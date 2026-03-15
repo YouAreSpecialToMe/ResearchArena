@@ -1,6 +1,6 @@
 # AutoResearch
 
-Benchmark harness for testing whether CLI agents (Claude Code, Codex, Aider, Kimi, MiniMax) can autonomously conduct end-to-end ML research — from idea to accepted paper.
+Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, MiniMax) can autonomously conduct end-to-end ML research — from idea to accepted paper.
 
 ## What this does
 
@@ -38,7 +38,7 @@ All agents (researcher + reviewers) run in the **same Docker image**:
 ```
 autoresearch/agent:latest
 ├── Python, CUDA, PyTorch, Transformers, etc.
-├── Claude Code, Codex, Aider CLIs
+├── Claude Code, Codex, Kimi, MiniMax CLIs
 │
 ├── Researcher (e.g., Claude Code)
 │   └── docker run -v workspace:/workspace        (read-write)
@@ -46,11 +46,11 @@ autoresearch/agent:latest
 ├── Reviewer 1 (e.g., Codex)
 │   └── docker run -v workspace:/workspace:ro     (read-only)
 │
-└── Reviewer 2 (e.g., Aider)
+└── Reviewer 2 (e.g., Kimi Code)
     └── docker run -v workspace:/workspace:ro     (read-only)
 ```
 
-Reviewers get full access to code, logs, and results — they can even re-run experiments to verify. They just can't modify anything.
+Reviewers get full access to code, logs, and results — they can even re-run experiments to verify. They just can't modify anything. Review output is parsed from the reviewer agent's stdout since the workspace is read-only.
 
 ### Auto-reviewer selection
 
@@ -58,11 +58,10 @@ The agent under test is excluded from the reviewer pool:
 
 | Researcher | Reviewers |
 |---|---|
-| Claude Code | Codex, Aider, Kimi, MiniMax |
-| Codex | Claude Code, Aider, Kimi, MiniMax |
-| Aider | Claude Code, Codex, Kimi, MiniMax |
-| Kimi | Claude Code, Codex, Aider, MiniMax |
-| MiniMax | Claude Code, Codex, Aider, Kimi |
+| Claude Code | Codex, Kimi Code, MiniMax |
+| Codex | Claude Code, Kimi Code, MiniMax |
+| Kimi Code | Claude Code, Codex, MiniMax |
+| MiniMax | Claude Code, Codex, Kimi Code |
 
 ## Setup
 
@@ -89,6 +88,8 @@ export MINIMAX_API_KEY=...          # for MiniMax
 export MINIMAX_GROUP_ID=...         # for MiniMax
 ```
 
+API keys are passed to Docker containers via environment variables (never via CLI arguments).
+
 ### 4. (Optional) Configure paperreview.ai
 
 Edit `configs/default.yaml`:
@@ -111,7 +112,7 @@ autoresearch run --seed "efficient fine-tuning for LLMs" --agent claude
 # Test Codex
 autoresearch run --seed "efficient fine-tuning for LLMs" --agent codex
 
-# Test Kimi
+# Test Kimi Code
 autoresearch run --seed "efficient fine-tuning for LLMs" --agent kimi
 
 # Test MiniMax
@@ -144,7 +145,7 @@ See [`configs/default.yaml`](configs/default.yaml) for all options:
 seed_topic: "your research topic"
 
 agent:
-  type: "claude"              # claude, codex, aider, kimi, minimax, custom
+  type: "claude"              # claude, codex, kimi, minimax, custom
   model: "claude-sonnet-4-6"
   docker_image: "autoresearch/agent:latest"
   gpus: 1
@@ -165,10 +166,8 @@ review:
       name: "Claude Code"
     - type: "codex"
       name: "Codex"
-    - type: "aider"
-      name: "Aider"
     - type: "kimi"
-      name: "Kimi"
+      name: "Kimi Code"
     - type: "minimax"
       name: "MiniMax"
 
@@ -198,7 +197,7 @@ Each paper goes through three review gates:
 
 ### 1. Reference verification
 
-Every citation is checked against Semantic Scholar and CrossRef APIs. **Any fake reference = automatic rejection (score 0).** The feedback lists exactly which references need replacing.
+Every citation is checked against Semantic Scholar and CrossRef APIs. **Any fake reference = automatic rejection (score 0).** Parser failures and API outages are handled gracefully — only references confirmed as non-existent trigger rejection. The feedback lists exactly which references need replacing.
 
 ### 2. paperreview.ai
 
@@ -213,7 +212,9 @@ Other CLI agents run in the **same Docker image** with the workspace mounted rea
 - **Results → Paper**: Do numbers in the paper match results.json?
 - **Code → Paper**: Does the code implement what the paper describes?
 
-If any link in this chain is broken, the reviewer scores `results_integrity: 0` and the paper is rejected.
+Reviewers output their review as JSON to stdout (since the workspace is read-only). The harness parses the last valid JSON object from the output to avoid matching example JSON in the agent's reasoning.
+
+If any link in the verification chain is broken, the reviewer scores `results_integrity: 0` and the paper is rejected.
 
 ## Output
 
@@ -238,10 +239,13 @@ outputs/runs/
 │   │   ├── claude_1710523200_stdout.txt # researcher agent output
 │   │   ├── claude_1710523200_stderr.txt
 │   │   ├── claude_1710523200_command.txt
-│   │   └── claude_1710523200_events.jsonl  # timestamped stream events (Claude)
-│   ├── review_logs/                     # reviewer agent outputs (same format)
+│   │   └── claude_1710523200_events.jsonl  # timestamped stream events
 │   ├── reviews.json                     # aggregated reviews
-│   └── reference_check.json            # citation verification results
+│   └── reference_check.json             # citation verification results
+│
+├── idea_01_review_logs/                 # reviewer agent outputs (sibling dir, not inside read-only workspace)
+│   ├── codex_1710530000_stdout.txt
+│   └── kimi_1710530100_stdout.txt
 │
 └── idea_02/
     └── ...
@@ -261,18 +265,18 @@ Total time, tokens, cost, and per-stage aggregation:
   "total_tokens": {"input_tokens": 1842000, "output_tokens": 563000, "total_tokens": 2405000},
   "total_cost_usd": 13.97,
   "stages": {
-    "ideation":    {"elapsed_seconds": 2105, "tokens": {...}, "cost_usd": 1.21, "actions": 2, "successes": 2, "failures": 0},
-    "experiments": {"elapsed_seconds": 9842, "tokens": {...}, "cost_usd": 4.78, "actions": 3, "successes": 2, "failures": 1,
+    "ideation":    {"elapsed_seconds": 2105, "tokens": {}, "cost_usd": 1.21, "actions": 2, "successes": 2, "failures": 0},
+    "experiments": {"elapsed_seconds": 9842, "tokens": {}, "cost_usd": 4.78, "actions": 3, "successes": 2, "failures": 1,
                     "failure_categories": {"oom": 1}},
-    "paper":       {"elapsed_seconds": 3210, "tokens": {...}, "cost_usd": 3.96, "actions": 3, "successes": 3, "failures": 0},
-    "review":      {"elapsed_seconds": 3089, "tokens": {...}, "cost_usd": 4.01, "actions": 8, "successes": 7, "failures": 1}
+    "paper":       {"elapsed_seconds": 3210, "tokens": {}, "cost_usd": 3.96, "actions": 3, "successes": 3, "failures": 0},
+    "review":      {"elapsed_seconds": 3089, "tokens": {}, "cost_usd": 4.01, "actions": 8, "successes": 7, "failures": 1}
   }
 }
 ```
 
 ### Action level
 
-Each pipeline stage invocation (ideation attempt, experiment run, paper draft, review round) is a separate action with its own timing, tokens, cost, failure classification, workspace diff, and log file links:
+Each pipeline stage invocation is a separate action with timing, tokens, cost, failure classification, workspace diff, and log file links:
 
 ```json
 {
@@ -289,16 +293,14 @@ Each pipeline stage invocation (ideation attempt, experiment run, paper draft, r
   "cost_usd": 2.43,
   "log_files": {
     "stdout": "outputs/runs/idea_01/logs/claude_1710523200_stdout.txt",
-    "stderr": "outputs/runs/idea_01/logs/claude_1710523200_stderr.txt",
-    "command": "outputs/runs/idea_01/logs/claude_1710523200_command.txt",
     "events": "outputs/runs/idea_01/logs/claude_1710523200_events.jsonl"
   },
   "workspace_diff": {
-    "created": [{"path": "experiment.py", "size": 4821}, {"path": "train.py", "size": 12043}],
+    "created": [{"path": "experiment.py", "size": 4821}],
     "modified": [],
     "deleted": []
   },
-  "sub_actions": [...]
+  "sub_actions": []
 }
 ```
 
@@ -306,7 +308,7 @@ Failure categories: `oom`, `timeout`, `rate_limit`, `auth_error`, `gpu_error`, `
 
 ### Sub-action level
 
-Each tool call the agent made within a stage. For Claude Code (via `--output-format stream-json`), this includes the LLM's reasoning, per-turn token usage, wall time per tool call, tool output, and which files each tool call actually changed on disk:
+Each tool call the agent made within a stage:
 
 ```json
 {
@@ -316,43 +318,22 @@ Each tool call the agent made within a stage. For Claude Code (via `--output-for
   "reasoning": "Let me run the training with the first seed.",
   "tokens": {"input": 9400, "output": 450},
   "duration_seconds": 342.8,
-  "files_affected": ["results.json", "figures/accuracy_curve.png", "checkpoints/best_model.pt"]
+  "files_affected": ["results.json", "figures/accuracy_curve.png"]
 }
 ```
 
 ### Tracking coverage by agent
 
-All agents get full tracking at every level. The data source differs but the output is the same:
-
-| Capability | Claude Code | Codex | Aider / Kimi / MiniMax |
+| Capability | Claude Code | Codex | Kimi / MiniMax |
 |---|---|---|---|
-| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--verbose` (plaintext) |
+| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--verbose` (plaintext via Aider) |
 | Tool calls | structured events | structured events | regex parsing |
-| Tool input | rich per-tool summaries | from event payload | from verbose output |
-| Tool output | tool result events | command output | lines after tool call |
-| LLM reasoning | text_delta blocks | agent_message events | accumulated text between actions |
 | Per-turn tokens | message_delta usage | turn.completed usage | `Tokens: N sent, N received` |
 | Per-tool duration | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl |
-| Error details | is_error in result | exit code | error pattern detection |
 | File changes | workspace diff | workspace diff | workspace diff |
 | Failure category | stderr patterns | stderr patterns | stderr patterns |
 
-All agents stream through `Popen` with line-by-line timestamping, so per-tool-call duration is available for every agent. Kimi and MiniMax run through Aider with their OpenAI-compatible APIs.
-
-Sub-action fields:
-
-| Field | Description | Source |
-|---|---|---|
-| `tool` | Tool name (Read, Write, Edit, Bash, WebSearch, etc.) | Parsed from agent stdout |
-| `input` | What was passed to the tool | Summarized from tool input |
-| `output` | What the tool returned (truncated) | Tool result event |
-| `reasoning` | LLM's thinking text before this tool call | Text blocks between tool calls |
-| `tokens` | `{input, output}` token counts for this turn | `message_delta` usage event |
-| `duration_seconds` | Wall time for the tool execution | Timestamped events file |
-| `error` | Error message if the tool call failed | Tool result with `is_error` |
-| `files_affected` | Files this tool call created/modified | Cross-referenced with workspace diff |
-
-Files changed on disk but not claimed by any tool call appear as `(side_effect)` entries — these are typically artifacts produced by running scripts (checkpoints, figures, caches).
+All agents stream through `Popen` with line-by-line timestamping. Kimi and MiniMax run through Aider with their OpenAI-compatible APIs.
 
 ## Project structure
 
@@ -371,7 +352,6 @@ autoresearch/
 │   ├── action_parser.py         # Parse agent stdout into structured sub-actions
 │   ├── workspace_diff.py        # Before/after filesystem snapshots
 │   ├── config.py                # YAML config loading
-│   ├── llm.py                   # LLM client (Anthropic/OpenAI)
 │   ├── paperreview.py           # paperreview.ai automation
 │   └── reference_checker.py     # Citation verification (Semantic Scholar + CrossRef)
 ├── templates/
@@ -379,5 +359,7 @@ autoresearch/
 │   └── reviewer_guidelines.md   # Guidelines for reviewer agents
 ├── configs/
 │   └── default.yaml             # Default configuration
-└── Dockerfile                   # GPU-enabled container with all agent CLIs
+├── Dockerfile                   # GPU-enabled container with all agent CLIs
+├── .dockerignore                # Excludes outputs/.git from Docker build context
+└── .gitignore
 ```

@@ -162,13 +162,14 @@ def _events_to_sub_actions(events: list[dict]) -> list[SubAction]:
     current_tool_id: str | None = None
     current_block_type: str | None = None  # "text" or "tool_use"
     turn_tokens: dict | None = None
-    tool_start_ts: float | None = None
 
     # Pending sub-actions in current turn (waiting for token info)
     turn_actions: list[SubAction] = []
 
     # Map tool_use_id → SubAction for matching results
     pending_by_id: dict[str, SubAction] = {}
+    # Map tool_use_id → start timestamp for duration calculation
+    tool_start_ts_by_id: dict[str, float] = {}
 
     for entry in events:
         ts = entry.get("ts")
@@ -197,7 +198,8 @@ def _events_to_sub_actions(events: list[dict]) -> list[SubAction]:
                 current_tool_name = block.get("name", "unknown")
                 current_tool_id = block.get("id", "")
                 current_tool_input_chunks = []
-                tool_start_ts = ts
+                if ts is not None and current_tool_id:
+                    tool_start_ts_by_id[current_tool_id] = ts
             elif current_block_type == "text":
                 pass  # will accumulate via deltas
 
@@ -309,9 +311,9 @@ def _events_to_sub_actions(events: list[dict]) -> list[SubAction]:
                     sub.output_summary = _truncate(str(content), 300)
 
                 # Compute duration if timestamps available
-                if ts is not None and tool_start_ts is not None:
-                    sub.duration_seconds = ts - tool_start_ts
-                    tool_start_ts = None
+                start_ts = tool_start_ts_by_id.pop(tool_id, None)
+                if ts is not None and start_ts is not None:
+                    sub.duration_seconds = ts - start_ts
 
     return actions
 

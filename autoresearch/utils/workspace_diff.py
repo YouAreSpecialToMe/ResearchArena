@@ -110,12 +110,15 @@ def diff(before: dict[str, FileInfo], after: dict[str, FileInfo]) -> WorkspaceDi
 
 
 def _quick_hash(path: Path) -> str:
-    """Hash file content. For files > 8KB, hash only the first 8KB."""
+    """Hash file content. Reads in chunks to handle large files."""
     h = hashlib.md5()
     try:
         with open(path, "rb") as f:
-            chunk = f.read(8192)
-            h.update(chunk)
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
     except OSError:
         return ""
     return h.hexdigest()

@@ -29,7 +29,8 @@ _REVIEWER_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "review
 
 # Output format appended to every reviewer prompt
 _REVIEW_OUTPUT_FORMAT = """
-When done, save your review to review.json in the current directory with this structure:
+The workspace is READ-ONLY — you cannot write files. Instead, output your review
+as a JSON object to stdout. Print ONLY the JSON, nothing else before or after it:
 {
     "scores": {
         "novelty": <int 1-10>,
@@ -266,8 +267,8 @@ def _run_cli_reviewer(
 
     The reviewer agent runs in the same Docker image as the researcher.
     It gets the full workspace (code, logs, results, paper) mounted read-only.
-    It can read everything, run code to verify, but cannot modify anything.
-    It saves its review to review.json.
+    It can read everything but cannot modify anything.
+    The review is parsed from stdout (JSON output).
 
     Returns:
         Tuple of (parsed review dict or None, AgentResult).
@@ -333,13 +334,15 @@ def _run_cli_reviewer(
 def _parse_review_from_output(stdout: str) -> dict | None:
     """Extract the review JSON from the agent's stdout.
 
-    The agent was asked to output a JSON review. We find and parse it.
+    Searches from the END of stdout to find the last valid JSON object
+    containing 'overall_score' and 'decision'. This avoids matching
+    example/partial JSON that the agent may print during reasoning.
     """
     if not stdout:
         return None
 
-    # Try to find a JSON block in the output
-    # Find any large JSON object containing our expected keys
+    # Collect all candidate JSON objects, return the last valid one
+    candidates = []
     brace_depth = 0
     json_start = None
     for i, c in enumerate(stdout):
@@ -354,12 +357,13 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                 try:
                     data = json.loads(candidate)
                     if "overall_score" in data and "decision" in data:
-                        return data
+                        candidates.append(data)
                 except json.JSONDecodeError:
-                    continue
+                    pass
                 json_start = None
 
-    return None
+    # Return the LAST match (most likely the actual review, not an example)
+    return candidates[-1] if candidates else None
 
 
 # ── paperreview.ai ───────────────────────────────────────────────────────

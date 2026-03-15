@@ -22,7 +22,7 @@ def main():
 @main.command()
 @click.option("--config", "-c", default="configs/default.yaml", help="Config file path")
 @click.option("--seed", "-s", default=None, help="Override seed topic")
-@click.option("--agent", default=None, help="Agent type (claude/codex/aider/custom)")
+@click.option("--agent", default=None, help="Agent type (claude/codex/kimi/minimax/custom)")
 @click.option("--model", default=None, help="Agent model override")
 @click.option("--max-ideas", default=None, type=int, help="Max ideas per seed")
 def run(config, seed, agent, model, max_ideas):

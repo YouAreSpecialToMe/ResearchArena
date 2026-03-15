@@ -110,9 +110,10 @@ def check_references(paper_latex: str) -> ReferenceCheckResult:
 
         time.sleep(REQUEST_DELAY)
 
-    # Only count refs that were actually checked (not parse errors)
-    checked = [r for r in results if r["status"] != "parse_error"]
-    unverified = len(checked) - verified
+    # Only count refs that were actually checked and found to be fake.
+    # Exclude parse_error (parser bug) and api_error (API outage) —
+    # these should not trigger false rejections.
+    unverified = sum(1 for r in results if r["status"] == "unverified")
 
     result = ReferenceCheckResult(
         total=len(raw_refs),

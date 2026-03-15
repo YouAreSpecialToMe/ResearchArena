@@ -230,13 +230,8 @@ class RunTracker:
         if not record.model or record.tokens.total == 0:
             return 0.0
 
-        # Find pricing — try exact match, then prefix match
+        # Find pricing — exact match only to avoid ambiguity (e.g., "o3" vs "o3-mini")
         pricing = _PRICING.get(record.model)
-        if not pricing:
-            for key, val in _PRICING.items():
-                if record.model.startswith(key) or key.startswith(record.model):
-                    pricing = val
-                    break
 
         if not pricing:
             return 0.0

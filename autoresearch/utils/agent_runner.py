@@ -204,11 +204,13 @@ def invoke_agent(
     console.print(f"  Timeout: {timeout}s")
 
     # Set up log directory
+    # For read-only mounts, logs go to a sibling directory on the host
+    # (can't write inside the read-only workspace)
     if readonly:
-        log_dir = workspace / "review_logs"
+        log_dir = workspace.parent / f"{workspace.name}_review_logs"
     else:
         log_dir = workspace / "logs"
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_prefix = f"{agent_type}_{int(time.time())}"
 
     # Save docker command before execution
@@ -219,13 +221,14 @@ def invoke_agent(
 
     # Stream stdout line-by-line for all known agents to timestamp events
     # for per-tool-call duration tracking. Only use subprocess.run for custom.
+    role = "reviewer" if readonly else "researcher"
     if agent_type in ("claude", "codex", "aider", "kimi", "minimax"):
         agent_result = _run_with_streaming(
-            docker_cmd, workspace, log_dir, log_prefix, timeout, start,
+            docker_cmd, workspace, log_dir, log_prefix, timeout, start, role,
         )
     else:
         agent_result = _run_simple(
-            docker_cmd, workspace, log_dir, log_prefix, timeout, start,
+            docker_cmd, workspace, log_dir, log_prefix, timeout, start, role,
         )
 
     return agent_result
@@ -241,6 +244,7 @@ def _run_with_streaming(
     log_prefix: str,
     timeout: int,
     start: float,
+    role: str = "researcher",
 ) -> AgentResult:
     """Run agent with Popen, streaming stdout to timestamp each line.
 
@@ -268,7 +272,7 @@ def _run_with_streaming(
                     proc.kill()
                     proc.wait()
                     console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
-                    _kill_container(workspace)
+                    _kill_container(workspace, role)
                     return _save_and_return(
                         exit_code=-1,
                         stdout="".join(stdout_lines),
@@ -376,6 +380,7 @@ def _run_simple(
     log_prefix: str,
     timeout: int,
     start: float,
+    role: str = "researcher",
 ) -> AgentResult:
     """Run agent with subprocess.run (simple, no streaming timestamps)."""
     try:
@@ -401,7 +406,7 @@ def _run_simple(
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
         console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
-        _kill_container(workspace)
+        _kill_container(workspace, role)
 
         return AgentResult(
             exit_code=-1,
@@ -520,6 +525,17 @@ def _build_docker_command(
         if val:
             cmd.extend(["-e", f"{var}={val}"])
 
+    # For Kimi/MiniMax: map their API key to OPENAI_API_KEY inside the container
+    # so Aider's --openai-api-base picks it up without leaking via CLI args
+    if agent_type == "kimi":
+        moonshot_key = os.environ.get("MOONSHOT_API_KEY", "")
+        if moonshot_key:
+            cmd.extend(["-e", f"OPENAI_API_KEY={moonshot_key}"])
+    elif agent_type == "minimax":
+        minimax_key = os.environ.get("MINIMAX_API_KEY", "")
+        if minimax_key:
+            cmd.extend(["-e", f"OPENAI_API_KEY={minimax_key}"])
+
     for key, val in extra_env.items():
         cmd.extend(["-e", f"{key}={val}"])
 
@@ -581,6 +597,8 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
 
     elif agent_type == "kimi":
         # Kimi (Moonshot AI) — runs through Aider with OpenAI-compatible API
+        # API key is passed via OPENAI_API_KEY env var in the container
+        # (set by _build_docker_command via MOONSHOT_API_KEY → OPENAI_API_KEY mapping)
         model = config.get("model", "moonshot-v1-auto")
         api_base = config.get("api_base", "https://api.moonshot.cn/v1")
         cmd = [
@@ -592,16 +610,15 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
             "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
             "--model", f"openai/{model}",
             "--openai-api-base", api_base,
-            "--openai-api-key", os.environ.get("MOONSHOT_API_KEY", ""),
         ]
         cmd.extend(["--message", task])
         return cmd
 
     elif agent_type == "minimax":
         # MiniMax — runs through Aider with OpenAI-compatible API
+        # API key is passed via OPENAI_API_KEY env var in the container
         model = config.get("model", "MiniMax-Text-01")
         api_base = config.get("api_base", "https://api.minimax.chat/v1")
-        api_key = os.environ.get("MINIMAX_API_KEY", "")
         cmd = [
             "aider",
             "--yes-always",
@@ -611,7 +628,6 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
             "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
             "--model", f"openai/{model}",
             "--openai-api-base", api_base,
-            "--openai-api-key", api_key,
         ]
         cmd.extend(["--message", task])
         return cmd
@@ -661,12 +677,11 @@ def _setup_workspace(agent_type: str, workspace: Path):
 # ── Container management ────────────────────────────────────────────────
 
 
-def _kill_container(workspace: Path):
-    """Find and kill any running container for this workspace."""
+def _kill_container(workspace: Path, role: str = "researcher"):
+    """Find and kill running containers for this workspace and role."""
     try:
-        # List containers with our naming pattern
         result = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"name=autoresearch-{workspace.name}"],
+            ["docker", "ps", "-q", "--filter", f"name=autoresearch-{role}-{workspace.name}"],
             capture_output=True,
             text=True,
             timeout=10,
