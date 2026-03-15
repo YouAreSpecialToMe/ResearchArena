@@ -72,6 +72,7 @@ def review_paper(
     accept_threshold: float = 6.0,
     workspace: Path | None = None,
     docker_image: str = "autoresearch/agent:latest",
+    tracker=None,
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
 
@@ -97,9 +98,16 @@ def review_paper(
     console.print("\n[bold]Pre-check: Reference verification[/]")
     from autoresearch.utils.reference_checker import check_references, save_reference_check
 
+    if tracker:
+        tracker.begin_action(stage="review", action="reference_check")
     ref_result = check_references(paper_latex)
     if workspace:
         save_reference_check(ref_result, workspace)
+    if tracker:
+        tracker.end_action(
+            outcome="success",
+            details=f"{ref_result.verified}/{ref_result.total} verified, {ref_result.unverified} fake",
+        )
 
     has_fake_refs = ref_result.unverified > 0
     ref_feedback = ""
@@ -125,12 +133,18 @@ def review_paper(
 
     # ── Source 1: paperreview.ai ──
     console.print("\n[bold]Review Source 1: paperreview.ai[/]")
+    if tracker:
+        tracker.begin_action(stage="review", action="paperreview_ai")
     pr_review = _run_paperreview(paper_pdf_path, paperreview_config, venue)
     if pr_review:
         all_reviews.append(pr_review)
         console.print(f"  Score: {pr_review.get('overall_score', 'N/A')}")
+        if tracker:
+            tracker.end_action(outcome="success", details=f"score={pr_review.get('overall_score')}")
     else:
         console.print("  [yellow]paperreview.ai review unavailable.[/]")
+        if tracker:
+            tracker.end_action(outcome="skipped", details="unavailable or not configured")
 
     # ── Source 2: CLI agent reviewers (same Docker, read-only workspace) ──
     console.print(
@@ -145,6 +159,14 @@ def review_paper(
             agent_name = agent_cfg.get("name", agent_cfg.get("type", f"Agent-{i+1}"))
             agent_type = agent_cfg["type"]
             console.print(f"  Running {agent_name} ({agent_type})...")
+
+            if tracker:
+                tracker.begin_action(
+                    stage="review",
+                    action=f"agent_review:{agent_name}",
+                    agent_type=agent_type,
+                    model=agent_cfg.get("model"),
+                )
 
             try:
                 agent_review = _run_cli_reviewer(
@@ -163,10 +185,19 @@ def review_paper(
                     integrity = agent_review.get("integrity_assessment", "")
                     if integrity:
                         console.print(f"    Integrity: {integrity[:80]}")
+                    if tracker:
+                        tracker.end_action(
+                            outcome="success",
+                            details=f"score={agent_review.get('overall_score')}, decision={agent_review.get('decision')}",
+                        )
                 else:
                     console.print(f"    [red]No review.json produced.[/]")
+                    if tracker:
+                        tracker.end_action(outcome="failure", details="No review.json produced")
             except Exception as e:
                 console.print(f"    [red]Failed: {e}[/]")
+                if tracker:
+                    tracker.end_action(outcome="failure", details=str(e)[:100])
 
     if not all_reviews:
         console.print("[red]No reviews obtained from any source.[/]")

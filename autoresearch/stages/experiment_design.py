@@ -24,17 +24,17 @@ def run(
     timeout: int = 14400,
     agent_config: dict | None = None,
     prior_errors: list[str] | None = None,
-) -> dict | None:
+) -> tuple[dict | None, object]:
     """Let the agent implement and run experiments.
 
     Expects idea.json to already exist in workspace.
 
     Returns:
-        Parsed results dict, or None if the agent failed.
+        Tuple of (parsed results dict or None, AgentResult).
     """
     task = _build_task(workspace, prior_errors)
 
-    result = invoke_agent(
+    agent_result = invoke_agent(
         agent_type=agent_type,
         task=task,
         workspace=workspace,
@@ -42,7 +42,7 @@ def run(
         agent_config=agent_config,
     )
 
-    return _parse_output(workspace)
+    return _parse_output(workspace), agent_result
 
 
 def _build_task(workspace: Path, prior_errors: list[str] | None) -> str:

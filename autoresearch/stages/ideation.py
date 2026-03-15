@@ -23,15 +23,15 @@ def run(
     history: list[dict] | None = None,
     timeout: int = 1800,
     agent_config: dict | None = None,
-) -> dict | None:
+) -> tuple[dict | None, object]:
     """Let the agent generate a research idea.
 
     Returns:
-        Parsed idea dict, or None if the agent failed to produce one.
+        Tuple of (parsed idea dict or None, AgentResult).
     """
     task = _build_task(seed_topic, history)
 
-    result = invoke_agent(
+    agent_result = invoke_agent(
         agent_type=agent_type,
         task=task,
         workspace=workspace,
@@ -39,7 +39,7 @@ def run(
         agent_config=agent_config,
     )
 
-    return _parse_output(workspace)
+    return _parse_output(workspace), agent_result
 
 
 def _build_task(seed_topic: str, history: list[dict] | None) -> str:

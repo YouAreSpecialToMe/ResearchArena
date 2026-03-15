@@ -22,17 +22,17 @@ def run(
     timeout: int = 3600,
     agent_config: dict | None = None,
     revision_feedback: str | None = None,
-) -> bool:
+) -> tuple[bool, object]:
     """Let the agent write a paper.
 
     Expects idea.json and results.json to exist in workspace.
 
     Returns:
-        True if paper.tex was produced, False otherwise.
+        Tuple of (True if paper.tex was produced, AgentResult).
     """
     task = _build_task(venue, revision_feedback)
 
-    invoke_agent(
+    agent_result = invoke_agent(
         agent_type=agent_type,
         task=task,
         workspace=workspace,
@@ -44,9 +44,9 @@ def run(
     paper_path = workspace / "paper.tex"
     if paper_path.exists():
         compile_paper(paper_path)
-        return True
+        return True, agent_result
 
-    return False
+    return False, agent_result
 
 
 def _build_task(venue: str, revision_feedback: str | None) -> str:

@@ -35,6 +35,7 @@ from autoresearch.stages import (
     paper_writing,
     review,
 )
+from autoresearch.utils.tracker import RunTracker, TokenUsage
 
 console = Console()
 
@@ -102,6 +103,8 @@ class Pipeline:
         self.base_dir = Path(config["experiment"]["workspace"])
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
+        self.tracker = RunTracker()
+
         self.state = PipelineState(
             max_experiment_retries=config["experiment"].get("max_experiment_retries_per_idea", 3),
             max_paper_revisions=config["paper"].get("max_revisions", 2),
@@ -122,6 +125,7 @@ class Pipeline:
             style="green",
         ))
 
+        self.tracker.start_run()
         start_time = time.time()
 
         while self.state.stage not in (Stage.ACCEPTED, Stage.FAILED):
@@ -143,8 +147,13 @@ class Pipeline:
             elif stage == Stage.REVIEW:
                 self._run_review(accept_threshold)
 
+        self.tracker.end_run()
         elapsed = time.time() - start_time
         self._print_summary(elapsed)
+
+        # Save tracker data
+        self.tracker.save(self.base_dir)
+
         return self._build_summary(elapsed)
 
     # ── Stage handlers ──────────────────────────────────────────────────
@@ -159,7 +168,15 @@ class Pipeline:
         workspace = self.base_dir / f"idea_{self.state.idea_attempts:02d}"
         console.print(f"  Idea {self.state.idea_attempts}/{self.state.max_ideas_per_seed}")
 
-        idea = ideation.run(
+        self.tracker.begin_action(
+            stage="ideation",
+            action="generate_idea",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.idea_attempts,
+        )
+
+        idea, agent_result = ideation.run(
             agent_type=self.agent_type,
             seed_topic=seed_topic,
             workspace=workspace,
@@ -168,8 +185,15 @@ class Pipeline:
             agent_config=self.agent_config,
         )
 
+        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+
         if idea is None:
             console.print("  [red]Agent failed to produce idea.json.[/]")
+            self.tracker.end_action(
+                outcome="failure",
+                details="No valid idea.json produced",
+                tokens=tokens,
+            )
             self.state.idea_history.append({
                 "idea": {"title": "(no idea produced)"},
                 "failure_stage": "ideation",
@@ -179,7 +203,13 @@ class Pipeline:
             self.state.stage = Stage.IDEATION  # try again
             return
 
-        console.print(f"  Title: [green]{idea.get('title', 'N/A')}[/]")
+        title = idea.get('title', 'N/A')
+        console.print(f"  Title: [green]{title}[/]")
+        self.tracker.end_action(
+            outcome="success",
+            details=title[:80],
+            tokens=tokens,
+        )
 
         # Reset per-idea state
         self.state.idea = idea
@@ -207,7 +237,15 @@ class Pipeline:
             f"{self.state.max_experiment_retries}"
         )
 
-        results = experiments.run(
+        self.tracker.begin_action(
+            stage="experiments",
+            action="run_experiments",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.experiment_attempts,
+        )
+
+        results, agent_result = experiments.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
             timeout=self.config["experiment"].get("max_gpu_hours", 4) * 3600,
@@ -215,14 +253,26 @@ class Pipeline:
             prior_errors=self.state.experiment_errors or None,
         )
 
+        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+
         if results is None:
             error_log = self._collect_error_log()
             self.state.experiment_errors.append(error_log)
             console.print("  [red]Agent failed to produce results.json.[/]")
+            self.tracker.end_action(
+                outcome="failure",
+                details="No results.json produced",
+                tokens=tokens,
+            )
             self.state.stage = Stage.EXPERIMENTS  # retry
             return
 
         console.print("  [green]Experiments succeeded.[/]")
+        self.tracker.end_action(
+            outcome="success",
+            details="Experiments completed, results.json written",
+            tokens=tokens,
+        )
         self.state.results = results
         self.state.stage = Stage.PAPER
 
@@ -233,7 +283,16 @@ class Pipeline:
         if self.state.review_result and self.state.paper_revision_attempts > 0:
             revision_feedback = self.state.review_result.aggregated_feedback
 
-        success = paper_writing.run(
+        is_revision = self.state.paper_revision_attempts > 0
+        self.tracker.begin_action(
+            stage="paper",
+            action="revise_paper" if is_revision else "write_paper",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.paper_revision_attempts + 1,
+        )
+
+        success, agent_result = paper_writing.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
             venue=self.config["paper"].get("template", "neurips"),
@@ -242,12 +301,24 @@ class Pipeline:
             revision_feedback=revision_feedback,
         )
 
+        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+
         if not success:
             console.print("  [red]Agent failed to produce paper.tex.[/]")
+            self.tracker.end_action(
+                outcome="failure",
+                details="No paper.tex produced",
+                tokens=tokens,
+            )
             self._abandon_idea("paper", "Agent did not produce paper.tex.")
             return
 
         console.print("  [green]Paper written.[/]")
+        self.tracker.end_action(
+            outcome="success",
+            details="revision" if is_revision else "initial draft",
+            tokens=tokens,
+        )
         self.state.stage = Stage.REVIEW
 
     def _run_review(self, accept_threshold: float):
@@ -267,6 +338,8 @@ class Pipeline:
             f"Reviewers: {[a.get('name', a.get('type')) for a in reviewer_agents]}"
         )
 
+        # Review sub-actions (reference_check, paperreview_ai, agent_review)
+        # are individually tracked inside review.review_paper via the tracker.
         result = review.review_paper(
             paper_latex=latex,
             paper_pdf_path=paper_pdf if paper_pdf.exists() else None,
@@ -276,6 +349,7 @@ class Pipeline:
             accept_threshold=accept_threshold,
             workspace=self.state.workspace,
             docker_image=self.agent_config.get("docker_image", "autoresearch/agent:latest"),
+            tracker=self.tracker,
         )
         review.save_reviews(result, self.state.workspace)
         self.state.review_result = result
@@ -350,6 +424,12 @@ class Pipeline:
         table.add_row("Ideas tried", f"{self.state.idea_attempts}/{self.state.max_ideas_per_seed}")
         table.add_row("Wall time", f"{elapsed:.0f}s")
 
+        total_tokens = self.tracker.total_tokens
+        if total_tokens.total:
+            table.add_row("Total tokens", f"{total_tokens.total:,} (in: {total_tokens.input_tokens:,}, out: {total_tokens.output_tokens:,})")
+        if self.tracker.total_cost > 0:
+            table.add_row("Est. cost", f"${self.tracker.total_cost:.2f}")
+
         best = self.state.best
         if best.idea:
             table.add_row("Best paper", best.idea.get("title", "N/A"))
@@ -359,6 +439,10 @@ class Pipeline:
             table.add_row("Best paper", "[red]None — no paper produced[/]")
 
         console.print(table)
+
+        # Print tracker tables
+        self.tracker.print_action_log()
+        self.tracker.print_stage_summary()
 
         if self.state.idea_history:
             hist = Table(title="Idea History")
@@ -385,6 +469,7 @@ class Pipeline:
             "total_steps": self.state.global_step,
             "ideas_tried": self.state.idea_attempts,
             "wall_time_seconds": round(elapsed),
+            "tracker": self.tracker.to_dict(),
             "best_paper": {
                 "title": best.idea.get("title"),
                 "score": best.score,
