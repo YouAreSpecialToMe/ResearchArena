@@ -72,14 +72,16 @@ def review_only(config, workspace):
         console.print(f"[red]No paper.tex found in {workspace}[/]")
         return
 
+    # Use all agents as reviewers for standalone review
     result = review_paper(
         paper_latex=paper_tex.read_text(),
         paper_pdf_path=paper_pdf if paper_pdf.exists() else None,
-        agent_configs=cfg["review"].get("agents", []),
+        reviewer_agents=cfg["review"].get("agents", []),
         paperreview_config=cfg["review"].get("paperreview", {}),
         venue=cfg["paper"].get("template", "neurips"),
         accept_threshold=cfg["review"]["accept_threshold"],
         workspace=workspace,
+        docker_image=cfg["agent"].get("docker_image", "autoresearch/agent:latest"),
     )
     save_reviews(result, workspace)
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")

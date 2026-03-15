@@ -257,14 +257,25 @@ class Pipeline:
         paper_pdf = self.state.workspace / "paper.pdf"
         latex = paper_tex.read_text(errors="replace") if paper_tex.exists() else ""
 
+        # Auto-select reviewer agents: all configured agents EXCEPT the one under test
+        reviewer_agents = [
+            a for a in self.config["review"].get("agents", [])
+            if a.get("type") != self.agent_type
+        ]
+        console.print(
+            f"  Researcher: {self.agent_type} → "
+            f"Reviewers: {[a.get('name', a.get('type')) for a in reviewer_agents]}"
+        )
+
         result = review.review_paper(
             paper_latex=latex,
             paper_pdf_path=paper_pdf if paper_pdf.exists() else None,
-            agent_configs=self.config["review"].get("agents", []),
+            reviewer_agents=reviewer_agents,
             paperreview_config=self.config["review"].get("paperreview", {}),
             venue=self.config["paper"].get("template", "neurips"),
             accept_threshold=accept_threshold,
             workspace=self.state.workspace,
+            docker_image=self.agent_config.get("docker_image", "autoresearch/agent:latest"),
         )
         review.save_reviews(result, self.state.workspace)
         self.state.review_result = result

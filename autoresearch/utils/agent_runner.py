@@ -86,6 +86,7 @@ def invoke_agent(
     workspace: Path,
     timeout: int = 14400,
     agent_config: dict | None = None,
+    readonly: bool = False,
 ) -> AgentResult:
     """Invoke a CLI agent inside a Docker container.
 
@@ -95,6 +96,7 @@ def invoke_agent(
         workspace: Host directory to mount as /workspace in the container
         timeout: Max seconds before killing the container
         agent_config: Additional config (model, image, resources, etc.)
+        readonly: If True, mount workspace as read-only (for reviewer agents)
 
     Returns:
         AgentResult with exit code, logs, and elapsed time
@@ -103,12 +105,17 @@ def invoke_agent(
     agent_config = agent_config or {}
 
     # Write permission files into workspace before container starts
-    _setup_workspace(agent_type, workspace)
+    # (only for read-write invocations — reviewers don't need them)
+    if not readonly:
+        _setup_workspace(agent_type, workspace)
 
     # Build docker run command
-    docker_cmd = _build_docker_command(agent_type, task, workspace, agent_config)
+    docker_cmd = _build_docker_command(
+        agent_type, task, workspace, agent_config, readonly=readonly,
+    )
 
-    console.print(f"  Agent: {agent_type}")
+    mode = "read-only" if readonly else "read-write"
+    console.print(f"  Agent: {agent_type} ({mode})")
     console.print(f"  Workspace: {workspace}")
     console.print(f"  Image: {agent_config.get('docker_image', DEFAULT_IMAGE)}")
     console.print(f"  Timeout: {timeout}s")
@@ -124,12 +131,16 @@ def invoke_agent(
         )
         elapsed = time.time() - start
 
-        # Save logs to workspace
-        log_dir = workspace / "logs"
+        # Save logs — for readonly reviewers, save to a review-specific log dir
+        if readonly:
+            log_dir = workspace / "review_logs"
+        else:
+            log_dir = workspace / "logs"
         log_dir.mkdir(exist_ok=True)
-        (log_dir / "agent_stdout.txt").write_text(result.stdout)
-        (log_dir / "agent_stderr.txt").write_text(result.stderr)
-        (log_dir / "docker_command.txt").write_text(" ".join(docker_cmd))
+        log_prefix = f"{agent_type}_{int(time.time())}"
+        (log_dir / f"{log_prefix}_stdout.txt").write_text(result.stdout)
+        (log_dir / f"{log_prefix}_stderr.txt").write_text(result.stderr)
+        (log_dir / f"{log_prefix}_command.txt").write_text(" ".join(docker_cmd))
 
         console.print(f"  Finished in {elapsed:.0f}s, exit code {result.returncode}")
 
@@ -144,8 +155,6 @@ def invoke_agent(
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
         console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
-
-        # Find and kill the container
         _kill_container(workspace)
 
         return AgentResult(
@@ -165,19 +174,26 @@ def _build_docker_command(
     task: str,
     workspace: Path,
     config: dict,
+    readonly: bool = False,
 ) -> list[str]:
     """Build the full `docker run` command."""
 
     image = config.get("docker_image", DEFAULT_IMAGE)
-    container_name = f"autoresearch-{workspace.name}-{int(time.time())}"
+    role = "reviewer" if readonly else "researcher"
+    container_name = f"autoresearch-{role}-{workspace.name}-{int(time.time())}"
+
+    # Mount workspace read-only for reviewers, read-write for researchers
+    mount_spec = f"{workspace.resolve()}:/workspace"
+    if readonly:
+        mount_spec += ":ro"
 
     cmd = [
         "docker", "run",
-        "--rm",                             # auto-remove container on exit
+        "--rm",
         "--name", container_name,
 
         # ── Mount workspace ──
-        "-v", f"{workspace.resolve()}:/workspace",
+        "-v", mount_spec,
         "-w", "/workspace",
 
         # ── Resource limits ──

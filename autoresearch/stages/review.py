@@ -1,16 +1,17 @@
 """Stage 6: Multi-source automated paper review.
 
-Before sending to reviewers, we verify all references against
-Semantic Scholar and CrossRef. Any fake reference = auto reject.
+Reviewer agents run as CLI agents in the SAME Docker image as the researcher,
+with the workspace mounted READ-ONLY. They can read all code, logs, results,
+and even re-run experiments to verify results. This is a real audit.
 
-Agent reviewers receive the full workspace (paper + experiment code + logs +
-results) so they can judge whether results are genuine, not just whether
-the paper reads well.
+When evaluating multiple CLI agents (claude, codex, aider), the agents NOT
+under test serve as reviewers. E.g., if claude is the researcher, codex and
+aider review.
 
 Review sources (fully autonomous):
   1. Reference check  — verify citations are real (Semantic Scholar + CrossRef)
   2. paperreview.ai   — external online review (Stanford Agentic Reviewer)
-  3. Agent reviewers  — independent LLMs with access to all experiment artifacts
+  3. CLI agent reviewers — other agents in Docker with read-only workspace access
 """
 
 from __future__ import annotations
@@ -22,18 +23,15 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from autoresearch.utils.llm import LLMClient
-
 console = Console()
 
 _REVIEWER_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "reviewer_guidelines.md"
 
 # Output format appended to every reviewer prompt
-_REVIEW_OUTPUT_FORMAT = """\
-
-Return a JSON object with your review:
-{{
-    "scores": {{
+_REVIEW_OUTPUT_FORMAT = """
+When done, save your review to review.json in the current directory with this structure:
+{
+    "scores": {
         "novelty": <int 1-10>,
         "soundness": <int 1-10>,
         "significance": <int 1-10>,
@@ -41,7 +39,7 @@ Return a JSON object with your review:
         "reproducibility": <int 1-10>,
         "experimental_rigor": <int 1-10>,
         "results_integrity": <int 1-10>
-    }},
+    },
     "overall_score": <float>,
     "decision": "accept" | "weak_accept" | "borderline" | "weak_reject" | "reject",
     "summary": "<2-3 sentence summary of the paper>",
@@ -50,21 +48,8 @@ Return a JSON object with your review:
     "detailed_feedback": "<paragraph of actionable feedback for revision>",
     "questions_for_authors": ["<question1>", ...],
     "integrity_assessment": "<your verdict on whether results are genuine, based on code and logs>"
-}}
+}
 """
-
-
-def _load_reviewer_system_prompt(venue: str) -> str:
-    """Build the reviewer system prompt from the guidelines template."""
-    guidelines = ""
-    if _REVIEWER_GUIDELINES_PATH.exists():
-        guidelines = _REVIEWER_GUIDELINES_PATH.read_text()
-
-    return (
-        f"You are an expert reviewer for a top-tier ML conference ({venue}).\n\n"
-        f"{guidelines}\n\n"
-        f"{_REVIEW_OUTPUT_FORMAT}"
-    )
 
 
 @dataclass
@@ -81,22 +66,27 @@ class ReviewResult:
 def review_paper(
     paper_latex: str,
     paper_pdf_path: str | Path | None,
-    agent_configs: list[dict],
+    reviewer_agents: list[dict],
     paperreview_config: dict,
     venue: str = "NeurIPS",
     accept_threshold: float = 6.0,
     workspace: Path | None = None,
+    docker_image: str = "autoresearch/agent:latest",
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
 
     Args:
-        paper_latex: LaTeX source (for agent reviewers)
+        paper_latex: LaTeX source (unused when reviewers are CLI agents with workspace)
         paper_pdf_path: Compiled PDF path (for paperreview.ai)
-        agent_configs: List of agent reviewer configs
+        reviewer_agents: List of reviewer agent configs, each with:
+            - type: "claude", "codex", "aider"
+            - name: human-readable label
+            - model: (optional) model override
         paperreview_config: Config for paperreview.ai
         venue: Target venue name
         accept_threshold: Score threshold for acceptance
-        workspace: Full agent workspace (code, logs, results) for reviewer access
+        workspace: Full agent workspace (mounted read-only for reviewers)
+        docker_image: Docker image to use for reviewer containers
 
     Returns:
         ReviewResult with aggregated scores and automated decision
@@ -108,9 +98,8 @@ def review_paper(
     from autoresearch.utils.reference_checker import check_references, save_reference_check
 
     ref_result = check_references(paper_latex)
-    ref_save_dir = Path(paper_pdf_path).parent if paper_pdf_path else None
-    if ref_save_dir:
-        save_reference_check(ref_result, ref_save_dir)
+    if workspace:
+        save_reference_check(ref_result, workspace)
 
     has_fake_refs = ref_result.unverified > 0
     ref_feedback = ""
@@ -143,34 +132,41 @@ def review_paper(
     else:
         console.print("  [yellow]paperreview.ai review unavailable.[/]")
 
-    # ── Source 2: Agent reviewers (with full workspace access) ──
-    workspace_context = _collect_workspace_context(workspace) if workspace else ""
-    console.print(f"\n[bold]Review Source 2: Agent reviewers ({len(agent_configs)} agents)[/]")
-    if workspace_context:
-        console.print(f"  Workspace context: {len(workspace_context)} chars provided to reviewers")
+    # ── Source 2: CLI agent reviewers (same Docker, read-only workspace) ──
+    console.print(
+        f"\n[bold]Review Source 2: CLI agent reviewers "
+        f"({len(reviewer_agents)} agents, read-only Docker)[/]"
+    )
 
-    for i, agent_cfg in enumerate(agent_configs):
-        agent_name = agent_cfg.get("name", f"Agent-{i+1}")
-        console.print(f"  Running {agent_name} ({agent_cfg['provider']}/{agent_cfg['model']})...")
-        try:
-            agent_review = _run_agent_reviewer(
-                agent_cfg, paper_latex, venue, workspace_context,
-            )
-            agent_review["source"] = f"agent:{agent_name}"
-            agent_review["agent_config"] = {
-                "provider": agent_cfg["provider"],
-                "model": agent_cfg["model"],
-            }
-            all_reviews.append(agent_review)
-            console.print(
-                f"    Score: {agent_review.get('overall_score', 'N/A')}, "
-                f"Decision: {agent_review.get('decision', 'N/A')}"
-            )
-            integrity = agent_review.get("integrity_assessment", "")
-            if integrity:
-                console.print(f"    Integrity: {integrity[:80]}")
-        except Exception as e:
-            console.print(f"    [red]Failed: {e}[/]")
+    if not workspace:
+        console.print("  [yellow]No workspace — skipping agent reviewers.[/]")
+    else:
+        for i, agent_cfg in enumerate(reviewer_agents):
+            agent_name = agent_cfg.get("name", agent_cfg.get("type", f"Agent-{i+1}"))
+            agent_type = agent_cfg["type"]
+            console.print(f"  Running {agent_name} ({agent_type})...")
+
+            try:
+                agent_review = _run_cli_reviewer(
+                    agent_cfg=agent_cfg,
+                    workspace=workspace,
+                    venue=venue,
+                    docker_image=docker_image,
+                )
+                if agent_review:
+                    agent_review["source"] = f"agent:{agent_name}"
+                    all_reviews.append(agent_review)
+                    console.print(
+                        f"    Score: {agent_review.get('overall_score', 'N/A')}, "
+                        f"Decision: {agent_review.get('decision', 'N/A')}"
+                    )
+                    integrity = agent_review.get("integrity_assessment", "")
+                    if integrity:
+                        console.print(f"    Integrity: {integrity[:80]}")
+                else:
+                    console.print(f"    [red]No review.json produced.[/]")
+            except Exception as e:
+                console.print(f"    [red]Failed: {e}[/]")
 
     if not all_reviews:
         console.print("[red]No reviews obtained from any source.[/]")
@@ -209,54 +205,115 @@ def review_paper(
     )
 
 
-# ── Workspace context collection ─────────────────────────────────────────
+# ── CLI agent reviewers ──────────────────────────────────────────────────
 
 
-def _collect_workspace_context(workspace: Path) -> str:
-    """Collect experiment code, logs, and results from workspace for reviewers.
+def _run_cli_reviewer(
+    agent_cfg: dict,
+    workspace: Path,
+    venue: str,
+    docker_image: str,
+) -> dict | None:
+    """Run a CLI agent as a reviewer in Docker with read-only workspace.
 
-    Reads all relevant files and concatenates them into a single string
-    that gets included in the reviewer prompt.
+    The reviewer agent runs in the same Docker image as the researcher.
+    It gets the full workspace (code, logs, results, paper) mounted read-only.
+    It can read everything, run code to verify, but cannot modify anything.
+    It saves its review to review.json.
     """
-    parts = []
-    MAX_FILE_SIZE = 5000  # chars per file to avoid token limits
+    from autoresearch.utils.agent_runner import invoke_agent
 
-    # results.json
-    results_path = workspace / "results.json"
-    if results_path.exists():
-        content = results_path.read_text(errors="replace")[:MAX_FILE_SIZE]
-        parts.append(f"=== results.json ===\n{content}")
+    # Load reviewer guidelines
+    guidelines = ""
+    if _REVIEWER_GUIDELINES_PATH.exists():
+        guidelines = _REVIEWER_GUIDELINES_PATH.read_text()
 
-    # Experiment code (.py files, excluding hidden/venv)
-    py_files = []
-    for f in sorted(workspace.rglob("*.py")):
-        rel = f.relative_to(workspace)
-        if any(p.startswith(".") or p in ("logs", "__pycache__") for p in rel.parts):
-            continue
-        py_files.append(f)
+    task = (
+        f"You are a reviewer for {venue}. The /workspace directory contains a "
+        f"research paper and its full experiment workspace produced by another "
+        f"AI agent inside this same Docker environment.\n\n"
+        f"You have READ-ONLY access to everything:\n"
+        f"- paper.tex — the paper\n"
+        f"- experiment code (.py files)\n"
+        f"- logs/ — stdout/stderr from the experiment runs\n"
+        f"- results.json — raw experiment results\n"
+        f"- figures/ — generated figures\n\n"
+        f"FIRST: Read reviewer_guidelines.md if it exists in the workspace.\n\n"
+        f"Your job:\n"
+        f"1. Read the paper, code, logs, and results\n"
+        f"2. Verify the chain: code → logs → results.json → paper\n"
+        f"3. Optionally re-run the experiment code to verify results reproduce\n"
+        f"4. Write your review\n\n"
+        f"{guidelines}\n\n"
+        f"{_REVIEW_OUTPUT_FORMAT}"
+    )
 
-    for f in py_files[:5]:  # limit to 5 code files
-        rel = f.relative_to(workspace)
-        content = f.read_text(errors="replace")[:MAX_FILE_SIZE]
-        parts.append(f"=== {rel} ===\n{content}")
+    # Copy reviewer guidelines into workspace (it's read-only so we need
+    # to do this before mounting — the workspace already has research_guidelines,
+    # we add reviewer_guidelines alongside it)
+    reviewer_guide_dest = workspace / "reviewer_guidelines.md"
+    if not reviewer_guide_dest.exists() and _REVIEWER_GUIDELINES_PATH.exists():
+        try:
+            import shutil
+            shutil.copy2(_REVIEWER_GUIDELINES_PATH, reviewer_guide_dest)
+        except OSError:
+            pass  # workspace might already be read-only from a previous reviewer
 
-    # Stdout log (training evidence)
-    stdout_log = workspace / "logs" / "agent_stdout.txt"
-    if stdout_log.exists():
-        content = stdout_log.read_text(errors="replace")
-        # Take last 3000 chars (most relevant part of training)
-        if len(content) > MAX_FILE_SIZE:
-            content = f"[...truncated first {len(content) - MAX_FILE_SIZE} chars...]\n" + content[-MAX_FILE_SIZE:]
-        parts.append(f"=== logs/agent_stdout.txt ===\n{content}")
+    agent_type = agent_cfg["type"]
+    reviewer_config = {
+        **agent_cfg,
+        "docker_image": docker_image,
+    }
 
-    # Stderr log
-    stderr_log = workspace / "logs" / "agent_stderr.txt"
-    if stderr_log.exists():
-        content = stderr_log.read_text(errors="replace")[-2000:]
-        if content.strip():
-            parts.append(f"=== logs/agent_stderr.txt (last 2000 chars) ===\n{content}")
+    result = invoke_agent(
+        agent_type=agent_type,
+        task=task,
+        workspace=workspace,
+        timeout=agent_cfg.get("review_timeout", 1800),
+        agent_config=reviewer_config,
+        readonly=True,
+    )
 
-    return "\n\n".join(parts)
+    # Parse the review from stdout (since workspace is read-only, agent
+    # can't write review.json — we parse it from the output instead)
+    return _parse_review_from_output(result.stdout)
+
+
+def _parse_review_from_output(stdout: str) -> dict | None:
+    """Extract the review JSON from the agent's stdout.
+
+    The agent was asked to output a JSON review. We find and parse it.
+    """
+    if not stdout:
+        return None
+
+    # Try to find a JSON block in the output
+    # Look for the review JSON pattern
+    import re
+
+    # Try to find JSON between braces that contains our expected keys
+    json_pattern = r'\{[^{}]*"overall_score"[^{}]*"decision"[^{}]*\}'
+    # More permissive: find any large JSON object
+    brace_depth = 0
+    json_start = None
+    for i, c in enumerate(stdout):
+        if c == '{':
+            if brace_depth == 0:
+                json_start = i
+            brace_depth += 1
+        elif c == '}':
+            brace_depth -= 1
+            if brace_depth == 0 and json_start is not None:
+                candidate = stdout[json_start:i + 1]
+                try:
+                    data = json.loads(candidate)
+                    if "overall_score" in data and "decision" in data:
+                        return data
+                except json.JSONDecodeError:
+                    continue
+                json_start = None
+
+    return None
 
 
 # ── paperreview.ai ───────────────────────────────────────────────────────
@@ -304,44 +361,6 @@ def _run_paperreview(
     except Exception as e:
         console.print(f"  [red]paperreview.ai error: {e}[/]")
         return None
-
-
-# ── Agent reviewers ──────────────────────────────────────────────────────
-
-
-def _run_agent_reviewer(
-    agent_cfg: dict,
-    paper_latex: str,
-    venue: str,
-    workspace_context: str,
-) -> dict:
-    """Run a single agent reviewer with full workspace access."""
-    llm = LLMClient(
-        provider=agent_cfg["provider"],
-        model=agent_cfg["model"],
-        temperature=agent_cfg.get("temperature", 0.3),
-        max_tokens=agent_cfg.get("max_tokens", 8192),
-    )
-
-    system = _load_reviewer_system_prompt(venue)
-
-    user_msg = f"Paper to review:\n\n{paper_latex}"
-
-    if workspace_context:
-        user_msg += (
-            "\n\n"
-            "========================================\n"
-            "EXPERIMENT WORKSPACE (from the agent's Docker container)\n"
-            "========================================\n\n"
-            "The following files come from the same isolated Docker container "
-            "where the research agent ran. The code, logs, and results were all "
-            "produced inside that container — they cannot be selectively curated.\n\n"
-            "Verify the chain: code → logs → results.json → paper.\n"
-            "If any link is broken or results appear fabricated, score 0.\n\n"
-            f"{workspace_context}"
-        )
-
-    return llm.generate_json(system, user_msg)
 
 
 # ── Display & aggregation ────────────────────────────────────────────────
