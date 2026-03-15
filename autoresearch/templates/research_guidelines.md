@@ -38,6 +38,18 @@ John Schulman, and the REFORMS checklist.
 - Disable learning rate decay until final tuning phase
 - Don't plug multiple changes simultaneously — isolate each variable
 
+### Results Integrity (CRITICAL)
+- ALL numbers in the paper MUST come directly from actual experiment runs
+- DO NOT fabricate, inflate, or manually adjust experimental results
+- DO NOT hardcode or invent numbers in results.json — every value must be
+  produced by actually running the experiment code
+- The review system cross-checks results.json against experiment logs.
+  If results cannot be traced back to actual code execution, the paper
+  is automatically rejected
+- If your method doesn't beat the baseline, report that honestly.
+  Negative results with honest analysis are acceptable; fabricated
+  positive results are not
+
 ### Statistical Rigor
 - ALWAYS include error bars (standard error of the mean, not just std dev)
 - Run experiments with at least 3-5 different random seeds
@@ -92,6 +104,7 @@ John Schulman, and the REFORMS checklist.
 
 ## Common Rejection Reasons
 
+- Fabricated or manipulated results (automatic reject)
 - Fabricated references (automatic reject)
 - No ablation study
 - Missing error bars / no statistical significance testing

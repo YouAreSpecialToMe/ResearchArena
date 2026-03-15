@@ -264,6 +264,7 @@ class Pipeline:
             paperreview_config=self.config["review"].get("paperreview", {}),
             venue=self.config["paper"].get("template", "neurips"),
             accept_threshold=accept_threshold,
+            workspace=self.state.workspace,
         )
         review.save_reviews(result, self.state.workspace)
         self.state.review_result = result

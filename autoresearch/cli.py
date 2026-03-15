@@ -79,6 +79,7 @@ def review_only(config, workspace):
         paperreview_config=cfg["review"].get("paperreview", {}),
         venue=cfg["paper"].get("template", "neurips"),
         accept_threshold=cfg["review"]["accept_threshold"],
+        workspace=workspace,
     )
     save_reviews(result, workspace)
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")

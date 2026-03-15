@@ -1,15 +1,16 @@
 """Stage 6: Multi-source automated paper review.
 
-Before sending to reviewers, we verify all references in the paper against
-Semantic Scholar and CrossRef. Papers with high fake-reference rates get
-penalized and the feedback includes which references need fixing.
+Before sending to reviewers, we verify all references against
+Semantic Scholar and CrossRef. Any fake reference = auto reject.
+
+Agent reviewers receive the full workspace (paper + experiment code + logs +
+results) so they can judge whether results are genuine, not just whether
+the paper reads well.
 
 Review sources (fully autonomous):
   1. Reference check  — verify citations are real (Semantic Scholar + CrossRef)
   2. paperreview.ai   — external online review (Stanford Agentic Reviewer)
-  3. Agent reviewers  — independent CLI-agent LLMs (different models/providers)
-
-Scores are aggregated and a decision is made automatically based on thresholds.
+  3. Agent reviewers  — independent LLMs with access to all experiment artifacts
 """
 
 from __future__ import annotations
@@ -25,45 +26,53 @@ from autoresearch.utils.llm import LLMClient
 
 console = Console()
 
-AGENT_REVIEWER_SYSTEM_PROMPT = """\
-You are an expert reviewer for a top-tier ML conference ({venue}). \
-Review the submitted paper rigorously and fairly.
+_REVIEWER_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "reviewer_guidelines.md"
 
-Evaluate on these criteria (each scored 1-10):
-1. Novelty: Is the contribution new and non-trivial?
-2. Soundness: Are the methods and experiments technically correct?
-3. Significance: Does this work matter to the community?
-4. Clarity: Is the paper well-written and easy to follow?
-5. Reproducibility: Could someone replicate the experiments?
-6. Experimental rigor: Are baselines fair? Are results statistically significant?
+# Output format appended to every reviewer prompt
+_REVIEW_OUTPUT_FORMAT = """\
 
-Return a JSON object:
+Return a JSON object with your review:
 {{
     "scores": {{
-        "novelty": <int>,
-        "soundness": <int>,
-        "significance": <int>,
-        "clarity": <int>,
-        "reproducibility": <int>,
-        "experimental_rigor": <int>
+        "novelty": <int 1-10>,
+        "soundness": <int 1-10>,
+        "significance": <int 1-10>,
+        "clarity": <int 1-10>,
+        "reproducibility": <int 1-10>,
+        "experimental_rigor": <int 1-10>,
+        "results_integrity": <int 1-10>
     }},
     "overall_score": <float>,
     "decision": "accept" | "weak_accept" | "borderline" | "weak_reject" | "reject",
-    "summary": "<2-3 sentence summary>",
+    "summary": "<2-3 sentence summary of the paper>",
     "strengths": ["<strength1>", ...],
     "weaknesses": ["<weakness1>", ...],
     "detailed_feedback": "<paragraph of actionable feedback for revision>",
-    "questions_for_authors": ["<question1>", ...]
+    "questions_for_authors": ["<question1>", ...],
+    "integrity_assessment": "<your verdict on whether results are genuine, based on code and logs>"
 }}
 """
 
 
+def _load_reviewer_system_prompt(venue: str) -> str:
+    """Build the reviewer system prompt from the guidelines template."""
+    guidelines = ""
+    if _REVIEWER_GUIDELINES_PATH.exists():
+        guidelines = _REVIEWER_GUIDELINES_PATH.read_text()
+
+    return (
+        f"You are an expert reviewer for a top-tier ML conference ({venue}).\n\n"
+        f"{guidelines}\n\n"
+        f"{_REVIEW_OUTPUT_FORMAT}"
+    )
+
+
 @dataclass
 class ReviewResult:
-    reviews: list[dict]          # all individual reviews (agent + paperreview)
-    avg_score: float             # average across all reviews
-    decision: str                # automated decision based on score threshold
-    aggregated_feedback: str     # all feedback combined for pipeline backtracking
+    reviews: list[dict]
+    avg_score: float
+    decision: str
+    aggregated_feedback: str
 
 
 # ── Main entry point ─────────────────────────────────────────────────────
@@ -76,21 +85,18 @@ def review_paper(
     paperreview_config: dict,
     venue: str = "NeurIPS",
     accept_threshold: float = 6.0,
+    workspace: Path | None = None,
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
 
     Args:
         paper_latex: LaTeX source (for agent reviewers)
         paper_pdf_path: Compiled PDF path (for paperreview.ai)
-        agent_configs: List of agent reviewer configs, each with:
-            - provider: "anthropic" or "openai"
-            - model: model name
-            - name: human-readable name (e.g. "Claude Sonnet", "GPT-4o")
-            - temperature: (optional, default 0.3)
-            - max_tokens: (optional, default 8192)
-        paperreview_config: Config for paperreview.ai (email, password, etc.)
+        agent_configs: List of agent reviewer configs
+        paperreview_config: Config for paperreview.ai
         venue: Target venue name
         accept_threshold: Score threshold for acceptance
+        workspace: Full agent workspace (code, logs, results) for reviewer access
 
     Returns:
         ReviewResult with aggregated scores and automated decision
@@ -102,12 +108,10 @@ def review_paper(
     from autoresearch.utils.reference_checker import check_references, save_reference_check
 
     ref_result = check_references(paper_latex)
-    # Save to PDF directory if available, otherwise to a temp location
     ref_save_dir = Path(paper_pdf_path).parent if paper_pdf_path else None
     if ref_save_dir:
         save_reference_check(ref_result, ref_save_dir)
 
-    # Any fake reference = automatic rejection
     has_fake_refs = ref_result.unverified > 0
     ref_feedback = ""
     if has_fake_refs:
@@ -139,13 +143,19 @@ def review_paper(
     else:
         console.print("  [yellow]paperreview.ai review unavailable.[/]")
 
-    # ── Source 2: Agent reviewers ──
+    # ── Source 2: Agent reviewers (with full workspace access) ──
+    workspace_context = _collect_workspace_context(workspace) if workspace else ""
     console.print(f"\n[bold]Review Source 2: Agent reviewers ({len(agent_configs)} agents)[/]")
+    if workspace_context:
+        console.print(f"  Workspace context: {len(workspace_context)} chars provided to reviewers")
+
     for i, agent_cfg in enumerate(agent_configs):
         agent_name = agent_cfg.get("name", f"Agent-{i+1}")
         console.print(f"  Running {agent_name} ({agent_cfg['provider']}/{agent_cfg['model']})...")
         try:
-            agent_review = _run_agent_reviewer(agent_cfg, paper_latex, venue)
+            agent_review = _run_agent_reviewer(
+                agent_cfg, paper_latex, venue, workspace_context,
+            )
             agent_review["source"] = f"agent:{agent_name}"
             agent_review["agent_config"] = {
                 "provider": agent_cfg["provider"],
@@ -156,6 +166,9 @@ def review_paper(
                 f"    Score: {agent_review.get('overall_score', 'N/A')}, "
                 f"Decision: {agent_review.get('decision', 'N/A')}"
             )
+            integrity = agent_review.get("integrity_assessment", "")
+            if integrity:
+                console.print(f"    Integrity: {integrity[:80]}")
         except Exception as e:
             console.print(f"    [red]Failed: {e}[/]")
 
@@ -172,7 +185,6 @@ def review_paper(
     scores = [r["overall_score"] for r in all_reviews if r.get("overall_score") is not None]
     avg_score = sum(scores) / len(scores) if scores else 5.0
 
-    # Fake references = automatic rejection, score zeroed
     if has_fake_refs:
         final_score = 0.0
         decision = "reject"
@@ -183,10 +195,8 @@ def review_paper(
         final_score = avg_score
         decision = _score_to_decision(final_score, accept_threshold)
 
-    # ── Display summary ──
     _display_review_summary(all_reviews, final_score, decision)
 
-    # ── Aggregate feedback for pipeline backtracking ──
     aggregated = _aggregate_feedback(all_reviews)
     if ref_feedback:
         aggregated = ref_feedback + "\n\n" + aggregated
@@ -197,6 +207,56 @@ def review_paper(
         decision=decision,
         aggregated_feedback=aggregated,
     )
+
+
+# ── Workspace context collection ─────────────────────────────────────────
+
+
+def _collect_workspace_context(workspace: Path) -> str:
+    """Collect experiment code, logs, and results from workspace for reviewers.
+
+    Reads all relevant files and concatenates them into a single string
+    that gets included in the reviewer prompt.
+    """
+    parts = []
+    MAX_FILE_SIZE = 5000  # chars per file to avoid token limits
+
+    # results.json
+    results_path = workspace / "results.json"
+    if results_path.exists():
+        content = results_path.read_text(errors="replace")[:MAX_FILE_SIZE]
+        parts.append(f"=== results.json ===\n{content}")
+
+    # Experiment code (.py files, excluding hidden/venv)
+    py_files = []
+    for f in sorted(workspace.rglob("*.py")):
+        rel = f.relative_to(workspace)
+        if any(p.startswith(".") or p in ("logs", "__pycache__") for p in rel.parts):
+            continue
+        py_files.append(f)
+
+    for f in py_files[:5]:  # limit to 5 code files
+        rel = f.relative_to(workspace)
+        content = f.read_text(errors="replace")[:MAX_FILE_SIZE]
+        parts.append(f"=== {rel} ===\n{content}")
+
+    # Stdout log (training evidence)
+    stdout_log = workspace / "logs" / "agent_stdout.txt"
+    if stdout_log.exists():
+        content = stdout_log.read_text(errors="replace")
+        # Take last 3000 chars (most relevant part of training)
+        if len(content) > MAX_FILE_SIZE:
+            content = f"[...truncated first {len(content) - MAX_FILE_SIZE} chars...]\n" + content[-MAX_FILE_SIZE:]
+        parts.append(f"=== logs/agent_stdout.txt ===\n{content}")
+
+    # Stderr log
+    stderr_log = workspace / "logs" / "agent_stderr.txt"
+    if stderr_log.exists():
+        content = stderr_log.read_text(errors="replace")[-2000:]
+        if content.strip():
+            parts.append(f"=== logs/agent_stderr.txt (last 2000 chars) ===\n{content}")
+
+    return "\n\n".join(parts)
 
 
 # ── paperreview.ai ───────────────────────────────────────────────────────
@@ -249,8 +309,13 @@ def _run_paperreview(
 # ── Agent reviewers ──────────────────────────────────────────────────────
 
 
-def _run_agent_reviewer(agent_cfg: dict, paper_latex: str, venue: str) -> dict:
-    """Run a single agent reviewer and return its review dict."""
+def _run_agent_reviewer(
+    agent_cfg: dict,
+    paper_latex: str,
+    venue: str,
+    workspace_context: str,
+) -> dict:
+    """Run a single agent reviewer with full workspace access."""
     llm = LLMClient(
         provider=agent_cfg["provider"],
         model=agent_cfg["model"],
@@ -258,8 +323,23 @@ def _run_agent_reviewer(agent_cfg: dict, paper_latex: str, venue: str) -> dict:
         max_tokens=agent_cfg.get("max_tokens", 8192),
     )
 
-    system = AGENT_REVIEWER_SYSTEM_PROMPT.format(venue=venue)
+    system = _load_reviewer_system_prompt(venue)
+
     user_msg = f"Paper to review:\n\n{paper_latex}"
+
+    if workspace_context:
+        user_msg += (
+            "\n\n"
+            "========================================\n"
+            "EXPERIMENT WORKSPACE (from the agent's Docker container)\n"
+            "========================================\n\n"
+            "The following files come from the same isolated Docker container "
+            "where the research agent ran. The code, logs, and results were all "
+            "produced inside that container — they cannot be selectively curated.\n\n"
+            "Verify the chain: code → logs → results.json → paper.\n"
+            "If any link is broken or results appear fabricated, score 0.\n\n"
+            f"{workspace_context}"
+        )
 
     return llm.generate_json(system, user_msg)
 
@@ -268,11 +348,11 @@ def _run_agent_reviewer(agent_cfg: dict, paper_latex: str, venue: str) -> dict:
 
 
 def _display_review_summary(reviews: list[dict], avg_score: float, decision: str):
-    """Print a summary table of all reviews."""
     table = Table(title="Review Summary")
     table.add_column("Source", style="cyan")
     table.add_column("Score", justify="center")
     table.add_column("Decision")
+    table.add_column("Integrity")
     table.add_column("Key Weaknesses")
 
     for r in reviews:
@@ -280,20 +360,24 @@ def _display_review_summary(reviews: list[dict], avg_score: float, decision: str
         score = r.get("overall_score", "N/A")
         dec = r.get("decision", "N/A")
 
+        integrity = ""
+        integrity_score = r.get("scores", {}).get("results_integrity")
+        if integrity_score is not None:
+            integrity = f"{integrity_score}/10"
+
         weaknesses = r.get("weaknesses", [])
         if isinstance(weaknesses, list):
-            w_str = "; ".join(str(w)[:60] for w in weaknesses[:2])
+            w_str = "; ".join(str(w)[:50] for w in weaknesses[:2])
         else:
-            w_str = str(weaknesses)[:120]
+            w_str = str(weaknesses)[:100]
 
-        table.add_row(source, f"{score}", dec, w_str)
+        table.add_row(source, f"{score}", dec, integrity, w_str)
 
     console.print(table)
     console.print(f"[bold]Aggregate: avg={avg_score:.1f}/10, decision={decision}[/]")
 
 
 def _aggregate_feedback(reviews: list[dict]) -> str:
-    """Combine all review feedback for pipeline use."""
     parts = []
     for i, r in enumerate(reviews):
         source = r.get("source", "unknown")
@@ -309,6 +393,10 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
         feedback = r.get("detailed_feedback", "")
         if feedback:
             parts.append(f"  Feedback: {feedback}")
+
+        integrity = r.get("integrity_assessment", "")
+        if integrity:
+            parts.append(f"  Integrity: {integrity}")
 
         parts.append("")
 
@@ -332,7 +420,6 @@ def save_reviews(result: ReviewResult, output_dir: str | Path) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "reviews.json"
-    # Filter out non-serializable fields from reviews
     clean_reviews = []
     for r in result.reviews:
         clean = {k: v for k, v in r.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}

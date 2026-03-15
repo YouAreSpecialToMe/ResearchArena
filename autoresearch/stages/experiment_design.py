@@ -57,7 +57,11 @@ def _build_task(workspace: Path, prior_errors: list[str] | None) -> str:
         "You have full autonomy — install packages, write multiple files, "
         "debug and fix errors, run multiple experiment variants, etc.\n\n"
         "The results.json should contain all quantitative results needed to "
-        "write a paper (metrics, comparisons, ablations, etc.)."
+        "write a paper (metrics, comparisons, ablations, etc.).\n\n"
+        "CRITICAL: Every number in results.json MUST come from actually running "
+        "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
+        "The review system verifies that results trace back to real code execution. "
+        "If your method doesn't beat baselines, report that honestly."
     )
 
     if prior_errors:
