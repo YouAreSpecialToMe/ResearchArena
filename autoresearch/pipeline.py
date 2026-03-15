@@ -472,9 +472,13 @@ class Pipeline:
         return tokens, log_files, sub_actions, diff_dict, failure_category
 
     def _collect_error_log(self) -> str:
-        log_path = self.state.workspace / "logs" / "agent_stderr.txt"
-        if log_path.exists():
-            return log_path.read_text()[-2000:]
+        log_dir = self.state.workspace / "logs"
+        if not log_dir.exists():
+            return "No error log found"
+        # Find the most recent stderr file (named {agent}_{timestamp}_stderr.txt)
+        stderr_files = sorted(log_dir.glob("*_stderr.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if stderr_files:
+            return stderr_files[0].read_text()[-2000:]
         return "No error log found"
 
     def _print_summary(self, elapsed: float):

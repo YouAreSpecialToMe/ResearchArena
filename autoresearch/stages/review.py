@@ -339,12 +339,7 @@ def _parse_review_from_output(stdout: str) -> dict | None:
         return None
 
     # Try to find a JSON block in the output
-    # Look for the review JSON pattern
-    import re
-
-    # Try to find JSON between braces that contains our expected keys
-    json_pattern = r'\{[^{}]*"overall_score"[^{}]*"decision"[^{}]*\}'
-    # More permissive: find any large JSON object
+    # Find any large JSON object containing our expected keys
     brace_depth = 0
     json_start = None
     for i, c in enumerate(stdout):

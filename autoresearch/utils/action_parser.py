@@ -817,7 +817,7 @@ def _match_file(target: str, changed_files: set[str]) -> list[str]:
     return matches
 
 
-
+def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
     """Create a brief human-readable summary of a tool's input."""
     if not tool_input:
         return ""
