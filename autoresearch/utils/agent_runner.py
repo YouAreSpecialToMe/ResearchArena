@@ -217,10 +217,9 @@ def invoke_agent(
 
     start = time.time()
 
-    # For Claude Code: stream stdout line-by-line and timestamp each event
-    # so the action parser can compute per-tool-call durations.
-    # For other agents: use subprocess.run (simpler, no timestamps needed).
-    if agent_type == "claude":
+    # Stream stdout line-by-line for all known agents to timestamp events
+    # for per-tool-call duration tracking. Only use subprocess.run for custom.
+    if agent_type in ("claude", "codex", "aider", "kimi", "minimax"):
         agent_result = _run_with_streaming(
             docker_cmd, workspace, log_dir, log_prefix, timeout, start,
         )
@@ -304,18 +303,20 @@ def _run_with_streaming(
                     if stream is proc.stdout:
                         stdout_lines.append(line)
                         ts = time.time()
-                        # Try to parse as JSON and write timestamped event
                         stripped = line.strip()
                         if stripped:
                             try:
                                 event = json.loads(stripped)
+                                # Structured JSON event (Claude Code, Codex)
                                 events_file.write(
                                     json.dumps({"ts": ts, "event": event}) + "\n"
                                 )
-                                events_file.flush()
                             except json.JSONDecodeError:
-                                # Non-JSON line (verbose output, etc.)
-                                pass
+                                # Plain text line (Aider, Kimi, MiniMax)
+                                events_file.write(
+                                    json.dumps({"ts": ts, "line": stripped}) + "\n"
+                                )
+                            events_file.flush()
                     else:
                         stderr_lines.append(line)
 
@@ -327,13 +328,16 @@ def _run_with_streaming(
                             stdout_lines.append(line)
                             stripped = line.strip()
                             if stripped:
+                                ts = time.time()
                                 try:
                                     event = json.loads(stripped)
                                     events_file.write(
-                                        json.dumps({"ts": time.time(), "event": event}) + "\n"
+                                        json.dumps({"ts": ts, "event": event}) + "\n"
                                     )
                                 except json.JSONDecodeError:
-                                    pass
+                                    events_file.write(
+                                        json.dumps({"ts": ts, "line": stripped}) + "\n"
+                                    )
                     if proc.stderr:
                         for line in proc.stderr:
                             stderr_lines.append(line)
@@ -504,6 +508,9 @@ def _build_docker_command(
         "HF_TOKEN",
         "HUGGING_FACE_HUB_TOKEN",
         "WANDB_API_KEY",
+        "MOONSHOT_API_KEY",      # Kimi (Moonshot AI)
+        "MINIMAX_API_KEY",       # MiniMax
+        "MINIMAX_GROUP_ID",      # MiniMax group ID
     ]
     # Also pass any extra env vars from config
     extra_env = config.get("env", {})
@@ -551,6 +558,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
             "codex",
             "--full-auto",
             "--quiet",
+            "--json",
         ]
         if config.get("model"):
             cmd.extend(["--model", config["model"]])
@@ -563,9 +571,48 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
             "--yes-always",
             "--no-git",
             "--no-auto-commits",
+            "--verbose",
+            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
         ]
         if config.get("model"):
             cmd.extend(["--model", config["model"]])
+        cmd.extend(["--message", task])
+        return cmd
+
+    elif agent_type == "kimi":
+        # Kimi (Moonshot AI) — runs through Aider with OpenAI-compatible API
+        model = config.get("model", "moonshot-v1-auto")
+        api_base = config.get("api_base", "https://api.moonshot.cn/v1")
+        cmd = [
+            "aider",
+            "--yes-always",
+            "--no-git",
+            "--no-auto-commits",
+            "--verbose",
+            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
+            "--model", f"openai/{model}",
+            "--openai-api-base", api_base,
+            "--openai-api-key", os.environ.get("MOONSHOT_API_KEY", ""),
+        ]
+        cmd.extend(["--message", task])
+        return cmd
+
+    elif agent_type == "minimax":
+        # MiniMax — runs through Aider with OpenAI-compatible API
+        model = config.get("model", "MiniMax-Text-01")
+        api_base = config.get("api_base", "https://api.minimax.chat/v1")
+        api_key = os.environ.get("MINIMAX_API_KEY", "")
+        cmd = [
+            "aider",
+            "--yes-always",
+            "--no-git",
+            "--no-auto-commits",
+            "--verbose",
+            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
+            "--model", f"openai/{model}",
+            "--openai-api-base", api_base,
+            "--openai-api-key", api_key,
+        ]
         cmd.extend(["--message", task])
         return cmd
 
@@ -583,7 +630,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
     else:
         raise ValueError(
             f"Unknown agent type: {agent_type}. "
-            f"Supported: claude, codex, aider, custom"
+            f"Supported: claude, codex, aider, kimi, minimax, custom"
         )
 
 

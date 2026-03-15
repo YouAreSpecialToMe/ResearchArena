@@ -1,6 +1,6 @@
 # AutoResearch
 
-Benchmark harness for testing whether CLI agents (Claude Code, Codex, Aider) can autonomously conduct end-to-end ML research — from idea to accepted paper.
+Benchmark harness for testing whether CLI agents (Claude Code, Codex, Aider, Kimi, MiniMax) can autonomously conduct end-to-end ML research — from idea to accepted paper.
 
 ## What this does
 
@@ -58,9 +58,11 @@ The agent under test is excluded from the reviewer pool:
 
 | Researcher | Reviewers |
 |---|---|
-| Claude Code | Codex, Aider |
-| Codex | Claude Code, Aider |
-| Aider | Claude Code, Codex |
+| Claude Code | Codex, Aider, Kimi, MiniMax |
+| Codex | Claude Code, Aider, Kimi, MiniMax |
+| Aider | Claude Code, Codex, Kimi, MiniMax |
+| Kimi | Claude Code, Codex, Aider, MiniMax |
+| MiniMax | Claude Code, Codex, Aider, Kimi |
 
 ## Setup
 
@@ -82,6 +84,9 @@ pip install -e .
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 export HF_TOKEN=hf_...
+export MOONSHOT_API_KEY=sk-...      # for Kimi
+export MINIMAX_API_KEY=...          # for MiniMax
+export MINIMAX_GROUP_ID=...         # for MiniMax
 ```
 
 ### 4. (Optional) Configure paperreview.ai
@@ -105,6 +110,12 @@ autoresearch run --seed "efficient fine-tuning for LLMs" --agent claude
 
 # Test Codex
 autoresearch run --seed "efficient fine-tuning for LLMs" --agent codex
+
+# Test Kimi
+autoresearch run --seed "efficient fine-tuning for LLMs" --agent kimi
+
+# Test MiniMax
+autoresearch run --seed "efficient fine-tuning for LLMs" --agent minimax
 
 # Override model
 autoresearch run --agent claude --model claude-opus-4-6
@@ -133,7 +144,7 @@ See [`configs/default.yaml`](configs/default.yaml) for all options:
 seed_topic: "your research topic"
 
 agent:
-  type: "claude"              # claude, codex, aider, custom
+  type: "claude"              # claude, codex, aider, kimi, minimax, custom
   model: "claude-sonnet-4-6"
   docker_image: "autoresearch/agent:latest"
   gpus: 1
@@ -156,6 +167,10 @@ review:
       name: "Codex"
     - type: "aider"
       name: "Aider"
+    - type: "kimi"
+      name: "Kimi"
+    - type: "minimax"
+      name: "MiniMax"
 
 pipeline:
   max_ideas_per_seed: 5
@@ -304,6 +319,25 @@ Each tool call the agent made within a stage. For Claude Code (via `--output-for
   "files_affected": ["results.json", "figures/accuracy_curve.png", "checkpoints/best_model.pt"]
 }
 ```
+
+### Tracking coverage by agent
+
+All agents get full tracking at every level. The data source differs but the output is the same:
+
+| Capability | Claude Code | Codex | Aider / Kimi / MiniMax |
+|---|---|---|---|
+| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--verbose` (plaintext) |
+| Tool calls | structured events | structured events | regex parsing |
+| Tool input | rich per-tool summaries | from event payload | from verbose output |
+| Tool output | tool result events | command output | lines after tool call |
+| LLM reasoning | text_delta blocks | agent_message events | accumulated text between actions |
+| Per-turn tokens | message_delta usage | turn.completed usage | `Tokens: N sent, N received` |
+| Per-tool duration | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl |
+| Error details | is_error in result | exit code | error pattern detection |
+| File changes | workspace diff | workspace diff | workspace diff |
+| Failure category | stderr patterns | stderr patterns | stderr patterns |
+
+All agents stream through `Popen` with line-by-line timestamping, so per-tool-call duration is available for every agent. Kimi and MiniMax run through Aider with their OpenAI-compatible APIs.
 
 Sub-action fields:
 

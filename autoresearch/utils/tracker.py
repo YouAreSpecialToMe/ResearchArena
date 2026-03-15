@@ -35,6 +35,16 @@ _PRICING = {
     "gpt-4o-mini":       {"input": 0.15, "output": 0.60},
     "o3":                {"input": 10.0, "output": 40.0},
     "o3-mini":           {"input": 1.10, "output": 4.40},
+    # Kimi (Moonshot AI)
+    "moonshot-v1-auto":    {"input": 0.84, "output": 0.84},
+    "moonshot-v1-8k":     {"input": 0.84, "output": 0.84},
+    "moonshot-v1-32k":    {"input": 1.68, "output": 1.68},
+    "moonshot-v1-128k":   {"input": 4.20, "output": 4.20},
+    "kimi-k2":            {"input": 1.0,  "output": 3.0},
+    # MiniMax
+    "MiniMax-Text-01":    {"input": 1.0,  "output": 5.50},
+    "abab6.5s-chat":      {"input": 0.70, "output": 0.70},
+    "abab6.5-chat":       {"input": 2.10, "output": 2.10},
 }
 
 

@@ -53,8 +53,8 @@ def parse_agent_stdout(agent_type: str, stdout: str, events_path: str | None = N
 
     Args:
         agent_type: "claude", "codex", "aider", or "custom"
-        stdout: Raw stdout from the agent (used for codex/aider/fallback)
-        events_path: Path to timestamped events JSONL file (Claude Code only).
+        stdout: Raw stdout from the agent
+        events_path: Path to timestamped events JSONL file (Claude Code / Codex).
                      If provided, used instead of stdout for richer parsing.
     """
     if not stdout and not events_path:
@@ -63,9 +63,10 @@ def parse_agent_stdout(agent_type: str, stdout: str, events_path: str | None = N
     if agent_type == "claude":
         return _parse_claude_events(events_path, stdout)
     elif agent_type == "codex":
-        return _parse_codex_stdout(stdout)
-    elif agent_type == "aider":
-        return _parse_aider_stdout(stdout)
+        return _parse_codex_events(events_path, stdout)
+    elif agent_type in ("aider", "kimi", "minimax"):
+        # Kimi and MiniMax run through Aider, so same parsing
+        return _parse_aider_events(events_path, stdout)
     else:
         return _parse_generic_stdout(stdout)
 
@@ -315,22 +316,141 @@ def _events_to_sub_actions(events: list[dict]) -> list[SubAction]:
     return actions
 
 
-# ── Codex ─────────────────────────────────────────────────────────────
+# ── Codex (--json JSONL output) ───────────────────────────────────────
 
 
-def _parse_codex_stdout(stdout: str) -> list[SubAction]:
-    """Parse Codex CLI stdout for tool call patterns.
+def _parse_codex_events(events_path: str | None, stdout: str) -> list[SubAction]:
+    """Parse Codex CLI --json output into rich sub-actions.
 
-    Codex outputs tool calls in a structured format. We look for patterns like:
-      [tool_call] shell: <command>
-      [tool_call] file_write: <path>
-      [tool_call] file_read: <path>
+    Codex with --json emits JSONL events. Key event types:
+        item.command_execution  — shell command run
+        item.file_change        — file written/edited
+        item.file_read          — file read
+        item.web_search         — web search
+        item.mcp_tool_call      — MCP tool invocation
+        item.agent_message      — agent reasoning text
+        turn.completed          — has usage {InputTokens, OutputTokens}
+
+    We use the timestamped events file when available (same streaming
+    approach as Claude Code).
     """
+    events = _load_events(events_path, stdout)
+    if not events:
+        return _parse_codex_stdout_fallback(stdout)
+
+    actions: list[SubAction] = []
+    current_reasoning_chunks: list[str] = []
+    turn_tokens: dict | None = None
+    turn_actions: list[SubAction] = []
+
+    for entry in events:
+        ts = entry.get("ts")
+        raw = entry.get("event", {})
+
+        event_type = raw.get("type", "")
+
+        if event_type == "item.agent_message":
+            # Agent reasoning / message text
+            text = raw.get("content", "") or raw.get("text", "")
+            if text:
+                current_reasoning_chunks.append(str(text))
+
+        elif event_type == "item.command_execution":
+            reasoning = "".join(current_reasoning_chunks).strip()
+            current_reasoning_chunks = []
+
+            command = raw.get("command", "")
+            exit_code = raw.get("exit_code")
+            output = raw.get("output", "")
+
+            sub = SubAction(
+                tool="Bash",
+                input_summary=_truncate(str(command), 200),
+                output_summary=_truncate(str(output), 300),
+                reasoning=_truncate(reasoning, 500) if reasoning else "",
+            )
+            if exit_code and exit_code != 0:
+                sub.error = f"exit code {exit_code}"
+
+            turn_actions.append(sub)
+            actions.append(sub)
+
+        elif event_type == "item.file_change":
+            reasoning = "".join(current_reasoning_chunks).strip()
+            current_reasoning_chunks = []
+
+            file_path = raw.get("path", "") or raw.get("file", "")
+            change_type = raw.get("change_type", "write")  # write, edit, delete
+            tool = "Write" if change_type == "write" else "Edit" if change_type == "edit" else "Delete"
+
+            sub = SubAction(
+                tool=tool,
+                input_summary=_truncate(str(file_path), 200),
+                reasoning=_truncate(reasoning, 500) if reasoning else "",
+            )
+            turn_actions.append(sub)
+            actions.append(sub)
+
+        elif event_type == "item.file_read":
+            file_path = raw.get("path", "") or raw.get("file", "")
+            actions.append(SubAction(
+                tool="Read",
+                input_summary=_truncate(str(file_path), 200),
+            ))
+
+        elif event_type == "item.web_search":
+            query = raw.get("query", "")
+            actions.append(SubAction(
+                tool="WebSearch",
+                input_summary=_truncate(str(query), 200),
+            ))
+
+        elif event_type == "item.mcp_tool_call":
+            tool_name = raw.get("tool", "") or raw.get("name", "")
+            tool_input = raw.get("input", {})
+            actions.append(SubAction(
+                tool=str(tool_name),
+                input_summary=_summarize_tool_input(str(tool_name), tool_input if isinstance(tool_input, dict) else {}),
+            ))
+
+        elif event_type == "turn.completed":
+            usage = raw.get("usage", {})
+            if usage:
+                turn_tokens = {
+                    "input": usage.get("InputTokens", usage.get("input_tokens", 0)),
+                    "output": usage.get("OutputTokens", usage.get("output_tokens", 0)),
+                }
+
+            # Distribute tokens across actions in this turn
+            if turn_tokens and turn_actions:
+                n = len(turn_actions)
+                for sub in turn_actions:
+                    sub.tokens = {
+                        "input": turn_tokens["input"] // n,
+                        "output": turn_tokens["output"] // n,
+                    }
+                remainder_in = turn_tokens["input"] - (turn_tokens["input"] // n) * n
+                remainder_out = turn_tokens["output"] - (turn_tokens["output"] // n) * n
+                if remainder_in or remainder_out:
+                    turn_actions[-1].tokens["input"] += remainder_in
+                    turn_actions[-1].tokens["output"] += remainder_out
+
+            turn_tokens = None
+            turn_actions = []
+            current_reasoning_chunks = []
+
+        elif event_type == "turn.started":
+            turn_actions = []
+            current_reasoning_chunks = []
+
+    return actions
+
+
+def _parse_codex_stdout_fallback(stdout: str) -> list[SubAction]:
+    """Fallback regex parser when Codex --json events are unavailable."""
     actions = []
 
-    tool_call_pattern = re.compile(
-        r'\[tool_call\]\s+(\w+):\s*(.*)', re.IGNORECASE
-    )
+    tool_call_pattern = re.compile(r'\[tool_call\]\s+(\w+):\s*(.*)', re.IGNORECASE)
     running_pattern = re.compile(r'Running:\s+(.*)')
     reading_pattern = re.compile(r'Reading\s+(.*)')
     writing_pattern = re.compile(r'Writing\s+(.*)')
@@ -348,70 +468,237 @@ def _parse_codex_stdout(stdout: str) -> list[SubAction]:
 
         m = running_pattern.match(line)
         if m:
-            actions.append(SubAction(
-                tool="Bash",
-                input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+            actions.append(SubAction(tool="Bash", input_summary=_truncate(m.group(1).strip(), 200)))
             continue
 
         m = reading_pattern.match(line)
         if m:
-            actions.append(SubAction(
-                tool="Read",
-                input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+            actions.append(SubAction(tool="Read", input_summary=_truncate(m.group(1).strip(), 200)))
             continue
 
         m = writing_pattern.match(line)
         if m:
-            actions.append(SubAction(
-                tool="Write",
-                input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+            actions.append(SubAction(tool="Write", input_summary=_truncate(m.group(1).strip(), 200)))
             continue
 
     return actions
 
 
-# ── Aider ─────────────────────────────────────────────────────────────
+# ── Aider (--verbose stdout with timestamps) ─────────────────────────
 
 
-def _parse_aider_stdout(stdout: str) -> list[SubAction]:
-    """Parse Aider CLI stdout for action patterns."""
-    actions = []
+# Patterns for Aider verbose output
+_AIDER_APPLIED = re.compile(r'Applied edit to\s+(.*)')
+_AIDER_RUNNING = re.compile(r'>\s*Running\s+(.*)')
+_AIDER_ADDED = re.compile(r'Added\s+(.*?)\s+to the chat')
+_AIDER_TOKENS = re.compile(
+    r'Tokens:\s*([\d,]+)\s*sent\s*[,/]\s*([\d,]+)\s*received', re.IGNORECASE
+)
+_AIDER_TOKENS_K = re.compile(
+    r'Tokens:\s*([\d.]+)k?\s*sent\s*[,/]\s*([\d.]+)k?\s*received', re.IGNORECASE
+)
+_AIDER_ERROR_PATTERNS = [
+    re.compile(r'Traceback \(most recent call last\)', re.IGNORECASE),
+    re.compile(r'Error:', re.IGNORECASE),
+    re.compile(r'Exception:', re.IGNORECASE),
+    re.compile(r'FAILED', re.IGNORECASE),
+    re.compile(r'command not found', re.IGNORECASE),
+]
+_AIDER_SKIP = re.compile(r'^(───|---|\*\*\*|===|ASSISTANT|USER|Cost:|Commit |Git )')
 
-    applied_pattern = re.compile(r'Applied edit to\s+(.*)')
-    running_pattern = re.compile(r'>\s*Running\s+(.*)')
-    added_pattern = re.compile(r'Added\s+(.*?)\s+to the chat')
 
-    for line in stdout.splitlines():
-        line = line.strip()
+def _parse_aider_events(events_path: str | None, stdout: str) -> list[SubAction]:
+    """Parse Aider output into rich sub-actions using timestamped events.
 
-        m = running_pattern.match(line)
+    If events_path is available, reads {"ts": ..., "line": "..."} entries
+    to compute per-tool-call duration. Otherwise falls back to raw stdout.
+    """
+    # Load timestamped lines
+    lines_with_ts: list[tuple[float | None, str]] = []
+
+    if events_path:
+        try:
+            with open(events_path) as f:
+                for raw_line in f:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        entry = json.loads(raw_line)
+                        ts = entry.get("ts")
+                        # Handle both plain text lines and JSON events
+                        text = entry.get("line", "")
+                        if not text and "event" in entry:
+                            continue  # skip structured events (not Aider)
+                        lines_with_ts.append((ts, text))
+                    except json.JSONDecodeError:
+                        pass
+        except FileNotFoundError:
+            pass
+
+    if not lines_with_ts:
+        # Fallback: no timestamps
+        for line in (stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped:
+                lines_with_ts.append((None, stripped))
+
+    if not lines_with_ts:
+        return []
+
+    return _aider_lines_to_sub_actions(lines_with_ts)
+
+
+def _aider_lines_to_sub_actions(
+    lines: list[tuple[float | None, str]],
+) -> list[SubAction]:
+    """Convert timestamped Aider output lines into SubAction records.
+
+    Strategy:
+    - Walk lines, detect tool call patterns (Running, Applied edit, Added)
+    - Lines between tool calls are either: reasoning (before), output (after)
+    - Use timestamps to compute duration per tool call
+    - Detect error patterns in output
+    """
+    actions: list[SubAction] = []
+
+    current_reasoning: list[str] = []
+    current_output: list[str] = []
+    current_errors: list[str] = []
+    last_tokens: dict | None = None
+    last_action: SubAction | None = None
+    last_action_ts: float | None = None
+    collecting_output = False  # True after a tool call, collecting its output
+
+    for ts, line in lines:
+        if not line:
+            continue
+
+        # ── Token usage ──
+        m = _AIDER_TOKENS.search(line)
         if m:
-            actions.append(SubAction(
+            last_tokens = {
+                "input": int(m.group(1).replace(",", "")),
+                "output": int(m.group(2).replace(",", "")),
+            }
+            continue
+
+        m = _AIDER_TOKENS_K.search(line)
+        if m:
+            last_tokens = {
+                "input": int(float(m.group(1)) * 1000),
+                "output": int(float(m.group(2)) * 1000),
+            }
+            continue
+
+        # ── Shell command ──
+        m = _AIDER_RUNNING.match(line)
+        if m:
+            # Finalize previous action's output
+            _finalize_output(last_action, current_output, current_errors)
+            current_output = []
+            current_errors = []
+
+            # Compute duration of previous action
+            if last_action and last_action_ts is not None and ts is not None:
+                last_action.duration_seconds = ts - last_action_ts
+
+            reasoning = " ".join(current_reasoning).strip()
+            current_reasoning = []
+
+            sub = SubAction(
                 tool="Bash",
                 input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+                reasoning=_truncate(reasoning, 500) if reasoning else "",
+                tokens=last_tokens,
+            )
+            last_tokens = None
+            last_action = sub
+            last_action_ts = ts
+            collecting_output = True
+            actions.append(sub)
             continue
 
-        m = applied_pattern.match(line)
+        # ── File edit ──
+        m = _AIDER_APPLIED.match(line)
         if m:
-            actions.append(SubAction(
+            _finalize_output(last_action, current_output, current_errors)
+            current_output = []
+            current_errors = []
+
+            if last_action and last_action_ts is not None and ts is not None:
+                last_action.duration_seconds = ts - last_action_ts
+
+            reasoning = " ".join(current_reasoning).strip()
+            current_reasoning = []
+
+            sub = SubAction(
                 tool="Edit",
                 input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+                reasoning=_truncate(reasoning, 500) if reasoning else "",
+                tokens=last_tokens,
+            )
+            last_tokens = None
+            last_action = sub
+            last_action_ts = ts
+            collecting_output = True
+            actions.append(sub)
             continue
 
-        m = added_pattern.match(line)
+        # ── File read ──
+        m = _AIDER_ADDED.match(line)
         if m:
-            actions.append(SubAction(
+            _finalize_output(last_action, current_output, current_errors)
+            current_output = []
+            current_errors = []
+
+            if last_action and last_action_ts is not None and ts is not None:
+                last_action.duration_seconds = ts - last_action_ts
+
+            sub = SubAction(
                 tool="Read",
                 input_summary=_truncate(m.group(1).strip(), 200),
-            ))
+            )
+            last_action = sub
+            last_action_ts = ts
+            collecting_output = False
+            actions.append(sub)
             continue
 
+        # ── Skip known non-content lines ──
+        if _AIDER_SKIP.match(line):
+            continue
+
+        # ── Check for error patterns ──
+        is_error = any(p.search(line) for p in _AIDER_ERROR_PATTERNS)
+
+        # ── Collect output or reasoning ──
+        if collecting_output and last_action:
+            current_output.append(line)
+            if is_error:
+                current_errors.append(line)
+        else:
+            if len(line) > 10:
+                current_reasoning.append(line)
+
+    # Finalize last action
+    _finalize_output(last_action, current_output, current_errors)
+
     return actions
+
+
+def _finalize_output(
+    action: SubAction | None,
+    output_lines: list[str],
+    error_lines: list[str],
+):
+    """Attach collected output and error lines to a sub-action."""
+    if not action:
+        return
+    if output_lines:
+        action.output_summary = _truncate("\n".join(output_lines), 300)
+    if error_lines:
+        action.error = _truncate("\n".join(error_lines), 300)
 
 
 # ── Generic fallback ──────────────────────────────────────────────────
