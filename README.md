@@ -205,42 +205,120 @@ If any link in this chain is broken, the reviewer scores `results_integrity: 0` 
 Each run produces a workspace directory:
 
 ```
-outputs/runs/idea_01/
-├── CLAUDE.md                    # agent permissions
-├── research_guidelines.md       # research best practices
-├── reviewer_guidelines.md       # reviewer instructions
-├── idea.json                    # research idea
-├── experiment.py                # experiment code (agent-written)
-├── results.json                 # experiment results
-├── paper.tex                    # LaTeX paper
-├── paper.pdf                    # compiled PDF
-├── figures/                     # generated figures
-├── logs/
-│   ├── agent_stdout.txt         # researcher agent output
-│   └── agent_stderr.txt
-├── review_logs/                 # reviewer agent outputs
-├── reviews.json                 # aggregated reviews
-└── reference_check.json         # citation verification results
+outputs/runs/
+├── summary.json                         # final run summary
+├── tracker.json                         # full tracking data (see below)
+│
+├── idea_01/
+│   ├── CLAUDE.md                        # agent permissions
+│   ├── research_guidelines.md           # research best practices
+│   ├── reviewer_guidelines.md           # reviewer instructions
+│   ├── idea.json                        # research idea
+│   ├── experiment.py                    # experiment code (agent-written)
+│   ├── results.json                     # experiment results
+│   ├── paper.tex                        # LaTeX paper
+│   ├── paper.pdf                        # compiled PDF
+│   ├── figures/                         # generated figures
+│   ├── logs/
+│   │   ├── claude_1710523200_stdout.txt # researcher agent output
+│   │   ├── claude_1710523200_stderr.txt
+│   │   ├── claude_1710523200_command.txt
+│   │   └── claude_1710523200_events.jsonl  # timestamped stream events (Claude)
+│   ├── review_logs/                     # reviewer agent outputs (same format)
+│   ├── reviews.json                     # aggregated reviews
+│   └── reference_check.json            # citation verification results
+│
+└── idea_02/
+    └── ...
 ```
 
-Final summary is saved to `outputs/runs/summary.json`:
+## Tracking
+
+Every run produces a `tracker.json` with structured data at three levels of granularity:
+
+### Run level
+
+Total time, tokens, cost, and per-stage aggregation:
 
 ```json
 {
-  "agent": "claude",
-  "status": "accepted",
-  "ideas_tried": 2,
-  "best_paper": {
-    "title": "...",
-    "score": 6.8,
-    "workspace": "outputs/runs/idea_02"
-  },
-  "idea_history": [
-    {"title": "...", "failure_stage": "review", "best_score": 4.2},
-    {"title": "...", "failure_stage": null, "best_score": 6.8}
-  ]
+  "total_elapsed_seconds": 18247.3,
+  "total_tokens": {"input_tokens": 1842000, "output_tokens": 563000, "total_tokens": 2405000},
+  "total_cost_usd": 13.97,
+  "stages": {
+    "ideation":    {"elapsed_seconds": 2105, "tokens": {...}, "cost_usd": 1.21, "actions": 2, "successes": 2, "failures": 0},
+    "experiments": {"elapsed_seconds": 9842, "tokens": {...}, "cost_usd": 4.78, "actions": 3, "successes": 2, "failures": 1,
+                    "failure_categories": {"oom": 1}},
+    "paper":       {"elapsed_seconds": 3210, "tokens": {...}, "cost_usd": 3.96, "actions": 3, "successes": 3, "failures": 0},
+    "review":      {"elapsed_seconds": 3089, "tokens": {...}, "cost_usd": 4.01, "actions": 8, "successes": 7, "failures": 1}
+  }
 }
 ```
+
+### Action level
+
+Each pipeline stage invocation (ideation attempt, experiment run, paper draft, review round) is a separate action with its own timing, tokens, cost, failure classification, workspace diff, and log file links:
+
+```json
+{
+  "stage": "experiments",
+  "action": "run_experiments",
+  "agent_type": "claude",
+  "model": "claude-sonnet-4-6",
+  "attempt": 1,
+  "elapsed_seconds": 5124.7,
+  "tokens": {"input_tokens": 320000, "output_tokens": 98000, "total_tokens": 418000},
+  "outcome": "failure",
+  "failure_category": "oom",
+  "details": "No results.json produced",
+  "cost_usd": 2.43,
+  "log_files": {
+    "stdout": "outputs/runs/idea_01/logs/claude_1710523200_stdout.txt",
+    "stderr": "outputs/runs/idea_01/logs/claude_1710523200_stderr.txt",
+    "command": "outputs/runs/idea_01/logs/claude_1710523200_command.txt",
+    "events": "outputs/runs/idea_01/logs/claude_1710523200_events.jsonl"
+  },
+  "workspace_diff": {
+    "created": [{"path": "experiment.py", "size": 4821}, {"path": "train.py", "size": 12043}],
+    "modified": [],
+    "deleted": []
+  },
+  "sub_actions": [...]
+}
+```
+
+Failure categories: `oom`, `timeout`, `rate_limit`, `auth_error`, `gpu_error`, `import_error`, `crash`, `syntax_error`, `runtime_error`, `docker_error`, `network_error`, `unknown`
+
+### Sub-action level
+
+Each tool call the agent made within a stage. For Claude Code (via `--output-format stream-json`), this includes the LLM's reasoning, per-turn token usage, wall time per tool call, tool output, and which files each tool call actually changed on disk:
+
+```json
+{
+  "tool": "Bash",
+  "input": "python experiment.py --epochs 50 --seed 42",
+  "output": "Epoch 50/50 - loss: 0.234 - acc: 0.891",
+  "reasoning": "Let me run the training with the first seed.",
+  "tokens": {"input": 9400, "output": 450},
+  "duration_seconds": 342.8,
+  "files_affected": ["results.json", "figures/accuracy_curve.png", "checkpoints/best_model.pt"]
+}
+```
+
+Sub-action fields:
+
+| Field | Description | Source |
+|---|---|---|
+| `tool` | Tool name (Read, Write, Edit, Bash, WebSearch, etc.) | Parsed from agent stdout |
+| `input` | What was passed to the tool | Summarized from tool input |
+| `output` | What the tool returned (truncated) | Tool result event |
+| `reasoning` | LLM's thinking text before this tool call | Text blocks between tool calls |
+| `tokens` | `{input, output}` token counts for this turn | `message_delta` usage event |
+| `duration_seconds` | Wall time for the tool execution | Timestamped events file |
+| `error` | Error message if the tool call failed | Tool result with `is_error` |
+| `files_affected` | Files this tool call created/modified | Cross-referenced with workspace diff |
+
+Files changed on disk but not claimed by any tool call appear as `(side_effect)` entries — these are typically artifacts produced by running scripts (checkpoints, figures, caches).
 
 ## Project structure
 
@@ -254,7 +332,10 @@ autoresearch/
 │   ├── paper_writing.py         # Agent writes LaTeX paper
 │   └── review.py                # Multi-source review (refs + paperreview.ai + CLI agents)
 ├── utils/
-│   ├── agent_runner.py          # Docker container management
+│   ├── agent_runner.py          # Docker container management + streaming + failure classification
+│   ├── tracker.py               # Run/action/sub-action tracking with time, tokens, cost
+│   ├── action_parser.py         # Parse agent stdout into structured sub-actions
+│   ├── workspace_diff.py        # Before/after filesystem snapshots
 │   ├── config.py                # YAML config loading
 │   ├── llm.py                   # LLM client (Anthropic/OpenAI)
 │   ├── paperreview.py           # paperreview.ai automation

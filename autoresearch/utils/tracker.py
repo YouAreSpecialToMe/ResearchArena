@@ -73,11 +73,15 @@ class ActionRecord:
     elapsed_seconds: float = 0.0
     tokens: TokenUsage = field(default_factory=TokenUsage)
     outcome: str = ""  # "success", "failure", "timeout", etc.
+    failure_category: str | None = None  # "oom", "timeout", "crash", "rate_limit", etc.
     details: str = ""  # brief description of what happened
     cost_usd: float = 0.0
+    log_files: dict[str, str] | None = None  # {"stdout": path, "stderr": path, "command": path}
+    sub_actions: list[dict] | None = None  # parsed tool calls within this action
+    workspace_diff: dict | None = None  # {"created": [...], "modified": [...], "deleted": [...]}
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "stage": self.stage,
             "action": self.action,
             "agent_type": self.agent_type,
@@ -89,6 +93,15 @@ class ActionRecord:
             "details": self.details,
             "cost_usd": round(self.cost_usd, 4),
         }
+        if self.failure_category:
+            d["failure_category"] = self.failure_category
+        if self.log_files:
+            d["log_files"] = self.log_files
+        if self.sub_actions:
+            d["sub_actions"] = self.sub_actions
+        if self.workspace_diff:
+            d["workspace_diff"] = self.workspace_diff
+        return d
 
 
 class RunTracker:
@@ -132,6 +145,10 @@ class RunTracker:
         outcome: str,
         details: str = "",
         tokens: TokenUsage | None = None,
+        log_files: dict[str, str] | None = None,
+        sub_actions: list[dict] | None = None,
+        workspace_diff: dict | None = None,
+        failure_category: str | None = None,
     ):
         if self._current is None:
             return
@@ -142,6 +159,14 @@ class RunTracker:
         record.details = details
         if tokens:
             record.tokens = tokens
+        if log_files:
+            record.log_files = log_files
+        if sub_actions:
+            record.sub_actions = sub_actions
+        if workspace_diff:
+            record.workspace_diff = workspace_diff
+        if failure_category:
+            record.failure_category = failure_category
         record.cost_usd = self._estimate_cost(record)
         self.actions.append(record)
         self._current = None
@@ -251,6 +276,9 @@ class RunTracker:
                 s["successes"] += 1
             elif a.outcome in ("failure", "timeout"):
                 s["failures"] += 1
+            if a.failure_category:
+                cats = s.setdefault("failure_categories", {})
+                cats[a.failure_category] = cats.get(a.failure_category, 0) + 1
         return stages
 
     # ── Display ───────────────────────────────────────────────────────
@@ -327,7 +355,7 @@ class RunTracker:
         total_tokens = self.total_tokens
         stages = {}
         for stage, s in self.stage_summary().items():
-            stages[stage] = {
+            stage_dict = {
                 "elapsed_seconds": round(s["elapsed_seconds"], 1),
                 "tokens": s["tokens"].to_dict(),
                 "cost_usd": round(s["cost_usd"], 4),
@@ -335,6 +363,9 @@ class RunTracker:
                 "successes": s["successes"],
                 "failures": s["failures"],
             }
+            if s.get("failure_categories"):
+                stage_dict["failure_categories"] = s["failure_categories"]
+            stages[stage] = stage_dict
         return {
             "total_elapsed_seconds": round(self.total_elapsed, 1),
             "total_tokens": total_tokens.to_dict(),

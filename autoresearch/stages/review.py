@@ -169,12 +169,22 @@ def review_paper(
                 )
 
             try:
-                agent_review = _run_cli_reviewer(
+                agent_review, agent_result = _run_cli_reviewer(
                     agent_cfg=agent_cfg,
                     workspace=workspace,
                     venue=venue,
                     docker_image=docker_image,
                 )
+                reviewer_log_files = agent_result.log_files if agent_result else None
+                reviewer_sub_actions = None
+                if agent_result and agent_result.stdout:
+                    from autoresearch.utils.action_parser import parse_agent_stdout
+                    events_path = (agent_result.log_files or {}).get("events")
+                    parsed = parse_agent_stdout(
+                        agent_type, agent_result.stdout, events_path=events_path,
+                    )
+                    reviewer_sub_actions = [s.to_dict() for s in parsed] if parsed else None
+
                 if agent_review:
                     agent_review["source"] = f"agent:{agent_name}"
                     all_reviews.append(agent_review)
@@ -189,11 +199,18 @@ def review_paper(
                         tracker.end_action(
                             outcome="success",
                             details=f"score={agent_review.get('overall_score')}, decision={agent_review.get('decision')}",
+                            log_files=reviewer_log_files,
+                            sub_actions=reviewer_sub_actions,
                         )
                 else:
                     console.print(f"    [red]No review.json produced.[/]")
                     if tracker:
-                        tracker.end_action(outcome="failure", details="No review.json produced")
+                        tracker.end_action(
+                            outcome="failure",
+                            details="No review.json produced",
+                            log_files=reviewer_log_files,
+                            sub_actions=reviewer_sub_actions,
+                        )
             except Exception as e:
                 console.print(f"    [red]Failed: {e}[/]")
                 if tracker:
@@ -244,13 +261,16 @@ def _run_cli_reviewer(
     workspace: Path,
     venue: str,
     docker_image: str,
-) -> dict | None:
+) -> tuple[dict | None, object]:
     """Run a CLI agent as a reviewer in Docker with read-only workspace.
 
     The reviewer agent runs in the same Docker image as the researcher.
     It gets the full workspace (code, logs, results, paper) mounted read-only.
     It can read everything, run code to verify, but cannot modify anything.
     It saves its review to review.json.
+
+    Returns:
+        Tuple of (parsed review dict or None, AgentResult).
     """
     from autoresearch.utils.agent_runner import invoke_agent
 
@@ -307,7 +327,7 @@ def _run_cli_reviewer(
 
     # Parse the review from stdout (since workspace is read-only, agent
     # can't write review.json — we parse it from the output instead)
-    return _parse_review_from_output(result.stdout)
+    return _parse_review_from_output(result.stdout), result
 
 
 def _parse_review_from_output(stdout: str) -> dict | None:

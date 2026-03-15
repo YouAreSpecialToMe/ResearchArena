@@ -20,7 +20,9 @@ Supported agents:
 
 from __future__ import annotations
 
+import json
 import os
+import select
 import shutil
 import subprocess
 import time
@@ -78,6 +80,87 @@ class AgentResult:
     elapsed_seconds: float
     workspace: Path
     container_id: str | None = None
+    log_files: dict[str, str] | None = None  # {"stdout": path, "stderr": path, "command": path}
+    failure_category: str | None = None      # classified failure reason
+
+
+# ── Failure classification ───────────────────────────────────────────────
+
+# Patterns checked against stderr and stdout (case-insensitive) to classify
+# why an agent invocation failed. Order matters — first match wins.
+_FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
+    ("oom", [
+        "out of memory", "oom", "cuda out of memory",
+        "cannot allocate memory", "memory allocation failed",
+        "torch.cuda.OutOfMemoryError",
+    ]),
+    ("timeout", [
+        "timed out", "timeout", "deadline exceeded",
+    ]),
+    ("rate_limit", [
+        "rate limit", "rate_limit", "429", "too many requests",
+        "quota exceeded", "overloaded",
+    ]),
+    ("auth_error", [
+        "authentication", "unauthorized", "401", "403",
+        "invalid api key", "permission denied",
+    ]),
+    ("gpu_error", [
+        "cuda error", "cudnn error", "nccl error",
+        "no cuda gpus", "gpu not available",
+    ]),
+    ("import_error", [
+        "modulenotfounderror", "importerror", "no module named",
+    ]),
+    ("crash", [
+        "segmentation fault", "core dumped", "killed",
+        "fatal error", "panic:",
+    ]),
+    ("syntax_error", [
+        "syntaxerror", "indentationerror",
+    ]),
+    ("runtime_error", [
+        "runtimeerror", "typeerror", "valueerror",
+        "keyerror", "indexerror", "attributeerror",
+        "filenotfounderror", "zerodivisionerror",
+    ]),
+    ("docker_error", [
+        "docker daemon", "container failed", "image not found",
+        "no such image", "pull access denied",
+    ]),
+    ("network_error", [
+        "connectionerror", "connectionrefused", "dns resolution",
+        "network unreachable", "ssl", "certificate",
+    ]),
+]
+
+
+def classify_failure(exit_code: int, stdout: str, stderr: str) -> str | None:
+    """Classify the failure reason from exit code and output.
+
+    Returns:
+        Category string, or None if the invocation succeeded (exit_code == 0).
+    """
+    if exit_code == 0:
+        return None
+
+    # Search stderr first (more likely to have error info), then stdout
+    combined = (stderr + "\n" + stdout[-5000:]).lower()
+
+    for category, patterns in _FAILURE_PATTERNS:
+        for pattern in patterns:
+            if pattern in combined:
+                return category
+
+    # Fallback based on exit code
+    if exit_code == -1:
+        return "timeout"
+    if exit_code == 137:
+        return "oom"  # killed by OOM killer
+    if exit_code == 139:
+        return "crash"  # segfault
+
+    return "unknown"
 
 
 def invoke_agent(
@@ -120,8 +203,177 @@ def invoke_agent(
     console.print(f"  Image: {agent_config.get('docker_image', DEFAULT_IMAGE)}")
     console.print(f"  Timeout: {timeout}s")
 
+    # Set up log directory
+    if readonly:
+        log_dir = workspace / "review_logs"
+    else:
+        log_dir = workspace / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_prefix = f"{agent_type}_{int(time.time())}"
+
+    # Save docker command before execution
+    command_path = log_dir / f"{log_prefix}_command.txt"
+    command_path.write_text(" ".join(docker_cmd))
+
     start = time.time()
 
+    # For Claude Code: stream stdout line-by-line and timestamp each event
+    # so the action parser can compute per-tool-call durations.
+    # For other agents: use subprocess.run (simpler, no timestamps needed).
+    if agent_type == "claude":
+        agent_result = _run_with_streaming(
+            docker_cmd, workspace, log_dir, log_prefix, timeout, start,
+        )
+    else:
+        agent_result = _run_simple(
+            docker_cmd, workspace, log_dir, log_prefix, timeout, start,
+        )
+
+    return agent_result
+
+
+# ── Execution strategies ─────────────────────────────────────────────────
+
+
+def _run_with_streaming(
+    docker_cmd: list[str],
+    workspace: Path,
+    log_dir: Path,
+    log_prefix: str,
+    timeout: int,
+    start: float,
+) -> AgentResult:
+    """Run agent with Popen, streaming stdout to timestamp each line.
+
+    Used for Claude Code (stream-json output). Produces an events.jsonl
+    file where each line is {"ts": <float>, "event": <json>} so the
+    action parser can compute per-tool-call durations.
+    """
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    events_path = log_dir / f"{log_prefix}_events.jsonl"
+
+    try:
+        proc = subprocess.Popen(
+            docker_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        with open(events_path, "w") as events_file:
+            while True:
+                # Check timeout
+                elapsed = time.time() - start
+                if elapsed > timeout:
+                    proc.kill()
+                    proc.wait()
+                    console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
+                    _kill_container(workspace)
+                    return _save_and_return(
+                        exit_code=-1,
+                        stdout="".join(stdout_lines),
+                        stderr=f"Agent timed out after {timeout}s",
+                        elapsed=elapsed,
+                        workspace=workspace,
+                        log_dir=log_dir,
+                        log_prefix=log_prefix,
+                        events_path=str(events_path),
+                    )
+
+                # Use select to read from both stdout and stderr without blocking
+                readable = []
+                if proc.stdout:
+                    readable.append(proc.stdout)
+                if proc.stderr:
+                    readable.append(proc.stderr)
+
+                if not readable:
+                    break
+
+                try:
+                    ready, _, _ = select.select(readable, [], [], 1.0)
+                except (ValueError, OSError):
+                    break
+
+                for stream in ready:
+                    line = stream.readline()
+                    if not line:
+                        continue
+
+                    if stream is proc.stdout:
+                        stdout_lines.append(line)
+                        ts = time.time()
+                        # Try to parse as JSON and write timestamped event
+                        stripped = line.strip()
+                        if stripped:
+                            try:
+                                event = json.loads(stripped)
+                                events_file.write(
+                                    json.dumps({"ts": ts, "event": event}) + "\n"
+                                )
+                                events_file.flush()
+                            except json.JSONDecodeError:
+                                # Non-JSON line (verbose output, etc.)
+                                pass
+                    else:
+                        stderr_lines.append(line)
+
+                # Check if process has finished
+                if proc.poll() is not None:
+                    # Drain remaining output
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            stdout_lines.append(line)
+                            stripped = line.strip()
+                            if stripped:
+                                try:
+                                    event = json.loads(stripped)
+                                    events_file.write(
+                                        json.dumps({"ts": time.time(), "event": event}) + "\n"
+                                    )
+                                except json.JSONDecodeError:
+                                    pass
+                    if proc.stderr:
+                        for line in proc.stderr:
+                            stderr_lines.append(line)
+                    break
+
+        elapsed = time.time() - start
+        console.print(f"  Finished in {elapsed:.0f}s, exit code {proc.returncode}")
+
+        return _save_and_return(
+            exit_code=proc.returncode,
+            stdout="".join(stdout_lines),
+            stderr="".join(stderr_lines),
+            elapsed=elapsed,
+            workspace=workspace,
+            log_dir=log_dir,
+            log_prefix=log_prefix,
+            events_path=str(events_path),
+        )
+
+    except Exception as e:
+        elapsed = time.time() - start
+        console.print(f"  [red]Error running agent: {e}[/]")
+        return AgentResult(
+            exit_code=-1,
+            stdout="".join(stdout_lines),
+            stderr=str(e),
+            elapsed_seconds=elapsed,
+            workspace=workspace,
+        )
+
+
+def _run_simple(
+    docker_cmd: list[str],
+    workspace: Path,
+    log_dir: Path,
+    log_prefix: str,
+    timeout: int,
+    start: float,
+) -> AgentResult:
+    """Run agent with subprocess.run (simple, no streaming timestamps)."""
     try:
         result = subprocess.run(
             docker_cmd,
@@ -130,26 +382,16 @@ def invoke_agent(
             timeout=timeout,
         )
         elapsed = time.time() - start
-
-        # Save logs — for readonly reviewers, save to a review-specific log dir
-        if readonly:
-            log_dir = workspace / "review_logs"
-        else:
-            log_dir = workspace / "logs"
-        log_dir.mkdir(exist_ok=True)
-        log_prefix = f"{agent_type}_{int(time.time())}"
-        (log_dir / f"{log_prefix}_stdout.txt").write_text(result.stdout)
-        (log_dir / f"{log_prefix}_stderr.txt").write_text(result.stderr)
-        (log_dir / f"{log_prefix}_command.txt").write_text(" ".join(docker_cmd))
-
         console.print(f"  Finished in {elapsed:.0f}s, exit code {result.returncode}")
 
-        return AgentResult(
+        return _save_and_return(
             exit_code=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
-            elapsed_seconds=elapsed,
+            elapsed=elapsed,
             workspace=workspace,
+            log_dir=log_dir,
+            log_prefix=log_prefix,
         )
 
     except subprocess.TimeoutExpired:
@@ -164,6 +406,45 @@ def invoke_agent(
             elapsed_seconds=elapsed,
             workspace=workspace,
         )
+
+
+def _save_and_return(
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    elapsed: float,
+    workspace: Path,
+    log_dir: Path,
+    log_prefix: str,
+    events_path: str | None = None,
+) -> AgentResult:
+    """Save log files and return AgentResult."""
+    stdout_path = log_dir / f"{log_prefix}_stdout.txt"
+    stderr_path = log_dir / f"{log_prefix}_stderr.txt"
+    command_path = log_dir / f"{log_prefix}_command.txt"
+    stdout_path.write_text(stdout)
+    stderr_path.write_text(stderr)
+    # command.txt is written by caller before execution — skip if exists
+    if not command_path.exists():
+        command_path.write_text("")
+
+    log_files = {
+        "stdout": str(stdout_path),
+        "stderr": str(stderr_path),
+        "command": str(command_path),
+    }
+    if events_path:
+        log_files["events"] = events_path
+
+    return AgentResult(
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        elapsed_seconds=elapsed,
+        workspace=workspace,
+        log_files=log_files,
+        failure_category=classify_failure(exit_code, stdout, stderr),
+    )
 
 
 # ── Docker command building ──────────────────────────────────────────────
@@ -255,6 +536,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         cmd = [
             "claude",
             "--print",
+            "--output-format", "stream-json",
             "--dangerously-skip-permissions",
             "--verbose",
         ]

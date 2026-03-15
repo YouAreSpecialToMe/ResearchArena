@@ -35,7 +35,9 @@ from autoresearch.stages import (
     paper_writing,
     review,
 )
+from autoresearch.utils.action_parser import annotate_with_workspace_diff, parse_agent_stdout
 from autoresearch.utils.tracker import RunTracker, TokenUsage
+from autoresearch.utils.workspace_diff import snapshot as ws_snapshot, diff as ws_diff
 
 console = Console()
 
@@ -176,6 +178,8 @@ class Pipeline:
             attempt=self.state.idea_attempts,
         )
 
+        before = ws_snapshot(workspace)
+
         idea, agent_result = ideation.run(
             agent_type=self.agent_type,
             seed_topic=seed_topic,
@@ -185,7 +189,9 @@ class Pipeline:
             agent_config=self.agent_config,
         )
 
-        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+        tokens, log_files, sub_actions, diff_dict, fail_cat = self._extract_tracking(
+            agent_result, ws_before=before, workspace=workspace,
+        )
 
         if idea is None:
             console.print("  [red]Agent failed to produce idea.json.[/]")
@@ -193,6 +199,10 @@ class Pipeline:
                 outcome="failure",
                 details="No valid idea.json produced",
                 tokens=tokens,
+                log_files=log_files,
+                sub_actions=sub_actions,
+                workspace_diff=diff_dict,
+                failure_category=fail_cat,
             )
             self.state.idea_history.append({
                 "idea": {"title": "(no idea produced)"},
@@ -209,6 +219,9 @@ class Pipeline:
             outcome="success",
             details=title[:80],
             tokens=tokens,
+            log_files=log_files,
+            sub_actions=sub_actions,
+            workspace_diff=diff_dict,
         )
 
         # Reset per-idea state
@@ -245,6 +258,8 @@ class Pipeline:
             attempt=self.state.experiment_attempts,
         )
 
+        before = ws_snapshot(self.state.workspace)
+
         results, agent_result = experiments.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
@@ -253,7 +268,9 @@ class Pipeline:
             prior_errors=self.state.experiment_errors or None,
         )
 
-        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+        tokens, log_files, sub_actions, diff_dict, fail_cat = self._extract_tracking(
+            agent_result, ws_before=before, workspace=self.state.workspace,
+        )
 
         if results is None:
             error_log = self._collect_error_log()
@@ -263,6 +280,10 @@ class Pipeline:
                 outcome="failure",
                 details="No results.json produced",
                 tokens=tokens,
+                log_files=log_files,
+                sub_actions=sub_actions,
+                workspace_diff=diff_dict,
+                failure_category=fail_cat,
             )
             self.state.stage = Stage.EXPERIMENTS  # retry
             return
@@ -272,6 +293,9 @@ class Pipeline:
             outcome="success",
             details="Experiments completed, results.json written",
             tokens=tokens,
+            log_files=log_files,
+            sub_actions=sub_actions,
+            workspace_diff=diff_dict,
         )
         self.state.results = results
         self.state.stage = Stage.PAPER
@@ -292,6 +316,8 @@ class Pipeline:
             attempt=self.state.paper_revision_attempts + 1,
         )
 
+        before = ws_snapshot(self.state.workspace)
+
         success, agent_result = paper_writing.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
@@ -301,7 +327,9 @@ class Pipeline:
             revision_feedback=revision_feedback,
         )
 
-        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout) if agent_result else TokenUsage()
+        tokens, log_files, sub_actions, diff_dict, fail_cat = self._extract_tracking(
+            agent_result, ws_before=before, workspace=self.state.workspace,
+        )
 
         if not success:
             console.print("  [red]Agent failed to produce paper.tex.[/]")
@@ -309,6 +337,10 @@ class Pipeline:
                 outcome="failure",
                 details="No paper.tex produced",
                 tokens=tokens,
+                log_files=log_files,
+                sub_actions=sub_actions,
+                workspace_diff=diff_dict,
+                failure_category=fail_cat,
             )
             self._abandon_idea("paper", "Agent did not produce paper.tex.")
             return
@@ -318,6 +350,9 @@ class Pipeline:
             outcome="success",
             details="revision" if is_revision else "initial draft",
             tokens=tokens,
+            log_files=log_files,
+            sub_actions=sub_actions,
+            workspace_diff=diff_dict,
         )
         self.state.stage = Stage.REVIEW
 
@@ -407,6 +442,34 @@ class Pipeline:
             "best_score": best_score,
         })
         self.state.stage = Stage.IDEATION
+
+    def _extract_tracking(self, agent_result, ws_before=None, workspace=None):
+        """Extract tokens, log_files, sub_actions, workspace_diff, and failure_category."""
+        if not agent_result:
+            return TokenUsage(), None, None, None, None
+        tokens = RunTracker.parse_tokens_from_stdout(agent_result.stdout)
+        log_files = agent_result.log_files
+        events_path = log_files.get("events") if log_files else None
+        sub_actions_raw = parse_agent_stdout(
+            self.agent_type, agent_result.stdout, events_path=events_path,
+        )
+
+        # Compute workspace diff
+        diff_dict = None
+        if ws_before is not None and workspace is not None:
+            ws_after = ws_snapshot(workspace)
+            d = ws_diff(ws_before, ws_after)
+            if d.total_changes > 0:
+                diff_dict = d.to_dict()
+
+        # Cross-reference: annotate sub-actions with actual file changes
+        if sub_actions_raw and diff_dict:
+            annotate_with_workspace_diff(sub_actions_raw, diff_dict)
+
+        sub_actions = [s.to_dict() for s in sub_actions_raw] if sub_actions_raw else None
+        failure_category = agent_result.failure_category
+
+        return tokens, log_files, sub_actions, diff_dict, failure_category
 
     def _collect_error_log(self) -> str:
         log_path = self.state.workspace / "logs" / "agent_stderr.txt"
