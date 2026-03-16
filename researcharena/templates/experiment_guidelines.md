@@ -1,78 +1,152 @@
 # Experiment Guidelines
 
-Distilled from Karpathy's Recipe for Training Neural Networks, Google's Rules of ML,
-NeurIPS reproducibility checklist, and REFORMS consensus framework.
+Distilled from Michael Lones' "How to Avoid ML Pitfalls", NeurIPS reproducibility
+checklist, REFORMS consensus framework, and Google's Rules of ML.
 
-## Phase 1: Data & Setup
+## Phase 1: Experiment Design (do this BEFORE writing code)
 
-- Spend time exploring your data before writing model code. Visualize distributions,
-  check for class imbalances, corrupted labels, duplicates.
-- Use standard benchmarks when possible — they make comparison easier.
-- Document: data source, collection method, train/val/test split sizes,
-  class distributions, any preprocessing applied.
-- Keep raw data intact. Create derived versions separately.
+### 1.1 Formulate your claim
 
-## Phase 2: Baseline First
+Before any implementation, write down:
+- **What is your hypothesis?** State it as a testable claim.
+  Example: "Method X improves accuracy over baseline Y on task Z because of property W."
+- **What evidence would convince a skeptical reviewer?**
+- **What would DISPROVE your claim?** Design experiments that could fail — if your
+  experiment cannot possibly produce a negative result, it's not informative.
 
-- Start with the simplest possible baseline (linear model, random, majority class).
-- Get it running end-to-end before building anything complex.
-- Copy proven architectures from related papers before inventing new ones.
-- Verify your training loop:
-  - Loss at initialization should match theory (e.g., -log(1/n_classes) for softmax)
-  - Overfit a single batch of 2-3 examples to zero loss
-  - If you can't overfit a tiny batch, your code has a bug
-- Turn off all regularization initially (no dropout, no augmentation, no weight decay).
+### 1.2 Choose the right experiment type
 
-## Phase 3: Your Method
+Not all research requires training a model. Choose what fits your claim:
 
-- Add complexity one component at a time. Evaluate each change independently.
-- If your method has multiple novel components, verify each one matters
-  before combining them.
-- Use Adam optimizer with lr=3e-4 as a starting point.
-- Disable learning rate decay until final tuning.
-- Use random search over grid search for hyperparameters.
+| Claim type | Experiment type | What to measure |
+|---|---|---|
+| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
+| "Component A is critical" | Ablation study | Performance with/without A |
+| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
+| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
+| "This property holds" | Analysis/probing | Measurements on existing models/data |
+| "This is faster/cheaper" | Systems experiment | Latency, throughput, memory, FLOPs |
+| "This benchmark is better" | Benchmark evaluation | Existing methods on new benchmark |
+| "This failure mode exists" | Failure analysis | Controlled examples that trigger failure |
 
-## Phase 4: Rigorous Evaluation
+### 1.3 Select what to measure
 
-### Multiple Seeds (non-negotiable)
-- Run every experiment with at least 3 different random seeds.
-- Report mean +/- standard deviation across seeds.
-- Use the SAME seeds for your method and all baselines (paired comparison).
-- Never report best-of-N runs — always report the average.
+- Use standard metrics for your task (accuracy, F1, BLEU, FID, perplexity, etc.)
+- Report ALL standard metrics, not just the one where you win
+- If you propose a new metric, also report standard ones for comparison
+- Consider both performance AND cost: FLOPs, latency, memory, training time
+- For systems claims, report percentiles (p50, p95, p99), not just mean
 
-### Baselines
-- Include at least 2 meaningful baselines.
-- One should be simple (linear, random, majority class).
-- One should be a recent published method.
-- Train baselines with equivalent effort (same compute budget, same tuning).
+### 1.4 Choose datasets that test your claim
 
-### Ablation Studies (required)
-- Remove each novel component one at a time.
-- Show quantitative impact: "without component X, performance drops from Y to Z."
-- This proves every part of your method contributes.
+- Use standard benchmarks when possible — they enable comparison with published work
+- Choose datasets that are relevant to your claim, not just convenient
+- If your claim is about robustness, test on distribution-shifted data
+- If your claim is about efficiency, test at multiple scales
+- If your claim is about generalization, test on multiple datasets
+- Document: data source, size, splits, preprocessing, any filtering applied
 
-### Statistical Significance
-- Report 95% confidence intervals when claiming one method beats another.
-- If the confidence intervals overlap, you cannot claim superiority.
+### 1.5 Select baselines fairly
 
-## Phase 5: Common Pitfalls to Avoid
+- Include at least 2 meaningful baselines:
+  - One simple baseline (random, majority class, linear model, naive approach)
+  - One strong baseline (recent published method or established approach)
+- Run all baselines with equivalent effort (same compute, same tuning)
+- If a baseline is too expensive to run yourself, cite published numbers
+  and clearly state you didn't rerun it
+- Never compare against intentionally weak baselines to inflate your results
 
-- DO NOT tune hyperparameters on the test set. Use a validation set.
-- DO NOT compare against baselines with different preprocessing.
-- DO NOT report only the metric where your method wins — report all standard
-  metrics for your task.
-- DO NOT forget to check for data leakage: ensure no test data is seen
-  during training or preprocessing.
-- DO NOT use batch normalization statistics from the training set at test
-  time without proper handling.
+### 1.6 Plan ablation studies
 
-## Phase 6: What to Save
+- For each novel component in your method, plan to remove it and measure impact
+- If your contribution is a single technique, vary its key parameters instead
+- Plan which components to ablate BEFORE running experiments, not after seeing results
 
-Save everything needed to reproduce and write the paper:
+### 1.7 Think about confounders
+
+- What else could explain your results besides your method?
+- Are you comparing with the same preprocessing, data splits, and compute budget?
+- Could the improvement come from more parameters, more data, or more compute
+  rather than from your actual contribution?
+- If using published baselines, are the setups truly comparable?
+
+## Phase 2: Implementation
+
+### General principles
+- Start simple. Get a minimal version working end-to-end first.
+- Add complexity one piece at a time. Evaluate each change independently.
+- Copy proven implementations from related papers before writing from scratch.
+- Use well-tested libraries (PyTorch, HuggingFace, scikit-learn, etc.)
+- Fix random seeds for reproducibility.
+
+### If training models
+- Verify loss at initialization matches theory (e.g., -log(1/n_classes) for softmax)
+- Overfit a single batch first — if you can't, your code has a bug
+- Turn off regularization initially (no dropout, augmentation, weight decay)
+- Use Adam optimizer with lr=3e-4 as a starting point
+- Use random search over grid search for hyperparameters
+- Disable learning rate decay until final tuning
+
+### If doing analysis/probing
+- Clearly document what you're measuring and why
+- Use controlled setups where possible (synthetic data with known properties)
+- Verify your measurement tool doesn't interfere with what you're measuring
+
+### If doing systems experiments
+- Run multiple times to account for variance
+- Report median and percentiles, not just mean
+- Warm up the system before measuring (avoid cold-start effects)
+- Control for background processes, other workloads, thermal throttling
+
+## Phase 3: Rigorous Evaluation
+
+### Multiple runs (non-negotiable)
+- Run every experiment with at least 3 different random seeds
+- Report mean +/- standard deviation across runs
+- Use the SAME seeds for your method and all baselines (paired comparison)
+- Never report best-of-N runs — always report the average
+
+### Ablation studies (required)
+- Remove each novel component one at a time
+- Show quantitative impact: "without component X, metric drops from Y to Z"
+- This proves every part of your method contributes
+
+### Statistical significance
+- Report 95% confidence intervals when claiming superiority
+- If confidence intervals overlap, you cannot claim your method is better
+- For multiple comparisons, apply correction (Bonferroni or similar)
+- Distinguish statistical significance from practical significance
+
+### Avoid data leakage (REFORMS checklist)
+- Preprocessing statistics (mean, std, scaling) computed from training data ONLY
+- Feature selection done on training data ONLY, not full dataset
+- Data augmentation applied AFTER train/test split, not before
+- For time series, use temporal splits (no future data in training)
+- Test set used ONCE for final evaluation, not for iterative model selection
+
+## Phase 4: Common Pitfalls
+
+From Michael Lones' "How to Avoid ML Pitfalls":
+
+- DO NOT tune hyperparameters on the test set — use a validation set
+- DO NOT compare against baselines with different preprocessing or splits
+- DO NOT report only the metric where your method wins
+- DO NOT claim SOTA without comparing against actual SOTA methods
+- DO NOT treat benchmark results as ground truth — small improvements may be noise
+- DO NOT ignore negative results — report them honestly with analysis
+- DO NOT draw conclusions beyond your tested conditions
+- DO NOT assume deep learning is always better — test simpler alternatives too
+- DO NOT use a single train/test split — use cross-validation or multiple seeds
+- DO NOT forget to inspect your model — verify it learns meaningful patterns,
+  not spurious correlations
+
+## Phase 5: What to Save
+
+Save everything needed to write the paper:
 
 ```
 results.json          # structured results (see format below)
-figures/              # training curves, comparison plots, ablation charts
+figures/              # comparison plots, ablation charts, analysis visualizations
 ```
 
 ### results.json format
@@ -85,38 +159,37 @@ figures/              # training curves, comparison plots, ablation charts
   },
   "baselines": {
     "baseline_name_1": {
-      "metric1": {"mean": 0.8102, "std": 0.0018},
-      "metric2": {"mean": 0.7856, "std": 0.0042}
-    },
-    "baseline_name_2": { ... }
+      "metric1": {"mean": 0.8102, "std": 0.0018}
+    }
   },
   "ablations": {
     "without_component_A": {
       "metric1": {"mean": 0.8401, "std": 0.0025}
-    },
-    "without_component_B": { ... }
+    }
   },
   "config": {
+    "experiment_type": "empirical_evaluation",
     "dataset": "dataset_name",
     "seeds": [42, 123, 456],
-    "epochs": 100,
-    "batch_size": 32,
-    "learning_rate": 0.0003,
-    "optimizer": "Adam",
-    "hardware": "1x NVIDIA GPU",
-    "training_time_minutes": 45
+    "hardware": "1x GPU",
+    "total_runtime_minutes": 120
   }
 }
 ```
 
+Adapt the structure to your experiment type. The key requirement:
+structured, machine-readable, complete, and honest.
+
 ## Reproducibility Checklist
 
 Before finishing, verify:
+- [ ] Claim is clearly stated and testable
+- [ ] Experiment type matches the claim
 - [ ] Fixed random seeds used throughout
-- [ ] Loss at initialization verified
-- [ ] At least 2 baselines compared
-- [ ] Results from 3+ seeds with mean +/- std
+- [ ] At least 2 meaningful baselines compared fairly
+- [ ] Results from 3+ runs with mean +/- std
 - [ ] Ablation study for each novel component
-- [ ] No data leakage (preprocessing uses only training data)
-- [ ] All hyperparameters documented in config
-- [ ] Training curves saved as figures
+- [ ] No data leakage (verified)
+- [ ] All configuration documented in results.json
+- [ ] Figures saved for key results
+- [ ] Negative results reported honestly (if any)
