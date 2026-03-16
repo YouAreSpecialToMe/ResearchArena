@@ -204,7 +204,7 @@ class Pipeline:
                 failure_category=fail_cat,
             )
             self.state.idea_history.append({
-                "idea": {"title": "(no idea produced)"},
+                "idea": {"description": "(no idea produced)"},
                 "failure_stage": "ideation",
                 "failure_reason": "Agent did not produce a valid idea.json",
                 "best_score": None,
@@ -212,11 +212,11 @@ class Pipeline:
             self.state.stage = Stage.IDEATION  # try again
             return
 
-        title = idea.get('title', 'N/A')
-        console.print(f"  Title: [green]{title}[/]")
+        desc = idea.get('description', idea.get('title', 'N/A'))
+        console.print(f"  Idea: [green]{desc[:80]}[/]")
         self.tracker.end_action(
             outcome="success",
-            details=title[:80],
+            details=desc[:80],
             tokens=tokens,
             log_files=log_files,
             sub_actions=sub_actions,
@@ -435,7 +435,7 @@ class Pipeline:
             best_score = self.state.review_result.avg_score
 
         self.state.idea_history.append({
-            "idea": self.state.idea or {"title": "(none)"},
+            "idea": self.state.idea or {"description": "(none)"},
             "failure_stage": failure_stage,
             "failure_reason": failure_reason,
             "best_score": best_score,
@@ -501,7 +501,7 @@ class Pipeline:
 
         best = self.state.best
         if best.idea:
-            table.add_row("Best paper", best.idea.get("title", "N/A"))
+            table.add_row("Best paper", best.idea.get("description", best.idea.get("title", "N/A"))[:60])
             table.add_row("Best score", f"{best.score:.1f}/10")
             table.add_row("Best workspace", str(best.workspace))
         else:
@@ -523,7 +523,7 @@ class Pipeline:
                 score = h.get("best_score")
                 hist.add_row(
                     str(i + 1),
-                    h["idea"].get("title", "N/A")[:50],
+                    h["idea"].get("description", h["idea"].get("title", "N/A"))[:50],
                     h["failure_stage"],
                     f"{score:.1f}" if score is not None else "-",
                 )
@@ -540,13 +540,13 @@ class Pipeline:
             "wall_time_seconds": round(elapsed),
             "tracker": self.tracker.to_dict(),
             "best_paper": {
-                "title": best.idea.get("title"),
+                "description": best.idea.get("description", best.idea.get("title")),
                 "score": best.score,
                 "workspace": str(best.workspace),
             } if best.idea else None,
             "idea_history": [
                 {
-                    "title": h["idea"].get("title"),
+                    "description": h["idea"].get("description", h["idea"].get("title")),
                     "failure_stage": h["failure_stage"],
                     "best_score": h.get("best_score"),
                 }

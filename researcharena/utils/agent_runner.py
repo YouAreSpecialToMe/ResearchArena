@@ -14,7 +14,8 @@ paper.tex) persist after the container exits.
 Supported agents:
   - claude: Claude Code CLI
   - codex: OpenAI Codex CLI
-  - aider: Aider CLI
+  - kimi: Kimi Code CLI (Moonshot AI)
+  - minimax: Mini-Agent CLI (MiniMax)
   - custom: Any command
 """
 
@@ -174,7 +175,7 @@ def invoke_agent(
     """Invoke a CLI agent inside a Docker container.
 
     Args:
-        agent_type: "claude", "codex", "aider", or "custom"
+        agent_type: "claude", "codex", "kimi", "minimax", or "custom"
         task: The task description / prompt for the agent
         workspace: Host directory to mount as /workspace in the container
         timeout: Max seconds before killing the container
@@ -222,7 +223,7 @@ def invoke_agent(
     # Stream stdout line-by-line for all known agents to timestamp events
     # for per-tool-call duration tracking. Only use subprocess.run for custom.
     role = "reviewer" if readonly else "researcher"
-    if agent_type in ("claude", "codex", "aider", "kimi", "minimax"):
+    if agent_type in ("claude", "codex", "kimi", "minimax"):
         agent_result = _run_with_streaming(
             docker_cmd, workspace, log_dir, log_prefix, timeout, start, role,
         )
@@ -316,7 +317,7 @@ def _run_with_streaming(
                                     json.dumps({"ts": ts, "event": event}) + "\n"
                                 )
                             except json.JSONDecodeError:
-                                # Plain text line (Aider, Kimi, MiniMax)
+                                # Plain text line
                                 events_file.write(
                                     json.dumps({"ts": ts, "line": stripped}) + "\n"
                                 )
@@ -513,6 +514,7 @@ def _build_docker_command(
     auth_mounts = {
         "claude": home / ".claude",
         "codex": home / ".codex",
+        "kimi": home / ".kimi",
     }
     auth_dir = auth_mounts.get(agent_type)
     if auth_dir and auth_dir.exists():
@@ -538,16 +540,7 @@ def _build_docker_command(
         if val:
             cmd.extend(["-e", f"{var}={val}"])
 
-    # For Kimi/MiniMax: map their API key to OPENAI_API_KEY inside the container
-    # so Aider's --openai-api-base picks it up without leaking via CLI args
-    if agent_type == "kimi":
-        moonshot_key = os.environ.get("MOONSHOT_API_KEY", "")
-        if moonshot_key:
-            cmd.extend(["-e", f"OPENAI_API_KEY={moonshot_key}"])
-    elif agent_type == "minimax":
-        minimax_key = os.environ.get("MINIMAX_API_KEY", "")
-        if minimax_key:
-            cmd.extend(["-e", f"OPENAI_API_KEY={minimax_key}"])
+    # Kimi and MiniMax have their own auth — API keys passed via env vars above
 
     for key, val in extra_env.items():
         cmd.extend(["-e", f"{key}={val}"])
@@ -594,55 +587,33 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         cmd.extend([task])
         return cmd
 
-    elif agent_type == "aider":
+    elif agent_type == "kimi":
+        # Kimi Code CLI (Moonshot AI) — similar to Claude Code
+        # --print: non-interactive, implicitly enables --yolo
+        # --output-format stream-json: structured output for parsing
         cmd = [
-            "aider",
-            "--yes-always",
-            "--no-git",
-            "--no-auto-commits",
+            "kimi",
+            "--print",
+            "--output-format", "stream-json",
             "--verbose",
-            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
         ]
         if config.get("model"):
             cmd.extend(["--model", config["model"]])
-        cmd.extend(["--message", task])
-        return cmd
-
-    elif agent_type == "kimi":
-        # Kimi (Moonshot AI) — runs through Aider with OpenAI-compatible API
-        # API key is passed via OPENAI_API_KEY env var in the container
-        # (set by _build_docker_command via MOONSHOT_API_KEY → OPENAI_API_KEY mapping)
-        model = config.get("model", "moonshot-v1-auto")
-        api_base = config.get("api_base", "https://api.moonshot.cn/v1")
-        cmd = [
-            "aider",
-            "--yes-always",
-            "--no-git",
-            "--no-auto-commits",
-            "--verbose",
-            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
-            "--model", f"openai/{model}",
-            "--openai-api-base", api_base,
-        ]
-        cmd.extend(["--message", task])
+        cmd.extend(["--max-steps-per-turn", str(config.get("max_turns", 200))])
+        cmd.extend(["--prompt", task])
         return cmd
 
     elif agent_type == "minimax":
-        # MiniMax — runs through Aider with OpenAI-compatible API
-        # API key is passed via OPENAI_API_KEY env var in the container
-        model = config.get("model", "MiniMax-Text-01")
-        api_base = config.get("api_base", "https://api.minimax.chat/v1")
+        # Mini-Agent CLI (MiniMax) — coding agent similar to Claude Code
+        # --prompt: non-interactive, process prompt and exit
+        # --yolo: auto-approve all operations
         cmd = [
-            "aider",
-            "--yes-always",
-            "--no-git",
-            "--no-auto-commits",
-            "--verbose",
-            "--llm-history-file", "/workspace/logs/aider_llm_history.jsonl",
-            "--model", f"openai/{model}",
-            "--openai-api-base", api_base,
+            "mini-agent",
+            "--yolo",
+            "--prompt", task,
         ]
-        cmd.extend(["--message", task])
+        if config.get("workspace"):
+            cmd.extend(["--workspace", config["workspace"]])
         return cmd
 
     elif agent_type == "custom":
@@ -659,7 +630,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
     else:
         raise ValueError(
             f"Unknown agent type: {agent_type}. "
-            f"Supported: claude, codex, aider, kimi, minimax, custom"
+            f"Supported: claude, codex, kimi, minimax, custom"
         )
 
 

@@ -39,8 +39,11 @@ RUN npm install -g @anthropic-ai/claude-code
 # Codex (OpenAI CLI)
 RUN npm install -g @openai/codex
 
-# Aider
-RUN pip install --no-cache-dir --break-system-packages aider-chat
+# Kimi Code CLI (Moonshot AI)
+RUN pip install --no-cache-dir --break-system-packages kimi-cli
+
+# Mini-Agent (MiniMax)
+RUN pip install --no-cache-dir --break-system-packages mini-agent
 
 # ── Workspace setup ──
 RUN mkdir -p /workspace

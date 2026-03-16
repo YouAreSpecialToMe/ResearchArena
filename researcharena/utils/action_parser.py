@@ -6,8 +6,9 @@ log what the agent actually did during a pipeline stage.
 
 Supported agents:
   - Claude Code (stream-json): structured JSON lines with full detail
-  - Codex: best-effort parsing of stdout patterns
-  - Aider: best-effort parsing of stdout patterns
+  - Kimi Code (stream-json): same format as Claude Code
+  - Codex (--json JSONL): structured events
+  - MiniMax / custom: generic stdout parsing
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ def parse_agent_stdout(agent_type: str, stdout: str, events_path: str | None = N
     """Parse agent stdout into sub-actions based on agent type.
 
     Args:
-        agent_type: "claude", "codex", "aider", or "custom"
+        agent_type: "claude", "codex", "kimi", "minimax", or "custom"
         stdout: Raw stdout from the agent
         events_path: Path to timestamped events JSONL file (Claude Code / Codex).
                      If provided, used instead of stdout for richer parsing.
@@ -62,11 +63,13 @@ def parse_agent_stdout(agent_type: str, stdout: str, events_path: str | None = N
 
     if agent_type == "claude":
         return _parse_claude_events(events_path, stdout)
+    elif agent_type == "kimi":
+        # Kimi Code CLI uses stream-json similar to Claude Code
+        return _parse_claude_events(events_path, stdout)
     elif agent_type == "codex":
         return _parse_codex_events(events_path, stdout)
-    elif agent_type in ("aider", "kimi", "minimax"):
-        # Kimi and MiniMax run through Aider, so same parsing
-        return _parse_aider_events(events_path, stdout)
+    elif agent_type == "minimax":
+        return _parse_generic_stdout(stdout)
     else:
         return _parse_generic_stdout(stdout)
 
@@ -484,223 +487,6 @@ def _parse_codex_stdout_fallback(stdout: str) -> list[SubAction]:
             continue
 
     return actions
-
-
-# ── Aider (--verbose stdout with timestamps) ─────────────────────────
-
-
-# Patterns for Aider verbose output
-_AIDER_APPLIED = re.compile(r'Applied edit to\s+(.*)')
-_AIDER_RUNNING = re.compile(r'>\s*Running\s+(.*)')
-_AIDER_ADDED = re.compile(r'Added\s+(.*?)\s+to the chat')
-_AIDER_TOKENS = re.compile(
-    r'Tokens:\s*([\d,]+)\s*sent\s*[,/]\s*([\d,]+)\s*received', re.IGNORECASE
-)
-_AIDER_TOKENS_K = re.compile(
-    r'Tokens:\s*([\d.]+)k?\s*sent\s*[,/]\s*([\d.]+)k?\s*received', re.IGNORECASE
-)
-_AIDER_ERROR_PATTERNS = [
-    re.compile(r'Traceback \(most recent call last\)', re.IGNORECASE),
-    re.compile(r'Error:', re.IGNORECASE),
-    re.compile(r'Exception:', re.IGNORECASE),
-    re.compile(r'FAILED', re.IGNORECASE),
-    re.compile(r'command not found', re.IGNORECASE),
-]
-_AIDER_SKIP = re.compile(r'^(───|---|\*\*\*|===|ASSISTANT|USER|Cost:|Commit |Git )')
-
-
-def _parse_aider_events(events_path: str | None, stdout: str) -> list[SubAction]:
-    """Parse Aider output into rich sub-actions using timestamped events.
-
-    If events_path is available, reads {"ts": ..., "line": "..."} entries
-    to compute per-tool-call duration. Otherwise falls back to raw stdout.
-    """
-    # Load timestamped lines
-    lines_with_ts: list[tuple[float | None, str]] = []
-
-    if events_path:
-        try:
-            with open(events_path) as f:
-                for raw_line in f:
-                    raw_line = raw_line.strip()
-                    if not raw_line:
-                        continue
-                    try:
-                        entry = json.loads(raw_line)
-                        ts = entry.get("ts")
-                        # Handle both plain text lines and JSON events
-                        text = entry.get("line", "")
-                        if not text and "event" in entry:
-                            continue  # skip structured events (not Aider)
-                        lines_with_ts.append((ts, text))
-                    except json.JSONDecodeError:
-                        pass
-        except FileNotFoundError:
-            pass
-
-    if not lines_with_ts:
-        # Fallback: no timestamps
-        for line in (stdout or "").splitlines():
-            stripped = line.strip()
-            if stripped:
-                lines_with_ts.append((None, stripped))
-
-    if not lines_with_ts:
-        return []
-
-    return _aider_lines_to_sub_actions(lines_with_ts)
-
-
-def _aider_lines_to_sub_actions(
-    lines: list[tuple[float | None, str]],
-) -> list[SubAction]:
-    """Convert timestamped Aider output lines into SubAction records.
-
-    Strategy:
-    - Walk lines, detect tool call patterns (Running, Applied edit, Added)
-    - Lines between tool calls are either: reasoning (before), output (after)
-    - Use timestamps to compute duration per tool call
-    - Detect error patterns in output
-    """
-    actions: list[SubAction] = []
-
-    current_reasoning: list[str] = []
-    current_output: list[str] = []
-    current_errors: list[str] = []
-    last_tokens: dict | None = None
-    last_action: SubAction | None = None
-    last_action_ts: float | None = None
-    collecting_output = False  # True after a tool call, collecting its output
-
-    for ts, line in lines:
-        if not line:
-            continue
-
-        # ── Token usage ──
-        m = _AIDER_TOKENS.search(line)
-        if m:
-            last_tokens = {
-                "input": int(m.group(1).replace(",", "")),
-                "output": int(m.group(2).replace(",", "")),
-            }
-            continue
-
-        m = _AIDER_TOKENS_K.search(line)
-        if m:
-            last_tokens = {
-                "input": int(float(m.group(1)) * 1000),
-                "output": int(float(m.group(2)) * 1000),
-            }
-            continue
-
-        # ── Shell command ──
-        m = _AIDER_RUNNING.match(line)
-        if m:
-            # Finalize previous action's output
-            _finalize_output(last_action, current_output, current_errors)
-            current_output = []
-            current_errors = []
-
-            # Compute duration of previous action
-            if last_action and last_action_ts is not None and ts is not None:
-                last_action.duration_seconds = ts - last_action_ts
-
-            reasoning = " ".join(current_reasoning).strip()
-            current_reasoning = []
-
-            sub = SubAction(
-                tool="Bash",
-                input_summary=_truncate(m.group(1).strip(), 200),
-                reasoning=_truncate(reasoning, 500) if reasoning else "",
-                tokens=last_tokens,
-            )
-            last_tokens = None
-            last_action = sub
-            last_action_ts = ts
-            collecting_output = True
-            actions.append(sub)
-            continue
-
-        # ── File edit ──
-        m = _AIDER_APPLIED.match(line)
-        if m:
-            _finalize_output(last_action, current_output, current_errors)
-            current_output = []
-            current_errors = []
-
-            if last_action and last_action_ts is not None and ts is not None:
-                last_action.duration_seconds = ts - last_action_ts
-
-            reasoning = " ".join(current_reasoning).strip()
-            current_reasoning = []
-
-            sub = SubAction(
-                tool="Edit",
-                input_summary=_truncate(m.group(1).strip(), 200),
-                reasoning=_truncate(reasoning, 500) if reasoning else "",
-                tokens=last_tokens,
-            )
-            last_tokens = None
-            last_action = sub
-            last_action_ts = ts
-            collecting_output = True
-            actions.append(sub)
-            continue
-
-        # ── File read ──
-        m = _AIDER_ADDED.match(line)
-        if m:
-            _finalize_output(last_action, current_output, current_errors)
-            current_output = []
-            current_errors = []
-
-            if last_action and last_action_ts is not None and ts is not None:
-                last_action.duration_seconds = ts - last_action_ts
-
-            sub = SubAction(
-                tool="Read",
-                input_summary=_truncate(m.group(1).strip(), 200),
-            )
-            last_action = sub
-            last_action_ts = ts
-            collecting_output = False
-            actions.append(sub)
-            continue
-
-        # ── Skip known non-content lines ──
-        if _AIDER_SKIP.match(line):
-            continue
-
-        # ── Check for error patterns ──
-        is_error = any(p.search(line) for p in _AIDER_ERROR_PATTERNS)
-
-        # ── Collect output or reasoning ──
-        if collecting_output and last_action:
-            current_output.append(line)
-            if is_error:
-                current_errors.append(line)
-        else:
-            if len(line) > 10:
-                current_reasoning.append(line)
-
-    # Finalize last action
-    _finalize_output(last_action, current_output, current_errors)
-
-    return actions
-
-
-def _finalize_output(
-    action: SubAction | None,
-    output_lines: list[str],
-    error_lines: list[str],
-):
-    """Attach collected output and error lines to a sub-action."""
-    if not action:
-        return
-    if output_lines:
-        action.output_summary = _truncate("\n".join(output_lines), 300)
-    if error_lines:
-        action.error = _truncate("\n".join(error_lines), 300)
 
 
 # ── Generic fallback ──────────────────────────────────────────────────

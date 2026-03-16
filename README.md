@@ -324,16 +324,15 @@ Each tool call the agent made within a stage:
 
 ### Tracking coverage by agent
 
-| Capability | Claude Code | Codex | Kimi / MiniMax |
-|---|---|---|---|
-| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--verbose` (plaintext via Aider) |
-| Tool calls | structured events | structured events | regex parsing |
-| Per-turn tokens | message_delta usage | turn.completed usage | `Tokens: N sent, N received` |
-| Per-tool duration | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl |
-| File changes | workspace diff | workspace diff | workspace diff |
-| Failure category | stderr patterns | stderr patterns | stderr patterns |
+| Capability | Claude Code | Codex | Kimi Code | Mini-Agent |
+|---|---|---|---|---|
+| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--output-format stream-json` | generic stdout |
+| Tool calls | structured events | structured events | structured events | generic parsing |
+| Per-tool duration | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl |
+| File changes | workspace diff | workspace diff | workspace diff | workspace diff |
+| Failure category | stderr patterns | stderr patterns | stderr patterns | stderr patterns |
 
-All agents stream through `Popen` with line-by-line timestamping. Kimi and MiniMax run through Aider with their OpenAI-compatible APIs.
+All agents run natively via their own CLI tools and stream through `Popen` with line-by-line timestamping.
 
 ## Project structure
 

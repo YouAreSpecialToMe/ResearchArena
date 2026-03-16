@@ -4,9 +4,9 @@ Reviewer agents run as CLI agents in the SAME Docker image as the researcher,
 with the workspace mounted READ-ONLY. They can read all code, logs, results,
 and even re-run experiments to verify results. This is a real audit.
 
-When evaluating multiple CLI agents (claude, codex, aider), the agents NOT
-under test serve as reviewers. E.g., if claude is the researcher, codex and
-aider review.
+When evaluating multiple CLI agents (claude, codex, kimi, minimax), the agents
+NOT under test serve as reviewers. E.g., if claude is the researcher, codex,
+kimi, and minimax review.
 
 Review sources (fully autonomous):
   1. Reference check  — verify citations are real (Semantic Scholar + CrossRef)
@@ -81,7 +81,7 @@ def review_paper(
         paper_latex: LaTeX source (unused when reviewers are CLI agents with workspace)
         paper_pdf_path: Compiled PDF path (for paperreview.ai)
         reviewer_agents: List of reviewer agent configs, each with:
-            - type: "claude", "codex", "aider"
+            - type: "claude", "codex", "kimi", "minimax"
             - name: human-readable label
             - model: (optional) model override
         paperreview_config: Config for paperreview.ai

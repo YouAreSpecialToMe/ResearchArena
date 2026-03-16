@@ -155,7 +155,7 @@ def bench(config, seeds_file, field, agent, model, max_ideas):
     for r in results:
         best = r.get("best_paper")
         score = f"{best['score']:.1f}" if best else "-"
-        title = best["title"][:40] if best else "-"
+        title = best.get("description", best.get("title", ""))[:40] if best else "-"
         table.add_row(
             r.get("seed_topic", ""),
             r.get("status", ""),

@@ -1,8 +1,11 @@
 """Stage 1: Let the CLI agent come up with a research idea.
 
-The agent gets a workspace and a seed topic. It decides on its own how to
-explore — searching papers, brainstorming, etc. We just check that it
-produced an idea.json file with the required fields.
+The agent gets a workspace and a seed field (e.g., "cv", "nlp"). It decides
+on its own how to explore — searching papers, brainstorming, etc.
+
+At this stage, we only ask for initial thoughts: what's the idea, why it
+matters, and a rough approach. Concrete details like datasets, metrics,
+and baselines come later in the experiment stage.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from pathlib import Path
 from researcharena.utils.agent_runner import invoke_agent
 
 
-REQUIRED_FIELDS = ["title", "abstract", "hypothesis", "method", "datasets", "metrics"]
+REQUIRED_FIELDS = ["description", "motivation", "proposed_approach", "related_work"]
 
 
 def run(
@@ -51,16 +54,24 @@ def _build_task(seed_topic: str, history: list[dict] | None) -> str:
         "result in a publishable ML conference paper.\n\n"
         "You have full autonomy — you can search the web, read papers, brainstorm, "
         "whatever you think is necessary.\n\n"
+        "This is the ideation stage — focus on the core idea, not implementation "
+        "details. You'll figure out datasets, metrics, and baselines later when "
+        "you actually run experiments.\n\n"
         "When done, save your idea to idea.json in the current directory with at least "
-        "these fields: title, abstract, hypothesis, method, datasets, metrics.\n"
-        "You may include any other fields you find useful."
+        "these fields:\n"
+        "  - description: a short description of the idea (1-3 sentences)\n"
+        "  - motivation: why this problem matters and what gap you're addressing\n"
+        "  - proposed_approach: your high-level approach and why it should work\n"
+        "  - related_work: key existing papers and how your idea differs from them\n\n"
+        "You may include any other fields you find useful (e.g., hypothesis, "
+        "novelty_claim)."
     )
 
     if history:
         task += "\n\n--- PREVIOUS FAILED ATTEMPTS (avoid these) ---\n"
         for i, h in enumerate(history):
             task += (
-                f"\nAttempt {i+1}: \"{h['idea'].get('title', 'N/A')}\"\n"
+                f"\nAttempt {i+1}: \"{h['idea'].get('description', h['idea'].get('title', 'N/A'))}\"\n"
                 f"  Failed at: {h['failure_stage']}\n"
                 f"  Reason: {h['failure_reason'][:300]}\n"
             )
