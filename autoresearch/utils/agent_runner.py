@@ -505,6 +505,19 @@ def _build_docker_command(
     # (default Docker behavior, but being explicit)
     cmd.extend(["--network", "host"])
 
+    # ── Mount CLI agent auth credentials ──
+    # Claude Code subscription auth lives in ~/.claude/
+    # Codex/OpenAI auth lives in ~/.codex/ or ~/.config/
+    # Mount read-only so agents can authenticate with subscriptions
+    home = Path.home()
+    auth_mounts = {
+        "claude": home / ".claude",
+        "codex": home / ".codex",
+    }
+    auth_dir = auth_mounts.get(agent_type)
+    if auth_dir and auth_dir.exists():
+        cmd.extend(["-v", f"{auth_dir}:/root/{auth_dir.name}:ro"])
+
     # ── Environment variables ──
     # Pass through API keys so the agent CLI can authenticate
     api_key_vars = [
