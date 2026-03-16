@@ -131,7 +131,8 @@ def bench(config, seeds_file, field, agent, model, max_ideas):
         console.print(f"[bold magenta]{'='*60}[/]")
 
         run_cfg = merge_configs(cfg, {**overrides, "seed_topic": seed})
-        run_cfg["experiment"]["workspace"] = f"outputs/runs/{seed}"
+        slug = seed.replace(" ", "_").replace("/", "_").lower()
+        run_cfg["experiment"]["workspace"] = f"outputs/runs/{slug}"
 
         pipeline = Pipeline(run_cfg)
         result = pipeline.run()

@@ -29,8 +29,7 @@ _REVIEWER_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "review
 
 # Output format appended to every reviewer prompt
 _REVIEW_OUTPUT_FORMAT = """
-The workspace is READ-ONLY — you cannot write files. Instead, output your review
-as a JSON object to stdout. Print ONLY the JSON, nothing else before or after it:
+Output your review as a JSON object to stdout. Print ONLY the JSON:
 {
     "scores": {
         "novelty": <int 1-10>,
@@ -39,16 +38,18 @@ as a JSON object to stdout. Print ONLY the JSON, nothing else before or after it
         "clarity": <int 1-10>,
         "reproducibility": <int 1-10>,
         "experimental_rigor": <int 1-10>,
+        "references": <int 1-10>,
         "results_integrity": <int 1-10>
     },
     "overall_score": <float>,
     "decision": "accept" | "weak_accept" | "borderline" | "weak_reject" | "reject",
     "summary": "<2-3 sentence summary of the paper>",
+    "novelty_assessment": "<what you found when searching for existing work online>",
     "strengths": ["<strength1>", ...],
     "weaknesses": ["<weakness1>", ...],
     "detailed_feedback": "<paragraph of actionable feedback for revision>",
     "questions_for_authors": ["<question1>", ...],
-    "integrity_assessment": "<your verdict on whether results are genuine, based on code and logs>"
+    "integrity_check": "<brief sanity check on results consistency>"
 }
 """
 
@@ -193,7 +194,7 @@ def review_paper(
                         f"    Score: {agent_review.get('overall_score', 'N/A')}, "
                         f"Decision: {agent_review.get('decision', 'N/A')}"
                     )
-                    integrity = agent_review.get("integrity_assessment", "")
+                    integrity = agent_review.get("integrity_check", "")
                     if integrity:
                         console.print(f"    Integrity: {integrity[:80]}")
                     if tracker:
@@ -281,20 +282,20 @@ def _run_cli_reviewer(
         guidelines = _REVIEWER_GUIDELINES_PATH.read_text()
 
     task = (
-        f"You are a reviewer for {venue}. The /workspace directory contains a "
-        f"research paper and its full experiment workspace produced by another "
-        f"AI agent inside this same Docker environment.\n\n"
-        f"You have READ-ONLY access to everything:\n"
-        f"- paper.tex — the paper\n"
+        f"You are a reviewer for {venue}. The workspace contains a research "
+        f"paper and supporting materials.\n\n"
+        f"Available files:\n"
+        f"- paper.tex — the paper to review\n"
         f"- experiment code (.py files)\n"
-        f"- logs/ — stdout/stderr from the experiment runs\n"
+        f"- logs/ — experiment execution logs\n"
         f"- results.json — raw experiment results\n"
         f"- figures/ — generated figures\n\n"
-        f"FIRST: Read reviewer_guidelines.md if it exists in the workspace.\n\n"
+        f"FIRST: Read reviewer_guidelines.md for detailed review instructions.\n\n"
         f"Your job:\n"
-        f"1. Read the paper, code, logs, and results\n"
-        f"2. Verify the chain: code → logs → results.json → paper\n"
-        f"3. Optionally re-run the experiment code to verify results reproduce\n"
+        f"1. Read the paper and evaluate its scientific contribution\n"
+        f"2. Search online (arXiv, Semantic Scholar, Google Scholar) to verify "
+        f"the claimed novelty — check if similar work already exists\n"
+        f"3. Check experiment code and logs as a sanity check on results\n"
         f"4. Write your review\n\n"
         f"{guidelines}\n\n"
         f"{_REVIEW_OUTPUT_FORMAT}"
@@ -463,7 +464,7 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
         if feedback:
             parts.append(f"  Feedback: {feedback}")
 
-        integrity = r.get("integrity_assessment", "")
+        integrity = r.get("integrity_check", "")
         if integrity:
             parts.append(f"  Integrity: {integrity}")
 

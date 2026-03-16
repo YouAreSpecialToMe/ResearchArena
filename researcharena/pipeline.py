@@ -376,7 +376,17 @@ class Pipeline:
                 workspace_diff=diff_dict,
                 failure_category=fail_cat,
             )
-            self._abandon_idea("paper", "Agent did not produce paper.tex.")
+            # Use one revision attempt for the retry
+            self.state.paper_revision_attempts += 1
+            if self.state.paper_revision_attempts <= self.state.max_paper_revisions:
+                console.print(
+                    f"  [yellow]→ Retrying paper writing "
+                    f"({self.state.paper_revision_attempts}/{self.state.max_paper_revisions})[/]"
+                )
+                self.state.stage = Stage.PAPER
+            else:
+                console.print("  [yellow]→ Paper writing retries exhausted. Abandoning idea.[/]")
+                self._abandon_idea("paper", "Agent failed to produce paper.tex after retries.")
             return
 
         console.print("  [green]Paper written.[/]")
