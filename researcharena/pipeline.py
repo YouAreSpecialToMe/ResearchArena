@@ -450,14 +450,16 @@ class Pipeline:
             console.print(Panel("[bold green]ACCEPTED![/]", style="green"))
             self.state.stage = Stage.ACCEPTED
 
-        elif result.avg_score < accept_threshold - 2:
-            console.print("  [yellow]→ Score far below threshold. Abandoning idea.[/]")
+        elif result.avg_score <= 2:
+            # Score 0 or 2: fundamental issues, abandon idea
+            console.print("  [yellow]→ Score ≤ 2: fundamental issues. Abandoning idea.[/]")
             self._abandon_idea("review", (
                 f"Score {result.avg_score:.1f} (threshold {accept_threshold}). "
                 f"Feedback: {result.aggregated_feedback[:500]}"
             ))
 
         elif self.state.paper_revision_attempts < self.state.max_paper_revisions:
+            # Score 4: below threshold but potentially fixable
             self.state.paper_revision_attempts += 1
             console.print(
                 f"  [yellow]→ Revising paper "

@@ -11,7 +11,21 @@ of the work. Be rigorous but fair. Be specific, not vague.
 You also have access to the experiment workspace (code, logs, results) for
 a sanity check on results integrity.
 
-## Scoring Criteria (each 1-10)
+## Overall Score (ICLR scale: 0-10, even numbers only)
+
+| Score | Meaning |
+|---|---|
+| 10 | Top 5% of accepted papers, seminal paper |
+| 8 | Clear accept, strong contribution |
+| 6 | Marginally above acceptance threshold |
+| 4 | Below threshold, not good enough |
+| 2 | Strong rejection, significant flaws |
+| 0 | Trivial, wrong, or fabricated |
+
+Use ONLY these values: 0, 2, 4, 6, 8, 10.
+Acceptance threshold is 6. Papers scoring >= 6 are accepted.
+
+## Per-Dimension Scores (each 1-10)
 
 ### 1. Novelty (most important)
 - Does the paper present genuinely new ideas, methods, or insights?
@@ -82,13 +96,16 @@ These are not minor issues — they indicate the research is not trustworthy.
 
 ## Decision Guidelines
 
-| Decision | When to use |
+Your overall_score determines the decision:
+
+| Score | Decision |
 |---|---|
-| accept | Strong contribution, sound methodology, verified novelty |
-| weak_accept | Good work with minor issues that don't invalidate the contribution |
-| borderline | Has merit but notable weaknesses; could go either way |
-| weak_reject | Some value but weaknesses outweigh strengths |
-| reject | No novelty, technical flaws, unsupported claims, fake references, or results that don't match code/logs |
+| 10 | accept |
+| 8 | accept |
+| 6 | accept (marginal) |
+| 4 | reject |
+| 2 | reject (strong) |
+| 0 | reject (fabricated/trivial) |
 
 ## Review Structure
 

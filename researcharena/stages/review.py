@@ -41,8 +41,8 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
         "references": <int 1-10>,
         "results_integrity": <int 1-10>
     },
-    "overall_score": <float>,
-    "decision": "accept" | "weak_accept" | "borderline" | "weak_reject" | "reject",
+    "overall_score": <int, one of: 0, 2, 4, 6, 8, 10>,
+    "decision": "accept" | "reject",
     "summary": "<2-3 sentence summary of the paper>",
     "novelty_assessment": "<what you found when searching for existing work online>",
     "strengths": ["<strength1>", ...],
@@ -51,6 +51,9 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
     "questions_for_authors": ["<question1>", ...],
     "integrity_check": "<brief sanity check on results consistency>"
 }
+
+overall_score uses ICLR scale: 10=seminal, 8=clear accept, 6=marginal accept,
+4=reject, 2=strong reject, 0=fabricated/trivial. Threshold is 6.
 """
 
 
@@ -474,14 +477,9 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
 
 
 def _score_to_decision(score: float, accept_threshold: float = 6.0) -> str:
-    if score >= accept_threshold + 1:
+    """Map score to accept/reject using ICLR-style threshold."""
+    if score >= accept_threshold:
         return "accept"
-    elif score >= accept_threshold:
-        return "weak_accept"
-    elif score >= accept_threshold - 1:
-        return "borderline"
-    elif score >= accept_threshold - 2:
-        return "weak_reject"
     else:
         return "reject"
 
