@@ -1,9 +1,9 @@
-# Base image for autoresearch agent containers.
+# Base image for researcharena agent containers.
 # Includes: Python, CUDA, common ML packages, and CLI agent tools.
 #
-# Build:  docker build -t autoresearch/agent:latest .
+# Build:  docker build -t researcharena/agent:latest .
 # Build with specific CUDA version:
-#   docker build --build-arg CUDA_VERSION=12.4.0 -t autoresearch/agent:latest .
+#   docker build --build-arg CUDA_VERSION=12.4.0 -t researcharena/agent:latest .
 
 ARG CUDA_VERSION=12.4.0
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04

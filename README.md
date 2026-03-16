@@ -19,7 +19,7 @@ The pipeline is a state machine with backtracking. It tracks the best paper acro
 
 ```
                     ┌─────────────────────────────────────────────────────┐
-                    │           autoresearch (harness)                    │
+                    │           researcharena (harness)                    │
                     │                                                     │
 Seed topic ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW     │
                     │     ↑              ↑                      │        │
@@ -36,7 +36,7 @@ Seed topic ───────→ │  IDEATION ──→ EXPERIMENTS ──�
 All agents (researcher + reviewers) run in the **same Docker image**:
 
 ```
-autoresearch/agent:latest
+researcharena/agent:latest
 ├── Python, CUDA, PyTorch, Transformers, etc.
 ├── Claude Code, Codex, Kimi, MiniMax CLIs
 │
@@ -68,7 +68,7 @@ The agent under test is excluded from the reviewer pool:
 ### 1. Build the Docker image
 
 ```bash
-docker build -t autoresearch/agent:latest .
+docker build -t researcharena/agent:latest .
 ```
 
 ### 2. Install the harness
@@ -107,34 +107,34 @@ review:
 
 ```bash
 # Test Claude Code
-autoresearch run --seed "efficient fine-tuning for LLMs" --agent claude
+researcharena run --seed "efficient fine-tuning for LLMs" --agent claude
 
 # Test Codex
-autoresearch run --seed "efficient fine-tuning for LLMs" --agent codex
+researcharena run --seed "efficient fine-tuning for LLMs" --agent codex
 
 # Test Kimi Code
-autoresearch run --seed "efficient fine-tuning for LLMs" --agent kimi
+researcharena run --seed "efficient fine-tuning for LLMs" --agent kimi
 
 # Test MiniMax
-autoresearch run --seed "efficient fine-tuning for LLMs" --agent minimax
+researcharena run --seed "efficient fine-tuning for LLMs" --agent minimax
 
 # Override model
-autoresearch run --agent claude --model claude-opus-4-6
+researcharena run --agent claude --model claude-opus-4-6
 
 # Limit ideas
-autoresearch run --seed "your topic" --max-ideas 3
+researcharena run --seed "your topic" --max-ideas 3
 ```
 
 ### Review an existing workspace
 
 ```bash
-autoresearch review-only outputs/runs/idea_01/
+researcharena review-only outputs/runs/idea_01/
 ```
 
 ### Custom config
 
 ```bash
-autoresearch run -c configs/my_config.yaml
+researcharena run -c configs/my_config.yaml
 ```
 
 ## Configuration
@@ -147,7 +147,7 @@ seed_topic: "your research topic"
 agent:
   type: "claude"              # claude, codex, kimi, minimax, custom
   model: "claude-sonnet-4-6"
-  docker_image: "autoresearch/agent:latest"
+  docker_image: "researcharena/agent:latest"
   gpus: 1
   memory_limit: "32g"
 
@@ -338,7 +338,7 @@ All agents stream through `Popen` with line-by-line timestamping. Kimi and MiniM
 ## Project structure
 
 ```
-autoresearch/
+researcharena/
 ├── cli.py                       # CLI entry point
 ├── pipeline.py                  # State machine orchestrator
 ├── stages/

@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from autoresearch.utils.agent_runner import invoke_agent
+from researcharena.utils.agent_runner import invoke_agent
 
 
 def run(

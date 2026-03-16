@@ -28,15 +28,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from autoresearch.stages import (
+from researcharena.stages import (
     experiment_design as experiments,
     ideation,
     paper_writing,
     review,
 )
-from autoresearch.utils.action_parser import annotate_with_workspace_diff, parse_agent_stdout
-from autoresearch.utils.tracker import RunTracker, TokenUsage
-from autoresearch.utils.workspace_diff import snapshot as ws_snapshot, diff as ws_diff
+from researcharena.utils.action_parser import annotate_with_workspace_diff, parse_agent_stdout
+from researcharena.utils.tracker import RunTracker, TokenUsage
+from researcharena.utils.workspace_diff import snapshot as ws_snapshot, diff as ws_diff
 
 console = Console()
 
@@ -382,7 +382,7 @@ class Pipeline:
             venue=self.config["paper"].get("template", "neurips"),
             accept_threshold=accept_threshold,
             workspace=self.state.workspace,
-            docker_image=self.agent_config.get("docker_image", "autoresearch/agent:latest"),
+            docker_image=self.agent_config.get("docker_image", "researcharena/agent:latest"),
             tracker=self.tracker,
         )
         review.save_reviews(result, self.state.workspace)

@@ -1,4 +1,4 @@
-"""CLI entry point for autoresearch."""
+"""CLI entry point for researcharena."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from autoresearch.utils.config import load_config, merge_configs
+from researcharena.utils.config import load_config, merge_configs
 
 console = Console()
 
@@ -42,7 +42,7 @@ def run(config, seed, agent, model, max_ideas):
     if overrides:
         cfg = merge_configs(cfg, overrides)
 
-    from autoresearch.pipeline import Pipeline
+    from researcharena.pipeline import Pipeline
 
     pipeline = Pipeline(cfg)
     result = pipeline.run()
@@ -63,7 +63,7 @@ def review_only(config, workspace):
     cfg = load_config(config)
     workspace = Path(workspace)
 
-    from autoresearch.stages.review import review_paper, save_reviews
+    from researcharena.stages.review import review_paper, save_reviews
 
     paper_tex = workspace / "paper.tex"
     paper_pdf = workspace / "paper.pdf"
@@ -81,7 +81,7 @@ def review_only(config, workspace):
         venue=cfg["paper"].get("template", "neurips"),
         accept_threshold=cfg["review"]["accept_threshold"],
         workspace=workspace,
-        docker_image=cfg["agent"].get("docker_image", "autoresearch/agent:latest"),
+        docker_image=cfg["agent"].get("docker_image", "researcharena/agent:latest"),
     )
     save_reviews(result, workspace)
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")
@@ -121,7 +121,7 @@ def bench(config, seeds_file, field, agent, model, max_ideas):
     if max_ideas:
         overrides.setdefault("pipeline", {})["max_ideas_per_seed"] = max_ideas
 
-    from autoresearch.pipeline import Pipeline
+    from researcharena.pipeline import Pipeline
     from rich.table import Table
 
     results = []

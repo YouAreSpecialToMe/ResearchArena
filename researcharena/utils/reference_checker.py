@@ -280,7 +280,7 @@ def _search_crossref(title: str, authors: str, year: str) -> dict | None:
     url = f"{CROSSREF_API}?query.title={query}&rows=3"
 
     req = urllib.request.Request(url)
-    req.add_header("User-Agent", "AutoResearch/1.0 (mailto:autoresearch@example.com)")
+    req.add_header("User-Agent", "AutoResearch/1.0 (mailto:researcharena@example.com)")
 
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())

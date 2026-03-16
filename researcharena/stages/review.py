@@ -72,7 +72,7 @@ def review_paper(
     venue: str = "NeurIPS",
     accept_threshold: float = 6.0,
     workspace: Path | None = None,
-    docker_image: str = "autoresearch/agent:latest",
+    docker_image: str = "researcharena/agent:latest",
     tracker=None,
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
@@ -97,7 +97,7 @@ def review_paper(
 
     # ── Pre-check: Reference verification ──
     console.print("\n[bold]Pre-check: Reference verification[/]")
-    from autoresearch.utils.reference_checker import check_references, save_reference_check
+    from researcharena.utils.reference_checker import check_references, save_reference_check
 
     if tracker:
         tracker.begin_action(stage="review", action="reference_check")
@@ -179,7 +179,7 @@ def review_paper(
                 reviewer_log_files = agent_result.log_files if agent_result else None
                 reviewer_sub_actions = None
                 if agent_result and agent_result.stdout:
-                    from autoresearch.utils.action_parser import parse_agent_stdout
+                    from researcharena.utils.action_parser import parse_agent_stdout
                     events_path = (agent_result.log_files or {}).get("events")
                     parsed = parse_agent_stdout(
                         agent_type, agent_result.stdout, events_path=events_path,
@@ -273,7 +273,7 @@ def _run_cli_reviewer(
     Returns:
         Tuple of (parsed review dict or None, AgentResult).
     """
-    from autoresearch.utils.agent_runner import invoke_agent
+    from researcharena.utils.agent_runner import invoke_agent
 
     # Load reviewer guidelines
     guidelines = ""
@@ -384,7 +384,7 @@ def _run_paperreview(
         return None
 
     try:
-        from autoresearch.utils.paperreview import submit_and_wait
+        from researcharena.utils.paperreview import submit_and_wait
 
         result = submit_and_wait(
             pdf_path=paper_pdf_path,

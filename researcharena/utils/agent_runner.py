@@ -34,7 +34,7 @@ from rich.console import Console
 console = Console()
 
 # Default Docker image — user can override in config
-DEFAULT_IMAGE = "autoresearch/agent:latest"
+DEFAULT_IMAGE = "researcharena/agent:latest"
 
 # Path to research guidelines template (relative to this file)
 _GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "research_guidelines.md"
@@ -470,7 +470,7 @@ def _build_docker_command(
 
     image = config.get("docker_image", DEFAULT_IMAGE)
     role = "reviewer" if readonly else "researcher"
-    container_name = f"autoresearch-{role}-{workspace.name}-{int(time.time())}"
+    container_name = f"researcharena-{role}-{workspace.name}-{int(time.time())}"
 
     # Mount workspace read-only for reviewers, read-write for researchers
     mount_spec = f"{workspace.resolve()}:/workspace"
@@ -694,7 +694,7 @@ def _kill_container(workspace: Path, role: str = "researcher"):
     """Find and kill running containers for this workspace and role."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"name=autoresearch-{role}-{workspace.name}"],
+            ["docker", "ps", "-q", "--filter", f"name=researcharena-{role}-{workspace.name}"],
             capture_output=True,
             text=True,
             timeout=10,
