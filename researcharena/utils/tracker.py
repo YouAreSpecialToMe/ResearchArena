@@ -97,9 +97,7 @@ class ActionRecord:
     failure_category: str | None = None  # "oom", "timeout", "crash", "rate_limit", etc.
     details: str = ""  # brief description of what happened
     cost_usd: float = 0.0
-    log_files: dict[str, str] | None = None  # {"stdout": path, "stderr": path, "command": path}
-    sub_actions: list[dict] | None = None  # parsed tool calls within this action
-    workspace_diff: dict | None = None  # {"created": [...], "modified": [...], "deleted": [...]}
+    log_files: dict[str, str] | None = None
 
     def to_dict(self) -> dict:
         is_sub = self.agent_type in _SUBSCRIPTION_AGENTS if self.agent_type else False
@@ -120,10 +118,6 @@ class ActionRecord:
             d["failure_category"] = self.failure_category
         if self.log_files:
             d["log_files"] = self.log_files
-        if self.sub_actions:
-            d["sub_actions"] = self.sub_actions
-        if self.workspace_diff:
-            d["workspace_diff"] = self.workspace_diff
         return d
 
 
@@ -169,8 +163,6 @@ class RunTracker:
         details: str = "",
         tokens: TokenUsage | None = None,
         log_files: dict[str, str] | None = None,
-        sub_actions: list[dict] | None = None,
-        workspace_diff: dict | None = None,
         failure_category: str | None = None,
     ):
         if self._current is None:
@@ -184,10 +176,6 @@ class RunTracker:
             record.tokens = tokens
         if log_files:
             record.log_files = log_files
-        if sub_actions:
-            record.sub_actions = sub_actions
-        if workspace_diff:
-            record.workspace_diff = workspace_diff
         if failure_category:
             record.failure_category = failure_category
         record.cost_usd = self._estimate_cost(record)

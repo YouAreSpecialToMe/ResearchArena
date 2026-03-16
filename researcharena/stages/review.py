@@ -181,14 +181,6 @@ def review_paper(
                     docker_image=docker_image,
                 )
                 reviewer_log_files = agent_result.log_files if agent_result else None
-                reviewer_sub_actions = None
-                if agent_result and agent_result.stdout:
-                    from researcharena.utils.action_parser import parse_agent_stdout
-                    events_path = (agent_result.log_files or {}).get("events")
-                    parsed = parse_agent_stdout(
-                        agent_type, agent_result.stdout, events_path=events_path,
-                    )
-                    reviewer_sub_actions = [s.to_dict() for s in parsed] if parsed else None
 
                 if agent_review:
                     agent_review["source"] = f"agent:{agent_name}"
@@ -205,16 +197,14 @@ def review_paper(
                             outcome="success",
                             details=f"score={agent_review.get('overall_score')}, decision={agent_review.get('decision')}",
                             log_files=reviewer_log_files,
-                            sub_actions=reviewer_sub_actions,
                         )
                 else:
-                    console.print(f"    [red]No review.json produced.[/]")
+                    console.print(f"    [red]No review produced.[/]")
                     if tracker:
                         tracker.end_action(
                             outcome="failure",
-                            details="No review.json produced",
+                            details="No review produced",
                             log_files=reviewer_log_files,
-                            sub_actions=reviewer_sub_actions,
                         )
             except Exception as e:
                 console.print(f"    [red]Failed: {e}[/]")
