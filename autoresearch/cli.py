@@ -87,5 +87,101 @@ def review_only(config, workspace):
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")
 
 
+@main.command()
+@click.option("--config", "-c", default="configs/default.yaml", help="Config file path")
+@click.option("--seeds-file", default="configs/seeds.yaml", help="Seeds YAML file")
+@click.option("--field", "-f", default=None, help="Run only this field (e.g., cv, nlp)")
+@click.option("--agent", default=None, help="Agent type override")
+@click.option("--model", default=None, help="Agent model override")
+@click.option("--max-ideas", default=None, type=int, help="Max ideas per seed")
+def bench(config, seeds_file, field, agent, model, max_ideas):
+    """Run the benchmark across seed fields.
+
+    Each seed is a field name (cv, nlp, theory, systems). The agent
+    decides what specific problem to research — that's part of what
+    we're testing.
+    """
+    cfg = load_config(config)
+    seeds_cfg = load_config(seeds_file)
+
+    all_seeds = seeds_cfg.get("seeds", [])
+    if field:
+        if field not in all_seeds:
+            console.print(f"[red]Unknown field: {field}. Available: {all_seeds}[/]")
+            return
+        seeds = [field]
+    else:
+        seeds = all_seeds
+
+    overrides = {}
+    if agent:
+        overrides.setdefault("agent", {})["type"] = agent
+    if model:
+        overrides.setdefault("agent", {})["model"] = model
+    if max_ideas:
+        overrides.setdefault("pipeline", {})["max_ideas_per_seed"] = max_ideas
+
+    from autoresearch.pipeline import Pipeline
+    from rich.table import Table
+
+    results = []
+    for seed in seeds:
+        console.print(f"\n[bold magenta]{'='*60}[/]")
+        console.print(f"[bold magenta]Seed field: {seed}[/]")
+        console.print(f"[bold magenta]{'='*60}[/]")
+
+        run_cfg = merge_configs(cfg, {**overrides, "seed_topic": seed})
+        run_cfg["experiment"]["workspace"] = f"outputs/runs/{seed}"
+
+        pipeline = Pipeline(run_cfg)
+        result = pipeline.run()
+        result["seed_topic"] = seed
+        results.append(result)
+
+        # Save per-seed summary
+        summary_path = Path(run_cfg["experiment"]["workspace"]) / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(result, indent=2))
+
+    # Print leaderboard
+    console.print(f"\n[bold]{'='*60}[/]")
+    table = Table(title="Benchmark Results")
+    table.add_column("Seed")
+    table.add_column("Status")
+    table.add_column("Best Score", justify="center")
+    table.add_column("Best Title")
+    table.add_column("Ideas", justify="center")
+
+    for r in results:
+        best = r.get("best_paper")
+        score = f"{best['score']:.1f}" if best else "-"
+        title = best["title"][:40] if best else "-"
+        table.add_row(
+            r.get("seed_topic", ""),
+            r.get("status", ""),
+            score,
+            title,
+            str(r.get("ideas_tried", 0)),
+        )
+
+    console.print(table)
+
+    combined_path = Path("outputs/runs/benchmark_results.json")
+    combined_path.parent.mkdir(parents=True, exist_ok=True)
+    combined_path.write_text(json.dumps(results, indent=2))
+    console.print(f"\nResults saved to {combined_path}")
+
+
+@main.command()
+@click.option("--seeds-file", default="configs/seeds.yaml", help="Seeds YAML file")
+def list_seeds(seeds_file):
+    """List all available seed fields."""
+    cfg = load_config(seeds_file)
+    seeds = cfg.get("seeds", [])
+    console.print(f"[bold]Available seeds ({len(seeds)}):[/]")
+    for s in seeds:
+        console.print(f"  - {s}")
+
+
 if __name__ == "__main__":
     main()
