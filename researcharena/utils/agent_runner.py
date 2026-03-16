@@ -41,7 +41,7 @@ _GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "research_guidel
 
 # Pre-authorization files written into the workspace before agent starts
 CLAUDE_MD_CONTENT = """\
-# AutoResearch Agent Workspace
+# ResearchArena Agent Workspace
 
 You are running autonomously as part of a research benchmark.
 You have full permission to:

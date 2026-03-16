@@ -118,7 +118,7 @@ class Pipeline:
         accept_threshold = self.config["review"]["accept_threshold"]
 
         console.print(Panel(
-            f"[bold]AutoResearch — CLI Agent Benchmark[/]\n"
+            f"[bold]ResearchArena — CLI Agent Benchmark[/]\n"
             f"Agent: {self.agent_type} ({self.agent_config.get('model', 'default')})\n"
             f"Seed: {seed_topic}\n"
             f"Accept threshold: {accept_threshold}/10\n"

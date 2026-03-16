@@ -15,7 +15,7 @@ console = Console()
 
 @click.group()
 def main():
-    """AutoResearch: benchmark CLI agents on autonomous research."""
+    """ResearchArena: benchmark CLI agents on autonomous research."""
     pass
 
 

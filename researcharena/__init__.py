@@ -1,1 +1,1 @@
-"""Autoresearch: autonomous end-to-end research pipeline."""
+"""ResearchArena: benchmark harness for CLI agent autonomous research."""

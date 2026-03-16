@@ -250,7 +250,7 @@ def _search_semantic_scholar(title: str, authors: str, year: str) -> dict | None
     url = f"{SEMANTIC_SCHOLAR_API}?query={query}&limit=3&fields=title,authors,year,externalIds,url"
 
     req = urllib.request.Request(url)
-    req.add_header("User-Agent", "AutoResearch/1.0")
+    req.add_header("User-Agent", "ResearchArena/1.0")
 
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())
@@ -280,7 +280,7 @@ def _search_crossref(title: str, authors: str, year: str) -> dict | None:
     url = f"{CROSSREF_API}?query.title={query}&rows=3"
 
     req = urllib.request.Request(url)
-    req.add_header("User-Agent", "AutoResearch/1.0 (mailto:researcharena@example.com)")
+    req.add_header("User-Agent", "ResearchArena/1.0 (mailto:researcharena@example.com)")
 
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())

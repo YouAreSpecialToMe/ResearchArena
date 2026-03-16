@@ -1,4 +1,4 @@
-# AutoResearch
+# ResearchArena
 
 Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, MiniMax) can autonomously conduct end-to-end ML research — from idea to accepted paper.
 
