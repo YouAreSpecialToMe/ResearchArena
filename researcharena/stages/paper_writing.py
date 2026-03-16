@@ -54,15 +54,15 @@ def _build_task(venue: str, revision_feedback: str | None) -> str:
         "You are a researcher. The current directory contains idea.json with "
         "your research idea, results.json with your experiment results, and "
         "possibly a figures/ directory.\n\n"
-        "FIRST: Read research_guidelines.md — especially the References section. "
-        "EVERY reference you cite MUST be a real, verifiable publication. "
+        "FIRST: Read paper_writing_guidelines.md in the current directory. "
+        "It contains detailed instructions on paper structure, formatting, "
+        "tables, figures, and references. Follow it closely.\n\n"
+        "CRITICAL: EVERY reference you cite MUST be a real, verifiable publication. "
         "Search Semantic Scholar (semanticscholar.org) to find real papers. "
         "Fake references cause AUTOMATIC REJECTION.\n\n"
         f"Write a complete {venue.upper()}-format LaTeX paper and save it as paper.tex.\n\n"
-        "You have full autonomy — structure the paper as you see fit. "
-        "Include proper sections (abstract, introduction, method, experiments, "
-        "conclusion, references). Include ablation studies and error bars. "
-        "If you can, compile it to PDF."
+        "You have full autonomy. Use the results.json data for all numbers in "
+        "the paper — every number must match exactly. If you can, compile to PDF."
     )
 
     if revision_feedback:

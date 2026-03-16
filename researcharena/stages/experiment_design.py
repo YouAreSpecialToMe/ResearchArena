@@ -1,13 +1,11 @@
-"""Stage 2+3: Let the CLI agent implement and run experiments.
+"""Stage 2: Let the CLI agent implement and run experiments.
 
-The agent gets the idea.json and workspace. It must:
-  - Write experiment code
-  - Run it
-  - Save results to results.json
-  - Optionally save figures to figures/
+The agent gets the idea.json and workspace. It handles the full experimental
+workflow: designing experiments, implementing code, running training/evaluation,
+debugging, and producing structured results.
 
-We merge design + run into one stage because the agent should be free to
-iterate on its own code — write, run, fix, rerun — without us micromanaging.
+The agent self-iterates within a single invocation — it writes code, runs it,
+sees errors, fixes them, reruns, etc. We just check the final output.
 """
 
 from __future__ import annotations
@@ -47,21 +45,42 @@ def run(
 
 def _build_task(workspace: Path, prior_errors: list[str] | None) -> str:
     task = (
-        "You are a researcher. Read the idea.json and research_guidelines.md "
-        "in the current directory.\n\n"
-        "Your job:\n"
-        "1. Implement the experiments described in the idea\n"
-        "2. Run them (you have access to GPUs)\n"
-        "3. Save the results to results.json in the current directory\n"
-        "4. Save any figures to a figures/ directory\n\n"
+        "You are a researcher. Read the idea.json, research_guidelines.md, "
+        "and experiment_guidelines.md in the current directory.\n\n"
+        "The experiment_guidelines.md contains detailed instructions on how to "
+        "conduct rigorous ML experiments — follow it closely.\n\n"
+        "Your job is to conduct the full experimental workflow for the research "
+        "idea described in idea.json:\n\n"
+        "1. EXPERIMENT DESIGN\n"
+        "   - Choose appropriate datasets (use standard benchmarks when possible)\n"
+        "   - Define evaluation metrics relevant to your claims\n"
+        "   - Select at least 2 meaningful baselines for comparison\n"
+        "   - Plan ablation studies to show each component's contribution\n\n"
+        "2. IMPLEMENTATION\n"
+        "   - Write clean, runnable experiment code\n"
+        "   - Install any packages you need (pip install)\n"
+        "   - Use GPUs for training (CUDA is available)\n\n"
+        "3. EXECUTION\n"
+        "   - Run your method AND all baselines on the same data splits\n"
+        "   - Run with at least 3 different random seeds for error bars\n"
+        "   - Run ablation experiments (remove components one at a time)\n"
+        "   - If something crashes, debug and fix it — iterate until it works\n\n"
+        "4. RESULTS\n"
+        "   - Save all results to results.json with this structure:\n"
+        "     {\n"
+        '       "method": {"metric1": mean±std, ...},\n'
+        '       "baselines": {"baseline1": {"metric1": mean±std, ...}, ...},\n'
+        '       "ablations": {"no_component_X": {"metric1": mean±std, ...}, ...},\n'
+        '       "config": {"seeds": [...], "dataset": "...", "epochs": N, ...}\n'
+        "     }\n"
+        "   - Save any figures (training curves, comparison plots) to figures/\n\n"
         "You have full autonomy — install packages, write multiple files, "
         "debug and fix errors, run multiple experiment variants, etc.\n\n"
-        "The results.json should contain all quantitative results needed to "
-        "write a paper (metrics, comparisons, ablations, etc.).\n\n"
         "CRITICAL: Every number in results.json MUST come from actually running "
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
         "The review system verifies that results trace back to real code execution. "
-        "If your method doesn't beat baselines, report that honestly."
+        "If your method doesn't beat baselines, report that honestly — negative "
+        "results with honest analysis are acceptable."
     )
 
     if prior_errors:

@@ -37,8 +37,11 @@ console = Console()
 # Default Docker image — user can override in config
 DEFAULT_IMAGE = "researcharena/agent:latest"
 
-# Path to research guidelines template (relative to this file)
-_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "research_guidelines.md"
+# Paths to guideline templates (relative to this file)
+_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+_GUIDELINES_PATH = _TEMPLATES_DIR / "research_guidelines.md"
+_EXPERIMENT_GUIDELINES_PATH = _TEMPLATES_DIR / "experiment_guidelines.md"
+_PAPER_WRITING_GUIDELINES_PATH = _TEMPLATES_DIR / "paper_writing_guidelines.md"
 
 # Pre-authorization files written into the workspace before agent starts
 CLAUDE_MD_CONTENT = """\
@@ -509,16 +512,20 @@ def _build_docker_command(
     # ── Mount CLI agent auth credentials ──
     # Claude Code subscription auth lives in ~/.claude/
     # Codex/OpenAI auth lives in ~/.codex/ or ~/.config/
-    # Mount read-only so agents can authenticate with subscriptions
+    # ── Mount CLI agent auth & memory ──
+    # Researcher: read-write so the agent can build up memory across stages
+    # Reviewer: read-only (auth only, no memory persistence)
     home = Path.home()
     auth_mounts = {
         "claude": home / ".claude",
         "codex": home / ".codex",
         "kimi": home / ".kimi",
+        "minimax": home / ".mini-agent",
     }
     auth_dir = auth_mounts.get(agent_type)
     if auth_dir and auth_dir.exists():
-        cmd.extend(["-v", f"{auth_dir}:/root/{auth_dir.name}:ro"])
+        mount_mode = "ro" if readonly else "rw"
+        cmd.extend(["-v", f"{auth_dir}:/root/{auth_dir.name}:{mount_mode}"])
 
     # ── Environment variables ──
     # Pass through API keys so the agent CLI can authenticate
@@ -644,6 +651,15 @@ def _setup_workspace(agent_type: str, workspace: Path):
     guidelines_dest = workspace / "research_guidelines.md"
     if not guidelines_dest.exists() and _GUIDELINES_PATH.exists():
         shutil.copy2(_GUIDELINES_PATH, guidelines_dest)
+
+    # Copy experiment and paper writing guidelines
+    for src, name in [
+        (_EXPERIMENT_GUIDELINES_PATH, "experiment_guidelines.md"),
+        (_PAPER_WRITING_GUIDELINES_PATH, "paper_writing_guidelines.md"),
+    ]:
+        dest = workspace / name
+        if not dest.exists() and src.exists():
+            shutil.copy2(src, dest)
 
     if agent_type == "claude":
         claude_md = workspace / "CLAUDE.md"
