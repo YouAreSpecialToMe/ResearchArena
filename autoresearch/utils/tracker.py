@@ -22,30 +22,41 @@ from rich.table import Table
 
 console = Console()
 
-# Approximate pricing per 1M tokens (USD) — used for cost estimates only
+# Approximate pricing per 1M tokens (USD).
+#
+# For CLI agents running on subscriptions (Claude Code on Max plan, Codex on
+# ChatGPT Pro), the actual cost is the subscription fee, not per-token.
+# These API prices are included for reference and for agents that DO use
+# per-token billing (Kimi, MiniMax via API keys).
+#
+# Token counts are always tracked regardless — they measure efficiency.
 _PRICING = {
-    # Anthropic
+    # Anthropic (API pricing — Claude Code subscription is flat-rate)
     "claude-opus-4-6":   {"input": 15.0, "output": 75.0},
     "claude-opus-4-5":   {"input": 15.0, "output": 75.0},
     "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
     "claude-sonnet-4-5": {"input": 3.0,  "output": 15.0},
     "claude-haiku-4-5":  {"input": 0.80, "output": 4.0},
-    # OpenAI
+    # OpenAI (API pricing — Codex subscription is flat-rate)
     "gpt-4o":            {"input": 2.50, "output": 10.0},
     "gpt-4o-mini":       {"input": 0.15, "output": 0.60},
     "o3":                {"input": 10.0, "output": 40.0},
     "o3-mini":           {"input": 1.10, "output": 4.40},
-    # Kimi (Moonshot AI)
+    # Kimi (Moonshot AI) — per-token billing
     "moonshot-v1-auto":    {"input": 0.84, "output": 0.84},
     "moonshot-v1-8k":     {"input": 0.84, "output": 0.84},
     "moonshot-v1-32k":    {"input": 1.68, "output": 1.68},
     "moonshot-v1-128k":   {"input": 4.20, "output": 4.20},
     "kimi-k2":            {"input": 1.0,  "output": 3.0},
-    # MiniMax
+    # MiniMax — per-token billing
     "MiniMax-Text-01":    {"input": 1.0,  "output": 5.50},
     "abab6.5s-chat":      {"input": 0.70, "output": 0.70},
     "abab6.5-chat":       {"input": 2.10, "output": 2.10},
 }
+
+# Agents that run on flat-rate subscriptions. Cost estimate is shown as
+# "API-equivalent" for comparison, but the actual cost is the subscription fee.
+_SUBSCRIPTION_AGENTS = {"claude", "codex"}
 
 
 @dataclass
@@ -91,6 +102,7 @@ class ActionRecord:
     workspace_diff: dict | None = None  # {"created": [...], "modified": [...], "deleted": [...]}
 
     def to_dict(self) -> dict:
+        is_sub = self.agent_type in _SUBSCRIPTION_AGENTS if self.agent_type else False
         d = {
             "stage": self.stage,
             "action": self.action,
@@ -102,6 +114,7 @@ class ActionRecord:
             "outcome": self.outcome,
             "details": self.details,
             "cost_usd": round(self.cost_usd, 4),
+            "billing": "subscription" if is_sub else "api",
         }
         if self.failure_category:
             d["failure_category"] = self.failure_category
@@ -227,18 +240,27 @@ class RunTracker:
     # ── Cost estimation ───────────────────────────────────────────────
 
     def _estimate_cost(self, record: ActionRecord) -> float:
+        """Estimate cost from token usage.
+
+        For subscription agents (Claude Code, Codex), this is the API-equivalent
+        cost for comparison purposes — the actual cost is the subscription fee.
+        For API-billed agents (Kimi, MiniMax), this is the real cost.
+        """
         if not record.model or record.tokens.total == 0:
             return 0.0
 
-        # Find pricing — exact match only to avoid ambiguity (e.g., "o3" vs "o3-mini")
         pricing = _PRICING.get(record.model)
-
         if not pricing:
             return 0.0
 
         input_cost = (record.tokens.input_tokens / 1_000_000) * pricing["input"]
         output_cost = (record.tokens.output_tokens / 1_000_000) * pricing["output"]
         return input_cost + output_cost
+
+    @staticmethod
+    def is_subscription_agent(agent_type: str | None) -> bool:
+        """Check if an agent runs on a flat-rate subscription."""
+        return agent_type in _SUBSCRIPTION_AGENTS
 
     # ── Aggregation ───────────────────────────────────────────────────
 
@@ -303,7 +325,14 @@ class RunTracker:
 
         for i, a in enumerate(self.actions):
             tokens_str = f"{a.tokens.total:,}" if a.tokens.total else "-"
-            cost_str = f"${a.cost_usd:.2f}" if a.cost_usd > 0 else "-"
+            # Mark subscription agent costs as API-equivalent
+            if a.cost_usd > 0:
+                if self.is_subscription_agent(a.agent_type):
+                    cost_str = f"~${a.cost_usd:.2f}"  # ~ means API-equivalent
+                else:
+                    cost_str = f"${a.cost_usd:.2f}"
+            else:
+                cost_str = "-"
             time_str = _format_duration(a.elapsed_seconds)
             outcome_style = "green" if a.outcome == "success" else "red" if a.outcome in ("failure", "timeout") else ""
             table.add_row(

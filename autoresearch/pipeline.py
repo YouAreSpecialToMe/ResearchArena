@@ -494,7 +494,10 @@ class Pipeline:
         if total_tokens.total:
             table.add_row("Total tokens", f"{total_tokens.total:,} (in: {total_tokens.input_tokens:,}, out: {total_tokens.output_tokens:,})")
         if self.tracker.total_cost > 0:
-            table.add_row("Est. cost", f"${self.tracker.total_cost:.2f}")
+            if RunTracker.is_subscription_agent(self.agent_type):
+                table.add_row("API-equiv cost", f"~${self.tracker.total_cost:.2f} (subscription agent)")
+            else:
+                table.add_row("Est. cost", f"${self.tracker.total_cost:.2f}")
 
         best = self.state.best
         if best.idea:
