@@ -10,7 +10,7 @@ checklist, REFORMS consensus framework, and Google's Rules of ML.
 Before any implementation, write down:
 - **What is your hypothesis?** State it as a testable claim.
   Example: "Method X improves accuracy over baseline Y on task Z because of property W."
-- **What evidence would convince a skeptical reviewer?**
+- **What evidence would convince a skeptical reader?**
 - **What would DISPROVE your claim?** Design experiments that could fail — if your
   experiment cannot possibly produce a negative result, it's not informative.
 

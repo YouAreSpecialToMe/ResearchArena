@@ -538,7 +538,7 @@ def annotate_with_workspace_diff(sub_actions: list[SubAction], workspace_diff: d
             # Extract file path from input_summary
             # Write: "experiment.py (42 lines)" → "experiment.py"
             # Edit: "train.py: old_text → ..." → "train.py"
-            # Read: "research_guidelines.md" → "research_guidelines.md"
+            # Read: "idea_guidelines.md" → "idea_guidelines.md"
             file_path = inp.split(" (")[0].split(":")[0].strip()
             if file_path:
                 # Match against changed files (handle both exact and basename)

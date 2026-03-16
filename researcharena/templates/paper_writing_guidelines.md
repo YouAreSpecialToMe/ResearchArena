@@ -168,7 +168,7 @@ Rules:
 
 - EVERY reference must be a REAL, VERIFIABLE publication
 - Search Semantic Scholar (semanticscholar.org) to find and verify papers
-- Fake or hallucinated citations cause AUTOMATIC REJECTION
+- Fake or hallucinated citations undermine scientific integrity
 - Use correct format: authors, title, venue, year
 - Prefer published conference/journal papers over arXiv preprints
 - Include 15-30 references for a typical ML paper

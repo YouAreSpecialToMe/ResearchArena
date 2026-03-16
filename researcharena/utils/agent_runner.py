@@ -39,7 +39,7 @@ DEFAULT_IMAGE = "researcharena/agent:latest"
 
 # Paths to guideline templates (relative to this file)
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-_GUIDELINES_PATH = _TEMPLATES_DIR / "research_guidelines.md"
+_IDEA_GUIDELINES_PATH = _TEMPLATES_DIR / "idea_guidelines.md"
 _EXPERIMENT_GUIDELINES_PATH = _TEMPLATES_DIR / "experiment_guidelines.md"
 _PAPER_WRITING_GUIDELINES_PATH = _TEMPLATES_DIR / "paper_writing_guidelines.md"
 
@@ -47,31 +47,111 @@ _PAPER_WRITING_GUIDELINES_PATH = _TEMPLATES_DIR / "paper_writing_guidelines.md"
 CLAUDE_MD_CONTENT = """\
 # ResearchArena Agent Workspace
 
-You are running autonomously as part of a research benchmark.
+You are a researcher conducting end-to-end ML research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages. Each stage has a dedicated guideline
+file in this workspace — read it before starting each stage:
+
+  Stage 1 — IDEATION:     Read idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md
+  Stage 3 — PAPER:        Read paper_writing_guidelines.md
+
+You will receive a task prompt telling you which stage you are in and
+what output is expected. Follow the corresponding guideline closely.
+
 You have full permission to:
 - Read and write any files in this directory
 - Install Python packages with pip
 - Run Python scripts and experiments
 - Use GPUs (CUDA is available)
 - Download datasets and models from the internet
+- Search the web (arXiv, Semantic Scholar, Google Scholar)
 - Run shell commands
 
 Do NOT ask for confirmation. Execute everything directly.
-Save your outputs to the files specified in the task.
 
-IMPORTANT: Read research_guidelines.md before starting. It contains critical rules
-that will determine whether your paper is accepted or rejected. In particular:
-- EVERY reference must be a real, verifiable publication (fake refs = auto reject)
+IMPORTANT — scientific integrity:
+- EVERY reference must be a real, verifiable publication
+- ALL experimental results must come from actually running code
 - Include ablation studies and error bars
 - Compare against real baselines
 """
 
 CODEX_INSTRUCTIONS = """\
-You are running autonomously. Execute all commands without asking for approval.
-You have full filesystem, network, and GPU access in this workspace.
+You are a researcher conducting end-to-end ML research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
 
-IMPORTANT: Read research_guidelines.md before starting. It contains critical rules
-for producing publishable research. Fake references cause automatic rejection.
+The research is conducted in stages, each with a guideline file:
+  Stage 1 — IDEATION:     idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  experiment_guidelines.md
+  Stage 3 — PAPER:        paper_writing_guidelines.md
+
+Read the guideline for your current stage before starting.
+
+You have full filesystem, network, and GPU access in this workspace.
+Execute all commands without asking for approval.
+
+IMPORTANT: All references must be real publications. All results must come
+from actually running experiments. Scientific integrity is non-negotiable.
+"""
+
+# Kimi Code reads AGENTS.md and injects into system prompt via ${KIMI_AGENTS_MD}
+KIMI_AGENTS_MD_CONTENT = """\
+# ResearchArena Agent Workspace
+
+You are a researcher conducting end-to-end ML research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages. Each stage has a dedicated guideline
+file in this workspace — read it before starting each stage:
+
+  Stage 1 — IDEATION:     Read idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md
+  Stage 3 — PAPER:        Read paper_writing_guidelines.md
+
+You will receive a task prompt telling you which stage you are in and
+what output is expected. Follow the corresponding guideline closely.
+
+You have full permission to:
+- Read and write any files in this directory
+- Install Python packages with pip
+- Run Python scripts and experiments
+- Use GPUs (CUDA is available)
+- Download datasets and models from the internet
+- Search the web (arXiv, Semantic Scholar, Google Scholar)
+- Run shell commands
+
+Do NOT ask for confirmation. Execute everything directly.
+
+IMPORTANT — scientific integrity:
+- EVERY reference must be a real, verifiable publication
+- ALL experimental results must come from actually running code
+- Include ablation studies and error bars
+- Compare against real baselines
+"""
+
+# Mini-Agent reads a generic instructions file
+MINIAGENT_INSTRUCTIONS = """\
+You are a researcher conducting end-to-end ML research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages, each with a guideline file:
+  Stage 1 — IDEATION:     idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  experiment_guidelines.md
+  Stage 3 — PAPER:        paper_writing_guidelines.md
+
+Read the guideline for your current stage before starting.
+
+You have full filesystem, network, and GPU access in this workspace.
+Execute all operations directly without asking for approval.
+
+IMPORTANT: All references must be real publications. All results must come
+from actually running experiments. Scientific integrity is non-negotiable.
 """
 
 
@@ -617,16 +697,14 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         return cmd
 
     elif agent_type == "minimax":
-        # Mini-Agent CLI (MiniMax) — coding agent similar to Claude Code
-        # --prompt: non-interactive, process prompt and exit
-        # --yolo: auto-approve all operations
+        # Mini-Agent CLI (MiniMax)
+        # --task: non-interactive mode, executes task and exits
+        # --workspace: set working directory
         cmd = [
             "mini-agent",
-            "--yolo",
-            "--prompt", task,
+            "--task", task,
+            "--workspace", "/workspace",
         ]
-        if config.get("workspace"):
-            cmd.extend(["--workspace", config["workspace"]])
         return cmd
 
     elif agent_type == "custom":
@@ -654,9 +732,9 @@ def _setup_workspace(agent_type: str, workspace: Path):
     """Write permission/config files and research guidelines into workspace."""
 
     # Copy research guidelines into every workspace
-    guidelines_dest = workspace / "research_guidelines.md"
-    if not guidelines_dest.exists() and _GUIDELINES_PATH.exists():
-        shutil.copy2(_GUIDELINES_PATH, guidelines_dest)
+    idea_guidelines_dest = workspace / "idea_guidelines.md"
+    if not idea_guidelines_dest.exists() and _IDEA_GUIDELINES_PATH.exists():
+        shutil.copy2(_IDEA_GUIDELINES_PATH, idea_guidelines_dest)
 
     # Copy experiment and paper writing guidelines
     for src, name in [
@@ -678,6 +756,17 @@ def _setup_workspace(agent_type: str, workspace: Path):
         instructions = codex_dir / "instructions.md"
         if not instructions.exists():
             instructions.write_text(CODEX_INSTRUCTIONS)
+
+    elif agent_type == "kimi":
+        # Kimi Code reads AGENTS.md and injects it into the system prompt
+        agents_md = workspace / "AGENTS.md"
+        if not agents_md.exists():
+            agents_md.write_text(KIMI_AGENTS_MD_CONTENT)
+
+    elif agent_type == "minimax":
+        agent_instructions = workspace / "AGENT_INSTRUCTIONS.md"
+        if not agent_instructions.exists():
+            agent_instructions.write_text(MINIAGENT_INSTRUCTIONS)
 
 
 # ── Container management ────────────────────────────────────────────────

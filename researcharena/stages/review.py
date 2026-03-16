@@ -301,7 +301,7 @@ def _run_cli_reviewer(
     )
 
     # Copy reviewer guidelines into workspace (it's read-only so we need
-    # to do this before mounting — the workspace already has research_guidelines,
+    # to do this before mounting — the workspace already has idea_guidelines,
     # we add reviewer_guidelines alongside it)
     reviewer_guide_dest = workspace / "reviewer_guidelines.md"
     if not reviewer_guide_dest.exists() and _REVIEWER_GUIDELINES_PATH.exists():

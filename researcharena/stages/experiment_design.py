@@ -58,10 +58,10 @@ def _build_task(
     hours = res.get("time_hours", 8)
 
     task = (
-        "You are a researcher. Read the idea.json, research_guidelines.md, "
-        "and experiment_guidelines.md in the current directory.\n\n"
-        "The experiment_guidelines.md contains detailed instructions on how to "
-        "conduct rigorous ML experiments — follow it closely.\n\n"
+        "=== STAGE 2: EXPERIMENTS ===\n\n"
+        "Read idea.json (your research idea from Stage 1) and "
+        "experiment_guidelines.md for detailed instructions on designing "
+        "and running rigorous experiments.\n\n"
         "AVAILABLE RESOURCES:\n"
         f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
         f"   - RAM: {mem}GB\n"
@@ -97,9 +97,8 @@ def _build_task(
         "debug and fix errors, run multiple experiment variants, etc.\n\n"
         "CRITICAL: Every number in results.json MUST come from actually running "
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
-        "The review system verifies that results trace back to real code execution. "
         "If your method doesn't beat baselines, report that honestly — negative "
-        "results with honest analysis are acceptable."
+        "results with honest analysis are valuable science."
     )
 
     if prior_errors:
