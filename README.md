@@ -1,35 +1,45 @@
 # ResearchArena
 
-Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, MiniMax) can autonomously conduct end-to-end ML research — from idea to accepted paper.
+Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, Mini-Agent) can autonomously conduct end-to-end ML research — from idea to accepted paper.
 
 ## What this does
 
-Given a seed topic, the pipeline:
+Given a seed field (e.g., "computer vision", "reinforcement learning"), the pipeline:
 
 1. **Launches a CLI agent in Docker** with GPU access, network, and ML packages
-2. **The agent does everything** — comes up with an idea, writes experiment code, runs it, analyzes results, writes a LaTeX paper
-3. **Other CLI agents review it** — running in the same Docker image with read-only access to the full workspace (code, logs, results)
+2. **The agent does everything** — explores the field, comes up with an idea, designs and runs experiments, writes a LaTeX paper
+3. **Other CLI agents review it** — running in the same Docker image with read-only workspace access, searching online to verify novelty
 4. **paperreview.ai** provides an additional external review
-5. **References are verified** against Semantic Scholar and CrossRef (any fake citation = auto reject)
+5. **References are verified** against Semantic Scholar and CrossRef
 6. If rejected, the pipeline iterates — revise the paper, retry experiments, or try a new idea entirely
 
-The pipeline is a state machine with backtracking. It tracks the best paper across all attempts.
+Each stage has a dedicated guideline file that the agent reads before starting. The agent has persistent memory across stages.
 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────────────────┐
-                    │           researcharena (harness)                    │
-                    │                                                     │
-Seed topic ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW     │
-                    │     ↑              ↑                      │        │
-                    │     │              │         reject ───────┘        │
-                    │     │              └── retry experiments            │
-                    │     └── try new idea                               │
-                    │                                                     │
-                    │  Each stage = one CLI agent invocation in Docker    │
-                    └─────────────────────────────────────────────────────┘
+                    ┌─────────────────────────────────────────────────────────┐
+                    │           researcharena (harness)                       │
+                    │                                                         │
+Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW         │
+                    │     ↑              ↑            ↑          │           │
+                    │     │              │            └── retry   │           │
+                    │     │              └── retry experiments    │           │
+                    │     └── try new idea ───────────────────────┘           │
+                    │                                                         │
+                    │  Each stage = one CLI agent invocation in Docker        │
+                    │  Each stage has a guideline: idea / experiment / paper   │
+                    └─────────────────────────────────────────────────────────┘
 ```
+
+### Stages & guidelines
+
+| Stage | Agent reads | Agent produces | Guideline |
+|---|---|---|---|
+| 1. IDEATION | seed field | `idea.json` | `idea_guidelines.md` |
+| 2. EXPERIMENTS | `idea.json` | `results.json` + `figures/` | `experiment_guidelines.md` |
+| 3. PAPER | `idea.json` + `results.json` | `paper.tex` | `paper_writing_guidelines.md` |
+| 4. REVIEW | paper + workspace (read-only) | review scores | `reviewer_guidelines.md` |
 
 ### Docker sharing
 
@@ -38,10 +48,11 @@ All agents (researcher + reviewers) run in the **same Docker image**:
 ```
 researcharena/agent:latest
 ├── Python, CUDA, PyTorch, Transformers, etc.
-├── Claude Code, Codex, Kimi, MiniMax CLIs
+├── Claude Code, Codex, Kimi Code, Mini-Agent CLIs
 │
 ├── Researcher (e.g., Claude Code)
 │   └── docker run -v workspace:/workspace        (read-write)
+│   └── ~/.claude/ mounted rw (persistent memory across stages)
 │
 ├── Reviewer 1 (e.g., Codex)
 │   └── docker run -v workspace:/workspace:ro     (read-only)
@@ -50,18 +61,16 @@ researcharena/agent:latest
     └── docker run -v workspace:/workspace:ro     (read-only)
 ```
 
-Reviewers get full access to code, logs, and results — they can even re-run experiments to verify. They just can't modify anything. Review output is parsed from the reviewer agent's stdout since the workspace is read-only.
-
 ### Auto-reviewer selection
 
 The agent under test is excluded from the reviewer pool:
 
 | Researcher | Reviewers |
 |---|---|
-| Claude Code | Codex, Kimi Code, MiniMax |
-| Codex | Claude Code, Kimi Code, MiniMax |
-| Kimi Code | Claude Code, Codex, MiniMax |
-| MiniMax | Claude Code, Codex, Kimi Code |
+| Claude Code | Codex, Kimi Code, Mini-Agent |
+| Codex | Claude Code, Kimi Code, Mini-Agent |
+| Kimi Code | Claude Code, Codex, Mini-Agent |
+| Mini-Agent | Claude Code, Codex, Kimi Code |
 
 ## Setup
 
@@ -83,16 +92,13 @@ pip install -e .
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 export HF_TOKEN=hf_...
-export MOONSHOT_API_KEY=sk-...      # for Kimi
-export MINIMAX_API_KEY=...          # for MiniMax
-export MINIMAX_GROUP_ID=...         # for MiniMax
+export MOONSHOT_API_KEY=sk-...      # for Kimi Code
+export MINIMAX_API_KEY=...          # for Mini-Agent
 ```
 
-API keys are passed to Docker containers via environment variables (never via CLI arguments).
+For subscription agents (Claude Code, Codex), just run `claude login` / `codex login` on the host — credentials are auto-mounted into Docker.
 
 ### 4. (Optional) Configure paperreview.ai
-
-Edit `configs/default.yaml`:
 
 ```yaml
 review:
@@ -103,56 +109,59 @@ review:
 
 ## Usage
 
-### Run the full pipeline
+### Run a single seed
 
 ```bash
-# Test Claude Code
-researcharena run --seed "efficient fine-tuning for LLMs" --agent claude
-
-# Test Codex
-researcharena run --seed "efficient fine-tuning for LLMs" --agent codex
-
-# Test Kimi Code
-researcharena run --seed "efficient fine-tuning for LLMs" --agent kimi
-
-# Test MiniMax
-researcharena run --seed "efficient fine-tuning for LLMs" --agent minimax
-
-# Override model
-researcharena run --agent claude --model claude-opus-4-6
-
-# Limit ideas
-researcharena run --seed "your topic" --max-ideas 3
+researcharena run --seed "computer vision" --agent claude
+researcharena run --seed "reinforcement learning" --agent codex
 ```
 
-### Review an existing workspace
+### Run the full benchmark (47 ICLR 2026 fields)
 
 ```bash
-researcharena review-only outputs/runs/idea_01/
+# All fields, all at once
+researcharena bench --agent claude
+
+# Single field
+researcharena bench --agent claude --field "computer vision"
+
+# Compare agents
+researcharena bench --agent claude
+researcharena bench --agent codex
+researcharena bench --agent kimi
 ```
 
-### Custom config
+### Other commands
 
 ```bash
-researcharena run -c configs/my_config.yaml
+researcharena list-seeds                          # show all 47 seed fields
+researcharena review-only outputs/runs/idea_01/   # review existing paper
+researcharena run -c configs/my_config.yaml       # custom config
 ```
 
 ## Configuration
 
-See [`configs/default.yaml`](configs/default.yaml) for all options:
+See [`configs/default.yaml`](configs/default.yaml):
 
 ```yaml
-seed_topic: "your research topic"
+seed_topic: "computer vision"
+
+resources:
+  total_gpus: 4
+  gpu_ids: "0,1,2,3"
+  gpu_type: "NVIDIA A100"
+  gpu_memory_gb: 80
+  total_cpus: 32
+  total_memory_gb: 128
+  concurrent_agents: 1          # auto-splits resources
 
 agent:
-  type: "claude"              # claude, codex, kimi, minimax, custom
+  type: "claude"                # claude, codex, kimi, minimax, custom
   model: "claude-sonnet-4-6"
   docker_image: "researcharena/agent:latest"
-  gpus: 1
-  memory_limit: "32g"
 
 experiment:
-  max_gpu_hours: 4
+  max_gpu_hours: 8
   max_experiment_retries_per_idea: 3
 
 paper:
@@ -160,205 +169,112 @@ paper:
   max_revisions: 2
 
 review:
-  accept_threshold: 6         # out of 10
-  agents:                     # all agents; researcher auto-excluded
-    - type: "claude"
-      name: "Claude Code"
-    - type: "codex"
-      name: "Codex"
-    - type: "kimi"
-      name: "Kimi Code"
-    - type: "minimax"
-      name: "MiniMax"
+  accept_threshold: 6           # ICLR scale (0-10)
 
 pipeline:
   max_ideas_per_seed: 5
   max_global_steps: 30
 ```
 
-## Iteration & backtracking
+## Scoring (ICLR 2026 scale)
 
-The pipeline doesn't just retry linearly. It backtracks to the right stage based on what failed:
+Reviews use the ICLR 2026 scoring system, aligned with paperreview.ai:
+
+| Score | Meaning | Decision |
+|---|---|---|
+| 10 | Seminal paper, top 5% | accept |
+| 8 | Clear accept, strong contribution | accept |
+| 6 | Marginally above threshold | accept |
+| 4 | Below threshold | reject |
+| 2 | Strong rejection | reject |
+| 0 | Fabricated or trivial | reject |
+
+Acceptance threshold: **6**. Scores are averaged across all review sources.
+
+### Scoring dimensions (per-dimension 1-10)
+
+1. **Novelty** — reviewer searches online (arXiv, Semantic Scholar) to verify
+2. **Soundness** — methodology and evidence
+3. **Significance** — does it matter to the community
+4. **Clarity** — writing quality and organization
+5. **Reproducibility** — enough detail to reimplement
+6. **Experimental rigor** — baselines, ablations, error bars
+7. **References** — reviewer verifies citations exist online
+8. **Results integrity** — sanity check: code/logs match reported numbers
+
+### Automatic rejection grounds
+
+- Fake or non-existent references
+- Experiment code cannot run or doesn't produce claimed results
+- Logs show different numbers than the paper reports
+- Numbers in paper don't match results.json
+
+## Iteration & backtracking
 
 | Failure | Action |
 |---|---|
-| Experiments fail (code crashes) | Retry experiments with error context |
-| Experiment budget exhausted | Abandon idea, try a new one |
-| Paper rejected (score far below threshold) | Abandon idea, try new one |
-| Paper rejected (close to threshold) | Revise paper with reviewer feedback |
-| Paper revisions exhausted | Abandon idea, try new one |
-| Fake references detected | Auto reject, revise with specific feedback |
+| Experiments fail (code crashes) | Retry with error context (up to 3 attempts) |
+| Experiment retries exhausted | Abandon idea, try new one |
+| Paper writing fails (no paper.tex) | Retry (shares revision budget) |
+| Paper rejected, score = 4 | Revise paper with feedback (up to 2 revisions) |
+| Paper rejected, score ≤ 2 | Abandon idea (fundamental issues) |
+| Revisions exhausted | Abandon idea, try new one |
+| Fake references detected | Score 0, abandon idea |
 
-When all ideas are exhausted, the pipeline returns the **best-scoring paper** across all attempts (or `None` if no paper was ever produced).
-
-## Review process
-
-Each paper goes through three review gates:
-
-### 1. Reference verification
-
-Every citation is checked against Semantic Scholar and CrossRef APIs. **Any fake reference = automatic rejection (score 0).** Parser failures and API outages are handled gracefully — only references confirmed as non-existent trigger rejection. The feedback lists exactly which references need replacing.
-
-### 2. paperreview.ai
-
-The compiled PDF is submitted to [paperreview.ai](https://paperreview.ai/) (Stanford Agentic Reviewer) for an external review.
-
-### 3. CLI agent reviewers
-
-Other CLI agents run in the **same Docker image** with the workspace mounted read-only. They verify the full chain:
-
-- **Code → Logs**: Does the code run? Do logs show real training?
-- **Logs → Results**: Do final metrics in logs match results.json?
-- **Results → Paper**: Do numbers in the paper match results.json?
-- **Code → Paper**: Does the code implement what the paper describes?
-
-Reviewers output their review as JSON to stdout (since the workspace is read-only). The harness parses the last valid JSON object from the output to avoid matching example JSON in the agent's reasoning.
-
-If any link in the verification chain is broken, the reviewer scores `results_integrity: 0` and the paper is rejected.
+Best paper across all attempts is tracked and returned.
 
 ## Output
 
-Each run produces a workspace directory:
-
 ```
 outputs/runs/
-├── summary.json                         # final run summary
-├── tracker.json                         # full tracking data (see below)
+├── summary.json                         # final result
+├── tracker.json                         # time, tokens, cost per action
 │
 ├── idea_01/
-│   ├── CLAUDE.md                        # agent permissions
-│   ├── research_guidelines.md           # research best practices
-│   ├── reviewer_guidelines.md           # reviewer instructions
+│   ├── CLAUDE.md                        # agent context (stage overview)
+│   ├── idea_guidelines.md               # how to find a novel idea
+│   ├── experiment_guidelines.md         # how to design & run experiments
+│   ├── paper_writing_guidelines.md      # how to write the paper
 │   ├── idea.json                        # research idea
-│   ├── experiment.py                    # experiment code (agent-written)
 │   ├── results.json                     # experiment results
-│   ├── paper.tex                        # LaTeX paper
-│   ├── paper.pdf                        # compiled PDF
+│   ├── paper.tex / paper.pdf            # the paper
 │   ├── figures/                         # generated figures
-│   ├── logs/
-│   │   ├── claude_1710523200_stdout.txt # researcher agent output
-│   │   ├── claude_1710523200_stderr.txt
-│   │   ├── claude_1710523200_command.txt
-│   │   └── claude_1710523200_events.jsonl  # timestamped stream events
+│   ├── logs/                            # researcher agent output
 │   ├── reviews.json                     # aggregated reviews
-│   └── reference_check.json             # citation verification results
+│   └── reference_check.json             # citation verification
 │
-├── idea_01_review_logs/                 # reviewer agent outputs (sibling dir, not inside read-only workspace)
-│   ├── codex_1710530000_stdout.txt
-│   └── kimi_1710530100_stdout.txt
+├── idea_01_review_logs/                 # reviewer agent outputs
 │
-└── idea_02/
-    └── ...
+└── idea_02/                             # if idea_01 was rejected
 ```
-
-## Tracking
-
-Every run produces a `tracker.json` with structured data at three levels of granularity:
-
-### Run level
-
-Total time, tokens, cost, and per-stage aggregation:
-
-```json
-{
-  "total_elapsed_seconds": 18247.3,
-  "total_tokens": {"input_tokens": 1842000, "output_tokens": 563000, "total_tokens": 2405000},
-  "total_cost_usd": 13.97,
-  "stages": {
-    "ideation":    {"elapsed_seconds": 2105, "tokens": {}, "cost_usd": 1.21, "actions": 2, "successes": 2, "failures": 0},
-    "experiments": {"elapsed_seconds": 9842, "tokens": {}, "cost_usd": 4.78, "actions": 3, "successes": 2, "failures": 1,
-                    "failure_categories": {"oom": 1}},
-    "paper":       {"elapsed_seconds": 3210, "tokens": {}, "cost_usd": 3.96, "actions": 3, "successes": 3, "failures": 0},
-    "review":      {"elapsed_seconds": 3089, "tokens": {}, "cost_usd": 4.01, "actions": 8, "successes": 7, "failures": 1}
-  }
-}
-```
-
-### Action level
-
-Each pipeline stage invocation is a separate action with timing, tokens, cost, failure classification, workspace diff, and log file links:
-
-```json
-{
-  "stage": "experiments",
-  "action": "run_experiments",
-  "agent_type": "claude",
-  "model": "claude-sonnet-4-6",
-  "attempt": 1,
-  "elapsed_seconds": 5124.7,
-  "tokens": {"input_tokens": 320000, "output_tokens": 98000, "total_tokens": 418000},
-  "outcome": "failure",
-  "failure_category": "oom",
-  "details": "No results.json produced",
-  "cost_usd": 2.43,
-  "log_files": {
-    "stdout": "outputs/runs/idea_01/logs/claude_1710523200_stdout.txt",
-    "events": "outputs/runs/idea_01/logs/claude_1710523200_events.jsonl"
-  },
-  "workspace_diff": {
-    "created": [{"path": "experiment.py", "size": 4821}],
-    "modified": [],
-    "deleted": []
-  },
-  "sub_actions": []
-}
-```
-
-Failure categories: `oom`, `timeout`, `rate_limit`, `auth_error`, `gpu_error`, `import_error`, `crash`, `syntax_error`, `runtime_error`, `docker_error`, `network_error`, `unknown`
-
-### Sub-action level
-
-Each tool call the agent made within a stage:
-
-```json
-{
-  "tool": "Bash",
-  "input": "python experiment.py --epochs 50 --seed 42",
-  "output": "Epoch 50/50 - loss: 0.234 - acc: 0.891",
-  "reasoning": "Let me run the training with the first seed.",
-  "tokens": {"input": 9400, "output": 450},
-  "duration_seconds": 342.8,
-  "files_affected": ["results.json", "figures/accuracy_curve.png"]
-}
-```
-
-### Tracking coverage by agent
-
-| Capability | Claude Code | Codex | Kimi Code | Mini-Agent |
-|---|---|---|---|---|
-| **Output format** | `--output-format stream-json` | `--json` (JSONL) | `--output-format stream-json` | generic stdout |
-| Tool calls | structured events | structured events | structured events | generic parsing |
-| Per-tool duration | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl | timestamped events.jsonl |
-| File changes | workspace diff | workspace diff | workspace diff | workspace diff |
-| Failure category | stderr patterns | stderr patterns | stderr patterns | stderr patterns |
-
-All agents run natively via their own CLI tools and stream through `Popen` with line-by-line timestamping.
 
 ## Project structure
 
 ```
 researcharena/
-├── cli.py                       # CLI entry point
+├── cli.py                       # CLI entry point (run, bench, review-only, list-seeds)
 ├── pipeline.py                  # State machine orchestrator
 ├── stages/
-│   ├── ideation.py              # Agent generates research idea
-│   ├── experiment_design.py     # Agent implements & runs experiments
-│   ├── paper_writing.py         # Agent writes LaTeX paper
-│   └── review.py                # Multi-source review (refs + paperreview.ai + CLI agents)
+│   ├── ideation.py              # Stage 1: agent explores field, produces idea.json
+│   ├── experiment_design.py     # Stage 2: agent implements & runs experiments
+│   ├── paper_writing.py         # Stage 3: agent writes LaTeX paper
+│   └── review.py                # Stage 4: reference check + paperreview.ai + CLI agent reviewers
 ├── utils/
-│   ├── agent_runner.py          # Docker container management + streaming + failure classification
-│   ├── tracker.py               # Run/action/sub-action tracking with time, tokens, cost
+│   ├── agent_runner.py          # Docker container management, 4 agent CLIs
+│   ├── tracker.py               # Time, tokens, cost tracking
 │   ├── action_parser.py         # Parse agent stdout into structured sub-actions
 │   ├── workspace_diff.py        # Before/after filesystem snapshots
 │   ├── config.py                # YAML config loading
-│   ├── paperreview.py           # paperreview.ai automation
+│   ├── paperreview.py           # paperreview.ai automation (Playwright)
 │   └── reference_checker.py     # Citation verification (Semantic Scholar + CrossRef)
 ├── templates/
-│   ├── research_guidelines.md   # Guidelines for the researcher agent
-│   └── reviewer_guidelines.md   # Guidelines for reviewer agents
+│   ├── idea_guidelines.md       # How to find a novel research idea
+│   ├── experiment_guidelines.md # How to design & run rigorous experiments
+│   ├── paper_writing_guidelines.md  # How to write a research paper
+│   └── reviewer_guidelines.md   # How to review (ICLR scale, novelty search)
 ├── configs/
-│   └── default.yaml             # Default configuration
-├── Dockerfile                   # GPU-enabled container with all agent CLIs
-├── .dockerignore                # Excludes outputs/.git from Docker build context
-└── .gitignore
+│   ├── default.yaml             # Default configuration
+│   └── seeds.yaml               # 47 seed fields from ICLR 2026 CFP
+├── Dockerfile                   # GPU-enabled container with all 4 agent CLIs
+└── .dockerignore
 ```
