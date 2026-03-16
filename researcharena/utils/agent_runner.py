@@ -497,8 +497,14 @@ def _build_docker_command(
     ]
 
     # ── GPU access ──
+    # Use specific GPU IDs if provided (e.g., "0,2"), otherwise use count
+    cuda_devices = config.get("cuda_devices")
     gpus = config.get("gpus", 1)
-    if gpus:
+    if cuda_devices:
+        # Use NVIDIA_VISIBLE_DEVICES for specific GPU assignment
+        device_ids = cuda_devices.split(",")
+        cmd.extend(["--gpus", f'"device={cuda_devices}"'])
+    elif gpus:
         if isinstance(gpus, int):
             cmd.extend(["--gpus", str(gpus)])
         elif gpus == "all":

@@ -101,6 +101,40 @@ class Pipeline:
         self.agent_type = config["agent"]["type"]
         self.agent_config = config["agent"]
 
+        # Compute per-agent resource allocation from total cluster resources
+        resources = config.get("resources", {})
+        n = max(1, resources.get("concurrent_agents", 1))
+
+        total_gpus = resources.get("total_gpus", 1)
+        gpus_per_agent = total_gpus // n if isinstance(total_gpus, int) else total_gpus
+
+        # Partition GPU IDs across concurrent agents
+        # agent_index is 0 for single-agent runs; for concurrent runs,
+        # the bench command would set this per agent
+        agent_index = config.get("_agent_index", 0)
+        all_gpu_ids = str(resources.get("gpu_ids", "0")).split(",")
+        if isinstance(gpus_per_agent, int) and len(all_gpu_ids) >= n:
+            start = agent_index * gpus_per_agent
+            assigned_ids = all_gpu_ids[start:start + gpus_per_agent]
+            self.agent_config["cuda_devices"] = ",".join(assigned_ids)
+        else:
+            self.agent_config["cuda_devices"] = str(resources.get("gpu_ids", "0"))
+
+        self.agent_config["gpus"] = gpus_per_agent
+        self.agent_config["cpus"] = resources.get("total_cpus", 8) // n
+        self.agent_config["memory_limit"] = f"{resources.get('total_memory_gb', 32) // n}g"
+        self.agent_config["shm_size"] = f"{resources.get('total_shm_gb', 8) // n}g"
+
+        # Store for the experiment prompt
+        self.per_agent_resources = {
+            "gpus": gpus_per_agent,
+            "gpu_type": resources.get("gpu_type", "GPU"),
+            "gpu_memory_gb": resources.get("gpu_memory_gb", 80),
+            "cpus": resources.get("total_cpus", 8) // n,
+            "memory_gb": resources.get("total_memory_gb", 32) // n,
+            "time_hours": config["experiment"].get("max_gpu_hours", 8),
+        }
+
         self.base_dir = Path(config["experiment"]["workspace"])
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -262,8 +296,9 @@ class Pipeline:
         results, agent_result = experiments.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
-            timeout=self.config["experiment"].get("max_gpu_hours", 4) * 3600,
+            timeout=self.config["experiment"].get("max_gpu_hours", 8) * 3600,
             agent_config=self.agent_config,
+            resources=self.per_agent_resources,
             prior_errors=self.state.experiment_errors or None,
         )
 

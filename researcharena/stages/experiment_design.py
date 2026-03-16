@@ -22,6 +22,7 @@ def run(
     timeout: int = 14400,
     agent_config: dict | None = None,
     prior_errors: list[str] | None = None,
+    resources: dict | None = None,
 ) -> tuple[dict | None, object]:
     """Let the agent implement and run experiments.
 
@@ -30,7 +31,7 @@ def run(
     Returns:
         Tuple of (parsed results dict or None, AgentResult).
     """
-    task = _build_task(workspace, prior_errors)
+    task = _build_task(workspace, prior_errors, resources)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -43,12 +44,30 @@ def run(
     return _parse_output(workspace), agent_result
 
 
-def _build_task(workspace: Path, prior_errors: list[str] | None) -> str:
+def _build_task(
+    workspace: Path,
+    prior_errors: list[str] | None,
+    resources: dict | None = None,
+) -> str:
+    res = resources or {}
+    gpus = res.get("gpus", 1)
+    gpu_type = res.get("gpu_type", "GPU")
+    gpu_mem = res.get("gpu_memory_gb", 80)
+    cpus = res.get("cpus", 8)
+    mem = res.get("memory_gb", 32)
+    hours = res.get("time_hours", 8)
+
     task = (
         "You are a researcher. Read the idea.json, research_guidelines.md, "
         "and experiment_guidelines.md in the current directory.\n\n"
         "The experiment_guidelines.md contains detailed instructions on how to "
         "conduct rigorous ML experiments — follow it closely.\n\n"
+        "AVAILABLE RESOURCES:\n"
+        f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
+        f"   - RAM: {mem}GB\n"
+        f"   - CPU: {cpus} cores\n"
+        f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+        "   Plan your experiments to fit within these resources.\n\n"
         "Your job is to conduct the full experimental workflow for the research "
         "idea described in idea.json:\n\n"
         "1. EXPERIMENT DESIGN\n"
