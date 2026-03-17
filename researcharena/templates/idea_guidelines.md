@@ -10,10 +10,16 @@ and standard academic research practices.
 
 Start by understanding what already exists. DO NOT skip this step.
 
-### Search for recent work
+### Search for existing work (newest to oldest)
 - Search arXiv (arxiv.org), Semantic Scholar (semanticscholar.org), and
-  Google Scholar (scholar.google.com) for recent papers in your seed field
-- Focus on papers from the last 2-3 years — the field moves fast
+  Google Scholar (scholar.google.com) for papers in your seed field
+- **Start with the newest papers first** — sort by date, read the most
+  recent work before going to older foundational papers. This ensures
+  you know the current frontier before proposing something new.
+- Recommended search order:
+  1. Last 6 months — what's happening right now?
+  2. Last 1-2 years — what are the current state-of-the-art methods?
+  3. Foundational papers — what are the classic approaches?
 - Look for:
   - Survey papers — they summarize the landscape and list open problems
   - Highly-cited recent papers — they define the current state of the art
