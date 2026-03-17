@@ -682,16 +682,18 @@ def _build_docker_command(
 
     # Mount CLI agent binaries from host (if not in image)
     home = Path.home()
+    # Map agent_type to (binary_name_to_find, binary_name_in_container)
     cli_binaries = {
-        "claude": shutil.which("claude"),
-        "codex": shutil.which("codex"),
-        "kimi": shutil.which("kimi"),
-        "minimax": shutil.which("mini-agent"),
+        "claude": ("claude", "claude"),
+        "codex": ("codex", "codex"),
+        "kimi": ("kimi", "kimi"),
+        "minimax": ("mini-agent", "mini-agent"),
     }
-    host_bin = cli_binaries.get(agent_type)
+    bin_search, bin_name = cli_binaries.get(agent_type, (agent_type, agent_type))
+    host_bin = shutil.which(bin_search)
     if host_bin:
         host_bin = str(Path(host_bin).resolve())
-        cmd.extend(["-v", f"{host_bin}:/usr/local/bin/{agent_type}:ro"])
+        cmd.extend(["-v", f"{host_bin}:/usr/local/bin/{bin_name}:ro"])
 
     # Mount CLI agent auth & memory
     auth_mounts = {
