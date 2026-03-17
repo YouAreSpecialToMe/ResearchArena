@@ -106,7 +106,7 @@ def review_paper(
 
     if tracker:
         tracker.begin_action(stage="review", action="reference_check")
-    ref_result = check_references(paper_latex)
+    ref_result = check_references(paper_latex, workspace=workspace)
     if workspace:
         save_reference_check(ref_result, workspace)
     if tracker:

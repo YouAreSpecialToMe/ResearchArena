@@ -39,16 +39,28 @@ class ReferenceCheckResult:
         return self.unverified / self.total if self.total > 0 else 0.0
 
 
-def check_references(paper_latex: str) -> ReferenceCheckResult:
+def check_references(paper_latex: str, workspace: Path | None = None) -> ReferenceCheckResult:
     """Extract and verify all references from a LaTeX paper.
 
     Args:
         paper_latex: LaTeX source code
+        workspace: workspace directory (to find .bib files if references
+                   are in a separate file via \\bibliography{})
 
     Returns:
         ReferenceCheckResult with verification status per reference
     """
-    raw_refs = _extract_references(paper_latex)
+    # If the .tex uses \bibliography{name}, read the .bib file too
+    combined = paper_latex
+    if workspace:
+        import re as _re
+        bib_match = _re.search(r'\\bibliography\{(\w+)\}', paper_latex)
+        if bib_match:
+            bib_path = workspace / f"{bib_match.group(1)}.bib"
+            if bib_path.exists():
+                combined = paper_latex + "\n" + bib_path.read_text()
+
+    raw_refs = _extract_references(combined)
     console.print(f"  Found {len(raw_refs)} references to verify")
 
     if not raw_refs:
