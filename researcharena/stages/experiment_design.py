@@ -99,13 +99,18 @@ def _build_task(
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
         "If your method doesn't beat baselines, report that honestly — negative "
         "results with honest analysis are valuable science.\n\n"
-        "ABANDON OPTION: After running experiments, if your method clearly "
-        "underperforms ALL baselines and you believe the idea is fundamentally "
-        "flawed (not just a tuning issue), you may abandon this idea by writing "
-        'a file called abandon.json with: {"abandon": true, "reason": "..."}. '
-        "The pipeline will go back to ideation with a new idea. Only do this if "
-        "the results are clearly negative — marginal differences or mixed results "
-        "are still worth writing up."
+        "ABANDON OPTION: At any point during experiments, if you determine this "
+        "idea is not viable, you may abandon it by writing a file called "
+        'abandon.json with: {"abandon": true, "reason": "..."}. '
+        "The pipeline will go back to ideation with a new idea. Valid reasons "
+        "to abandon include (but are not limited to):\n"
+        "  - Method clearly underperforms all baselines (not just a tuning issue)\n"
+        "  - Experiment setup is infeasible (dependencies won't install, dataset "
+        "too large for available resources, etc.)\n"
+        "  - Code won't run after multiple debugging attempts\n"
+        "  - Approach is fundamentally intractable with available compute\n"
+        "  - Any other reason you judge the idea is not worth pursuing\n"
+        "Use your judgment — marginal or mixed results are still worth writing up."
     )
 
     if prior_errors:
