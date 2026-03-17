@@ -25,7 +25,17 @@ from rich.table import Table
 
 console = Console()
 
-_REVIEWER_GUIDELINES_PATH = Path(__file__).parent.parent / "templates" / "reviewer_guidelines.md"
+_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+_DOMAINS_WITH_TEMPLATES = {"systems", "databases", "pl", "theory", "security"}
+
+
+def _get_reviewer_guidelines_path(domain: str = "ml") -> Path:
+    """Return the path to reviewer guidelines, domain-specific if available."""
+    if domain in _DOMAINS_WITH_TEMPLATES:
+        domain_path = _TEMPLATES_DIR / domain / "reviewer_guidelines.md"
+        if domain_path.exists():
+            return domain_path
+    return _TEMPLATES_DIR / "reviewer_guidelines.md"
 
 # Output format appended to every reviewer prompt
 _REVIEW_OUTPUT_FORMAT = """
@@ -79,6 +89,7 @@ def review_paper(
     docker_image: str = "researcharena/agent:latest",
     tracker=None,
     runtime: str = "docker",
+    domain: str = "ml",
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
 
@@ -194,6 +205,7 @@ def review_paper(
                     venue=venue,
                     docker_image=docker_image,
                     runtime=runtime,
+                    domain=domain,
                 )
                 reviewer_log_files = agent_result.log_files if agent_result else None
 
@@ -272,6 +284,7 @@ def _run_cli_reviewer(
     venue: str,
     docker_image: str,
     runtime: str = "docker",
+    domain: str = "ml",
 ) -> tuple[dict | None, object]:
     """Run a CLI agent as a reviewer in Docker with read-only workspace.
 
@@ -285,10 +298,11 @@ def _run_cli_reviewer(
     """
     from researcharena.utils.agent_runner import invoke_agent
 
-    # Load reviewer guidelines
+    # Load domain-specific reviewer guidelines
+    reviewer_guidelines_path = _get_reviewer_guidelines_path(domain)
     guidelines = ""
-    if _REVIEWER_GUIDELINES_PATH.exists():
-        guidelines = _REVIEWER_GUIDELINES_PATH.read_text()
+    if reviewer_guidelines_path.exists():
+        guidelines = reviewer_guidelines_path.read_text()
 
     task = (
         f"You are a reviewer for {venue}. The workspace contains a research "
@@ -314,10 +328,10 @@ def _run_cli_reviewer(
     # to do this before mounting — the workspace already has idea_guidelines,
     # we add reviewer_guidelines alongside it)
     reviewer_guide_dest = workspace / "reviewer_guidelines.md"
-    if not reviewer_guide_dest.exists() and _REVIEWER_GUIDELINES_PATH.exists():
+    if not reviewer_guide_dest.exists() and reviewer_guidelines_path.exists():
         try:
             import shutil
-            shutil.copy2(_REVIEWER_GUIDELINES_PATH, reviewer_guide_dest)
+            shutil.copy2(reviewer_guidelines_path, reviewer_guide_dest)
         except OSError:
             pass  # workspace might already be read-only from a previous reviewer
 

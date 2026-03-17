@@ -527,6 +527,7 @@ class Pipeline:
             docker_image=self.agent_config.get("docker_image", "researcharena/agent:latest"),
             tracker=self.tracker,
             runtime=self.agent_config.get("runtime", "docker"),
+            domain=self.domain,
         )
         review.save_reviews(result, self.state.workspace)
         self.state.review_result = result

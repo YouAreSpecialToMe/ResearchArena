@@ -104,8 +104,9 @@ def run(config, seed, agent, model, max_ideas, platform, domain):
 
 @main.command()
 @click.option("--config", "-c", default="configs/default.yaml")
+@click.option("--domain", default=None, type=click.Choice(["ml", "systems", "databases", "pl", "theory", "security"]), help="Domain (selects reviewer guidelines)")
 @click.argument("workspace", type=click.Path(exists=True))
-def review_only(config, workspace):
+def review_only(config, domain, workspace):
     """Run review on an existing paper (skip research stages)."""
     cfg = load_config(config)
     workspace = Path(workspace)
@@ -119,6 +120,8 @@ def review_only(config, workspace):
         console.print(f"[red]No paper.tex found in {workspace}[/]")
         return
 
+    resolved_domain = domain or cfg.get("seed_domain", "ml")
+
     # Use all agents as reviewers for standalone review
     result = review_paper(
         paper_latex=paper_tex.read_text(),
@@ -130,6 +133,7 @@ def review_only(config, workspace):
         workspace=workspace,
         docker_image=cfg["agent"].get("docker_image", "researcharena/agent:latest"),
         runtime=cfg["agent"].get("runtime", "docker"),
+        domain=resolved_domain,
     )
     save_reviews(result, workspace)
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")
