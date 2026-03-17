@@ -491,11 +491,13 @@ class Pipeline:
         paper_pdf = self.state.workspace / "paper.pdf"
         latex = paper_tex.read_text(errors="replace") if paper_tex.exists() else ""
 
-        # Auto-select reviewer agents: all configured agents EXCEPT the one under test
-        reviewer_agents = [
-            a for a in self.config["review"].get("agents", [])
-            if a.get("type") != self.agent_type
-        ]
+        # Auto-select reviewer agents: exclude the researcher from the pool
+        # unless allow_self_review is set (useful for smoke tests with one agent)
+        all_agents = self.config["review"].get("agents", [])
+        if self.config["review"].get("allow_self_review", False):
+            reviewer_agents = all_agents
+        else:
+            reviewer_agents = [a for a in all_agents if a.get("type") != self.agent_type]
         console.print(
             f"  Researcher: {self.agent_type} → "
             f"Reviewers: {[a.get('name', a.get('type')) for a in reviewer_agents]}"
