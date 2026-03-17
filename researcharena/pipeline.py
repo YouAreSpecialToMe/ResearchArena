@@ -544,7 +544,7 @@ class Pipeline:
             ))
 
         elif self.state.paper_revision_attempts < self.state.max_paper_revisions:
-            # Score between 2 and threshold (e.g., 4): below threshold but potentially fixable
+            # Score between 2 and threshold: below threshold but potentially fixable
             # Full revision loop: refine idea → re-run experiments → rewrite paper
             self.state.paper_revision_attempts += 1
             console.print(
