@@ -533,32 +533,30 @@ class Pipeline:
 
         console.print(f"  Score: {result.avg_score:.1f}/10, Decision: {result.decision}")
 
-        if result.avg_score >= accept_threshold:
+        if result.avg_score >= 8:
+            # Score 8-10: clear accept
             console.print(Panel("[bold green]ACCEPTED![/]", style="green"))
             self.state.stage = Stage.ACCEPTED
 
-        elif result.avg_score <= 2:
-            # Score 0 or 2: fundamental issues, abandon idea
-            console.print("  [yellow]→ Score ≤ 2: fundamental issues. Abandoning idea.[/]")
-            self._abandon_idea("review", (
-                f"Score {result.avg_score:.1f} (threshold {accept_threshold}). "
-                f"Feedback: {result.aggregated_feedback[:500]}"
-            ))
+        elif result.avg_score >= 6:
+            # Score 6: marginal, try to improve with revision
+            if self.state.paper_revision_attempts < self.state.max_paper_revisions:
+                self.state.paper_revision_attempts += 1
+                console.print(
+                    f"  [yellow]→ Score 6 (marginal). Revision {self.state.paper_revision_attempts}/"
+                    f"{self.state.max_paper_revisions}: refine idea → experiments → paper[/]"
+                )
+                self.state.stage = Stage.REFINE_IDEA
+            else:
+                # Revisions exhausted but score is 6 — accept as marginal
+                console.print(Panel("[bold green]ACCEPTED (marginal, revisions exhausted)[/]", style="green"))
+                self.state.stage = Stage.ACCEPTED
 
-        elif self.state.paper_revision_attempts < self.state.max_paper_revisions:
-            # Score between 2 and threshold: below threshold but potentially fixable
-            # Full revision loop: refine idea → re-run experiments → rewrite paper
-            self.state.paper_revision_attempts += 1
-            console.print(
-                f"  [yellow]→ Revision {self.state.paper_revision_attempts}/{self.state.max_paper_revisions}: "
-                f"refine idea → experiments → paper[/]"
-            )
-            self.state.stage = Stage.REFINE_IDEA
-
-        else:
-            console.print("  [yellow]→ Revisions exhausted. Abandoning idea.[/]")
+        elif result.avg_score <= 4:
+            # Score 0-4: reject, abandon idea
+            console.print(f"  [yellow]→ Score ≤ 4: rejected. Abandoning idea.[/]")
             self._abandon_idea("review", (
-                f"Score {result.avg_score:.1f} after {self.state.paper_revision_attempts} revisions. "
+                f"Score {result.avg_score:.1f}. "
                 f"Feedback: {result.aggregated_feedback[:500]}"
             ))
 

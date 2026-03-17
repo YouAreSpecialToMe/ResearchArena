@@ -23,10 +23,10 @@ Each stage has a dedicated guideline file that the agent reads before starting. 
                     │                                                              │
 Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW              │
                     │     ↑              ↑                       │                │
-                    │     │              │                       ├─ score ≥ 6     │
+                    │     │              │                       ├─ score ≥ 8     │
                     │     │              │                       │   → ACCEPTED   │
                     │     │              │                       │                │
-                    │     │              │                       ├─ 2 < score < 6 │
+                    │     │              │                       ├─ score = 6     │
                     │     │              │                       │   ↓            │
                     │     │              │                   REFINE IDEA          │
                     │     │              │                   (read feedback,      │
@@ -37,11 +37,12 @@ Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──�
                     │     │                  + rewrite paper                       │
                     │     │                  + re-review                           │
                     │     │                                                        │
-                    │     │              ┌─ score ≤ 2 (fundamental issues)        │
-                    │     │              ├─ revisions exhausted                    │
+                    │     │              ┌─ score ≤ 4 (rejected)                   │
                     │     │              ├─ experiment retries exhausted           │
                     │     │              └─ agent writes abandon.json             │
                     │     └──────────────── try new idea ─────────────────────────│
+                    │                                                              │
+                    │     score 6 + revisions exhausted → ACCEPTED (marginal)      │
                     │                                                              │
                     │  Each stage = one CLI agent invocation                       │
                     │  Agent sees resource constraints + retry budget at each stage│
@@ -258,7 +259,7 @@ paper:
   max_revisions: 2
 
 review:
-  accept_threshold: 6           # ICLR scale (0-10)
+  accept_threshold: 8           # ≥8 accept, 6 revision, ≤4 reject
   allow_self_review: false      # true for smoke tests with one agent
 
 pipeline:
@@ -296,12 +297,12 @@ Reviews use the ICLR 2026 scoring system, aligned with paperreview.ai:
 |---|---|---|
 | 10 | Seminal paper, top 5% | accept |
 | 8 | Clear accept, strong contribution | accept |
-| 6 | Marginally above threshold | accept |
-| 4 | Below threshold | reject |
-| 2 | Strong rejection | reject |
-| 0 | Fabricated or trivial | reject |
+| 6 | Marginally above threshold | revision (try to improve) |
+| 4 | Below threshold | reject, abandon idea |
+| 2 | Strong rejection | reject, abandon idea |
+| 0 | Fabricated or trivial | reject, abandon idea |
 
-Acceptance threshold: **6**. Scores are averaged across all review sources.
+Acceptance threshold: **8**. Score 6 triggers a revision loop. Scores are averaged across all review sources.
 
 ### Scoring dimensions (per-dimension 1-10)
 
@@ -329,8 +330,8 @@ Acceptance threshold: **6**. Scores are averaged across all review sources.
 | Experiment retries exhausted | Abandon idea, try new one |
 | Agent writes `abandon.json` | Abandon idea early (agent decides idea isn't viable) |
 | Paper writing fails (no paper.tex) | Retry paper writing |
-| Paper rejected, score > 2 and < 6 | Full revision loop: refine idea → re-run experiments → rewrite paper (up to 2 revisions) |
-| Paper rejected, score ≤ 2 | Abandon idea (fundamental issues) |
+| Paper score = 6 (marginal) | Full revision loop: refine idea → re-run experiments → rewrite paper (up to 2 revisions) |
+| Paper score ≤ 4 (rejected) | Abandon idea, try new one |
 | Revisions exhausted, still rejected | Abandon idea, try new one |
 | Fake references detected | Score 0, abandon idea |
 
