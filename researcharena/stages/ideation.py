@@ -163,14 +163,8 @@ def _build_refinement_task(
     )
 
     if results:
-        # Summarize key results
-        method_results = results.get("method", {})
-        baseline_results = results.get("baselines", {})
-        task += "PREVIOUS EXPERIMENT RESULTS (summary):\n"
-        task += f"  Method: {json.dumps(method_results)[:300]}\n"
-        for name, scores in baseline_results.items():
-            task += f"  Baseline '{name}': {json.dumps(scores)[:200]}\n"
-        task += "\n"
+        task += "PREVIOUS EXPERIMENT RESULTS:\n"
+        task += f"{json.dumps(results, indent=2)}\n\n"
 
     task += (
         "YOUR TASK:\n"
@@ -203,6 +197,8 @@ def _parse_output(workspace: Path) -> dict | None:
     # Check required fields
     missing = [f for f in REQUIRED_FIELDS if f not in idea]
     if missing:
+        from rich.console import Console
+        Console().print(f"  [yellow]idea.json missing fields: {missing}[/]")
         return None
 
     return idea
