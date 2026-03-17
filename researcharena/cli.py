@@ -82,6 +82,7 @@ def review_only(config, workspace):
         accept_threshold=cfg["review"]["accept_threshold"],
         workspace=workspace,
         docker_image=cfg["agent"].get("docker_image", "researcharena/agent:latest"),
+        runtime=cfg["agent"].get("runtime", "docker"),
     )
     save_reviews(result, workspace)
     console.print(f"Score: {result.avg_score:.1f}/10, Decision: {result.decision}")

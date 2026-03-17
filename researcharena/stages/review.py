@@ -78,6 +78,7 @@ def review_paper(
     workspace: Path | None = None,
     docker_image: str = "researcharena/agent:latest",
     tracker=None,
+    runtime: str = "docker",
 ) -> ReviewResult:
     """Run all review sources and aggregate scores automatically.
 
@@ -179,6 +180,7 @@ def review_paper(
                     workspace=workspace,
                     venue=venue,
                     docker_image=docker_image,
+                    runtime=runtime,
                 )
                 reviewer_log_files = agent_result.log_files if agent_result else None
 
@@ -256,6 +258,7 @@ def _run_cli_reviewer(
     workspace: Path,
     venue: str,
     docker_image: str,
+    runtime: str = "docker",
 ) -> tuple[dict | None, object]:
     """Run a CLI agent as a reviewer in Docker with read-only workspace.
 
@@ -309,6 +312,7 @@ def _run_cli_reviewer(
     reviewer_config = {
         **agent_cfg,
         "docker_image": docker_image,
+        "runtime": runtime,
     }
 
     result = invoke_agent(
