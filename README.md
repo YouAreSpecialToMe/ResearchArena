@@ -6,14 +6,14 @@ Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code,
 
 Given a seed field (e.g., "computer vision", "reinforcement learning"), the pipeline:
 
-1. **Launches a CLI agent in Docker** with GPU access, network, and ML packages
+1. **Launches a CLI agent** with GPU access, network, and ML packages
 2. **The agent does everything** — explores the field, comes up with an idea, designs and runs experiments, writes a LaTeX paper
-3. **Other CLI agents review it** — running in the same Docker image with read-only workspace access, searching online to verify novelty
+3. **Other CLI agents review it** — with read-only workspace access, searching online to verify novelty
 4. **paperreview.ai** provides an additional external review
 5. **References are verified** against Semantic Scholar and CrossRef
 6. If rejected, the pipeline iterates — revise the paper, retry experiments, or try a new idea entirely
 
-Each stage has a dedicated guideline file that the agent reads before starting. The agent has persistent memory across stages.
+Each stage has a dedicated guideline file that the agent reads before starting. The agent receives computational resource constraints upfront so it scopes ideas to fit.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──�
                     │     │              └── retry experiments    │           │
                     │     └── try new idea ───────────────────────┘           │
                     │                                                         │
-                    │  Each stage = one CLI agent invocation in Docker        │
+                    │  Each stage = one CLI agent invocation                  │
                     │  Each stage has a guideline: idea / experiment / paper   │
                     └─────────────────────────────────────────────────────────┘
 ```
@@ -36,19 +36,21 @@ Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──�
 
 | Stage | Agent reads | Agent produces | Guideline |
 |---|---|---|---|
-| 1. IDEATION | seed field | `idea.json` | `idea_guidelines.md` |
+| 1. IDEATION | seed field + resource constraints | `idea.json` | `idea_guidelines.md` |
 | 2. EXPERIMENTS | `idea.json` | `results.json` + `figures/` | `experiment_guidelines.md` |
 | 3. PAPER | `idea.json` + `results.json` | `paper.tex` | `paper_writing_guidelines.md` |
 | 4. REVIEW | paper + workspace (read-only) | review scores | `reviewer_guidelines.md` |
 
-### Docker sharing
+### Runtime modes
 
-All agents (researcher + reviewers) run in the **same Docker image**:
+The harness supports two runtime modes:
+
+**Docker/Podman mode** (`runtime: "docker"`, default) — each agent runs in an isolated container:
 
 ```
-researcharena/agent:latest
-├── Python, CUDA, PyTorch, Transformers, etc.
-├── Claude Code, Codex, Kimi Code, Mini-Agent CLIs
+researcharena/agent:latest (pytorch/pytorch base)
+├── Python, CUDA, PyTorch pre-installed
+├── CLI agent binaries mounted from host
 │
 ├── Researcher (e.g., Claude Code)
 │   └── docker run -v workspace:/workspace        (read-write)
@@ -60,6 +62,18 @@ researcharena/agent:latest
 └── Reviewer 2 (e.g., Kimi Code)
     └── docker run -v workspace:/workspace:ro     (read-only)
 ```
+
+**Local mode** (`runtime: "local"`) — agents run directly on the host:
+
+```
+workspace/idea_01/
+├── .venv/                    # per-workspace virtualenv (system-site-packages)
+├── idea.json, results.json   # agent artifacts
+├── logs/                     # stdout, stderr, events.jsonl
+└── CLAUDE.md                 # agent context file
+```
+
+Each workspace gets its own virtualenv so agents can `pip install` packages without conflicting with each other or the host. Local mode is useful when Docker/Podman is unavailable or for development.
 
 ### Auto-reviewer selection
 
@@ -74,19 +88,48 @@ The agent under test is excluded from the reviewer pool:
 
 ## Setup
 
-### 1. Build the Docker image
-
-```bash
-docker build -t researcharena/agent:latest .
-```
-
-### 2. Install the harness
+### 1. Install the harness
 
 ```bash
 pip install -e .
 ```
 
-### 3. Set API keys
+### 2. (Docker mode) Build or pull the image
+
+```bash
+# Option A: Pull pre-built PyTorch image and tag it
+docker pull pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+docker tag pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel researcharena/agent:latest
+
+# Option B: Build with extra ML packages
+docker build -t researcharena/agent:latest .
+
+# Podman (rootless, no subuid):
+podman pull docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+podman tag docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel localhost/researcharena/agent:latest
+```
+
+CLI agent binaries (claude, codex, etc.) are automatically mounted from the host into the container at runtime — they don't need to be installed in the image.
+
+### 3. (Local mode) Just install agent CLIs
+
+```bash
+# Claude Code
+claude login
+
+# Codex (optional)
+npm install -g @openai/codex && codex login
+
+# Kimi Code (optional)
+pip install kimi-cli
+
+# Mini-Agent (optional)
+pip install mini-agent
+```
+
+No container needed. Set `runtime: "local"` in your config.
+
+### 4. Set API keys
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -96,9 +139,9 @@ export MOONSHOT_API_KEY=sk-...      # for Kimi Code
 export MINIMAX_API_KEY=...          # for Mini-Agent
 ```
 
-For subscription agents (Claude Code, Codex), just run `claude login` / `codex login` on the host — credentials are auto-mounted into Docker.
+For subscription agents (Claude Code, Codex), just run `claude login` / `codex login` — credentials are auto-mounted into containers or used directly in local mode.
 
-### 4. (Optional) Configure paperreview.ai
+### 5. (Optional) Configure paperreview.ai
 
 ```yaml
 review:
@@ -116,10 +159,16 @@ researcharena run --seed "computer vision" --agent claude
 researcharena run --seed "reinforcement learning" --agent codex
 ```
 
+### Run with local mode (no container)
+
+```bash
+researcharena run -c configs/smoke_test.yaml
+```
+
 ### Run the full benchmark (47 ICLR 2026 fields)
 
 ```bash
-# All fields, all at once
+# All fields
 researcharena bench --agent claude
 
 # Single field
@@ -158,6 +207,7 @@ resources:
 agent:
   type: "claude"                # claude, codex, kimi, minimax, custom
   model: "claude-sonnet-4-6"
+  runtime: "docker"             # "docker" or "local"
   docker_image: "researcharena/agent:latest"
 
 experiment:
@@ -174,6 +224,25 @@ review:
 pipeline:
   max_ideas_per_seed: 5
   max_global_steps: 30
+```
+
+### Smoke test config
+
+A minimal config for quick verification ([`configs/smoke_test.yaml`](configs/smoke_test.yaml)):
+
+```yaml
+agent:
+  runtime: "local"              # no container needed
+  max_turns: 50
+  ideation_timeout: 1800        # 30 min
+
+experiment:
+  max_gpu_hours: 1
+  max_experiment_retries_per_idea: 1
+
+pipeline:
+  max_ideas_per_seed: 1
+  max_global_steps: 6
 ```
 
 ## Scoring (ICLR 2026 scale)
@@ -231,6 +300,7 @@ outputs/runs/
 ├── tracker.json                         # time, tokens, cost per action
 │
 ├── idea_01/
+│   ├── .venv/                           # per-workspace virtualenv (local mode)
 │   ├── CLAUDE.md                        # agent context (stage overview)
 │   ├── idea_guidelines.md               # how to find a novel idea
 │   ├── experiment_guidelines.md         # how to design & run experiments
@@ -260,10 +330,8 @@ researcharena/
 │   ├── paper_writing.py         # Stage 3: agent writes LaTeX paper
 │   └── review.py                # Stage 4: reference check + paperreview.ai + CLI agent reviewers
 ├── utils/
-│   ├── agent_runner.py          # Docker container management, 4 agent CLIs
+│   ├── agent_runner.py          # Local + Docker/Podman execution, 4 agent CLIs
 │   ├── tracker.py               # Time, tokens, cost tracking
-│   ├── action_parser.py         # Parse agent stdout into structured sub-actions
-│   ├── workspace_diff.py        # Before/after filesystem snapshots
 │   ├── config.py                # YAML config loading
 │   ├── paperreview.py           # paperreview.ai automation (Playwright)
 │   └── reference_checker.py     # Citation verification (Semantic Scholar + CrossRef)
@@ -274,7 +342,8 @@ researcharena/
 │   └── reviewer_guidelines.md   # How to review (ICLR scale, novelty search)
 ├── configs/
 │   ├── default.yaml             # Default configuration
+│   ├── smoke_test.yaml          # Quick single-idea smoke test
 │   └── seeds.yaml               # 47 seed fields from ICLR 2026 CFP
-├── Dockerfile                   # GPU-enabled container with all 4 agent CLIs
-└── .dockerignore
+├── Dockerfile                   # Pip-only build on pytorch base (podman-compatible)
+└── pyproject.toml
 ```
