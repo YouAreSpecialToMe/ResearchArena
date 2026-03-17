@@ -26,7 +26,7 @@ Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──�
                     │     │              │                       ├─ score ≥ 6     │
                     │     │              │                       │   → ACCEPTED   │
                     │     │              │                       │                │
-                    │     │              │                       ├─ score 3-5     │
+                    │     │              │                       ├─ score 4       │
                     │     │              │                       │   ↓            │
                     │     │              │                   REFINE IDEA          │
                     │     │              │                   (read feedback,      │
@@ -306,7 +306,7 @@ Acceptance threshold: **6**. Scores are averaged across all review sources.
 | Experiment retries exhausted | Abandon idea, try new one |
 | Agent writes `abandon.json` | Abandon idea early (agent decides idea isn't viable) |
 | Paper writing fails (no paper.tex) | Retry paper writing |
-| Paper rejected, score 3-5 | Full revision loop: refine idea → re-run experiments → rewrite paper (up to 2 revisions) |
+| Paper rejected, score 4 | Full revision loop: refine idea → re-run experiments → rewrite paper (up to 2 revisions) |
 | Paper rejected, score ≤ 2 | Abandon idea (fundamental issues) |
 | Revisions exhausted, still rejected | Abandon idea, try new one |
 | Fake references detected | Score 0, abandon idea |
