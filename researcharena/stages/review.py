@@ -417,7 +417,7 @@ def _score_qualitative_review(
         f"(paperreview.ai) produced the following qualitative review of a "
         f"research paper, but did NOT assign a numeric score.\n\n"
         f"Read the review carefully and assign a score.\n\n"
-        f"--- EXTERNAL REVIEW ---\n{review_text[:6000]}\n--- END REVIEW ---\n\n"
+        f"--- EXTERNAL REVIEW ---\n{review_text}\n--- END REVIEW ---\n\n"
         f"Based on this review, assign an overall score on the ICLR scale:\n"
         f"  10 = seminal, top 5%\n"
         f"  8 = clear accept, strong contribution\n"
