@@ -312,6 +312,28 @@ class Pipeline:
                     except _json.JSONDecodeError:
                         pass
 
+        # Agent explicitly abandoned the idea (results clearly negative)
+        if results == experiments.ABANDON_SIGNAL:
+            abandon_reason = "Agent abandoned: results underperform baselines"
+            abandon_path = self.state.workspace / "abandon.json"
+            if abandon_path.exists():
+                try:
+                    import json as _json
+                    reason = _json.loads(abandon_path.read_text()).get("reason", "")
+                    if reason:
+                        abandon_reason = f"Agent abandoned: {reason}"
+                except Exception:
+                    pass
+            console.print(f"  [yellow]→ {abandon_reason}[/]")
+            self.tracker.end_action(
+                outcome="abandoned",
+                details=abandon_reason[:100],
+                tokens=tokens,
+                log_files=log_files,
+            )
+            self._abandon_idea("experiments", abandon_reason)
+            return
+
         if results is None:
             error_log = self._collect_error_log()
             self.state.experiment_errors.append(error_log)

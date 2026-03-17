@@ -98,7 +98,14 @@ def _build_task(
         "CRITICAL: Every number in results.json MUST come from actually running "
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
         "If your method doesn't beat baselines, report that honestly — negative "
-        "results with honest analysis are valuable science."
+        "results with honest analysis are valuable science.\n\n"
+        "ABANDON OPTION: After running experiments, if your method clearly "
+        "underperforms ALL baselines and you believe the idea is fundamentally "
+        "flawed (not just a tuning issue), you may abandon this idea by writing "
+        'a file called abandon.json with: {"abandon": true, "reason": "..."}. '
+        "The pipeline will go back to ideation with a new idea. Only do this if "
+        "the results are clearly negative — marginal differences or mixed results "
+        "are still worth writing up."
     )
 
     if prior_errors:
@@ -110,7 +117,21 @@ def _build_task(
     return task
 
 
-def _parse_output(workspace: Path) -> dict | None:
+# Sentinel returned when the agent explicitly abandons the idea
+ABANDON_SIGNAL = "__ABANDON__"
+
+
+def _parse_output(workspace: Path) -> dict | str | None:
+    # Check for abandon signal first
+    abandon_path = workspace / "abandon.json"
+    if abandon_path.exists():
+        try:
+            data = json.loads(abandon_path.read_text())
+            if data.get("abandon"):
+                return ABANDON_SIGNAL
+        except json.JSONDecodeError:
+            pass
+
     results_path = workspace / "results.json"
     if not results_path.exists():
         return None
