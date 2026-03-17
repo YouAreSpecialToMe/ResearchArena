@@ -148,6 +148,8 @@ def review_paper(
             console.print("  Scoring paperreview.ai review with agent...")
             scored = _score_qualitative_review(
                 pr_review, reviewer_agents[0], workspace, venue, runtime,
+                timeout=paperreview_config.get("scoring_timeout", 120),
+                max_turns=paperreview_config.get("scoring_max_turns", 5),
             )
             if scored is not None:
                 pr_review["overall_score"] = scored
@@ -384,6 +386,8 @@ def _score_qualitative_review(
     workspace: Path,
     venue: str,
     runtime: str = "docker",
+    timeout: int = 120,
+    max_turns: int = 5,
 ) -> float | None:
     """Use a CLI agent to assign a numeric ICLR score to a qualitative review.
 
@@ -434,14 +438,14 @@ def _score_qualitative_review(
     scorer_config = {
         **agent_cfg,
         "runtime": runtime,
-        "max_turns": 5,
+        "max_turns": max_turns,
     }
 
     result = invoke_agent(
         agent_type=agent_type,
         task=task,
         workspace=workspace,
-        timeout=120,
+        timeout=timeout,
         agent_config=scorer_config,
         readonly=True,
     )
