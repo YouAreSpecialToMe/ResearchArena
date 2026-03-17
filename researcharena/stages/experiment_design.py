@@ -130,7 +130,9 @@ def _build_task(
     if prior_errors:
         task += "\n\n--- PREVIOUS ATTEMPTS FAILED ---\n"
         for i, err in enumerate(prior_errors):
-            task += f"\nAttempt {i+1} error:\n{err[:500]}\n"
+            # Keep the last 2000 chars — the actual error is usually at the end
+            err_text = err[-2000:] if len(err) > 2000 else err
+            task += f"\nAttempt {i+1} error:\n{err_text}\n"
         task += "\nFix the issues and try a different approach if needed.\n"
 
     return task
