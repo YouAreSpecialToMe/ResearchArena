@@ -103,20 +103,19 @@ def submit_paper(
         page.goto(PAPERREVIEW_URL, timeout=timeout * 1000)
 
         # Fill in the email
-        page.fill('input[type="email"]', email_address)
+        page.fill('input[name="email"]', email_address)
 
-        # Select venue if the dropdown exists
+        # Fill venue (text input, not dropdown)
         try:
-            page.select_option("select", label=venue_label, timeout=5000)
+            page.fill('input[name="customVenue"]', venue_label, timeout=5000)
         except Exception:
-            # Venue selector might not exist or have different structure
             pass
 
         # Upload PDF
-        page.set_input_files('input[type="file"]', str(pdf_path))
+        page.set_input_files('input[name="pdf"]', str(pdf_path))
 
         # Click submit
-        page.click('button[type="submit"]')
+        page.click('text=Submit for Review')
 
         # Wait for confirmation
         page.wait_for_timeout(3000)
@@ -204,12 +203,12 @@ def fetch_review(token: str, timeout: int = 60) -> PaperReviewResult:
         page = browser.new_page()
         page.goto(REVIEW_VIEW_URL, timeout=timeout * 1000)
 
-        # Enter the token
-        page.fill('input[type="text"]', token)
-        page.click('button[type="submit"]')
+        # Enter the token and click "Load Review"
+        page.fill('input[name="token"]', token)
+        page.click('text=Load Review')
 
         # Wait for review to load
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(10000)
 
         html = page.content()
         text = page.text_content("body")
@@ -283,6 +282,48 @@ def _extract_token_from_body(body: str) -> str | None:
     return None
 
 
+def _estimate_score_from_text(sections: dict) -> float:
+    """Estimate a numeric score from qualitative review text.
+
+    paperreview.ai doesn't provide numeric scores, so we estimate
+    based on keyword signals in the weaknesses and overall assessment.
+    Returns a score on the ICLR 0-10 scale.
+    """
+    weaknesses = sections.get("weaknesses", "").lower()
+    overall = sections.get("overall_assessment", "").lower()
+    strengths = sections.get("strengths", "").lower()
+    combined = weaknesses + " " + overall
+
+    # Start at 6 (marginal accept) and adjust
+    score = 6.0
+
+    # Strong negative signals
+    severe = ["fundamental flaw", "fatal", "fabricat", "not reproducible",
+              "plagiari", "no contribution", "trivial contribution"]
+    for s in severe:
+        if s in combined:
+            score -= 2.0
+
+    # Moderate negative signals
+    moderate = ["major weakness", "significant concern", "not convincing",
+                "lacks novelty", "incremental", "insufficient experiment",
+                "missing baseline", "unfair comparison", "overclaim",
+                "not well-supported", "seriously lacking"]
+    for s in moderate:
+        if s in combined:
+            score -= 0.5
+
+    # Positive signals
+    positive = ["strong contribution", "well-written", "convincing result",
+                "novel approach", "significant improvement", "solid experiment",
+                "well-motivated", "thorough evaluation", "impressive"]
+    for s in positive:
+        if s in combined or s in strengths:
+            score += 0.3
+
+    return max(0.0, min(10.0, round(score * 2) / 2))  # clamp and round to 0.5
+
+
 def _parse_review(text: str, html: str) -> PaperReviewResult:
     """Parse review text into structured PaperReviewResult.
 
@@ -335,6 +376,11 @@ def _parse_review(text: str, html: str) -> PaperReviewResult:
         overall_score = float(overall_match.group(1))
     elif dimensions:
         overall_score = sum(dimensions.values()) / len(dimensions)
+
+    # Fallback: paperreview.ai gives qualitative reviews without numeric scores.
+    # Estimate a score from the tone of the weaknesses and overall assessment.
+    if overall_score is None:
+        overall_score = _estimate_score_from_text(sections)
 
     return PaperReviewResult(
         dimensions=dimensions,
