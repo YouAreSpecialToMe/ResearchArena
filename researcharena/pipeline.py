@@ -41,6 +41,7 @@ console = Console()
 
 class Stage(Enum):
     IDEATION = "ideation"
+    REFINE_IDEA = "refine_idea"
     EXPERIMENTS = "experiments"
     PAPER = "paper"
     REVIEW = "review"
@@ -173,6 +174,8 @@ class Pipeline:
 
             if stage == Stage.IDEATION:
                 self._run_ideation(seed_topic)
+            elif stage == Stage.REFINE_IDEA:
+                self._run_refine_idea()
             elif stage == Stage.EXPERIMENTS:
                 self._run_experiments()
             elif stage == Stage.PAPER:
@@ -259,6 +262,62 @@ class Pipeline:
         self.state.experiment_attempts = 0
         self.state.paper_revision_attempts = 0
 
+        self.state.stage = Stage.EXPERIMENTS
+
+    def _run_refine_idea(self):
+        """Refine the current idea based on reviewer feedback, then re-run experiments."""
+        console.print("  Refining idea based on reviewer feedback...")
+
+        self.tracker.begin_action(
+            stage="refine_idea",
+            action="refine_idea",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.paper_revision_attempts,
+        )
+
+        feedback = ""
+        if self.state.review_result:
+            feedback = self.state.review_result.aggregated_feedback
+
+        refined_idea, agent_result = ideation.run_refinement(
+            agent_type=self.agent_type,
+            workspace=self.state.workspace,
+            original_idea=self.state.idea,
+            reviewer_feedback=feedback,
+            results=self.state.results,
+            timeout=self.config["agent"].get("ideation_timeout", 1800),
+            agent_config=self.agent_config,
+            resources=self.per_agent_resources,
+            revision_attempt=self.state.paper_revision_attempts,
+            max_revisions=self.state.max_paper_revisions,
+        )
+
+        tokens, log_files, fail_cat = self._extract_tracking(agent_result)
+
+        if refined_idea is None:
+            console.print("  [yellow]Agent didn't update idea.json. Proceeding with original idea.[/]")
+            self.tracker.end_action(
+                outcome="skipped",
+                details="No updated idea.json produced, keeping original",
+                tokens=tokens,
+                log_files=log_files,
+            )
+        else:
+            desc = refined_idea.get('description', refined_idea.get('title', 'N/A'))
+            console.print(f"  Refined idea: [green]{desc[:80]}[/]")
+            self.tracker.end_action(
+                outcome="success",
+                details=desc[:80],
+                tokens=tokens,
+                log_files=log_files,
+            )
+            self.state.idea = refined_idea
+
+        # Reset experiment state for the refined idea
+        self.state.results = None
+        self.state.experiment_errors = []
+        self.state.experiment_attempts = 0
         self.state.stage = Stage.EXPERIMENTS
 
     def _run_experiments(self):
@@ -485,13 +544,14 @@ class Pipeline:
             ))
 
         elif self.state.paper_revision_attempts < self.state.max_paper_revisions:
-            # Score 4: below threshold but potentially fixable
+            # Score 3-5: below threshold but potentially fixable
+            # Full revision loop: refine idea → re-run experiments → rewrite paper
             self.state.paper_revision_attempts += 1
             console.print(
-                f"  [yellow]→ Revising paper "
-                f"({self.state.paper_revision_attempts}/{self.state.max_paper_revisions})[/]"
+                f"  [yellow]→ Revision {self.state.paper_revision_attempts}/{self.state.max_paper_revisions}: "
+                f"refine idea → experiments → paper[/]"
             )
-            self.state.stage = Stage.PAPER
+            self.state.stage = Stage.REFINE_IDEA
 
         else:
             console.print("  [yellow]→ Revisions exhausted. Abandoning idea.[/]")

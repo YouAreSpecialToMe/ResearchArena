@@ -104,6 +104,95 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
     return task
 
 
+def run_refinement(
+    agent_type: str,
+    workspace: Path,
+    original_idea: dict,
+    reviewer_feedback: str,
+    results: dict | None = None,
+    timeout: int = 1800,
+    agent_config: dict | None = None,
+    resources: dict | None = None,
+    revision_attempt: int = 1,
+    max_revisions: int = 2,
+) -> tuple[dict | None, object]:
+    """Let the agent refine an existing idea based on reviewer feedback.
+
+    Returns:
+        Tuple of (refined idea dict or None, AgentResult).
+    """
+    task = _build_refinement_task(
+        original_idea, reviewer_feedback, results,
+        resources, revision_attempt, max_revisions,
+    )
+
+    agent_result = invoke_agent(
+        agent_type=agent_type,
+        task=task,
+        workspace=workspace,
+        timeout=timeout,
+        agent_config=agent_config,
+    )
+
+    return _parse_output(workspace), agent_result
+
+
+def _build_refinement_task(
+    original_idea: dict,
+    reviewer_feedback: str,
+    results: dict | None,
+    resources: dict | None = None,
+    revision_attempt: int = 1,
+    max_revisions: int = 2,
+) -> str:
+    res = resources or {}
+    hours = res.get("time_hours", 8)
+    revisions_left = max_revisions - revision_attempt
+
+    idea_desc = original_idea.get("description", original_idea.get("title", "N/A"))
+    idea_approach = original_idea.get("proposed_approach", "")
+
+    task = (
+        "=== IDEA REFINEMENT (post-review) ===\n\n"
+        f"BUDGET: Revision {revision_attempt}/{max_revisions}"
+        f" ({revisions_left} revisions left after this).\n\n"
+        "Your paper was reviewed and REJECTED. You now have a chance to refine\n"
+        "your idea, run additional experiments, and rewrite the paper.\n\n"
+        f"ORIGINAL IDEA:\n{idea_desc}\n\n"
+        f"APPROACH:\n{idea_approach}\n\n"
+        "--- REVIEWER FEEDBACK ---\n"
+        f"{reviewer_feedback}\n"
+        "--- END FEEDBACK ---\n\n"
+    )
+
+    if results:
+        # Summarize key results
+        method_results = results.get("method", {})
+        baseline_results = results.get("baselines", {})
+        task += "PREVIOUS EXPERIMENT RESULTS (summary):\n"
+        task += f"  Method: {json.dumps(method_results)[:300]}\n"
+        for name, scores in baseline_results.items():
+            task += f"  Baseline '{name}': {json.dumps(scores)[:200]}\n"
+        task += "\n"
+
+    task += (
+        "YOUR TASK:\n"
+        "1. Read the reviewer feedback carefully\n"
+        "2. Decide how to strengthen your idea — you can:\n"
+        "   - Refine the approach (fix methodological issues)\n"
+        "   - Add new components or modify existing ones\n"
+        "   - Plan additional experiments (ablations, baselines, datasets)\n"
+        "   - Pivot the framing or motivation\n"
+        "3. Update idea.json with your refined idea\n"
+        "   Keep the same fields but update the content. Add a 'revision_notes'\n"
+        "   field explaining what changed and why.\n\n"
+        f"After this, you will re-run experiments (~{hours}h budget) and rewrite the paper.\n"
+        "Focus on addressing the specific reviewer concerns."
+    )
+
+    return task
+
+
 def _parse_output(workspace: Path) -> dict | None:
     idea_path = workspace / "idea.json"
     if not idea_path.exists():
