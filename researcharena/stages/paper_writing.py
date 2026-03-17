@@ -1,4 +1,4 @@
-"""Stage 4: Let the CLI agent write a paper from its own research.
+"""Stage 3: Let the CLI agent write a paper from its own research.
 
 The agent gets the workspace containing idea.json, results.json, and figures/.
 It must produce paper.tex (and optionally compile to paper.pdf).
