@@ -52,8 +52,8 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
     "integrity_check": "<brief sanity check on results consistency>"
 }
 
-overall_score uses ICLR scale: 10=seminal, 8=clear accept, 6=marginal accept,
-4=reject, 2=strong reject, 0=fabricated/trivial. Threshold is 6.
+overall_score uses ICLR scale: 10=seminal, 8=clear accept, 6=marginal (revision),
+4=reject, 2=strong reject, 0=fabricated/trivial. Threshold is 8.
 """
 
 
@@ -74,7 +74,7 @@ def review_paper(
     reviewer_agents: list[dict],
     paperreview_config: dict,
     venue: str = "NeurIPS",
-    accept_threshold: float = 6.0,
+    accept_threshold: float = 8.0,
     workspace: Path | None = None,
     docker_image: str = "researcharena/agent:latest",
     tracker=None,
@@ -408,7 +408,7 @@ def _score_qualitative_review(
         f"Based on this review, assign an overall score on the ICLR scale:\n"
         f"  10 = seminal, top 5%\n"
         f"  8 = clear accept, strong contribution\n"
-        f"  6 = marginally above threshold\n"
+        f"  6 = marginal, needs revision\n"
         f"  4 = below threshold, reject\n"
         f"  2 = strong reject\n"
         f"  0 = fabricated or trivial\n\n"
@@ -562,7 +562,7 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _score_to_decision(score: float, accept_threshold: float = 6.0) -> str:
+def _score_to_decision(score: float, accept_threshold: float = 8.0) -> str:
     """Map score to accept/reject using ICLR-style threshold."""
     if score >= accept_threshold:
         return "accept"

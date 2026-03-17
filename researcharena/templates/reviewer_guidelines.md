@@ -17,13 +17,13 @@ a sanity check on results integrity.
 |---|---|
 | 10 | Top 5% of accepted papers, seminal paper |
 | 8 | Clear accept, strong contribution |
-| 6 | Marginally above acceptance threshold |
-| 4 | Below threshold, not good enough |
+| 6 | Marginal, needs revision |
+| 4 | Below threshold, reject |
 | 2 | Strong rejection, significant flaws |
 | 0 | Trivial, wrong, or fabricated |
 
 Use ONLY these values: 0, 2, 4, 6, 8, 10.
-Acceptance threshold is 6. Papers scoring >= 6 are accepted.
+Acceptance threshold is 8. Score 6 triggers a revision loop. Score < 6 is rejected.
 
 ## Per-Dimension Scores (each 1-10)
 
