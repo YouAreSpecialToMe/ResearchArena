@@ -293,6 +293,25 @@ class Pipeline:
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
 
+        # On timeout, child processes (e.g., python experiment.py) may still
+        # be running and produce results.json after the agent CLI is killed.
+        # Wait briefly and re-check.
+        if results is None and fail_cat == "timeout":
+            import json as _json
+            results_path = self.state.workspace / "results.json"
+            for _wait in (2, 5, 10):
+                time.sleep(_wait)
+                if results_path.exists():
+                    try:
+                        results = _json.loads(results_path.read_text())
+                        console.print(
+                            f"  [yellow]Agent timed out but results.json was "
+                            f"found (child process completed).[/]"
+                        )
+                        break
+                    except _json.JSONDecodeError:
+                        pass
+
         if results is None:
             error_log = self._collect_error_log()
             self.state.experiment_errors.append(error_log)
