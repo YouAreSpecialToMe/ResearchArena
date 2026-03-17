@@ -18,28 +18,45 @@ Each stage has a dedicated guideline file that the agent reads before starting. 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────────────────────┐
-                    │           researcharena (harness)                       │
-                    │                                                         │
-Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW         │
-                    │     ↑              ↑            ↑          │           │
-                    │     │              │            └── retry   │           │
-                    │     │              └── retry experiments    │           │
-                    │     └── try new idea ───────────────────────┘           │
-                    │                                                         │
-                    │  Each stage = one CLI agent invocation                  │
-                    │  Each stage has a guideline: idea / experiment / paper   │
-                    └─────────────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────────────────────────┐
+                    │               researcharena (harness)                        │
+                    │                                                              │
+Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW              │
+                    │     ↑              ↑                       │                │
+                    │     │              │                       ├─ score ≥ 6     │
+                    │     │              │                       │   → ACCEPTED   │
+                    │     │              │                       │                │
+                    │     │              │                       ├─ score 3-5     │
+                    │     │              │                       │   ↓            │
+                    │     │              │                   REFINE IDEA          │
+                    │     │              │                   (read feedback,      │
+                    │     │              │                    update idea.json)   │
+                    │     │              │                       │                │
+                    │     │              └───────────────────────┘                │
+                    │     │                  re-run experiments                    │
+                    │     │                  + rewrite paper                       │
+                    │     │                  + re-review                           │
+                    │     │                                                        │
+                    │     │              ┌─ score ≤ 2 (fundamental issues)        │
+                    │     │              ├─ revisions exhausted                    │
+                    │     │              ├─ experiment retries exhausted           │
+                    │     │              └─ agent writes abandon.json             │
+                    │     └──────────────── try new idea ─────────────────────────│
+                    │                                                              │
+                    │  Each stage = one CLI agent invocation                       │
+                    │  Agent sees resource constraints + retry budget at each stage│
+                    └──────────────────────────────────────────────────────────────┘
 ```
 
 ### Stages & guidelines
 
 | Stage | Agent reads | Agent produces | Guideline |
 |---|---|---|---|
-| 1. IDEATION | seed field + resource constraints | `idea.json` | `idea_guidelines.md` |
-| 2. EXPERIMENTS | `idea.json` | `results.json` + `figures/` | `experiment_guidelines.md` |
-| 3. PAPER | `idea.json` + `results.json` | `paper.tex` | `paper_writing_guidelines.md` |
+| 1. IDEATION | seed field + resource constraints + retry budget | `idea.json` | `idea_guidelines.md` |
+| 2. EXPERIMENTS | `idea.json` + resource constraints + retry budget | `results.json` + `figures/` (or `abandon.json`) | `experiment_guidelines.md` |
+| 3. PAPER | `idea.json` + `results.json` + revision budget | `paper.tex` | `paper_writing_guidelines.md` |
 | 4. REVIEW | paper + workspace (read-only) | review scores | `reviewer_guidelines.md` |
+| 4b. REFINE IDEA | original idea + reviewer feedback + previous results | updated `idea.json` | `idea_guidelines.md` |
 
 ### Runtime modes
 
@@ -240,9 +257,12 @@ experiment:
   max_gpu_hours: 1
   max_experiment_retries_per_idea: 1
 
+paper:
+  max_revisions: 1              # allow 1 revision after review
+
 pipeline:
   max_ideas_per_seed: 1
-  max_global_steps: 6
+  max_global_steps: 10
 ```
 
 ## Scoring (ICLR 2026 scale)
@@ -280,15 +300,18 @@ Acceptance threshold: **6**. Scores are averaged across all review sources.
 
 ## Iteration & backtracking
 
-| Failure | Action |
+| Outcome | Action |
 |---|---|
 | Experiments fail (code crashes) | Retry with error context (up to 3 attempts) |
 | Experiment retries exhausted | Abandon idea, try new one |
-| Paper writing fails (no paper.tex) | Retry (shares revision budget) |
-| Paper rejected, score = 4 | Revise paper with feedback (up to 2 revisions) |
+| Agent writes `abandon.json` | Abandon idea early (agent decides idea isn't viable) |
+| Paper writing fails (no paper.tex) | Retry paper writing |
+| Paper rejected, score 3-5 | Full revision loop: refine idea → re-run experiments → rewrite paper (up to 2 revisions) |
 | Paper rejected, score ≤ 2 | Abandon idea (fundamental issues) |
-| Revisions exhausted | Abandon idea, try new one |
+| Revisions exhausted, still rejected | Abandon idea, try new one |
 | Fake references detected | Score 0, abandon idea |
+
+The agent sees its retry budget at every stage so it can adjust strategy — e.g., be more conservative on the last attempt, or abandon early if retries are available.
 
 Best paper across all attempts is tracked and returned.
 
