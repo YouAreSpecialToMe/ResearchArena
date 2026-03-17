@@ -387,6 +387,10 @@ class Pipeline:
             timeout=self.config["agent"].get("paper_timeout", 3600),
             agent_config=self.agent_config,
             revision_feedback=revision_feedback,
+            revision_attempt=self.state.paper_revision_attempts,
+            max_revisions=self.state.max_paper_revisions,
+            idea_attempt=self.state.idea_attempts,
+            max_ideas=self.state.max_ideas_per_seed,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)

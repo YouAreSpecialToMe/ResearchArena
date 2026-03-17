@@ -22,6 +22,10 @@ def run(
     timeout: int = 3600,
     agent_config: dict | None = None,
     revision_feedback: str | None = None,
+    revision_attempt: int = 0,
+    max_revisions: int = 2,
+    idea_attempt: int = 1,
+    max_ideas: int = 5,
 ) -> tuple[bool, object]:
     """Let the agent write a paper.
 
@@ -30,7 +34,7 @@ def run(
     Returns:
         Tuple of (True if paper.tex was produced, AgentResult).
     """
-    task = _build_task(venue, revision_feedback)
+    task = _build_task(venue, revision_feedback, revision_attempt, max_revisions, idea_attempt, max_ideas)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -49,9 +53,33 @@ def run(
     return False, agent_result
 
 
-def _build_task(venue: str, revision_feedback: str | None) -> str:
+def _build_task(
+    venue: str,
+    revision_feedback: str | None,
+    revision_attempt: int = 0,
+    max_revisions: int = 2,
+    idea_attempt: int = 1,
+    max_ideas: int = 5,
+) -> str:
+    revisions_left = max_revisions - revision_attempt
+    ideas_left = max_ideas - idea_attempt
+    if revision_attempt > 0:
+        budget_line = (
+            f"BUDGET: Revision {revision_attempt}/{max_revisions}"
+            f" ({revisions_left} revisions left)."
+            f" Idea {idea_attempt}/{max_ideas}"
+            f" ({ideas_left} new ideas left if this one is abandoned).\n\n"
+        )
+    else:
+        budget_line = (
+            f"BUDGET: Initial draft. Up to {max_revisions} revisions allowed"
+            f" if reviewers request changes."
+            f" Idea {idea_attempt}/{max_ideas}.\n\n"
+        )
+
     task = (
         "=== STAGE 3: PAPER WRITING ===\n\n"
+        f"{budget_line}"
         "Read paper_writing_guidelines.md for detailed instructions on "
         "paper structure, formatting, tables, figures, and references.\n\n"
         "The workspace contains:\n"
