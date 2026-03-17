@@ -93,7 +93,7 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
             task += (
                 f"\nAttempt {i+1}: \"{h['idea'].get('description', h['idea'].get('title', 'N/A'))}\"\n"
                 f"  Failed at: {h['failure_stage']}\n"
-                f"  Reason: {h['failure_reason'][:300]}\n"
+                f"  Reason: {h['failure_reason']}\n"
             )
         task += "\n--- Generate a DIFFERENT idea that avoids these problems. ---\n"
 

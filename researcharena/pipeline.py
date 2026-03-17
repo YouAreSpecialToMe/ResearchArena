@@ -555,7 +555,7 @@ class Pipeline:
                 )
                 self._abandon_idea("review", (
                     f"Score {result.avg_score:.1f} after {self.state.paper_revision_attempts} revisions. "
-                    f"Feedback: {result.aggregated_feedback[:500]}"
+                    f"Feedback: {result.aggregated_feedback}"
                 ))
 
         else:
@@ -563,7 +563,7 @@ class Pipeline:
             console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. Abandoning idea.[/]")
             self._abandon_idea("review", (
                 f"Score {result.avg_score:.1f}. "
-                f"Feedback: {result.aggregated_feedback[:500]}"
+                f"Feedback: {result.aggregated_feedback}"
             ))
 
     # ── Helpers ──────────────────────────────────────────────────────────
