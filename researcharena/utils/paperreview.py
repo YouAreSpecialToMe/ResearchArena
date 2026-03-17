@@ -377,10 +377,8 @@ def _parse_review(text: str, html: str) -> PaperReviewResult:
     elif dimensions:
         overall_score = sum(dimensions.values()) / len(dimensions)
 
-    # Fallback: paperreview.ai gives qualitative reviews without numeric scores.
-    # Estimate a score from the tone of the weaknesses and overall assessment.
-    if overall_score is None:
-        overall_score = _estimate_score_from_text(sections)
+    # paperreview.ai gives qualitative reviews without numeric scores.
+    # The caller (review.py) uses a CLI agent to assign a score.
 
     return PaperReviewResult(
         dimensions=dimensions,

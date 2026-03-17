@@ -143,6 +143,17 @@ def review_paper(
         tracker.begin_action(stage="review", action="paperreview_ai")
     pr_review = _run_paperreview(paper_pdf_path, paperreview_config, venue)
     if pr_review:
+        # Use the first available reviewer agent to score the qualitative review
+        if reviewer_agents and workspace:
+            console.print("  Scoring paperreview.ai review with agent...")
+            scored = _score_qualitative_review(
+                pr_review, reviewer_agents[0], workspace, venue, runtime,
+            )
+            if scored is not None:
+                pr_review["overall_score"] = scored
+                pr_review["decision"] = _score_to_decision(scored, accept_threshold)
+                console.print(f"  Agent scored paperreview.ai: {scored}/10")
+
         all_reviews.append(pr_review)
         console.print(f"  Score: {pr_review.get('overall_score', 'N/A')}")
         if tracker:
@@ -152,10 +163,10 @@ def review_paper(
         if tracker:
             tracker.end_action(outcome="skipped", details="unavailable or not configured")
 
-    # ── Source 2: CLI agent reviewers (same Docker, read-only workspace) ──
+    # ── Source 2: CLI agent reviewers (independent, no prior context) ──
     console.print(
         f"\n[bold]Review Source 2: CLI agent reviewers "
-        f"({len(reviewer_agents)} agents, read-only Docker)[/]"
+        f"({len(reviewer_agents)} agents)[/]"
     )
 
     if not workspace:
@@ -362,6 +373,87 @@ def _parse_review_from_output(stdout: str) -> dict | None:
 
     # Return the LAST match (most likely the actual review, not an example)
     return candidates[-1] if candidates else None
+
+
+# ── Score qualitative reviews ─────────────────────────────────────────────
+
+
+def _score_qualitative_review(
+    pr_review: dict,
+    agent_cfg: dict,
+    workspace: Path,
+    venue: str,
+    runtime: str = "docker",
+) -> float | None:
+    """Use a CLI agent to assign a numeric ICLR score to a qualitative review.
+
+    The agent reads the review text and outputs a JSON with overall_score.
+    This is a short, focused task — no web search or code reading needed.
+    """
+    from researcharena.utils.agent_runner import invoke_agent
+
+    review_text = (
+        f"Summary: {pr_review.get('summary', '')}\n\n"
+        f"Strengths: {pr_review.get('strengths', pr_review.get('strengths', ''))}\n\n"
+        f"Weaknesses: {pr_review.get('weaknesses', pr_review.get('weaknesses', ''))}\n\n"
+        f"Detailed feedback: {pr_review.get('detailed_feedback', '')}\n\n"
+        f"Overall assessment: {pr_review.get('questions_for_authors', '')}\n"
+    )
+
+    task = (
+        f"You are a meta-reviewer for {venue}. An external review system "
+        f"(paperreview.ai) produced the following qualitative review of a "
+        f"research paper, but did NOT assign a numeric score.\n\n"
+        f"--- EXTERNAL REVIEW ---\n{review_text[:3000]}\n--- END REVIEW ---\n\n"
+        f"Based on this review, assign an overall score on the ICLR scale:\n"
+        f"  10 = seminal, top 5%\n"
+        f"  8 = clear accept, strong contribution\n"
+        f"  6 = marginally above threshold\n"
+        f"  4 = below threshold, reject\n"
+        f"  2 = strong reject\n"
+        f"  0 = fabricated or trivial\n\n"
+        f"Output ONLY a JSON object:\n"
+        f'{{"overall_score": <int, one of 0/2/4/6/8/10>, '
+        f'"reasoning": "<1-2 sentence justification>"}}\n'
+    )
+
+    agent_type = agent_cfg["type"]
+    scorer_config = {
+        **agent_cfg,
+        "runtime": runtime,
+        "max_turns": 5,
+    }
+
+    result = invoke_agent(
+        agent_type=agent_type,
+        task=task,
+        workspace=workspace,
+        timeout=120,
+        agent_config=scorer_config,
+        readonly=True,
+    )
+
+    # Parse score from stdout
+    if result.stdout:
+        import json as _json
+        # Find JSON in output
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{") and "overall_score" in line:
+                try:
+                    data = _json.loads(line)
+                    score = data.get("overall_score")
+                    if isinstance(score, (int, float)) and 0 <= score <= 10:
+                        return float(score)
+                except _json.JSONDecodeError:
+                    pass
+
+        # Try parsing from the full stdout
+        parsed = _parse_review_from_output(result.stdout)
+        if parsed and parsed.get("overall_score") is not None:
+            return float(parsed["overall_score"])
+
+    return None
 
 
 # ── paperreview.ai ───────────────────────────────────────────────────────
