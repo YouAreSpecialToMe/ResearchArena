@@ -534,30 +534,33 @@ class Pipeline:
         console.print(f"  Score: {result.avg_score:.1f}/10, Decision: {result.decision}")
 
         if result.avg_score >= 8:
-            # Score 8-10: clear accept
+            # Score ≥8: accept
             console.print(Panel("[bold green]ACCEPTED![/]", style="green"))
             self.state.stage = Stage.ACCEPTED
 
         elif result.avg_score >= 6:
-            # Score 6: marginal, try to improve with revision
+            # Score 6-7.x: marginal, try to improve with revision
             if self.state.paper_revision_attempts < self.state.max_paper_revisions:
                 self.state.paper_revision_attempts += 1
                 console.print(
-                    f"  [yellow]→ Score 6 (marginal). Revision {self.state.paper_revision_attempts}/"
+                    f"  [yellow]→ Score {result.avg_score:.1f} (marginal). "
+                    f"Revision {self.state.paper_revision_attempts}/"
                     f"{self.state.max_paper_revisions}: refine idea → experiments → paper[/]"
                 )
                 self.state.stage = Stage.REFINE_IDEA
             else:
-                # Revisions exhausted, still marginal — reject
-                console.print("  [yellow]→ Score 6 after all revisions. Abandoning idea.[/]")
+                console.print(
+                    f"  [yellow]→ Score {result.avg_score:.1f} after all revisions. "
+                    f"Abandoning idea.[/]"
+                )
                 self._abandon_idea("review", (
                     f"Score {result.avg_score:.1f} after {self.state.paper_revision_attempts} revisions. "
                     f"Feedback: {result.aggregated_feedback[:500]}"
                 ))
 
-        elif result.avg_score <= 4:
-            # Score 0-4: reject, abandon idea
-            console.print(f"  [yellow]→ Score ≤ 4: rejected. Abandoning idea.[/]")
+        else:
+            # Score <6: reject, abandon idea
+            console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. Abandoning idea.[/]")
             self._abandon_idea("review", (
                 f"Score {result.avg_score:.1f}. "
                 f"Feedback: {result.aggregated_feedback[:500]}"
