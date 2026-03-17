@@ -23,6 +23,10 @@ def run(
     agent_config: dict | None = None,
     prior_errors: list[str] | None = None,
     resources: dict | None = None,
+    attempt: int = 1,
+    max_attempts: int = 3,
+    idea_attempt: int = 1,
+    max_ideas: int = 5,
 ) -> tuple[dict | None, object]:
     """Let the agent implement and run experiments.
 
@@ -31,7 +35,7 @@ def run(
     Returns:
         Tuple of (parsed results dict or None, AgentResult).
     """
-    task = _build_task(workspace, prior_errors, resources)
+    task = _build_task(workspace, prior_errors, resources, attempt, max_attempts, idea_attempt, max_ideas)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -48,6 +52,10 @@ def _build_task(
     workspace: Path,
     prior_errors: list[str] | None,
     resources: dict | None = None,
+    attempt: int = 1,
+    max_attempts: int = 3,
+    idea_attempt: int = 1,
+    max_ideas: int = 5,
 ) -> str:
     res = resources or {}
     gpus = res.get("gpus", 1)
@@ -57,8 +65,14 @@ def _build_task(
     mem = res.get("memory_gb", 32)
     hours = res.get("time_hours", 8)
 
+    exp_retries_left = max_attempts - attempt
+    ideas_left = max_ideas - idea_attempt
     task = (
         "=== STAGE 2: EXPERIMENTS ===\n\n"
+        f"BUDGET: Experiment attempt {attempt}/{max_attempts} for this idea"
+        f" ({exp_retries_left} retries left)."
+        f" Idea {idea_attempt}/{max_ideas}"
+        f" ({ideas_left} new ideas left if this one is abandoned).\n\n"
         "Read idea.json (your research idea from Stage 1) and "
         "experiment_guidelines.md for detailed instructions on designing "
         "and running rigorous experiments.\n\n"

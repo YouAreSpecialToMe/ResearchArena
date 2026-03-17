@@ -27,13 +27,15 @@ def run(
     timeout: int = 1800,
     agent_config: dict | None = None,
     resources: dict | None = None,
+    attempt: int = 1,
+    max_attempts: int = 5,
 ) -> tuple[dict | None, object]:
     """Let the agent generate a research idea.
 
     Returns:
         Tuple of (parsed idea dict or None, AgentResult).
     """
-    task = _build_task(seed_topic, history, resources)
+    task = _build_task(seed_topic, history, resources, attempt, max_attempts)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -46,7 +48,7 @@ def run(
     return _parse_output(workspace), agent_result
 
 
-def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None) -> str:
+def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None, attempt: int = 1, max_attempts: int = 5) -> str:
     res = resources or {}
     gpus = res.get("gpus", 1)
     gpu_type = res.get("gpu_type", "GPU")
@@ -55,9 +57,12 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
     mem = res.get("memory_gb", 32)
     hours = res.get("time_hours", 8)
 
+    remaining = max_attempts - attempt
     task = (
         f"=== STAGE 1: IDEATION ===\n\n"
         f"Your seed field is: {seed_topic}\n\n"
+        f"ATTEMPT: {attempt}/{max_attempts} "
+        f"({'LAST CHANCE — make it count!' if remaining == 0 else f'{remaining} retries remaining if this idea fails'})\n\n"
         "Read idea_guidelines.md for the step-by-step process: explore the "
         "field, search existing work online (arXiv, Semantic Scholar, Google "
         "Scholar), generate candidate ideas, and verify novelty.\n\n"

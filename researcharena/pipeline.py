@@ -217,6 +217,8 @@ class Pipeline:
             timeout=self.config["agent"].get("ideation_timeout", 1800),
             agent_config=self.agent_config,
             resources=self.per_agent_resources,
+            attempt=self.state.idea_attempts,
+            max_attempts=self.state.max_ideas_per_seed,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
@@ -289,6 +291,10 @@ class Pipeline:
             agent_config=self.agent_config,
             resources=self.per_agent_resources,
             prior_errors=self.state.experiment_errors or None,
+            attempt=self.state.experiment_attempts,
+            max_attempts=self.state.max_experiment_retries,
+            idea_attempt=self.state.idea_attempts,
+            max_ideas=self.state.max_ideas_per_seed,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
