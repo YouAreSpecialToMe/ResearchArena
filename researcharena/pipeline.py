@@ -548,9 +548,12 @@ class Pipeline:
                 )
                 self.state.stage = Stage.REFINE_IDEA
             else:
-                # Revisions exhausted but score is 6 — accept as marginal
-                console.print(Panel("[bold green]ACCEPTED (marginal, revisions exhausted)[/]", style="green"))
-                self.state.stage = Stage.ACCEPTED
+                # Revisions exhausted, still marginal — reject
+                console.print("  [yellow]→ Score 6 after all revisions. Abandoning idea.[/]")
+                self._abandon_idea("review", (
+                    f"Score {result.avg_score:.1f} after {self.state.paper_revision_attempts} revisions. "
+                    f"Feedback: {result.aggregated_feedback[:500]}"
+                ))
 
         elif result.avg_score <= 4:
             # Score 0-4: reject, abandon idea

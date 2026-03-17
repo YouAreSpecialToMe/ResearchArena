@@ -42,7 +42,7 @@ Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──�
                     │     │              └─ agent writes abandon.json             │
                     │     └──────────────── try new idea ─────────────────────────│
                     │                                                              │
-                    │     score 6 + revisions exhausted → ACCEPTED (marginal)      │
+                    │     score 6 + revisions exhausted → reject, try new idea      │
                     │                                                              │
                     │  Each stage = one CLI agent invocation                       │
                     │  Agent sees resource constraints + retry budget at each stage│
@@ -297,7 +297,7 @@ Reviews use the ICLR 2026 scoring system, aligned with paperreview.ai:
 |---|---|---|
 | 10 | Seminal paper, top 5% | accept |
 | 8 | Clear accept, strong contribution | accept |
-| 6 | Marginally above threshold | revision (try to improve) |
+| 6 | Marginal | revision (try to improve), reject if revisions exhausted |
 | 4 | Below threshold | reject, abandon idea |
 | 2 | Strong rejection | reject, abandon idea |
 | 0 | Fabricated or trivial | reject, abandon idea |
