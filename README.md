@@ -92,9 +92,17 @@ workspace/idea_01/
 
 Each workspace gets its own virtualenv so agents can `pip install` packages without conflicting with each other or the host. Local mode is useful when Docker/Podman is unavailable or for development.
 
+### Review sources
+
+Each paper is evaluated by three independent sources:
+
+1. **Reference checker** — verifies citations against Semantic Scholar + CrossRef APIs. Fake references trigger automatic score 0.
+2. **paperreview.ai** — external Stanford agentic reviewer. Submits PDF, polls email for review token, fetches structured review. Requires Gmail with app password.
+3. **CLI agent reviewers** — other agents review with read-only workspace access, checking code, logs, and searching online to verify novelty claims.
+
 ### Auto-reviewer selection
 
-The agent under test is excluded from the reviewer pool:
+The agent under test is excluded from the reviewer pool (unless `allow_self_review: true`):
 
 | Researcher | Reviewers |
 |---|---|
@@ -102,6 +110,8 @@ The agent under test is excluded from the reviewer pool:
 | Codex | Claude Code, Kimi Code, Mini-Agent |
 | Kimi Code | Claude Code, Codex, Mini-Agent |
 | Mini-Agent | Claude Code, Codex, Kimi Code |
+
+For smoke tests with only one agent, set `allow_self_review: true` to let the agent review its own work.
 
 ## Setup
 
@@ -160,12 +170,24 @@ For subscription agents (Claude Code, Codex), just run `claude login` / `codex l
 
 ### 5. (Optional) Configure paperreview.ai
 
+Requires Gmail with an [app password](https://myaccount.google.com/apppasswords) (Outlook/Microsoft accounts are not supported — they require OAuth2).
+
+```bash
+export PAPERREVIEW_EMAIL="you@gmail.com"
+export PAPERREVIEW_PASSWORD="your-app-password"
+```
+
+Then in your config:
+
 ```yaml
 review:
   paperreview:
-    email: "you@gmail.com"
-    email_password: "app-specific-password"
+    email: "${PAPERREVIEW_EMAIL}"
+    email_password: "${PAPERREVIEW_PASSWORD}"
+    imap_server: "imap.gmail.com"       # default
 ```
+
+Config files support `${ENV_VAR}` substitution so credentials stay out of version control.
 
 ## Usage
 
@@ -237,6 +259,7 @@ paper:
 
 review:
   accept_threshold: 6           # ICLR scale (0-10)
+  allow_self_review: false      # true for smoke tests with one agent
 
 pipeline:
   max_ideas_per_seed: 5
