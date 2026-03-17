@@ -58,12 +58,45 @@ def _build_task(
     max_ideas: int = 5,
 ) -> str:
     res = resources or {}
-    gpus = res.get("gpus", 1)
+    platform = res.get("platform", "gpu")
+    gpus = res.get("gpus", 0 if platform == "cpu" else 1)
     gpu_type = res.get("gpu_type", "GPU")
     gpu_mem = res.get("gpu_memory_gb", 80)
     cpus = res.get("cpus", 8)
     mem = res.get("memory_gb", 32)
     hours = res.get("time_hours", 8)
+
+    # Build resource description based on platform
+    if platform == "cpu" or gpus == 0:
+        resource_block = (
+            "AVAILABLE RESOURCES:\n"
+            f"   - CPU: {cpus} cores\n"
+            f"   - RAM: {mem}GB\n"
+            f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+            "   - NO GPU available — all computation must run on CPU.\n"
+            "   Plan your experiments to fit within these resources.\n"
+        )
+        impl_block = (
+            "2. IMPLEMENTATION\n"
+            "   - Write clean, runnable experiment code\n"
+            "   - Install any packages you need (pip install)\n"
+            "   - All computation runs on CPU — optimize accordingly\n\n"
+        )
+    else:
+        resource_block = (
+            "AVAILABLE RESOURCES:\n"
+            f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
+            f"   - RAM: {mem}GB\n"
+            f"   - CPU: {cpus} cores\n"
+            f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+            "   Plan your experiments to fit within these resources.\n"
+        )
+        impl_block = (
+            "2. IMPLEMENTATION\n"
+            "   - Write clean, runnable experiment code\n"
+            "   - Install any packages you need (pip install)\n"
+            "   - Use GPUs for training (CUDA is available)\n\n"
+        )
 
     exp_retries_left = max_attempts - attempt
     ideas_left = max_ideas - idea_attempt
@@ -76,12 +109,7 @@ def _build_task(
         "Read idea.json (your research idea from Stage 1) and "
         "experiment_guidelines.md for detailed instructions on designing "
         "and running rigorous experiments.\n\n"
-        "AVAILABLE RESOURCES:\n"
-        f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
-        f"   - RAM: {mem}GB\n"
-        f"   - CPU: {cpus} cores\n"
-        f"   - Time limit: ~{hours} hours total for ALL experiments\n"
-        "   Plan your experiments to fit within these resources.\n\n"
+        f"{resource_block}\n"
         "Your job is to conduct the full experimental workflow for the research "
         "idea described in idea.json:\n\n"
         "1. EXPERIMENT DESIGN\n"
@@ -89,10 +117,7 @@ def _build_task(
         "   - Define evaluation metrics relevant to your claims\n"
         "   - Select at least 2 meaningful baselines for comparison\n"
         "   - Plan ablation studies to show each component's contribution\n\n"
-        "2. IMPLEMENTATION\n"
-        "   - Write clean, runnable experiment code\n"
-        "   - Install any packages you need (pip install)\n"
-        "   - Use GPUs for training (CUDA is available)\n\n"
+        f"{impl_block}"
         "3. EXECUTION\n"
         "   - Run your method AND all baselines on the same data splits\n"
         "   - Run with at least 3 different random seeds for error bars\n"

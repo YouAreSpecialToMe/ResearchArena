@@ -36,16 +36,28 @@ console = Console()
 DEFAULT_IMAGE = "researcharena/agent:latest"
 
 # Paths to guideline templates (relative to this file)
+# Domain-specific templates live in templates/{domain}/.
+# The top-level templates/ dir has the ML defaults.
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-_IDEA_GUIDELINES_PATH = _TEMPLATES_DIR / "idea_guidelines.md"
-_EXPERIMENT_GUIDELINES_PATH = _TEMPLATES_DIR / "experiment_guidelines.md"
-_PAPER_WRITING_GUIDELINES_PATH = _TEMPLATES_DIR / "paper_writing_guidelines.md"
+
+# Valid domains that have their own template subdirectory
+_DOMAINS_WITH_TEMPLATES = {"systems", "databases", "pl", "theory", "security"}
+
+
+def _get_template_path(filename: str, domain: str = "ml") -> Path:
+    """Return the path to a guideline template, domain-specific if available."""
+    if domain in _DOMAINS_WITH_TEMPLATES:
+        domain_path = _TEMPLATES_DIR / domain / filename
+        if domain_path.exists():
+            return domain_path
+    # Fallback to top-level ML templates
+    return _TEMPLATES_DIR / filename
 
 # Pre-authorization files written into the workspace before agent starts
-CLAUDE_MD_CONTENT = """\
+CLAUDE_MD_GPU = """\
 # ResearchArena Agent Workspace
 
-You are a researcher conducting end-to-end ML research autonomously.
+You are a researcher conducting end-to-end research autonomously.
 Your goal is to advance scientific understanding — find a meaningful problem,
 investigate it rigorously, and communicate your findings in a research paper.
 
@@ -77,8 +89,46 @@ IMPORTANT — scientific integrity:
 - Compare against real baselines
 """
 
-CODEX_INSTRUCTIONS = """\
-You are a researcher conducting end-to-end ML research autonomously.
+CLAUDE_MD_CPU = """\
+# ResearchArena Agent Workspace
+
+You are a researcher conducting end-to-end research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages. Each stage has a dedicated guideline
+file in this workspace — read it before starting each stage:
+
+  Stage 1 — IDEATION:     Read idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md
+  Stage 3 — PAPER:        Read paper_writing_guidelines.md
+
+You will receive a task prompt telling you which stage you are in and
+what output is expected. Follow the corresponding guideline closely.
+
+You have full permission to:
+- Read and write any files in this directory
+- Install Python packages with pip (use the workspace .venv if present)
+- Run Python scripts and experiments
+- Download datasets from the internet
+- Search the web (arXiv, Semantic Scholar, Google Scholar)
+- Run shell commands
+
+NOTE: No GPU is available. All computation runs on CPU only.
+Design your experiments accordingly — prefer analytical, algorithmic,
+or systems-level experiments that don't require GPU compute.
+
+Do NOT ask for confirmation. Execute everything directly.
+
+IMPORTANT — scientific integrity:
+- EVERY reference must be a real, verifiable publication
+- ALL experimental results must come from actually running code
+- Include ablation studies and error bars
+- Compare against real baselines
+"""
+
+CODEX_INSTRUCTIONS_GPU = """\
+You are a researcher conducting end-to-end research autonomously.
 Your goal is to advance scientific understanding — find a meaningful problem,
 investigate it rigorously, and communicate your findings in a research paper.
 
@@ -96,11 +146,30 @@ IMPORTANT: All references must be real publications. All results must come
 from actually running experiments. Scientific integrity is non-negotiable.
 """
 
+CODEX_INSTRUCTIONS_CPU = """\
+You are a researcher conducting end-to-end research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages, each with a guideline file:
+  Stage 1 — IDEATION:     idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  experiment_guidelines.md
+  Stage 3 — PAPER:        paper_writing_guidelines.md
+
+Read the guideline for your current stage before starting.
+
+You have full filesystem and network access in this workspace. No GPU available.
+Execute all commands without asking for approval.
+
+IMPORTANT: All references must be real publications. All results must come
+from actually running experiments. Scientific integrity is non-negotiable.
+"""
+
 # Kimi Code reads AGENTS.md and injects into system prompt via ${KIMI_AGENTS_MD}
-KIMI_AGENTS_MD_CONTENT = """\
+KIMI_AGENTS_MD_GPU = """\
 # ResearchArena Agent Workspace
 
-You are a researcher conducting end-to-end ML research autonomously.
+You are a researcher conducting end-to-end research autonomously.
 Your goal is to advance scientific understanding — find a meaningful problem,
 investigate it rigorously, and communicate your findings in a research paper.
 
@@ -132,9 +201,45 @@ IMPORTANT — scientific integrity:
 - Compare against real baselines
 """
 
+KIMI_AGENTS_MD_CPU = """\
+# ResearchArena Agent Workspace
+
+You are a researcher conducting end-to-end research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages. Each stage has a dedicated guideline
+file in this workspace — read it before starting each stage:
+
+  Stage 1 — IDEATION:     Read idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md
+  Stage 3 — PAPER:        Read paper_writing_guidelines.md
+
+You will receive a task prompt telling you which stage you are in and
+what output is expected. Follow the corresponding guideline closely.
+
+You have full permission to:
+- Read and write any files in this directory
+- Install Python packages with pip
+- Run Python scripts and experiments
+- Download datasets from the internet
+- Search the web (arXiv, Semantic Scholar, Google Scholar)
+- Run shell commands
+
+NOTE: No GPU is available. All computation runs on CPU only.
+
+Do NOT ask for confirmation. Execute everything directly.
+
+IMPORTANT — scientific integrity:
+- EVERY reference must be a real, verifiable publication
+- ALL experimental results must come from actually running code
+- Include ablation studies and error bars
+- Compare against real baselines
+"""
+
 # Mini-Agent reads a generic instructions file
-MINIAGENT_INSTRUCTIONS = """\
-You are a researcher conducting end-to-end ML research autonomously.
+MINIAGENT_INSTRUCTIONS_GPU = """\
+You are a researcher conducting end-to-end research autonomously.
 Your goal is to advance scientific understanding — find a meaningful problem,
 investigate it rigorously, and communicate your findings in a research paper.
 
@@ -146,6 +251,25 @@ The research is conducted in stages, each with a guideline file:
 Read the guideline for your current stage before starting.
 
 You have full filesystem, network, and GPU access in this workspace.
+Execute all operations directly without asking for approval.
+
+IMPORTANT: All references must be real publications. All results must come
+from actually running experiments. Scientific integrity is non-negotiable.
+"""
+
+MINIAGENT_INSTRUCTIONS_CPU = """\
+You are a researcher conducting end-to-end research autonomously.
+Your goal is to advance scientific understanding — find a meaningful problem,
+investigate it rigorously, and communicate your findings in a research paper.
+
+The research is conducted in stages, each with a guideline file:
+  Stage 1 — IDEATION:     idea_guidelines.md
+  Stage 2 — EXPERIMENTS:  experiment_guidelines.md
+  Stage 3 — PAPER:        paper_writing_guidelines.md
+
+Read the guideline for your current stage before starting.
+
+You have full filesystem and network access in this workspace. No GPU available.
 Execute all operations directly without asking for approval.
 
 IMPORTANT: All references must be real publications. All results must come
@@ -273,7 +397,9 @@ def invoke_agent(
     agent_config = agent_config or {}
 
     if not readonly:
-        _setup_workspace(agent_type, workspace)
+        platform = "cpu" if agent_config.get("gpus", 1) == 0 else "gpu"
+        domain = agent_config.get("domain", "ml")
+        _setup_workspace(agent_type, workspace, platform=platform, domain=domain)
 
     runtime = agent_config.get("runtime", "docker")
 
@@ -313,10 +439,13 @@ def _invoke_local(
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 
-    # GPU assignment
+    # GPU assignment (or explicit block for CPU platform)
     cuda_devices = agent_config.get("cuda_devices")
     if cuda_devices:
         env["CUDA_VISIBLE_DEVICES"] = cuda_devices
+    elif agent_config.get("gpus", 1) == 0:
+        # CPU platform: explicitly block GPU access on the host
+        env["CUDA_VISIBLE_DEVICES"] = ""
 
     mode = "read-only" if readonly else "read-write"
     console.print(f"  Agent: {agent_type} ({mode})")
@@ -662,18 +791,18 @@ def _build_docker_command(
     if _is_podman():
         cmd.extend(["--userns=host"])
 
-    # GPU access
+    # GPU access (skip entirely for CPU platform)
     is_podman = _is_podman()
     cuda_devices = config.get("cuda_devices")
     gpus = config.get("gpus", 1)
-    if is_podman:
-        cmd.extend(["--device", "nvidia.com/gpu=all"])
-        if cuda_devices:
-            cmd.extend(["-e", f"NVIDIA_VISIBLE_DEVICES={cuda_devices}"])
-    elif cuda_devices:
-        cmd.extend(["--gpus", f'"device={cuda_devices}"'])
-    elif gpus:
-        if isinstance(gpus, int):
+    if gpus and gpus != 0:
+        if is_podman:
+            cmd.extend(["--device", "nvidia.com/gpu=all"])
+            if cuda_devices:
+                cmd.extend(["-e", f"NVIDIA_VISIBLE_DEVICES={cuda_devices}"])
+        elif cuda_devices:
+            cmd.extend(["--gpus", f'"device={cuda_devices}"'])
+        elif isinstance(gpus, int):
             cmd.extend(["--gpus", str(gpus)])
         elif gpus == "all":
             cmd.extend(["--gpus", "all"])
@@ -819,42 +948,44 @@ def _build_agent_command(agent_type: str, task: str, config: dict, workspace_pat
 # ── Workspace setup ──────────────────────────────────────────────────────
 
 
-def _setup_workspace(agent_type: str, workspace: Path):
+def _setup_workspace(agent_type: str, workspace: Path, platform: str = "gpu", domain: str = "ml"):
     """Write permission/config files and research guidelines into workspace."""
 
-    idea_guidelines_dest = workspace / "idea_guidelines.md"
-    if not idea_guidelines_dest.exists() and _IDEA_GUIDELINES_PATH.exists():
-        shutil.copy2(_IDEA_GUIDELINES_PATH, idea_guidelines_dest)
-
-    for src, name in [
-        (_EXPERIMENT_GUIDELINES_PATH, "experiment_guidelines.md"),
-        (_PAPER_WRITING_GUIDELINES_PATH, "paper_writing_guidelines.md"),
+    # Copy domain-specific guideline templates
+    for filename in [
+        "idea_guidelines.md",
+        "experiment_guidelines.md",
+        "paper_writing_guidelines.md",
     ]:
-        dest = workspace / name
-        if not dest.exists() and src.exists():
-            shutil.copy2(src, dest)
+        dest = workspace / filename
+        if not dest.exists():
+            src = _get_template_path(filename, domain)
+            if src.exists():
+                shutil.copy2(src, dest)
+
+    is_gpu = (platform == "gpu")
 
     if agent_type == "claude":
         claude_md = workspace / "CLAUDE.md"
         if not claude_md.exists():
-            claude_md.write_text(CLAUDE_MD_CONTENT)
+            claude_md.write_text(CLAUDE_MD_GPU if is_gpu else CLAUDE_MD_CPU)
 
     elif agent_type == "codex":
         codex_dir = workspace / ".codex"
         codex_dir.mkdir(exist_ok=True)
         instructions = codex_dir / "instructions.md"
         if not instructions.exists():
-            instructions.write_text(CODEX_INSTRUCTIONS)
+            instructions.write_text(CODEX_INSTRUCTIONS_GPU if is_gpu else CODEX_INSTRUCTIONS_CPU)
 
     elif agent_type == "kimi":
         agents_md = workspace / "AGENTS.md"
         if not agents_md.exists():
-            agents_md.write_text(KIMI_AGENTS_MD_CONTENT)
+            agents_md.write_text(KIMI_AGENTS_MD_GPU if is_gpu else KIMI_AGENTS_MD_CPU)
 
     elif agent_type == "minimax":
         agent_instructions = workspace / "AGENT_INSTRUCTIONS.md"
         if not agent_instructions.exists():
-            agent_instructions.write_text(MINIAGENT_INSTRUCTIONS)
+            agent_instructions.write_text(MINIAGENT_INSTRUCTIONS_GPU if is_gpu else MINIAGENT_INSTRUCTIONS_CPU)
 
 
 # ── Runtime detection ──────────────────────────────────────────────────

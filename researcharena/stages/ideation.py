@@ -50,7 +50,8 @@ def run(
 
 def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None, attempt: int = 1, max_attempts: int = 5) -> str:
     res = resources or {}
-    gpus = res.get("gpus", 1)
+    platform = res.get("platform", "gpu")
+    gpus = res.get("gpus", 0 if platform == "cpu" else 1)
     gpu_type = res.get("gpu_type", "GPU")
     gpu_mem = res.get("gpu_memory_gb", 80)
     cpus = res.get("cpus", 8)
@@ -58,6 +59,34 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
     hours = res.get("time_hours", 8)
 
     remaining = max_attempts - attempt
+
+    # Build resource description based on platform
+    if platform == "cpu" or gpus == 0:
+        resource_block = (
+            "COMPUTATIONAL RESOURCES (scope your idea to fit):\n"
+            f"   - CPU: {cpus} cores\n"
+            f"   - RAM: {mem}GB\n"
+            f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+            "   - NO GPU available — your experiments must run on CPU only.\n"
+            "   Your idea MUST be feasible within these constraints. Design\n"
+            "   experiments that are analytical, algorithmic, or systems-level.\n"
+            "   Avoid ideas that require training neural networks or GPU compute.\n"
+            "   Prefer ideas that involve algorithm design, formal analysis,\n"
+            "   systems benchmarking, program analysis, or similar CPU workloads.\n"
+        )
+    else:
+        resource_block = (
+            "COMPUTATIONAL RESOURCES (scope your idea to fit):\n"
+            f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
+            f"   - RAM: {mem}GB\n"
+            f"   - CPU: {cpus} cores\n"
+            f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+            "   Your idea MUST be feasible within these constraints. Avoid ideas\n"
+            "   that require training large models from scratch, massive datasets,\n"
+            "   or multi-day compute. Prefer ideas that can show results with\n"
+            "   small-to-medium scale experiments.\n"
+        )
+
     task = (
         f"=== STAGE 1: IDEATION ===\n\n"
         f"Your seed field is: {seed_topic}\n\n"
@@ -65,16 +94,8 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         f"({'LAST CHANCE — make it count!' if remaining == 0 else f'{remaining} retries remaining if this idea fails'})\n\n"
         "Read idea_guidelines.md for the step-by-step process.\n\n"
         "Come up with a novel, concrete, and feasible research idea that could "
-        "result in a publishable ML conference paper.\n\n"
-        "COMPUTATIONAL RESOURCES (scope your idea to fit):\n"
-        f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
-        f"   - RAM: {mem}GB\n"
-        f"   - CPU: {cpus} cores\n"
-        f"   - Time limit: ~{hours} hours total for ALL experiments\n"
-        "   Your idea MUST be feasible within these constraints. Avoid ideas\n"
-        "   that require training large models from scratch, massive datasets,\n"
-        "   or multi-day compute. Prefer ideas that can show results with\n"
-        "   small-to-medium scale experiments.\n\n"
+        "result in a publishable conference paper.\n\n"
+        f"{resource_block}\n"
         "Focus on the core idea, not implementation details. You'll design "
         "experiments and write the paper in later stages.\n\n"
         "When done, save your idea to idea.json in the current directory with at least "

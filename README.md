@@ -1,12 +1,12 @@
 # ResearchArena
 
-Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, Mini-Agent) can autonomously conduct end-to-end ML research — from idea to accepted paper.
+Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, Mini-Agent) can autonomously conduct end-to-end research — from idea to accepted paper.
 
 ## What this does
 
-Given a seed field (e.g., "computer vision", "reinforcement learning"), the pipeline:
+Given a seed field (e.g., "computer vision", "query optimization", "program analysis"), the pipeline:
 
-1. **Launches a CLI agent** with GPU access, network, and ML packages
+1. **Launches a CLI agent** with appropriate compute access (GPU or CPU), network, and packages
 2. **The agent does everything** — explores the field, comes up with an idea, designs and runs experiments, writes a LaTeX paper
 3. **Other CLI agents review it** — with read-only workspace access, searching online to verify novelty
 4. **paperreview.ai** provides an additional external review
@@ -15,6 +15,17 @@ Given a seed field (e.g., "computer vision", "reinforcement learning"), the pipe
 
 Each stage has a dedicated guideline file that the agent reads before starting. The agent receives computational resource constraints upfront so it scopes ideas to fit.
 
+## Conferences & Areas
+
+Seeds span multiple CS conferences and two platforms:
+
+| Platform | Areas | Conferences |
+|---|---|---|
+| **GPU** | NLP, CV, graphics, generative models, RL, robotics, AI4Science | ICLR, NeurIPS, ICML, CVPR, ACL, EMNLP, SIGGRAPH, CoRL |
+| **CPU** | Systems, databases, PL, theory, architecture, security | OSDI, SOSP, SIGMOD, VLDB, PLDI, POPL, STOC, FOCS, ISCA, CCS |
+
+GPU seeds get CUDA-enabled containers with GPU access. CPU seeds get lightweight containers optimized for analytical, algorithmic, and systems-level experiments.
+
 ## Architecture
 
 ```
@@ -22,8 +33,8 @@ Each stage has a dedicated guideline file that the agent reads before starting. 
                     │               researcharena (harness)                        │
                     │                                                              │
 Seed field ───────→ │  IDEATION ──→ EXPERIMENTS ──→ PAPER ──→ REVIEW              │
-                    │     ↑              ↑                       │                │
-                    │     │              │                       ├─ score ≥ 8     │
+  + platform        │     ↑              ↑                       │                │
+  (gpu/cpu)         │     │              │                       ├─ score ≥ 8     │
                     │     │              │                       │   → ACCEPTED   │
                     │     │              │                       │                │
                     │     │              │                       ├─ score = 6     │
@@ -66,8 +77,9 @@ The harness supports two runtime modes:
 **Docker/Podman mode** (`runtime: "docker"`, default) — each agent runs in an isolated container:
 
 ```
-researcharena/agent:latest (pytorch/pytorch base)
-├── Python, CUDA, PyTorch pre-installed
+GPU platform: researcharena/agent:latest (pytorch/pytorch base, CUDA)
+CPU platform: researcharena/agent-cpu:latest (python:3.11-slim base)
+
 ├── CLI agent binaries mounted from host
 │
 ├── Researcher (e.g., Claude Code)
@@ -122,7 +134,9 @@ For smoke tests with only one agent, set `allow_self_review: true` to let the ag
 pip install -e .
 ```
 
-### 2. (Docker mode) Build or pull the image
+### 2. (Docker mode) Build or pull images
+
+**GPU image** (for NLP, CV, graphics, generative models):
 
 ```bash
 # Option A: Pull pre-built PyTorch image and tag it
@@ -135,6 +149,15 @@ docker build -t researcharena/agent:latest .
 # Podman (rootless, no subuid):
 podman pull docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 podman tag docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel localhost/researcharena/agent:latest
+```
+
+**CPU image** (for systems, databases, PL, theory):
+
+```bash
+docker build -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
+
+# Podman:
+podman build --userns=host -f Dockerfile.cpu -t localhost/researcharena/agent-cpu:latest .
 ```
 
 CLI agent binaries (claude, codex, etc.) are automatically mounted from the host into the container at runtime — they don't need to be installed in the image.
@@ -195,8 +218,11 @@ Config files support `${ENV_VAR}` substitution so credentials stay out of versio
 ### Run a single seed
 
 ```bash
+# GPU seed (default)
 researcharena run --seed "computer vision" --agent claude
-researcharena run --seed "reinforcement learning" --agent codex
+
+# CPU seed
+researcharena run --seed "query optimization" --agent claude --platform cpu
 ```
 
 ### Run with local mode (no container)
@@ -205,14 +231,24 @@ researcharena run --seed "reinforcement learning" --agent codex
 researcharena run -c configs/smoke_test.yaml
 ```
 
-### Run the full benchmark (47 ICLR 2026 fields)
+### Run the full benchmark
 
 ```bash
-# All fields
+# All seeds (GPU + CPU)
 researcharena bench --agent claude
 
+# GPU seeds only (NLP, CV, graphics, etc.)
+researcharena bench --agent claude --platform gpu
+
+# CPU seeds only (systems, DB, PL, theory)
+researcharena bench --agent claude --platform cpu
+
+# Filter by conference
+researcharena bench --agent claude --conference sigmod
+researcharena bench --agent claude --conference iclr
+
 # Single field
-researcharena bench --agent claude --field "computer vision"
+researcharena bench --agent claude --field "query optimization"
 
 # Compare agents
 researcharena bench --agent claude
@@ -223,7 +259,10 @@ researcharena bench --agent kimi
 ### Other commands
 
 ```bash
-researcharena list-seeds                          # show all 47 seed fields
+researcharena list-seeds                          # show all seeds
+researcharena list-seeds --platform gpu           # GPU seeds only
+researcharena list-seeds --platform cpu           # CPU seeds only
+researcharena list-seeds --conference sigmod      # SIGMOD seeds
 researcharena review-only outputs/runs/idea_01/   # review existing paper
 researcharena run -c configs/my_config.yaml       # custom config
 ```
@@ -234,15 +273,26 @@ See [`configs/default.yaml`](configs/default.yaml):
 
 ```yaml
 seed_topic: "computer vision"
+seed_platform: "gpu"              # or "cpu"
 
-resources:
-  total_gpus: 4
-  gpu_ids: "0,1,2,3"
-  gpu_type: "NVIDIA A100"
-  gpu_memory_gb: 80
-  total_cpus: 32
-  total_memory_gb: 128
-  concurrent_agents: 1          # auto-splits resources
+# Per-platform resource profiles
+platforms:
+  gpu:
+    resources:
+      total_gpus: 4
+      gpu_ids: "0,1,2,3"
+      gpu_type: "NVIDIA A100"
+      gpu_memory_gb: 80
+      total_cpus: 32
+      total_memory_gb: 128
+    docker_image: "researcharena/agent:latest"
+
+  cpu:
+    resources:
+      total_gpus: 0
+      total_cpus: 32
+      total_memory_gb: 128
+    docker_image: "researcharena/agent-cpu:latest"
 
 agent:
   type: "claude"                # claude, codex, kimi, minimax, custom
@@ -265,6 +315,21 @@ review:
 pipeline:
   max_ideas_per_seed: 5
   max_global_steps: 30
+```
+
+### Seeds format
+
+Each seed in `configs/seeds.yaml` has:
+
+```yaml
+seeds:
+  - name: "computer vision"
+    conferences: [iclr, neurips, cvpr, eccv]
+    platform: gpu
+
+  - name: "query optimization"
+    conferences: [sigmod, vldb, icde]
+    platform: cpu
 ```
 
 ### Smoke test config
@@ -370,14 +435,14 @@ outputs/runs/
 ```
 researcharena/
 ├── cli.py                       # CLI entry point (run, bench, review-only, list-seeds)
-├── pipeline.py                  # State machine orchestrator
+├── pipeline.py                  # State machine orchestrator (platform-aware)
 ├── stages/
 │   ├── ideation.py              # Stage 1: agent explores field, produces idea.json
 │   ├── experiment_design.py     # Stage 2: agent implements & runs experiments
 │   ├── paper_writing.py         # Stage 3: agent writes LaTeX paper
 │   └── review.py                # Stage 4: reference check + paperreview.ai + CLI agent reviewers
 ├── utils/
-│   ├── agent_runner.py          # Local + Docker/Podman execution, 4 agent CLIs
+│   ├── agent_runner.py          # Local + Docker/Podman execution, GPU/CPU platform support
 │   ├── tracker.py               # Time, tokens, cost tracking
 │   ├── config.py                # YAML config loading
 │   ├── paperreview.py           # paperreview.ai automation (Playwright)
@@ -388,9 +453,10 @@ researcharena/
 │   ├── paper_writing_guidelines.md  # How to write a research paper
 │   └── reviewer_guidelines.md   # How to review (ICLR scale, novelty search)
 ├── configs/
-│   ├── default.yaml             # Default configuration
+│   ├── default.yaml             # Default configuration (GPU + CPU platforms)
 │   ├── smoke_test.yaml          # Quick single-idea smoke test
-│   └── seeds.yaml               # 47 seed fields from ICLR 2026 CFP
-├── Dockerfile                   # Pip-only build on pytorch base (podman-compatible)
+│   └── seeds.yaml               # Seed fields across multiple conferences
+├── Dockerfile                   # GPU image: pytorch base (CUDA-enabled)
+├── Dockerfile.cpu               # CPU image: python:3.11-slim base
 └── pyproject.toml
 ```
