@@ -216,6 +216,7 @@ class Pipeline:
             history=self.state.idea_history or None,
             timeout=self.config["agent"].get("ideation_timeout", 1800),
             agent_config=self.agent_config,
+            resources=self.per_agent_resources,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)

@@ -1,15 +1,11 @@
-"""Invoke a CLI agent inside a Docker container.
+"""Invoke a CLI agent, either in a container or locally on the host.
 
-Each agent invocation runs in an isolated Docker container with:
-  - Its own filesystem (workspace mounted as a volume)
-  - GPU access via NVIDIA Container Toolkit
-  - Network access for downloading datasets/models
-  - Resource limits (memory, CPU, timeout)
-  - Pre-installed base packages
-  - API keys passed through as environment variables
+Supports two runtime modes (set via config agent.runtime):
+  - "docker" (default): runs in a Docker/Podman container
+  - "local": runs directly on the host with a per-workspace virtualenv
 
-The workspace directory is bind-mounted so artifacts (idea.json, results.json,
-paper.tex) persist after the container exits.
+Local mode creates an isolated virtualenv for each workspace so agents
+can pip install packages without conflicting with each other or the host.
 
 Supported agents:
   - claude: Claude Code CLI
@@ -26,7 +22,9 @@ import os
 import select
 import shutil
 import subprocess
+import sys
 import time
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,7 +61,7 @@ what output is expected. Follow the corresponding guideline closely.
 
 You have full permission to:
 - Read and write any files in this directory
-- Install Python packages with pip
+- Install Python packages with pip (use the workspace .venv if present)
 - Run Python scripts and experiments
 - Use GPUs (CUDA is available)
 - Download datasets and models from the internet
@@ -255,15 +253,18 @@ def invoke_agent(
     agent_config: dict | None = None,
     readonly: bool = False,
 ) -> AgentResult:
-    """Invoke a CLI agent inside a Docker container.
+    """Invoke a CLI agent, either in a container or locally.
+
+    When agent_config["runtime"] is "local", the agent runs directly on
+    the host with a per-workspace virtualenv. Otherwise it runs in Docker.
 
     Args:
         agent_type: "claude", "codex", "kimi", "minimax", or "custom"
         task: The task description / prompt for the agent
-        workspace: Host directory to mount as /workspace in the container
-        timeout: Max seconds before killing the container
-        agent_config: Additional config (model, image, resources, etc.)
-        readonly: If True, mount workspace as read-only (for reviewer agents)
+        workspace: Directory for agent artifacts
+        timeout: Max seconds before killing the agent
+        agent_config: Additional config (model, image, resources, runtime, etc.)
+        readonly: If True, workspace is read-only (for reviewer agents)
 
     Returns:
         AgentResult with exit code, logs, and elapsed time
@@ -271,12 +272,99 @@ def invoke_agent(
     workspace.mkdir(parents=True, exist_ok=True)
     agent_config = agent_config or {}
 
-    # Write permission files into workspace before container starts
-    # (only for read-write invocations — reviewers don't need them)
     if not readonly:
         _setup_workspace(agent_type, workspace)
 
-    # Build docker run command
+    runtime = agent_config.get("runtime", "docker")
+
+    if runtime == "local":
+        return _invoke_local(agent_type, task, workspace, timeout, agent_config, readonly)
+    else:
+        return _invoke_docker(agent_type, task, workspace, timeout, agent_config, readonly)
+
+
+# ── Local runtime ────────────────────────────────────────────────────────
+
+
+def _invoke_local(
+    agent_type: str,
+    task: str,
+    workspace: Path,
+    timeout: int,
+    agent_config: dict,
+    readonly: bool,
+) -> AgentResult:
+    """Run the agent CLI directly on the host with a per-workspace virtualenv."""
+
+    # Create a virtualenv for this workspace (inherits system packages)
+    venv_dir = workspace / ".venv"
+    if not venv_dir.exists():
+        console.print(f"  Creating virtualenv at {venv_dir}...")
+        venv.create(str(venv_dir), with_pip=True, system_site_packages=True)
+
+    # Build the agent command
+    cmd = _build_agent_command(agent_type, task, agent_config, workspace_path=str(workspace.resolve()))
+
+    # Set up environment: activate venv, set CUDA devices
+    env = os.environ.copy()
+    venv_bin = venv_dir / "bin"
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    env["NONINTERACTIVE"] = "1"
+    env["CI"] = "1"
+
+    # GPU assignment
+    cuda_devices = agent_config.get("cuda_devices")
+    if cuda_devices:
+        env["CUDA_VISIBLE_DEVICES"] = cuda_devices
+
+    mode = "read-only" if readonly else "read-write"
+    console.print(f"  Agent: {agent_type} ({mode})")
+    console.print(f"  Workspace: {workspace}")
+    console.print(f"  Runtime: local (virtualenv)")
+    console.print(f"  Timeout: {timeout}s")
+
+    # Set up logging
+    if readonly:
+        log_dir = workspace.parent / f"{workspace.name}_review_logs"
+    else:
+        log_dir = workspace / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_prefix = f"{agent_type}_{int(time.time())}"
+
+    command_path = log_dir / f"{log_prefix}_command.txt"
+    command_path.write_text(" ".join(cmd))
+
+    start = time.time()
+    cwd = workspace.resolve()
+
+    if agent_type in ("claude", "codex", "kimi", "minimax"):
+        return _run_with_streaming(
+            cmd, workspace, log_dir, log_prefix, timeout, start,
+            role="reviewer" if readonly else "researcher",
+            cwd=cwd, env=env,
+        )
+    else:
+        return _run_simple(
+            cmd, workspace, log_dir, log_prefix, timeout, start,
+            role="reviewer" if readonly else "researcher",
+            cwd=cwd, env=env,
+        )
+
+
+# ── Docker runtime ───────────────────────────────────────────────────────
+
+
+def _invoke_docker(
+    agent_type: str,
+    task: str,
+    workspace: Path,
+    timeout: int,
+    agent_config: dict,
+    readonly: bool,
+) -> AgentResult:
+    """Run the agent inside a Docker/Podman container."""
+
     docker_cmd = _build_docker_command(
         agent_type, task, workspace, agent_config, readonly=readonly,
     )
@@ -287,9 +375,6 @@ def invoke_agent(
     console.print(f"  Image: {agent_config.get('docker_image', DEFAULT_IMAGE)}")
     console.print(f"  Timeout: {timeout}s")
 
-    # Set up log directory
-    # For read-only mounts, logs go to a sibling directory on the host
-    # (can't write inside the read-only workspace)
     if readonly:
         log_dir = workspace.parent / f"{workspace.name}_review_logs"
     else:
@@ -297,44 +382,40 @@ def invoke_agent(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_prefix = f"{agent_type}_{int(time.time())}"
 
-    # Save docker command before execution
     command_path = log_dir / f"{log_prefix}_command.txt"
     command_path.write_text(" ".join(docker_cmd))
 
     start = time.time()
-
-    # Stream stdout line-by-line for all known agents to timestamp events
-    # for per-tool-call duration tracking. Only use subprocess.run for custom.
     role = "reviewer" if readonly else "researcher"
+
     if agent_type in ("claude", "codex", "kimi", "minimax"):
-        agent_result = _run_with_streaming(
+        return _run_with_streaming(
             docker_cmd, workspace, log_dir, log_prefix, timeout, start, role,
         )
     else:
-        agent_result = _run_simple(
+        return _run_simple(
             docker_cmd, workspace, log_dir, log_prefix, timeout, start, role,
         )
-
-    return agent_result
 
 
 # ── Execution strategies ─────────────────────────────────────────────────
 
 
 def _run_with_streaming(
-    docker_cmd: list[str],
+    cmd: list[str],
     workspace: Path,
     log_dir: Path,
     log_prefix: str,
     timeout: int,
     start: float,
     role: str = "researcher",
+    cwd: Path | None = None,
+    env: dict | None = None,
 ) -> AgentResult:
     """Run agent with Popen, streaming stdout to timestamp each line.
 
-    Used for Claude Code (stream-json output). Produces an events.jsonl
-    file where each line is {"ts": <float>, "event": <json>} so the
-    action parser can compute per-tool-call durations.
+    Produces an events.jsonl file where each line is {"ts": <float>, "event": <json>}
+    so the action parser can compute per-tool-call durations.
     """
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -342,10 +423,12 @@ def _run_with_streaming(
 
     try:
         proc = subprocess.Popen(
-            docker_cmd,
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=cwd,
+            env=env,
         )
 
         with open(events_path, "w") as events_file:
@@ -355,8 +438,9 @@ def _run_with_streaming(
                 if elapsed > timeout:
                     proc.kill()
                     proc.wait()
-                    console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
-                    _kill_container(workspace, role)
+                    console.print(f"  [red]Agent timed out after {elapsed:.0f}s.[/]")
+                    if not cwd:  # docker mode
+                        _kill_container(workspace, role)
                     return _save_and_return(
                         exit_code=-1,
                         stdout="".join(stdout_lines),
@@ -395,12 +479,10 @@ def _run_with_streaming(
                         if stripped:
                             try:
                                 event = json.loads(stripped)
-                                # Structured JSON event (Claude Code, Codex)
                                 events_file.write(
                                     json.dumps({"ts": ts, "event": event}) + "\n"
                                 )
                             except json.JSONDecodeError:
-                                # Plain text line
                                 events_file.write(
                                     json.dumps({"ts": ts, "line": stripped}) + "\n"
                                 )
@@ -458,21 +540,25 @@ def _run_with_streaming(
 
 
 def _run_simple(
-    docker_cmd: list[str],
+    cmd: list[str],
     workspace: Path,
     log_dir: Path,
     log_prefix: str,
     timeout: int,
     start: float,
     role: str = "researcher",
+    cwd: Path | None = None,
+    env: dict | None = None,
 ) -> AgentResult:
     """Run agent with subprocess.run (simple, no streaming timestamps)."""
     try:
         result = subprocess.run(
-            docker_cmd,
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=cwd,
+            env=env,
         )
         elapsed = time.time() - start
         console.print(f"  Finished in {elapsed:.0f}s, exit code {result.returncode}")
@@ -489,8 +575,9 @@ def _run_simple(
 
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
-        console.print(f"  [red]Agent timed out after {elapsed:.0f}s. Killing container...[/]")
-        _kill_container(workspace, role)
+        console.print(f"  [red]Agent timed out after {elapsed:.0f}s.[/]")
+        if not cwd:  # docker mode
+            _kill_container(workspace, role)
 
         return AgentResult(
             exit_code=-1,
@@ -517,7 +604,6 @@ def _save_and_return(
     command_path = log_dir / f"{log_prefix}_command.txt"
     stdout_path.write_text(stdout)
     stderr_path.write_text(stderr)
-    # command.txt is written by caller before execution — skip if exists
     if not command_path.exists():
         command_path.write_text("")
 
@@ -556,33 +642,35 @@ def _build_docker_command(
     role = "reviewer" if readonly else "researcher"
     container_name = f"researcharena-{role}-{workspace.name}-{int(time.time())}"
 
-    # Mount workspace read-only for reviewers, read-write for researchers
     mount_spec = f"{workspace.resolve()}:/workspace"
     if readonly:
         mount_spec += ":ro"
 
+    runtime = _container_runtime()
     cmd = [
-        "docker", "run",
+        runtime, "run",
         "--rm",
         "--name", container_name,
-
-        # ── Mount workspace ──
         "-v", mount_spec,
         "-w", "/workspace",
-
-        # ── Resource limits ──
         "--memory", config.get("memory_limit", "32g"),
         "--cpus", str(config.get("cpus", 8)),
-        "--shm-size", config.get("shm_size", "8g"),  # needed for PyTorch DataLoader
+        "--shm-size", config.get("shm_size", "8g"),
     ]
 
-    # ── GPU access ──
-    # Use specific GPU IDs if provided (e.g., "0,2"), otherwise use count
+    # Podman rootless needs --userns=host when no subuid mappings exist
+    if _is_podman():
+        cmd.extend(["--userns=host"])
+
+    # GPU access
+    is_podman = _is_podman()
     cuda_devices = config.get("cuda_devices")
     gpus = config.get("gpus", 1)
-    if cuda_devices:
-        # Use NVIDIA_VISIBLE_DEVICES for specific GPU assignment
-        device_ids = cuda_devices.split(",")
+    if is_podman:
+        cmd.extend(["--device", "nvidia.com/gpu=all"])
+        if cuda_devices:
+            cmd.extend(["-e", f"NVIDIA_VISIBLE_DEVICES={cuda_devices}"])
+    elif cuda_devices:
         cmd.extend(["--gpus", f'"device={cuda_devices}"'])
     elif gpus:
         if isinstance(gpus, int):
@@ -590,18 +678,22 @@ def _build_docker_command(
         elif gpus == "all":
             cmd.extend(["--gpus", "all"])
 
-    # ── Network ──
-    # Allow network access for downloading datasets, models, API calls
-    # (default Docker behavior, but being explicit)
     cmd.extend(["--network", "host"])
 
-    # ── Mount CLI agent auth credentials ──
-    # Claude Code subscription auth lives in ~/.claude/
-    # Codex/OpenAI auth lives in ~/.codex/ or ~/.config/
-    # ── Mount CLI agent auth & memory ──
-    # Researcher: read-write so the agent can build up memory across stages
-    # Reviewer: read-only (auth only, no memory persistence)
+    # Mount CLI agent binaries from host (if not in image)
     home = Path.home()
+    cli_binaries = {
+        "claude": shutil.which("claude"),
+        "codex": shutil.which("codex"),
+        "kimi": shutil.which("kimi"),
+        "minimax": shutil.which("mini-agent"),
+    }
+    host_bin = cli_binaries.get(agent_type)
+    if host_bin:
+        host_bin = str(Path(host_bin).resolve())
+        cmd.extend(["-v", f"{host_bin}:/usr/local/bin/{agent_type}:ro"])
+
+    # Mount CLI agent auth & memory
     auth_mounts = {
         "claude": home / ".claude",
         "codex": home / ".codex",
@@ -613,19 +705,26 @@ def _build_docker_command(
         mount_mode = "ro" if readonly else "rw"
         cmd.extend(["-v", f"{auth_dir}:/root/{auth_dir.name}:{mount_mode}"])
 
-    # ── Environment variables ──
-    # Pass through API keys so the agent CLI can authenticate
+    config_files = {
+        "claude": home / ".claude.json",
+        "codex": home / ".codex.json",
+    }
+    config_file = config_files.get(agent_type)
+    if config_file and config_file.exists():
+        mount_mode = "ro" if readonly else "rw"
+        cmd.extend(["-v", f"{config_file}:/root/{config_file.name}:{mount_mode}"])
+
+    # Environment variables
     api_key_vars = [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "HF_TOKEN",
         "HUGGING_FACE_HUB_TOKEN",
         "WANDB_API_KEY",
-        "MOONSHOT_API_KEY",      # Kimi (Moonshot AI)
-        "MINIMAX_API_KEY",       # MiniMax
-        "MINIMAX_GROUP_ID",      # MiniMax group ID
+        "MOONSHOT_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_GROUP_ID",
     ]
-    # Also pass any extra env vars from config
     extra_env = config.get("env", {})
 
     for var in api_key_vars:
@@ -633,26 +732,22 @@ def _build_docker_command(
         if val:
             cmd.extend(["-e", f"{var}={val}"])
 
-    # Kimi and MiniMax have their own auth — API keys passed via env vars above
-
     for key, val in extra_env.items():
         cmd.extend(["-e", f"{key}={val}"])
 
-    # Non-interactive signals
     cmd.extend([
         "-e", "NONINTERACTIVE=1",
         "-e", "CI=1",
     ])
 
-    # ── Image + agent command ──
     cmd.append(image)
     cmd.extend(_build_agent_command(agent_type, task, config))
 
     return cmd
 
 
-def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
-    """Build the command that runs inside the container."""
+def _build_agent_command(agent_type: str, task: str, config: dict, workspace_path: str = "/workspace") -> list[str]:
+    """Build the command that runs inside the container (or locally)."""
 
     if agent_type == "claude":
         cmd = [
@@ -665,7 +760,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         if config.get("model"):
             cmd.extend(["--model", config["model"]])
         cmd.extend(["--max-turns", str(config.get("max_turns", 200))])
-        cmd.extend(["--prompt", task])
+        cmd.extend(["-p", task])
         return cmd
 
     elif agent_type == "codex":
@@ -681,9 +776,6 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         return cmd
 
     elif agent_type == "kimi":
-        # Kimi Code CLI (Moonshot AI) — similar to Claude Code
-        # --print: non-interactive, implicitly enables --yolo
-        # --output-format stream-json: structured output for parsing
         cmd = [
             "kimi",
             "--print",
@@ -697,13 +789,10 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         return cmd
 
     elif agent_type == "minimax":
-        # Mini-Agent CLI (MiniMax)
-        # --task: non-interactive mode, executes task and exits
-        # --workspace: set working directory
         cmd = [
             "mini-agent",
             "--task", task,
-            "--workspace", "/workspace",
+            "--workspace", workspace_path,
         ]
         return cmd
 
@@ -713,7 +802,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
         cmd_str = (
             template
             .replace("{task}", shlex.quote(task))
-            .replace("{workspace}", shlex.quote("/workspace"))
+            .replace("{workspace}", shlex.quote(workspace_path))
             .replace("{model}", shlex.quote(config.get("model", "")))
         )
         return ["bash", "-c", cmd_str]
@@ -731,12 +820,10 @@ def _build_agent_command(agent_type: str, task: str, config: dict) -> list[str]:
 def _setup_workspace(agent_type: str, workspace: Path):
     """Write permission/config files and research guidelines into workspace."""
 
-    # Copy research guidelines into every workspace
     idea_guidelines_dest = workspace / "idea_guidelines.md"
     if not idea_guidelines_dest.exists() and _IDEA_GUIDELINES_PATH.exists():
         shutil.copy2(_IDEA_GUIDELINES_PATH, idea_guidelines_dest)
 
-    # Copy experiment and paper writing guidelines
     for src, name in [
         (_EXPERIMENT_GUIDELINES_PATH, "experiment_guidelines.md"),
         (_PAPER_WRITING_GUIDELINES_PATH, "paper_writing_guidelines.md"),
@@ -758,7 +845,6 @@ def _setup_workspace(agent_type: str, workspace: Path):
             instructions.write_text(CODEX_INSTRUCTIONS)
 
     elif agent_type == "kimi":
-        # Kimi Code reads AGENTS.md and injects it into the system prompt
         agents_md = workspace / "AGENTS.md"
         if not agents_md.exists():
             agents_md.write_text(KIMI_AGENTS_MD_CONTENT)
@@ -769,6 +855,30 @@ def _setup_workspace(agent_type: str, workspace: Path):
             agent_instructions.write_text(MINIAGENT_INSTRUCTIONS)
 
 
+# ── Runtime detection ──────────────────────────────────────────────────
+
+
+def _container_runtime() -> str:
+    """Return the path to the container runtime ('docker' or 'podman')."""
+    docker_path = shutil.which("docker")
+    if docker_path:
+        return docker_path
+    podman_path = shutil.which("podman")
+    if podman_path:
+        return podman_path
+    return "docker"
+
+
+def _is_podman() -> bool:
+    """Detect if the container runtime is podman."""
+    rt = _container_runtime()
+    if "podman" in str(Path(rt).resolve()):
+        return True
+    if "podman" in Path(rt).name:
+        return True
+    return False
+
+
 # ── Container management ────────────────────────────────────────────────
 
 
@@ -776,7 +886,7 @@ def _kill_container(workspace: Path, role: str = "researcher"):
     """Find and kill running containers for this workspace and role."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"name=researcharena-{role}-{workspace.name}"],
+            [_container_runtime(), "ps", "-q", "--filter", f"name=researcharena-{role}-{workspace.name}"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -784,7 +894,7 @@ def _kill_container(workspace: Path, role: str = "researcher"):
         for container_id in result.stdout.strip().split("\n"):
             if container_id:
                 subprocess.run(
-                    ["docker", "kill", container_id],
+                    [_container_runtime(), "kill", container_id],
                     capture_output=True,
                     timeout=10,
                 )

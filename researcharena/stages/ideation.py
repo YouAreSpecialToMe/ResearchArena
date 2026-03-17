@@ -26,13 +26,14 @@ def run(
     history: list[dict] | None = None,
     timeout: int = 1800,
     agent_config: dict | None = None,
+    resources: dict | None = None,
 ) -> tuple[dict | None, object]:
     """Let the agent generate a research idea.
 
     Returns:
         Tuple of (parsed idea dict or None, AgentResult).
     """
-    task = _build_task(seed_topic, history)
+    task = _build_task(seed_topic, history, resources)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -45,13 +46,30 @@ def run(
     return _parse_output(workspace), agent_result
 
 
-def _build_task(seed_topic: str, history: list[dict] | None) -> str:
+def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None) -> str:
+    res = resources or {}
+    gpus = res.get("gpus", 1)
+    gpu_type = res.get("gpu_type", "GPU")
+    gpu_mem = res.get("gpu_memory_gb", 80)
+    cpus = res.get("cpus", 8)
+    mem = res.get("memory_gb", 32)
+    hours = res.get("time_hours", 8)
+
     task = (
         f"=== STAGE 1: IDEATION ===\n\n"
         f"Your seed field is: {seed_topic}\n\n"
         "Read idea_guidelines.md for the step-by-step process: explore the "
         "field, search existing work online (arXiv, Semantic Scholar, Google "
         "Scholar), generate candidate ideas, and verify novelty.\n\n"
+        "COMPUTATIONAL RESOURCES (scope your idea to fit):\n"
+        f"   - GPU: {gpus}x {gpu_type} ({gpu_mem}GB VRAM each)\n"
+        f"   - RAM: {mem}GB\n"
+        f"   - CPU: {cpus} cores\n"
+        f"   - Time limit: ~{hours} hours total for ALL experiments\n"
+        "   Your idea MUST be feasible within these constraints. Avoid ideas\n"
+        "   that require training large models from scratch, massive datasets,\n"
+        "   or multi-day compute. Prefer ideas that can show results with\n"
+        "   small-to-medium scale experiments.\n\n"
         "Come up with a novel, concrete, and feasible research idea that could "
         "result in a publishable ML conference paper.\n\n"
         "You have full autonomy — search the web, read papers, brainstorm, "

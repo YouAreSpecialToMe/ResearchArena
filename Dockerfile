@@ -1,49 +1,24 @@
 # Base image for researcharena agent containers.
-# Includes: Python, CUDA, common ML packages, and CLI agent tools.
+# Uses the official PyTorch image (has Python, CUDA, pip pre-installed).
+# Only pip installs — no apt-get — so it works with rootless podman.
 #
-# Build:  docker build -t researcharena/agent:latest .
-# Build with specific CUDA version:
-#   docker build --build-arg CUDA_VERSION=12.4.0 -t researcharena/agent:latest .
+# CLI agent tools (claude, codex, etc.) are mounted from the host at runtime
+# by agent_runner.py, so they don't need to be installed here.
+#
+# Build:
+#   podman build --userns=host -t researcharena/agent:latest .
+#   # or: docker build -t researcharena/agent:latest .
 
-ARG CUDA_VERSION=12.4.0
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
-ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# ── System dependencies ──
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv python3-dev \
-    git curl wget unzip \
-    build-essential cmake \
-    texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
-    nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
-
-# Make python3 the default
-RUN ln -sf /usr/bin/python3 /usr/bin/python
-
-# ── Base Python packages ──
-RUN pip install --no-cache-dir --break-system-packages --upgrade pip && \
-    pip install --no-cache-dir --break-system-packages \
-    numpy pandas matplotlib scipy scikit-learn \
-    torch torchvision torchaudio \
+# ── Python ML packages (beyond what pytorch image provides) ──
+RUN pip install --no-cache-dir \
+    torchvision torchaudio \
     transformers datasets accelerate \
     huggingface_hub wandb \
-    jupyter seaborn plotly
-
-# ── CLI agent tools ──
-# Claude Code
-RUN npm install -g @anthropic-ai/claude-code
-
-# Codex (OpenAI CLI)
-RUN npm install -g @openai/codex
-
-# Kimi Code CLI (Moonshot AI)
-RUN pip install --no-cache-dir --break-system-packages kimi-cli
-
-# Mini-Agent (MiniMax)
-RUN pip install --no-cache-dir --break-system-packages mini-agent
+    scikit-learn scipy pandas matplotlib seaborn plotly
 
 # ── Workspace setup ──
 RUN mkdir -p /workspace
