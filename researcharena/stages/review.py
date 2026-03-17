@@ -392,19 +392,32 @@ def _score_qualitative_review(
     """
     from researcharena.utils.agent_runner import invoke_agent
 
+    # Build review text from all available sections
+    strengths = pr_review.get("strengths", "")
+    if isinstance(strengths, list):
+        strengths = "\n".join(str(s) for s in strengths)
+    weaknesses = pr_review.get("weaknesses", "")
+    if isinstance(weaknesses, list):
+        weaknesses = "\n".join(str(w) for w in weaknesses)
+    questions = pr_review.get("questions_for_authors", "")
+    if isinstance(questions, list):
+        questions = "\n".join(str(q) for q in questions)
+
     review_text = (
-        f"Summary: {pr_review.get('summary', '')}\n\n"
-        f"Strengths: {pr_review.get('strengths', pr_review.get('strengths', ''))}\n\n"
-        f"Weaknesses: {pr_review.get('weaknesses', pr_review.get('weaknesses', ''))}\n\n"
-        f"Detailed feedback: {pr_review.get('detailed_feedback', '')}\n\n"
-        f"Overall assessment: {pr_review.get('questions_for_authors', '')}\n"
+        f"Summary:\n{pr_review.get('summary', '')}\n\n"
+        f"Strengths:\n{strengths}\n\n"
+        f"Weaknesses:\n{weaknesses}\n\n"
+        f"Detailed feedback:\n{pr_review.get('detailed_feedback', '')}\n\n"
+        f"Questions for authors:\n{questions}\n\n"
+        f"Overall assessment:\n{pr_review.get('overall_assessment', '')}\n"
     )
 
     task = (
         f"You are a meta-reviewer for {venue}. An external review system "
         f"(paperreview.ai) produced the following qualitative review of a "
         f"research paper, but did NOT assign a numeric score.\n\n"
-        f"--- EXTERNAL REVIEW ---\n{review_text[:3000]}\n--- END REVIEW ---\n\n"
+        f"Read the review carefully and assign a score.\n\n"
+        f"--- EXTERNAL REVIEW ---\n{review_text[:6000]}\n--- END REVIEW ---\n\n"
         f"Based on this review, assign an overall score on the ICLR scale:\n"
         f"  10 = seminal, top 5%\n"
         f"  8 = clear accept, strong contribution\n"
@@ -486,16 +499,17 @@ def _run_paperreview(
             max_wait=config.get("max_wait", 3600),
         )
 
-        overall = result.overall_score or 5.0
+        overall = result.overall_score
         return {
             "source": "paperreview.ai",
             "scores": result.dimensions,
             "overall_score": overall,
-            "decision": _score_to_decision(overall),
+            "decision": _score_to_decision(overall) if overall else "unknown",
             "summary": result.summary,
             "strengths": [result.strengths] if result.strengths else [],
             "weaknesses": [result.weaknesses] if result.weaknesses else [],
-            "detailed_feedback": result.detailed_comments or result.overall_assessment,
+            "detailed_feedback": result.detailed_comments or "",
+            "overall_assessment": result.overall_assessment or "",
             "questions_for_authors": [result.questions] if result.questions else [],
         }
     except Exception as e:
