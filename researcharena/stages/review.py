@@ -35,7 +35,7 @@ def _get_reviewer_guidelines_path(domain: str = "ml") -> Path:
         domain_path = _TEMPLATES_DIR / domain / "reviewer_guidelines.md"
         if domain_path.exists():
             return domain_path
-    return _TEMPLATES_DIR / "reviewer_guidelines.md"
+    return _TEMPLATES_DIR / "ml" / "reviewer_guidelines.md"
 
 # Output format appended to every reviewer prompt
 _REVIEW_OUTPUT_FORMAT = """

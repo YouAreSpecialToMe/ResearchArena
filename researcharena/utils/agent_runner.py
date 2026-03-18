@@ -50,8 +50,8 @@ def _get_template_path(filename: str, domain: str = "ml") -> Path:
         domain_path = _TEMPLATES_DIR / domain / filename
         if domain_path.exists():
             return domain_path
-    # Fallback to top-level ML templates
-    return _TEMPLATES_DIR / filename
+    # Fallback to ml templates
+    return _TEMPLATES_DIR / "ml" / filename
 
 # Pre-authorization files written into the workspace before agent starts
 CLAUDE_MD_GPU = """\
