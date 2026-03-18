@@ -53,8 +53,7 @@ def check_references(paper_latex: str, workspace: Path | None = None) -> Referen
     # If the .tex uses \bibliography{name}, read the .bib file too
     combined = paper_latex
     if workspace:
-        import re as _re
-        bib_match = _re.search(r'\\bibliography\{(\w+)\}', paper_latex)
+        bib_match = re.search(r'\\bibliography\{(\w+)\}', paper_latex)
         if bib_match:
             bib_path = workspace / f"{bib_match.group(1)}.bib"
             if bib_path.exists():

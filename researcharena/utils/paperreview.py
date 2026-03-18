@@ -1,17 +1,17 @@
 """Client for paperreview.ai (Stanford Agentic Reviewer).
 
 paperreview.ai has no public API, so we automate the web interaction:
-  1. Submit PDF via their upload form (multipart POST)
-  2. Poll email inbox for the review access token
+  1. Submit PDF via their upload form (Playwright)
+  2. Poll email inbox for the review access token (IMAP)
   3. Fetch the review page and parse the results
 
 Requires: playwright (for form submission), imaplib (for email polling).
 
-The review contains 7 dimension scores + qualitative sections:
-  - Summary, Strengths, Weaknesses, Detailed Comments,
-    Questions for Authors, Overall Assessment
-Dimensions: originality, research_importance, claim_support,
-  experimental_soundness, writing_clarity, community_value, prior_work_context
+The review contains qualitative sections:
+  Summary, Strengths, Weaknesses, Detailed Comments,
+  Questions for Authors, Overall Assessment.
+No numeric scores are provided — the caller (review.py) uses a CLI
+agent to assign a numeric score based on the qualitative content.
 """
 
 from __future__ import annotations
@@ -280,48 +280,6 @@ def _extract_token_from_body(body: str) -> str | None:
         if match:
             return match.group(1)
     return None
-
-
-def _estimate_score_from_text(sections: dict) -> float:
-    """Estimate a numeric score from qualitative review text.
-
-    paperreview.ai doesn't provide numeric scores, so we estimate
-    based on keyword signals in the weaknesses and overall assessment.
-    Returns a score on the ICLR 0-10 scale.
-    """
-    weaknesses = sections.get("weaknesses", "").lower()
-    overall = sections.get("overall_assessment", "").lower()
-    strengths = sections.get("strengths", "").lower()
-    combined = weaknesses + " " + overall
-
-    # Start at 6 (marginal accept) and adjust
-    score = 6.0
-
-    # Strong negative signals
-    severe = ["fundamental flaw", "fatal", "fabricat", "not reproducible",
-              "plagiari", "no contribution", "trivial contribution"]
-    for s in severe:
-        if s in combined:
-            score -= 2.0
-
-    # Moderate negative signals
-    moderate = ["major weakness", "significant concern", "not convincing",
-                "lacks novelty", "incremental", "insufficient experiment",
-                "missing baseline", "unfair comparison", "overclaim",
-                "not well-supported", "seriously lacking"]
-    for s in moderate:
-        if s in combined:
-            score -= 0.5
-
-    # Positive signals
-    positive = ["strong contribution", "well-written", "convincing result",
-                "novel approach", "significant improvement", "solid experiment",
-                "well-motivated", "thorough evaluation", "impressive"]
-    for s in positive:
-        if s in combined or s in strengths:
-            score += 0.3
-
-    return max(0.0, min(10.0, round(score * 2) / 2))  # clamp and round to 0.5
 
 
 def _parse_review(text: str, html: str) -> PaperReviewResult:
