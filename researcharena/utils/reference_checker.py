@@ -148,8 +148,8 @@ def _extract_references(latex: str) -> list[dict]:
     """
     refs = []
 
-    # Method 1: \bibitem entries
-    bibitem_pattern = r"\\bibitem\{([^}]*)\}\s*(.*?)(?=\\bibitem|\s*\\end\{thebibliography\}|$)"
+    # Method 1: \bibitem entries (with optional [...] label)
+    bibitem_pattern = r"\\bibitem(?:\[[^\]]*\])?\{([^}]*)\}\s*(.*?)(?=\\bibitem|\s*\\end\{thebibliography\}|$)"
     for match in re.finditer(bibitem_pattern, latex, re.DOTALL):
         key = match.group(1)
         body = _clean_latex(match.group(2).strip())
@@ -243,8 +243,14 @@ def _parse_bibtex_entry(body: str) -> dict:
 
 def _clean_latex(text: str) -> str:
     """Remove common LaTeX commands from text."""
-    text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)  # \cmd{arg} -> arg
-    text = re.sub(r"[{}~\\]", " ", text)
+    # Remove \newblock and other no-arg commands
+    text = re.sub(r"\\(?:newblock|noindent|par|medskip|smallskip|bigskip)\b\s*", "", text)
+    # \cmd{arg} -> arg (handles nested braces simply)
+    text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)
+    # {X} -> X (single-char brace groups like {G}aussian -> Gaussian)
+    text = re.sub(r"\{([^}]*)\}", r"\1", text)
+    # Remove remaining tildes and backslashes
+    text = re.sub(r"[~\\]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
