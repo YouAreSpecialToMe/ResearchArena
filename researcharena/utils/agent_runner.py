@@ -438,6 +438,19 @@ def _invoke_local(
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 
+    # Isolate agent memory per workspace.
+    # Set HOME to a workspace-local directory so each idea gets its own
+    # ~/.claude/, ~/.codex/, etc. This prevents cross-contamination between
+    # benchmark runs while preserving memory across stages within one idea.
+    agent_home = workspace / ".agent_home"
+    agent_home.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(agent_home)
+
+    # Copy auth credentials into the isolated home (first run only).
+    # The agent needs auth to call APIs, but shouldn't see prior memory.
+    real_home = Path.home()
+    _seed_agent_auth(agent_type, real_home, agent_home)
+
     # GPU assignment (or explicit block for CPU platform)
     cuda_devices = agent_config.get("cuda_devices")
     if cuda_devices:
@@ -985,6 +998,40 @@ def _setup_workspace(agent_type: str, workspace: Path, platform: str = "gpu", do
         agent_instructions = workspace / "AGENT_INSTRUCTIONS.md"
         if not agent_instructions.exists():
             agent_instructions.write_text(MINIAGENT_INSTRUCTIONS_GPU if is_gpu else MINIAGENT_INSTRUCTIONS_CPU)
+
+
+# ── Agent auth seeding ────────────────────────────────────────────────
+
+
+def _seed_agent_auth(agent_type: str, real_home: Path, agent_home: Path):
+    """Copy authentication credentials into the isolated agent home.
+
+    Only copies auth files (API keys, login tokens), NOT memory or history.
+    This runs once per workspace — subsequent stages reuse the same home.
+    """
+    auth_files = {
+        "claude": [
+            (".claude.json", ".claude.json"),
+            (".claude/credentials.json", ".claude/credentials.json"),
+        ],
+        "codex": [
+            (".codex.json", ".codex.json"),
+            (".codex/credentials.json", ".codex/credentials.json"),
+        ],
+        "kimi": [
+            (".kimi/credentials.json", ".kimi/credentials.json"),
+        ],
+        "minimax": [
+            (".mini-agent/credentials.json", ".mini-agent/credentials.json"),
+        ],
+    }
+
+    for src_rel, dst_rel in auth_files.get(agent_type, []):
+        src = real_home / src_rel
+        dst = agent_home / dst_rel
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 # ── Runtime detection ──────────────────────────────────────────────────
