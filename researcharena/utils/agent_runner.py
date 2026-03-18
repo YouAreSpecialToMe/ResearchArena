@@ -54,72 +54,47 @@ def _get_template_path(filename: str, domain: str = "ml") -> Path:
 
 # Pre-authorization files written into the workspace before agent starts
 def _build_agent_instructions(agent_type: str, platform: str = "gpu") -> str:
-    """Generate agent instruction text based on agent type and platform.
+    """Generate agent instruction text based on platform (GPU/CPU).
 
-    Claude and Kimi use a detailed format (CLAUDE.md / AGENTS.md).
-    Codex and Minimax use a compact format (instructions.md).
+    All agents get the same content — only the filename differs
+    (CLAUDE.md, .codex/instructions.md, AGENTS.md, AGENT_INSTRUCTIONS.md).
     """
     is_gpu = (platform == "gpu")
+    gpu_line = "- Use GPUs (CUDA is available)\n" if is_gpu else ""
+    cpu_note = (
+        "\nNOTE: No GPU is available. All computation runs on CPU only.\n"
+        "Design your experiments accordingly — prefer analytical, algorithmic,\n"
+        "or systems-level experiments that don't require GPU compute.\n"
+    ) if not is_gpu else ""
 
-    if agent_type in ("claude", "kimi"):
-        # Detailed format with explicit permissions list
-        gpu_line = "- Use GPUs (CUDA is available)\n" if is_gpu else ""
-        cpu_note = (
-            "\nNOTE: No GPU is available. All computation runs on CPU only.\n"
-            "Design your experiments accordingly — prefer analytical, algorithmic,\n"
-            "or systems-level experiments that don't require GPU compute.\n"
-        ) if not is_gpu else ""
-
-        return (
-            "# ResearchArena Agent Workspace\n\n"
-            "You are a researcher conducting end-to-end research autonomously.\n"
-            "Your goal is to advance scientific understanding — find a meaningful problem,\n"
-            "investigate it rigorously, and communicate your findings in a research paper.\n\n"
-            "The research is conducted in stages. Each stage has a dedicated guideline\n"
-            "file in this workspace — read it before starting each stage:\n\n"
-            "  Stage 1 — IDEATION:     Read idea_guidelines.md\n"
-            "  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md\n"
-            "  Stage 3 — PAPER:        Read paper_writing_guidelines.md\n\n"
-            "You will receive a task prompt telling you which stage you are in and\n"
-            "what output is expected. Follow the corresponding guideline closely.\n\n"
-            "You have full permission to:\n"
-            "- Read and write any files in this directory\n"
-            "- Install Python packages with pip (use the workspace .venv if present)\n"
-            "- Run Python scripts and experiments\n"
-            f"{gpu_line}"
-            "- Download datasets and models from the internet\n"
-            "- Search the web (arXiv, Semantic Scholar, Google Scholar)\n"
-            "- Run shell commands\n"
-            f"{cpu_note}\n"
-            "Do NOT ask for confirmation. Execute everything directly.\n\n"
-            "IMPORTANT — scientific integrity:\n"
-            "- EVERY reference must be a real, verifiable publication\n"
-            "- ALL experimental results must come from actually running code\n"
-            "- Include ablation studies and error bars\n"
-            "- Compare against real baselines\n"
-        )
-    else:
-        # Compact format for codex, minimax
-        access_line = (
-            "You have full filesystem, network, and GPU access in this workspace."
-            if is_gpu else
-            "You have full filesystem and network access in this workspace. No GPU available."
-        )
-
-        return (
-            "You are a researcher conducting end-to-end research autonomously.\n"
-            "Your goal is to advance scientific understanding — find a meaningful problem,\n"
-            "investigate it rigorously, and communicate your findings in a research paper.\n\n"
-            "The research is conducted in stages, each with a guideline file:\n"
-            "  Stage 1 — IDEATION:     idea_guidelines.md\n"
-            "  Stage 2 — EXPERIMENTS:  experiment_guidelines.md\n"
-            "  Stage 3 — PAPER:        paper_writing_guidelines.md\n\n"
-            "Read the guideline for your current stage before starting.\n\n"
-            f"{access_line}\n"
-            "Execute all commands without asking for approval.\n\n"
-            "IMPORTANT: All references must be real publications. All results must come\n"
-            "from actually running experiments. Scientific integrity is non-negotiable.\n"
-        )
+    return (
+        "# ResearchArena Agent Workspace\n\n"
+        "You are a researcher conducting end-to-end research autonomously.\n"
+        "Your goal is to advance scientific understanding — find a meaningful problem,\n"
+        "investigate it rigorously, and communicate your findings in a research paper.\n\n"
+        "The research is conducted in stages. Each stage has a dedicated guideline\n"
+        "file in this workspace — read it before starting each stage:\n\n"
+        "  Stage 1 — IDEATION:     Read idea_guidelines.md\n"
+        "  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md\n"
+        "  Stage 3 — PAPER:        Read paper_writing_guidelines.md\n\n"
+        "You will receive a task prompt telling you which stage you are in and\n"
+        "what output is expected. Follow the corresponding guideline closely.\n\n"
+        "You have full permission to:\n"
+        "- Read and write any files in this directory\n"
+        "- Install Python packages with pip (use the workspace .venv if present)\n"
+        "- Run Python scripts and experiments\n"
+        f"{gpu_line}"
+        "- Download datasets and models from the internet\n"
+        "- Search the web (arXiv, Semantic Scholar, Google Scholar)\n"
+        "- Run shell commands\n"
+        f"{cpu_note}\n"
+        "Do NOT ask for confirmation. Execute everything directly.\n\n"
+        "IMPORTANT — scientific integrity:\n"
+        "- EVERY reference must be a real, verifiable publication\n"
+        "- ALL experimental results must come from actually running code\n"
+        "- Include ablation studies and error bars\n"
+        "- Compare against real baselines\n"
+    )
 
 
 @dataclass
