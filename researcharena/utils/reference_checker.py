@@ -205,18 +205,27 @@ def _parse_bib_body(body: str) -> dict:
     if title_match:
         result["title"] = title_match.group(1).strip()
     else:
-        # Try: text after first period, before second period/venue
-        parts = re.split(r"\.\s+", body, maxsplit=3)
+        # Split on sentence boundaries: period+space, but skip single-letter
+        # abbreviations (P. Srinivasan, T. Barron, etc.)
+        # Try multiple candidate titles and pick the best one
+        parts = re.split(r"(?<![A-Z])\.(?:\s+)(?=[A-Z])", body, maxsplit=5)
         if len(parts) >= 2:
-            # First part is usually authors, second is title
             result["authors"] = parts[0].strip()
-            result["title"] = parts[1].strip().rstrip(".")
+            # The title is usually the longest non-venue part after authors
+            # Skip parts that look like venue names
+            for part in parts[1:]:
+                part = part.strip().rstrip(".")
+                if len(part) > 10 and not re.match(r"(?:In |Proceedings|arXiv|https?://|ACM |IEEE )", part):
+                    result["title"] = part
+                    break
+            if not result["title"] and len(parts) >= 2:
+                result["title"] = parts[1].strip().rstrip(".")
         elif parts:
             result["title"] = parts[0].strip()
 
-    # Extract authors (text before the year or first period)
+    # Extract authors (text before the year or first sentence boundary)
     if not result["authors"]:
-        author_match = re.match(r"^(.*?)(?:\.|,\s*\(?\d{4})", body)
+        author_match = re.match(r"^(.*?)(?<![A-Z])\.(?:\s+)(?=[A-Z])", body)
         if author_match:
             result["authors"] = author_match.group(1).strip()
 
