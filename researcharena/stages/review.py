@@ -26,7 +26,7 @@ from rich.table import Table
 console = Console()
 
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-_DOMAINS_WITH_TEMPLATES = {"systems", "databases", "pl", "theory", "security"}
+_DOMAINS_WITH_TEMPLATES = {"ml", "systems", "databases", "pl", "theory", "security"}
 
 
 def _get_reviewer_guidelines_path(domain: str = "ml") -> Path:

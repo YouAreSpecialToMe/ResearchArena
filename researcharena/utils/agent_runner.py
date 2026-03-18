@@ -41,7 +41,7 @@ DEFAULT_IMAGE = "researcharena/agent:latest"
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 # Valid domains that have their own template subdirectory
-_DOMAINS_WITH_TEMPLATES = {"systems", "databases", "pl", "theory", "security"}
+_DOMAINS_WITH_TEMPLATES = {"ml", "systems", "databases", "pl", "theory", "security"}
 
 
 def _get_template_path(filename: str, domain: str = "ml") -> Path:
