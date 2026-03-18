@@ -375,7 +375,7 @@ def _parse_review_from_output(stdout: str) -> dict | None:
             continue
         try:
             event = json.loads(line)
-            # Claude / Kimi stream-json
+            # Claude stream-json: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
             if event.get("type") == "assistant":
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text":
@@ -384,6 +384,15 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                 result_text = event.get("result", "")
                 if result_text:
                     text_content.append(result_text)
+            # Kimi stream-json: {"role":"assistant","content":[{"type":"text","text":"..."}]}
+            elif event.get("role") == "assistant":
+                content = event.get("content", [])
+                if isinstance(content, str):
+                    text_content.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_content.append(block.get("text", ""))
             # Codex JSON — try common response fields
             elif "response" in event:
                 text_content.append(str(event["response"]))

@@ -715,13 +715,10 @@ def _build_agent_command(agent_type: str, task: str, config: dict, workspace_pat
 
     elif agent_type == "codex":
         cmd = [
-            "codex",
-            "--full-auto",
-            "--quiet",
-            "--json",
+            "codex", "exec",
         ]
         if config.get("model"):
-            cmd.extend(["--model", config["model"]])
+            cmd.extend(["-c", f'model="{config["model"]}"'])
         cmd.extend([task])
         return cmd
 
