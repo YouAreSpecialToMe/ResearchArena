@@ -245,16 +245,35 @@ def _invoke_local(
     venv_dir = workspace / ".venv"
     if not venv_dir.exists():
         console.print(f"  Creating virtualenv at {venv_dir}...")
-        venv.create(str(venv_dir), with_pip=True, system_site_packages=True)
+        created = False
+        # Try subprocess-based approaches first (venv.create calls sys.exit on failure)
+        for venv_cmd in [
+            ["python3", "-m", "venv", "--system-site-packages", str(venv_dir)],
+            ["python3", "-m", "virtualenv", "--system-site-packages", str(venv_dir)],
+            ["virtualenv", "--system-site-packages", str(venv_dir)],
+        ]:
+            try:
+                subprocess.run(venv_cmd, check=True, capture_output=True, text=True)
+                created = True
+                break
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Clean up partial venv dir before trying next method
+                if venv_dir.exists():
+                    shutil.rmtree(venv_dir, ignore_errors=True)
+                continue
+        if not created:
+            console.print("  [yellow]venv creation failed — running without virtualenv[/]")
+            venv_dir = None
 
     # Build the agent command
     cmd = _build_agent_command(agent_type, task, agent_config, workspace_path=str(workspace.resolve()))
 
     # Set up environment: activate venv, set CUDA devices
     env = os.environ.copy()
-    venv_bin = venv_dir / "bin"
-    env["VIRTUAL_ENV"] = str(venv_dir)
-    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    if venv_dir is not None:
+        venv_bin = venv_dir / "bin"
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 

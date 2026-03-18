@@ -128,7 +128,7 @@ def review_only(config, domain, workspace):
         paper_pdf_path=paper_pdf if paper_pdf.exists() else None,
         reviewer_agents=cfg["review"].get("agents", []),
         paperreview_config=cfg["review"].get("paperreview", {}),
-        venue=cfg["paper"].get("template", "neurips"),
+        venue=cfg.get("seed_conferences", [None])[0] or cfg["paper"].get("template") or {"ml": "neurips", "systems": "osdi", "databases": "sigmod", "pl": "pldi", "theory": "stoc", "security": "ccs"}.get(resolved_domain, "neurips"),
         accept_threshold=cfg["review"]["accept_threshold"],
         workspace=workspace,
         docker_image=cfg["agent"].get("docker_image", "researcharena/agent:latest"),
@@ -226,6 +226,7 @@ def bench(config, seeds_file, field, agent, model, max_ideas, conference, platfo
             **overrides,
             "seed_topic": seed_name,
             "seed_domain": seed.get("domain", "ml"),
+            "seed_conferences": seed.get("conferences", []),
         })
         run_cfg = _resolve_platform_config(run_cfg, seed_platform)
 

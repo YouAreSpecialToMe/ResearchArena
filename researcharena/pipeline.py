@@ -105,6 +105,9 @@ class Pipeline:
         self.domain = config.get("seed_domain", "ml")
         self.agent_config["domain"] = self.domain
 
+        # Resolve venue: seed conferences > paper.template > domain default
+        self.venue = self._resolve_venue()
+
         # Compute per-agent resource allocation from total cluster resources
         resources = config.get("resources", {})
         n = max(1, resources.get("concurrent_agents", 1))
@@ -155,6 +158,35 @@ class Pipeline:
             max_ideas_per_seed=config["pipeline"]["max_ideas_per_seed"],
             max_global_steps=config["pipeline"]["max_global_steps"],
         )
+
+    # Default venue per domain, used when no conferences are specified
+    _DOMAIN_DEFAULT_VENUE: dict[str, str] = {
+        "ml": "neurips",
+        "systems": "osdi",
+        "databases": "sigmod",
+        "pl": "pldi",
+        "theory": "stoc",
+        "security": "ccs",
+    }
+
+    def _resolve_venue(self) -> str:
+        """Pick the paper venue from seed conferences, falling back to domain default.
+
+        Priority: seed_conferences[0] > paper.template (if not 'neurips' or
+        matches domain) > domain default.
+        """
+        conferences = self.config.get("seed_conferences", [])
+        if conferences:
+            return conferences[0]
+
+        # If paper.template was explicitly set to something domain-appropriate, use it
+        template = self.config.get("paper", {}).get("template")
+        domain_default = self._DOMAIN_DEFAULT_VENUE.get(self.domain, "neurips")
+        if template and template != "neurips":
+            # Explicitly overridden to a non-default value — respect it
+            return template
+
+        return domain_default
 
     def run(self) -> dict:
         seed_topic = self.config["seed_topic"]
@@ -451,7 +483,7 @@ class Pipeline:
         success, agent_result = paper_writing.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
-            venue=self.config["paper"].get("template", "neurips"),
+            venue=self.venue,
             timeout=self.config["agent"].get("paper_timeout", 3600),
             agent_config=self.agent_config,
             revision_feedback=revision_feedback,
@@ -519,7 +551,7 @@ class Pipeline:
             paper_pdf_path=paper_pdf if paper_pdf.exists() else None,
             reviewer_agents=reviewer_agents,
             paperreview_config=self.config["review"].get("paperreview", {}),
-            venue=self.config["paper"].get("template", "neurips"),
+            venue=self.venue,
             accept_threshold=accept_threshold,
             workspace=self.state.workspace,
             docker_image=self.agent_config.get("docker_image", "researcharena/agent:latest"),
