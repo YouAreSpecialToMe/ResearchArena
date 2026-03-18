@@ -357,17 +357,17 @@ def _run_cli_reviewer(
 def _parse_review_from_output(stdout: str) -> dict | None:
     """Extract the review JSON from the agent's stdout.
 
-    Handles two output formats:
-    1. Stream-json: review JSON is inside {"type":"assistant","message":{"content":[{"text":"..."}]}}
-    2. Plain text: review JSON appears directly in stdout
+    Handles output formats from all supported agents:
+    1. Stream-json (Claude, Kimi): {"type":"assistant","message":{"content":[{"text":"..."}]}}
+    2. Codex JSON: {"response":"...", ...} or {"choices":[{"message":{"content":"..."}}]}
+    3. Plain text (Minimax, custom): review JSON appears directly in stdout
 
     Searches for the last valid JSON containing 'overall_score' and 'decision'.
     """
     if not stdout:
         return None
 
-    # Step 1: Extract all text content from stream-json events
-    # This handles the case where the review is embedded in a text field
+    # Step 1: Extract all text content from structured output events
     text_content = []
     for line in stdout.strip().split("\n"):
         line = line.strip()
@@ -375,21 +375,42 @@ def _parse_review_from_output(stdout: str) -> dict | None:
             continue
         try:
             event = json.loads(line)
-            # Extract text from assistant messages
+            # Claude / Kimi stream-json
             if event.get("type") == "assistant":
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text":
                         text_content.append(block["text"])
-            # Also check result text
             elif event.get("type") == "result":
                 result_text = event.get("result", "")
                 if result_text:
                     text_content.append(result_text)
+            # Codex JSON — try common response fields
+            elif "response" in event:
+                text_content.append(str(event["response"]))
+            elif "choices" in event:
+                for choice in event["choices"]:
+                    msg = choice.get("message", {}).get("content", "")
+                    if msg:
+                        text_content.append(msg)
+            elif "output" in event:
+                text_content.append(str(event["output"]))
+            # If the parsed JSON itself has overall_score, use it directly
+            elif "overall_score" in event and "decision" in event:
+                return event
         except json.JSONDecodeError:
-            # Not JSON — treat as plain text
+            # Not JSON — treat as plain text (Minimax, custom agents)
             text_content.append(line)
 
     combined = "\n".join(text_content) if text_content else stdout
+
+    # If the combined text still contains escaped JSON (e.g., from Codex
+    # wrapping the response in a JSON string), try to unescape it
+    if '\\"' in combined and "overall_score" not in combined:
+        try:
+            # Try interpreting as a JSON string to unescape
+            combined = json.loads(f'"{combined}"')
+        except (json.JSONDecodeError, ValueError):
+            combined = combined.replace('\\"', '"').replace('\\n', '\n')
 
     # Step 2: Find review JSON in the extracted text using brace matching
     candidates = []
@@ -494,11 +515,11 @@ def _score_qualitative_review(
     )
 
     # Parse score from stdout.
-    # The output may be stream-json (nested inside event wrappers) or plain text.
-    # In stream-json, quotes are escaped as \" so we check both forms.
+    # Works with all agent output formats (stream-json, codex json, plain text).
     if result.stdout:
         import re
-        # Strategy 1: find overall_score": N or overall_score\": N anywhere
+        # Strategy 1: regex search for overall_score in any format
+        # Handles both raw quotes and escaped quotes (stream-json)
         score_match = re.search(
             r'overall_score\\?"\s*:\s*(\d+)',
             result.stdout,
@@ -508,7 +529,7 @@ def _score_qualitative_review(
             if 0 <= score <= 10:
                 return float(score)
 
-        # Strategy 2: use the general review parser (extracts text from stream-json)
+        # Strategy 2: use the general review parser (handles all agent formats)
         parsed = _parse_review_from_output(result.stdout)
         if parsed and parsed.get("overall_score") is not None:
             return float(parsed["overall_score"])
