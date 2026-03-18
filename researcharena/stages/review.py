@@ -206,6 +206,7 @@ def review_paper(
                     docker_image=docker_image,
                     runtime=runtime,
                     domain=domain,
+                    ref_feedback=ref_feedback,
                 )
                 reviewer_log_files = agent_result.log_files if agent_result else None
 
@@ -251,11 +252,13 @@ def review_paper(
     scores = [r["overall_score"] for r in all_reviews if r.get("overall_score") is not None]
     avg_score = sum(scores) / len(scores) if scores else 5.0
 
-    if has_fake_refs:
-        final_score = 0.0
+    # If fake references were found, cap the score — reviewers are informed
+    # and should reject, but we enforce the cap as a safety net.
+    if has_fake_refs and avg_score > 4.0:
+        final_score = 4.0
         decision = "reject"
         console.print(
-            f"  Reviewer avg: {avg_score:.1f}, but forced to 0 (fake references)"
+            f"  Reviewer avg: {avg_score:.1f}, capped to 4.0 (fake references detected)"
         )
     else:
         final_score = avg_score
@@ -299,6 +302,7 @@ def _run_cli_reviewer(
     docker_image: str,
     runtime: str = "docker",
     domain: str = "ml",
+    ref_feedback: str = "",
 ) -> tuple[dict | None, object]:
     """Run a CLI agent as a reviewer with read-only workspace.
 
@@ -338,9 +342,22 @@ def _run_cli_reviewer(
     agent_type = agent_cfg["type"]
     extra_instructions = _get_agent_review_instructions(agent_type)
 
+    ref_section = ""
+    if ref_feedback:
+        ref_section = (
+            f"\n--- AUTOMATED REFERENCE CHECK ---\n"
+            f"{ref_feedback}\n"
+            f"--- END REFERENCE CHECK ---\n\n"
+            f"The above reference check was performed automatically before your review.\n"
+            f"Unverified references are likely fabricated. This is grounds for automatic\n"
+            f"rejection — you MUST set decision to 'reject' and score references ≤ 2\n"
+            f"if any references are confirmed fake.\n\n"
+        )
+
     task = (
         f"{base_task}"
         f"{extra_instructions}\n\n"
+        f"{ref_section}"
         f"{guidelines}\n\n"
         f"{_REVIEW_OUTPUT_FORMAT}"
     )
