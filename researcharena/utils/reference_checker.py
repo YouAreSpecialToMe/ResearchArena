@@ -207,8 +207,8 @@ def _parse_bib_body(body: str) -> dict:
     else:
         # Split on sentence boundaries: period+space, but skip single-letter
         # abbreviations (P. Srinivasan, T. Barron, etc.)
-        # Try multiple candidate titles and pick the best one
-        parts = re.split(r"(?<![A-Z])\.(?:\s+)(?=[A-Z])", body, maxsplit=5)
+        # Allow uppercase letters OR digits after period (for titles like "3D Gaussian...")
+        parts = re.split(r"(?<![A-Z])\.(?:\s+)(?=[A-Z0-9])", body, maxsplit=5)
         if len(parts) >= 2:
             result["authors"] = parts[0].strip()
             # The title is usually the longest non-venue part after authors
