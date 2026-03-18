@@ -66,7 +66,8 @@ def main():
 @click.option("--max-ideas", default=None, type=int, help="Max ideas per seed")
 @click.option("--platform", default=None, type=click.Choice(["gpu", "cpu"]), help="Platform (gpu/cpu)")
 @click.option("--domain", default=None, type=click.Choice(["ml", "systems", "databases", "pl", "theory", "security"]), help="Domain (selects guideline templates)")
-def run(config, seed, agent, model, max_ideas, platform, domain):
+@click.option("--workspace", "-w", default=None, help="Override output workspace directory")
+def run(config, seed, agent, model, max_ideas, platform, domain, workspace):
     """Run the full research pipeline with a CLI agent."""
     cfg = load_config(config)
 
@@ -81,6 +82,8 @@ def run(config, seed, agent, model, max_ideas, platform, domain):
         overrides.setdefault("pipeline", {})["max_ideas_per_seed"] = max_ideas
     if domain:
         overrides["seed_domain"] = domain
+    if workspace:
+        overrides.setdefault("experiment", {})["workspace"] = workspace
 
     if overrides:
         cfg = merge_configs(cfg, overrides)

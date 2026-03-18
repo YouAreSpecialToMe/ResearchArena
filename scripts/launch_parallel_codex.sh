@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# launch_parallel.sh — Run researchers in parallel, one per GPU.
+# launch_parallel_codex.sh — Run 8 Codex researchers in parallel, one per GPU.
 #
 # Usage:
-#   bash scripts/launch_parallel.sh
-#   bash scripts/launch_parallel.sh --config configs/8xa6000.yaml --seeds-file configs/seed_gpu_exp.yaml
-#
-# With 8 GPUs and 10 seeds, runs 2 batches: first 8 in parallel, then remaining 2.
-# Each researcher gets:
-#   - One A6000 GPU (CUDA_VISIBLE_DEVICES=N)
-#   - Its own workspace under outputs/8xa6000/<slug>/
-#   - A log file under outputs/8xa6000/logs/
+#   bash scripts/launch_parallel_codex.sh
+#   bash scripts/launch_parallel_codex.sh --config configs/8xa6000_codex.yaml --seeds-file configs/seed_gpu_exp.yaml
 
 set -euo pipefail
 
-CONFIG="${CONFIG:-configs/8xa6000.yaml}"
+CONFIG="${CONFIG:-configs/8xa6000_codex.yaml}"
 SEEDS_FILE="${SEEDS_FILE:-configs/seed_gpu_exp.yaml}"
 NUM_GPUS=8
-AGENT="claude"
+AGENT="codex"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="outputs/${AGENT}/logs"
 mkdir -p "$LOG_DIR"
@@ -41,11 +35,12 @@ done < "$SEEDS_FILE"
 
 TOTAL=${#SEEDS[@]}
 echo "============================================================"
-echo "  ResearchArena — Parallel Launch"
+echo "  ResearchArena — Parallel Launch (Codex researcher)"
 echo "  Config:     $CONFIG"
 echo "  Seeds file: $SEEDS_FILE"
 echo "  Seeds:      $TOTAL"
 echo "  GPUs:       $NUM_GPUS × A6000"
+echo "  Researcher: Codex (gpt-5.4)"
 if [[ $TOTAL -gt $NUM_GPUS ]]; then
   BATCHES=$(( (TOTAL + NUM_GPUS - 1) / NUM_GPUS ))
   echo "  Batches:    $BATCHES (${NUM_GPUS} GPUs, overflow queued)"
