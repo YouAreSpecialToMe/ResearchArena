@@ -373,19 +373,18 @@ class Pipeline:
         # be running and produce results.json after the agent CLI is killed.
         # Wait briefly and re-check.
         if results is None and fail_cat == "timeout":
-            import json as _json
             results_path = self.state.workspace / "results.json"
             for _wait in (2, 5, 10):
                 time.sleep(_wait)
                 if results_path.exists():
                     try:
-                        results = _json.loads(results_path.read_text())
+                        results = json.loads(results_path.read_text())
                         console.print(
                             f"  [yellow]Agent timed out but results.json was "
                             f"found (child process completed).[/]"
                         )
                         break
-                    except _json.JSONDecodeError:
+                    except json.JSONDecodeError:
                         pass
 
         # Agent explicitly abandoned the idea via abandon.json
@@ -394,8 +393,7 @@ class Pipeline:
             abandon_path = self.state.workspace / "abandon.json"
             if abandon_path.exists():
                 try:
-                    import json as _json
-                    reason = _json.loads(abandon_path.read_text()).get("reason", "")
+                    reason = json.loads(abandon_path.read_text()).get("reason", "")
                     if reason:
                         abandon_reason = f"Agent abandoned: {reason}"
                 except Exception:

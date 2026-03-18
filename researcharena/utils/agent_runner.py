@@ -20,9 +20,9 @@ from __future__ import annotations
 import json
 import os
 import select
+import shlex
 import shutil
 import subprocess
-import sys
 import time
 import venv
 from dataclasses import dataclass
@@ -105,7 +105,6 @@ class AgentResult:
     stderr: str
     elapsed_seconds: float
     workspace: Path
-    container_id: str | None = None
     log_files: dict[str, str] | None = None  # {"stdout": path, "stderr": path, "command": path}
     failure_category: str | None = None      # classified failure reason
 
@@ -761,7 +760,6 @@ def _build_agent_command(agent_type: str, task: str, config: dict, workspace_pat
         return cmd
 
     elif agent_type == "custom":
-        import shlex
         template = config.get("command", 'echo "{task}"')
         cmd_str = (
             template

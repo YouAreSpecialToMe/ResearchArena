@@ -389,6 +389,16 @@ def _parse_review_from_output(stdout: str) -> dict | None:
     return candidates[-1] if candidates else None
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _to_str(value) -> str:
+    """Convert a value to string — joins lists with newlines."""
+    if isinstance(value, list):
+        return "\n".join(str(v) for v in value)
+    return str(value) if value else ""
+
+
 # ── Score qualitative reviews ─────────────────────────────────────────────
 
 
@@ -409,15 +419,9 @@ def _score_qualitative_review(
     from researcharena.utils.agent_runner import invoke_agent
 
     # Build review text from all available sections
-    strengths = pr_review.get("strengths", "")
-    if isinstance(strengths, list):
-        strengths = "\n".join(str(s) for s in strengths)
-    weaknesses = pr_review.get("weaknesses", "")
-    if isinstance(weaknesses, list):
-        weaknesses = "\n".join(str(w) for w in weaknesses)
-    questions = pr_review.get("questions_for_authors", "")
-    if isinstance(questions, list):
-        questions = "\n".join(str(q) for q in questions)
+    strengths = _to_str(pr_review.get("strengths", ""))
+    weaknesses = _to_str(pr_review.get("weaknesses", ""))
+    questions = _to_str(pr_review.get("questions_for_authors", ""))
 
     review_text = (
         f"Summary:\n{pr_review.get('summary', '')}\n\n"
@@ -553,11 +557,7 @@ def _display_review_summary(reviews: list[dict], avg_score: float, decision: str
         if integrity_score is not None:
             integrity = f"{integrity_score}/10"
 
-        weaknesses = r.get("weaknesses", [])
-        if isinstance(weaknesses, list):
-            w_str = "; ".join(str(w)[:50] for w in weaknesses[:2])
-        else:
-            w_str = str(weaknesses)[:100]
+        w_str = _to_str(r.get("weaknesses", ""))[:100]
 
         table.add_row(source, f"{score}", dec, integrity, w_str)
 
@@ -571,12 +571,7 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
         source = r.get("source", "unknown")
         parts.append(f"--- Review {i+1} ({source}, score: {r.get('overall_score', 'N/A')}) ---")
 
-        weaknesses = r.get("weaknesses", [])
-        if isinstance(weaknesses, list):
-            for w in weaknesses:
-                parts.append(f"  Weakness: {w}")
-        else:
-            parts.append(f"  Weakness: {weaknesses}")
+        parts.append(f"  Weaknesses: {_to_str(r.get('weaknesses', ''))}")
 
         feedback = r.get("detailed_feedback", "")
         if feedback:
