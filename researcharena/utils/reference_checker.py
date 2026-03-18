@@ -23,6 +23,7 @@ console = Console()
 # Rate limit: Semantic Scholar allows ~100 req/5min without API key
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 CROSSREF_API = "https://api.crossref.org/works"
+ARXIV_API = "http://export.arxiv.org/api/query"
 REQUEST_DELAY = 1.0  # seconds between API calls
 REQUEST_TIMEOUT = 30  # seconds per API request
 MAX_RETRIES = 2       # retry count per API
@@ -82,22 +83,17 @@ def check_references(paper_latex: str, workspace: Path | None = None) -> Referen
 
         console.print(f"  [{i+1}/{len(raw_refs)}] Checking: {title[:60]}...")
 
-        # Try Semantic Scholar first, then CrossRef (with retries)
+        # Try Semantic Scholar, then CrossRef, then arXiv (with retries)
         match = None
-        api_error = False
-        try:
-            match = _search_with_retry(_search_semantic_scholar, title, authors, year)
-        except Exception:
-            api_error = True
-
-        if not match:
+        api_error_count = 0
+        for search_fn in [_search_semantic_scholar, _search_crossref, _search_arxiv]:
+            if match:
+                break
             try:
-                match = _search_with_retry(_search_crossref, title, authors, year)
+                match = _search_with_retry(search_fn, title, authors, year)
             except Exception:
-                if api_error:
-                    pass  # both failed
-                else:
-                    api_error = True
+                api_error_count += 1
+        api_error = (api_error_count == 3)  # all three APIs failed
 
         if match:
             verified += 1
@@ -339,6 +335,46 @@ def _search_crossref(title: str, authors: str, year: str) -> dict | None:
                 "authors": authors_str,
                 "year": year_str,
                 "url": f"https://doi.org/{doi}" if doi else "",
+            }
+
+    return None
+
+
+def _search_arxiv(title: str, authors: str, year: str) -> dict | None:
+    """Search arXiv for a paper by title.
+
+    arXiv indexes preprints quickly, so this catches very recent papers
+    that Semantic Scholar and CrossRef haven't indexed yet.
+
+    Returns match dict or None. Raises on API/network errors.
+    """
+    # arXiv API uses Atom feed format
+    query = urllib.parse.quote(f'ti:"{title[:150]}"')
+    url = f"http://export.arxiv.org/api/query?search_query={query}&max_results=3"
+
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "ResearchArena/1.0")
+
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        data = resp.read().decode()
+
+    # Parse Atom XML for title matches
+    # arXiv returns XML, extract titles with regex (avoid xml dependency)
+    titles_found = re.findall(r"<title>(.*?)</title>", data, re.DOTALL)
+    arxiv_ids = re.findall(r"<id>http://arxiv.org/abs/([^<]+)</id>", data)
+    author_names = re.findall(r"<name>(.*?)</name>", data)
+
+    # Skip first title (it's the feed title, not a paper)
+    for i, arxiv_title in enumerate(titles_found[1:]):
+        clean_title = re.sub(r"\s+", " ", arxiv_title.strip())
+        if _titles_match(title, clean_title):
+            arxiv_id = arxiv_ids[i] if i < len(arxiv_ids) else ""
+            return {
+                "source": "arxiv",
+                "title": clean_title,
+                "authors": "",
+                "year": year,
+                "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "",
             }
 
     return None
