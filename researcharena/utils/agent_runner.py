@@ -37,7 +37,6 @@ DEFAULT_IMAGE = "researcharena/agent:latest"
 
 # Paths to guideline templates (relative to this file)
 # Domain-specific templates live in templates/{domain}/.
-# The top-level templates/ dir has the ML defaults.
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 # Valid domains that have their own template subdirectory

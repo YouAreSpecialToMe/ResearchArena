@@ -447,11 +447,13 @@ researcharena/
 │   ├── config.py                # YAML config loading
 │   ├── paperreview.py           # paperreview.ai automation (Playwright)
 │   └── reference_checker.py     # Citation verification (Semantic Scholar + CrossRef)
-├── templates/
-│   ├── idea_guidelines.md       # How to find a novel research idea
-│   ├── experiment_guidelines.md # How to design & run rigorous experiments
-│   ├── paper_writing_guidelines.md  # How to write a research paper
-│   └── reviewer_guidelines.md   # How to review (ICLR scale, novelty search)
+├── templates/                   # Domain-specific guideline templates
+│   ├── ml/                      # ML/AI (ICLR, NeurIPS, ICML, CVPR, ACL)
+│   ├── systems/                 # Systems (OSDI, SOSP, EuroSys)
+│   ├── databases/               # Databases (SIGMOD, VLDB, ICDE)
+│   ├── pl/                      # Programming Languages (PLDI, POPL, OOPSLA)
+│   ├── theory/                  # Theory (STOC, FOCS, SODA)
+│   └── security/                # Security (CCS, S&P, USENIX Security)
 ├── configs/
 │   ├── default.yaml             # Default configuration (GPU + CPU platforms)
 │   ├── smoke_test.yaml          # Quick single-idea smoke test
