@@ -33,10 +33,15 @@ Acceptance threshold is 8. Score 6 triggers a revision loop. Score < 6 is reject
 ### 1. Algorithmic Novelty (most important)
 - Does the paper present a genuinely new algorithm, data structure,
   protocol, or system design technique?
-- **Search online** (DBLP, ACM DL, Semantic Scholar, Google Scholar) to
-  verify the claimed novelty. Check if similar techniques already exist
-  in the database literature or in related fields (algorithms, systems,
-  ML-for-DB).
+- **You MUST perform at least 5 distinct online searches** before assessing
+  novelty. Do NOT accept the authors' novelty claims at face value.
+  Required search strategies (do ALL of them):
+  a) Search the exact paper title on DBLP, ACM DL, and Semantic Scholar
+  b) Search the core technique name + the domain (e.g., "learned index structure B-tree")
+  c) Search for each key baseline/related work cited to find papers THEY cite
+  d) Search for the method's key components combined (e.g., "adaptive partitioning hash join")
+  e) Search recent proceedings (last 3 years) of SIGMOD, VLDB, ICDE for similar ideas
+- If you find a paper that proposes a substantially similar technique, score novelty ≤ 4
 - Novel combinations of existing techniques count IF the combination
   itself is non-obvious and provides new insight or capability
 - Incremental improvements (e.g., small constant-factor speedups with
@@ -112,10 +117,13 @@ Acceptance threshold is 8. Score 6 triggers a revision loop. Score < 6 is reject
 
 ### 8. Results Integrity (sanity check — but violations mean reject)
 You have access to the experiment workspace (code, logs, results.json).
-Use it as a sanity check:
-- Do the numbers in the paper match results.json?
-- Do the logs show evidence of actual code execution?
-- Does the code implement what the paper describes?
+You MUST verify ALL of the following:
+- Read results.json and compare EVERY number in the paper's tables against it
+- Check that experiment source code (.py files) exists in the workspace.
+  If NO source code is present, this is a major integrity concern (score ≤ 4)
+- Read experiment logs and verify they show actual execution (queries, throughput, etc.)
+- Check that the code implements what the paper describes (not a different method)
+- Verify figures are generated from the actual results, not fabricated
 - Are benchmark configurations consistent between the paper and the code?
 
 The primary evaluation is the scientific contribution. However, any of
@@ -125,6 +133,7 @@ the following are grounds for **automatic rejection**:
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that don't match results.json
 - Baselines that are intentionally misconfigured to inflate improvements
+- Missing experiment source code with no explanation
 
 These are not minor issues — they indicate the research is not trustworthy.
 
@@ -168,7 +177,7 @@ Your overall_score determines the decision:
 |---|---|
 | 10 | accept |
 | 8 | accept |
-| 6 | accept (marginal) |
+| 6 | revision (marginal, needs revision) |
 | 4 | reject |
 | 2 | reject (strong) |
 | 0 | reject (fabricated/trivial) |

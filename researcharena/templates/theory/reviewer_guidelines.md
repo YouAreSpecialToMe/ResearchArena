@@ -72,8 +72,15 @@ no value.
 - Does the proof introduce a genuinely new idea or method?
 - Or is it a routine (even if technically involved) application of known
   techniques?
-- **Search online** (ECCC, arXiv, DBLP, Semantic Scholar) to verify that
-  the technique has not appeared before in a similar context
+- **You MUST perform at least 5 distinct online searches** before assessing
+  novelty. Do NOT accept the authors' novelty claims at face value.
+  Required search strategies (do ALL of them):
+  a) Search the exact paper title on ECCC, arXiv, DBLP, and Semantic Scholar
+  b) Search the core technique name + the problem (e.g., "spectral method graph partitioning")
+  c) Search for each key cited paper to find papers THEY cite
+  d) Search for the theorem's key components combined (e.g., "sublinear time approximation maximum matching")
+  e) Search recent proceedings (last 3 years) of STOC, FOCS, SODA for similar results
+- If you find a paper that proves a substantially similar result or uses the same technique, score novelty ≤ 4
 - Novel techniques that apply to multiple problems are particularly valued
 - A new proof of a known result using a novel technique CAN be a
   significant contribution
@@ -110,12 +117,16 @@ no value.
 ### 6. Results Integrity (sanity check)
 
 You have access to the experiment workspace (code, logs, results.json).
-Use it as a sanity check:
+You MUST verify ALL of the following:
 
+- Read results.json and compare EVERY number/theorem in the paper against it
 - Does results.json contain the theorem statements claimed in the paper?
 - Do the theorem statements in results.json match those in the paper?
 - If experiments are included: do the experimental numbers in the paper
   match those in results.json?
+- Check that source code (.py files) exists in the workspace if experiments
+  are claimed. If NO source code is present, this is a major integrity
+  concern (score ≤ 4)
 - Does the code (if any) implement what the paper describes?
 
 The primary evaluation is the mathematical contribution. However, any of
@@ -124,6 +135,7 @@ the following are grounds for **automatic rejection**:
 - Experimental results in the paper do not match results.json
 - References that do not exist (fake citations)
 - Claims of proofs that are not actually present in the paper or appendix
+- Missing experiment source code when experiments are claimed
 
 These indicate the research is not trustworthy.
 
@@ -179,7 +191,7 @@ Your overall_score determines the decision:
 |---|---|
 | 10 | accept |
 | 8 | accept |
-| 6 | accept (marginal) |
+| 6 | revision (marginal, needs revision) |
 | 4 | reject |
 | 2 | reject (strong) |
 | 0 | reject (incorrect/fabricated) |

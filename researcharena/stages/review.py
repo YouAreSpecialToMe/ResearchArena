@@ -52,7 +52,7 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
         "results_integrity": <int 1-10>
     },
     "overall_score": <int, one of: 0, 2, 4, 6, 8, 10>,
-    "decision": "accept" | "reject",
+    "decision": "accept" | "revision" | "reject",
     "summary": "<2-3 sentence summary of the paper>",
     "novelty_assessment": "<what you found when searching for existing work online>",
     "strengths": ["<strength1>", ...],
@@ -275,6 +275,20 @@ def review_paper(
     )
 
 
+# ── Agent-specific review instructions ────────────────────────────────────
+
+
+def _get_agent_review_instructions(agent_type: str) -> str:
+    """Return agent-specific instructions to compensate for known weaknesses."""
+    if agent_type == "codex":
+        return (
+            "IMPORTANT: Read ALL workspace files before writing your review.\n"
+            "Start by reading: paper.tex, results.json, and all .py files.\n"
+            "Then read logs/ directory contents.\n"
+        )
+    return ""
+
+
 # ── CLI agent reviewers ──────────────────────────────────────────────────
 
 
@@ -303,7 +317,7 @@ def _run_cli_reviewer(
     if reviewer_guidelines_path.exists():
         guidelines = reviewer_guidelines_path.read_text()
 
-    task = (
+    base_task = (
         f"You are a reviewer for {venue}. The workspace contains a research "
         f"paper and supporting materials.\n\n"
         f"Available files:\n"
@@ -319,6 +333,14 @@ def _run_cli_reviewer(
         f"the claimed novelty — check if similar work already exists\n"
         f"3. Check experiment code and logs as a sanity check on results\n"
         f"4. Write your review\n\n"
+    )
+
+    agent_type = agent_cfg["type"]
+    extra_instructions = _get_agent_review_instructions(agent_type)
+
+    task = (
+        f"{base_task}"
+        f"{extra_instructions}\n\n"
         f"{guidelines}\n\n"
         f"{_REVIEW_OUTPUT_FORMAT}"
     )
@@ -333,7 +355,6 @@ def _run_cli_reviewer(
         except OSError:
             pass  # workspace might already be read-only from a previous reviewer
 
-    agent_type = agent_cfg["type"]
     reviewer_config = {
         **agent_cfg,
         "docker_image": docker_image,
@@ -404,6 +425,11 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
                             text_content.append(block.get("text", ""))
+            # Codex --json JSONL: {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+            elif event.get("type") in ("item.completed", "item.started"):
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    text_content.append(item.get("text", ""))
             # Codex JSON — try common response fields
             elif "response" in event:
                 text_content.append(str(event["response"]))
@@ -664,9 +690,11 @@ def _aggregate_feedback(reviews: list[dict]) -> str:
 
 
 def _score_to_decision(score: float, accept_threshold: float = 8.0) -> str:
-    """Map score to accept/reject using ICLR-style threshold."""
+    """Map score to accept/revision/reject using ICLR-style threshold."""
     if score >= accept_threshold:
         return "accept"
+    elif score >= 6.0:
+        return "revision"
     else:
         return "reject"
 

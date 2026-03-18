@@ -39,6 +39,15 @@ Acceptance threshold is 8. Score 6 triggers a revision loop. Score < 6 is reject
 
 ### 2. Design Novelty (most important for systems papers)
 - Does the system embody a new design insight, abstraction, or architecture?
+- **You MUST perform at least 5 distinct online searches** before assessing
+  novelty. Do NOT accept the authors' novelty claims at face value.
+  Required search strategies (do ALL of them):
+  a) Search the exact paper title on ACM DL, USENIX proceedings, and Semantic Scholar
+  b) Search the core technique/system name + the domain (e.g., "disaggregated memory key-value store")
+  c) Search for each key baseline/related system cited to find papers THEY cite
+  d) Search for the system's key design components combined (e.g., "RDMA persistent memory log")
+  e) Search recent proceedings (last 3 years) of OSDI, SOSP, EuroSys, NSDI for similar designs
+- If you find a system that embodies a substantially similar design insight, score novelty ≤ 4
 - Is there a key idea that others can learn from and apply to other systems?
 - Novel combinations of existing techniques count IF the combination
   yields new insights or enables new capabilities
@@ -106,10 +115,13 @@ Missing any of the above is a significant weakness.
 
 ### 9. Results Integrity (sanity check -- but violations mean reject)
 You have access to the experiment workspace (code, logs, results.json).
-Use it as a sanity check:
-- Do the numbers in the paper match results.json?
-- Do the logs show evidence of actual system execution (not fabricated output)?
-- Does the code implement what the paper describes?
+You MUST verify ALL of the following:
+- Read results.json and compare EVERY number in the paper's tables against it
+- Check that experiment source code (.py files) exists in the workspace.
+  If NO source code is present, this is a major integrity concern (score ≤ 4)
+- Read experiment logs and verify they show actual system execution (not fabricated output)
+- Check that the code implements what the paper describes (not a different method)
+- Verify figures are generated from the actual results, not fabricated
 - Are the benchmark configurations in the code consistent with what the
   paper claims?
 - Do throughput/latency numbers seem physically plausible given the hardware?
@@ -121,6 +133,7 @@ following are grounds for **automatic rejection**:
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that do not match results.json
 - Benchmark results that are physically impossible on the stated hardware
+- Missing experiment source code with no explanation
 
 These are not minor issues -- they indicate the research is not trustworthy.
 
@@ -169,7 +182,7 @@ Your overall_score determines the decision:
 |---|---|
 | 10 | accept |
 | 8 | accept |
-| 6 | accept (marginal) |
+| 6 | revision (marginal, needs revision) |
 | 4 | reject |
 | 2 | reject (strong) |
 | 0 | reject (fabricated/trivial) |

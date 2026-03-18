@@ -736,9 +736,11 @@ def _build_agent_command(agent_type: str, task: str, config: dict, workspace_pat
         cmd = [
             "codex", "exec",
             "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
         ]
         if config.get("model"):
-            cmd.extend(["-c", f'model="{config["model"]}"'])
+            cmd.extend(["-m", config["model"]])
         cmd.extend([task])
         return cmd
 

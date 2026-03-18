@@ -34,8 +34,15 @@ rejected.
 ### 1. Novelty (most important)
 - Does the paper present a genuinely new formal technique, analysis, type
   system, optimization, synthesis method, or language design idea?
-- **Search online** (ACM DL, DBLP, Semantic Scholar, Google Scholar) to verify
-  the claimed novelty. Check if similar work already exists.
+- **You MUST perform at least 5 distinct online searches** before assessing
+  novelty. Do NOT accept the authors' novelty claims at face value.
+  Required search strategies (do ALL of them):
+  a) Search the exact paper title on ACM DL, DBLP, and Semantic Scholar
+  b) Search the core technique name + the domain (e.g., "gradual typing soundness")
+  c) Search for each key baseline/related work cited to find papers THEY cite
+  d) Search for the method's key components combined (e.g., "bidirectional type inference refinement")
+  e) Search recent proceedings (last 3 years) of POPL, PLDI, OOPSLA, ICFP for similar ideas
+- If you find a paper that proposes a substantially similar technique, score novelty ≤ 4
 - PL has a long history -- check older proceedings too (1990s POPL/PLDI papers,
   foundational work from the 1970s-80s)
 - Novel combinations of existing techniques count IF the combination itself
@@ -134,10 +141,13 @@ rejected.
 
 ### 9. Results Integrity (sanity check -- but violations mean reject)
 You have access to the experiment workspace (code, proofs, logs, results.json).
-Use it as a sanity check:
-- Do the numbers in the paper match results.json?
-- Do the logs show evidence of actual tool execution?
-- Does the code implement what the paper describes?
+You MUST verify ALL of the following:
+- Read results.json and compare EVERY number in the paper's tables against it
+- Check that experiment source code (.py files) exists in the workspace.
+  If NO source code is present, this is a major integrity concern (score ≤ 4)
+- Read experiment logs and verify they show actual tool execution
+- Check that the code implements what the paper describes (not a different method)
+- Verify figures are generated from the actual results, not fabricated
 - Do mechanized proofs compile with the stated proof assistant version?
 
 The primary evaluation is the scientific contribution. However, any of the
@@ -148,6 +158,7 @@ following are grounds for **automatic rejection**:
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that don't match results.json
 - Mechanized proofs that don't compile
+- Missing experiment source code with no explanation
 
 These are not minor issues -- they indicate the research is not trustworthy.
 
@@ -159,7 +170,7 @@ Your overall_score determines the decision:
 |---|---|
 | 10 | accept |
 | 8 | accept |
-| 6 | accept (marginal) |
+| 6 | revision (marginal, needs revision) |
 | 4 | reject |
 | 2 | reject (strong) |
 | 0 | reject (fabricated/trivial) |

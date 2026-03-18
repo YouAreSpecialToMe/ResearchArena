@@ -161,14 +161,25 @@ def _extract_references(latex: str) -> list[dict]:
 
     # Method 2: If no \bibitem found, try to parse a .bib-style bibliography
     if not refs:
-        bib_pattern = r"@\w+\{([^,]+),\s*(.*?)\n\}"
-        for match in re.finditer(bib_pattern, latex, re.DOTALL):
-            key = match.group(1).strip()
-            body = match.group(2)
-            parsed = _parse_bibtex_entry(body)
-            parsed["key"] = key
-            parsed["raw"] = body[:300]
-            refs.append(parsed)
+        # Match @type{key, using brace-depth counting for the entry body
+        # (handles nested braces in titles like {FaceNet} or {Caltech-UCSD})
+        for header in re.finditer(r"@\w+\{([^,]+),", latex):
+            key = header.group(1).strip()
+            start = header.end()
+            depth = 1  # we're inside the opening { from @type{
+            i = start
+            while i < len(latex) and depth > 0:
+                if latex[i] == "{":
+                    depth += 1
+                elif latex[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth == 0:
+                body = latex[start:i - 1]
+                parsed = _parse_bibtex_entry(body)
+                parsed["key"] = key
+                parsed["raw"] = body[:300]
+                refs.append(parsed)
 
     # Method 3: If still nothing, try to find references section and parse free-form
     if not refs:
@@ -236,19 +247,40 @@ def _parse_bibtex_entry(body: str) -> dict:
     """Parse a BibTeX entry body into title/authors/year."""
     result = {"title": "", "authors": "", "year": ""}
 
-    title_match = re.search(r"title\s*=\s*\{(.*?)\}", body, re.IGNORECASE | re.DOTALL)
-    if title_match:
-        result["title"] = _clean_latex(title_match.group(1).strip())
+    title_val = _extract_bibtex_field(body, "title")
+    if title_val is not None:
+        result["title"] = _clean_latex(title_val.strip())
 
-    author_match = re.search(r"author\s*=\s*\{(.*?)\}", body, re.IGNORECASE | re.DOTALL)
-    if author_match:
-        result["authors"] = _clean_latex(author_match.group(1).strip())
+    author_val = _extract_bibtex_field(body, "author")
+    if author_val is not None:
+        result["authors"] = _clean_latex(author_val.strip())
 
     year_match = re.search(r"year\s*=\s*\{?(\d{4})\}?", body, re.IGNORECASE)
     if year_match:
         result["year"] = year_match.group(1)
 
     return result
+
+
+def _extract_bibtex_field(body: str, field: str) -> str | None:
+    """Extract a BibTeX field value, correctly handling nested braces."""
+    match = re.search(rf"{field}\s*=\s*\{{", body, re.IGNORECASE)
+    if not match:
+        return None
+
+    start = match.end()  # position right after the opening {
+    depth = 1
+    i = start
+    while i < len(body) and depth > 0:
+        if body[i] == "{":
+            depth += 1
+        elif body[i] == "}":
+            depth -= 1
+        i += 1
+
+    if depth == 0:
+        return body[start:i - 1]
+    return None
 
 
 def _clean_latex(text: str) -> str:
