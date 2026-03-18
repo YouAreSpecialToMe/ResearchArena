@@ -258,19 +258,6 @@ def _invoke_local(
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 
-    # Isolate agent memory per workspace.
-    # Set HOME to a workspace-local directory so each idea gets its own
-    # ~/.claude/, ~/.codex/, etc. This prevents cross-contamination between
-    # benchmark runs while preserving memory across stages within one idea.
-    agent_home = workspace / ".agent_home"
-    agent_home.mkdir(parents=True, exist_ok=True)
-    env["HOME"] = str(agent_home)
-
-    # Copy auth credentials into the isolated home (first run only).
-    # The agent needs auth to call APIs, but shouldn't see prior memory.
-    real_home = Path.home()
-    _seed_agent_auth(agent_type, real_home, agent_home)
-
     # GPU assignment (or explicit block for CPU platform)
     cuda_devices = agent_config.get("cuda_devices")
     if cuda_devices:
@@ -808,60 +795,6 @@ def _setup_workspace(agent_type: str, workspace: Path, platform: str = "gpu", do
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(_build_agent_instructions(agent_type, platform))
-
-
-# ── Agent auth seeding ────────────────────────────────────────────────
-
-
-def _seed_agent_auth(agent_type: str, real_home: Path, agent_home: Path):
-    """Copy authentication credentials into the isolated agent home.
-
-    Copies the agent's config directory but excludes memory, history,
-    and conversation data to keep each workspace isolated.
-    This runs once per workspace — subsequent stages reuse the same home.
-    """
-    # Directories and files to exclude (memory/history, not auth)
-    _EXCLUDE = {
-        "history.jsonl", "memory", "memories", "projects",
-        "file-history", "paste-cache", "cache", "debug",
-        "downloads", "plans", "plugins", "shell-snapshots",
-        "backups", "mcp-needs-auth-cache.json",
-        "state_5.sqlite", "state_5.sqlite-shm", "state_5.sqlite-wal",
-        "logs_1.sqlite", "logs_1.sqlite-shm", "logs_1.sqlite-wal",
-        "tmp", "skills",
-    }
-
-    # Map agent type to (config file, config dir)
-    auth_sources = {
-        "claude": (".claude.json", ".claude"),
-        "codex": (None, ".codex"),
-        "kimi": (None, ".kimi"),
-        "minimax": (None, ".mini-agent"),
-    }
-
-    config_file, config_dir = auth_sources.get(agent_type, (None, None))
-
-    # Copy the top-level config file (e.g., ~/.claude.json)
-    if config_file:
-        src = real_home / config_file
-        dst = agent_home / config_file
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
-
-    # Copy the config directory, excluding memory/history
-    if config_dir:
-        src_dir = real_home / config_dir
-        dst_dir = agent_home / config_dir
-        if src_dir.exists() and not dst_dir.exists():
-            dst_dir.mkdir(parents=True, exist_ok=True)
-            for item in src_dir.iterdir():
-                if item.name in _EXCLUDE:
-                    continue
-                dst_item = dst_dir / item.name
-                if item.is_file():
-                    shutil.copy2(item, dst_item)
-                elif item.is_dir():
-                    shutil.copytree(item, dst_item, dirs_exist_ok=True)
 
 
 # ── Runtime detection ──────────────────────────────────────────────────
