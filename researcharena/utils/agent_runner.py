@@ -249,12 +249,37 @@ def _invoke_local(
         # Try subprocess-based approaches first (venv.create calls sys.exit on failure)
         for venv_cmd in [
             ["python3", "-m", "venv", "--system-site-packages", str(venv_dir)],
+            ["python3", "-m", "venv", "--system-site-packages", "--without-pip", str(venv_dir)],
             ["python3", "-m", "virtualenv", "--system-site-packages", str(venv_dir)],
             ["virtualenv", "--system-site-packages", str(venv_dir)],
         ]:
             try:
                 subprocess.run(venv_cmd, check=True, capture_output=True, text=True)
                 created = True
+                # If created with --without-pip, bootstrap pip
+                if "--without-pip" in venv_cmd:
+                    venv_pip = venv_dir / "bin" / "pip"
+                    if not venv_pip.exists():
+                        try:
+                            subprocess.run(
+                                [str(venv_dir / "bin" / "python3"), "-m", "ensurepip", "--default-pip"],
+                                check=True, capture_output=True, text=True,
+                            )
+                        except (subprocess.CalledProcessError, FileNotFoundError):
+                            # ensurepip unavailable — fetch get-pip.py as last resort
+                            try:
+                                get_pip = venv_dir / "get-pip.py"
+                                subprocess.run(
+                                    ["curl", "-sS", "https://bootstrap.pypa.io/get-pip.py", "-o", str(get_pip)],
+                                    check=True, capture_output=True, text=True,
+                                )
+                                subprocess.run(
+                                    [str(venv_dir / "bin" / "python3"), str(get_pip)],
+                                    check=True, capture_output=True, text=True,
+                                )
+                                get_pip.unlink(missing_ok=True)
+                            except (subprocess.CalledProcessError, FileNotFoundError):
+                                console.print("  [yellow]pip bootstrap failed — venv has no pip[/]")
                 break
             except (subprocess.CalledProcessError, FileNotFoundError):
                 # Clean up partial venv dir before trying next method
