@@ -367,6 +367,14 @@ def _parse_review_from_output(stdout: str) -> dict | None:
     if not stdout:
         return None
 
+    # Step 0: Try parsing entire stdout as a single JSON object (Codex raw output)
+    try:
+        data = json.loads(stdout.strip())
+        if isinstance(data, dict) and "overall_score" in data and "decision" in data:
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+
     # Step 1: Extract all text content from structured output events
     text_content = []
     for line in stdout.strip().split("\n"):
@@ -375,6 +383,9 @@ def _parse_review_from_output(stdout: str) -> dict | None:
             continue
         try:
             event = json.loads(line)
+            if not isinstance(event, dict):
+                text_content.append(line)
+                continue
             # Claude stream-json: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
             if event.get("type") == "assistant":
                 for block in event.get("message", {}).get("content", []):
