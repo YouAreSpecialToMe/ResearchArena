@@ -1009,26 +1009,29 @@ def _seed_agent_auth(agent_type: str, real_home: Path, agent_home: Path):
     Only copies auth files (API keys, login tokens), NOT memory or history.
     This runs once per workspace — subsequent stages reuse the same home.
     """
+    # Auth-only files to copy for each agent type.
+    # Format: list of relative paths from HOME.
     auth_files = {
         "claude": [
-            (".claude.json", ".claude.json"),
-            (".claude/credentials.json", ".claude/credentials.json"),
+            ".claude.json",           # main config with auth tokens
         ],
         "codex": [
-            (".codex.json", ".codex.json"),
-            (".codex/credentials.json", ".codex/credentials.json"),
+            ".codex/auth.json",       # auth tokens
+            ".codex/config.toml",     # settings (may include auth)
         ],
         "kimi": [
-            (".kimi/credentials.json", ".kimi/credentials.json"),
+            ".kimi/auth.json",
+            ".kimi/config.json",
         ],
         "minimax": [
-            (".mini-agent/credentials.json", ".mini-agent/credentials.json"),
+            ".mini-agent/auth.json",
+            ".mini-agent/config.json",
         ],
     }
 
-    for src_rel, dst_rel in auth_files.get(agent_type, []):
-        src = real_home / src_rel
-        dst = agent_home / dst_rel
+    for rel_path in auth_files.get(agent_type, []):
+        src = real_home / rel_path
+        dst = agent_home / rel_path
         if src.exists() and not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
