@@ -716,6 +716,7 @@ def _build_agent_command(agent_type: str, task: str, config: dict, workspace_pat
     elif agent_type == "codex":
         cmd = [
             "codex", "exec",
+            "--skip-git-repo-check",
         ]
         if config.get("model"):
             cmd.extend(["-c", f'model="{config["model"]}"'])
