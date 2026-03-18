@@ -1,8 +1,7 @@
-"""Stage 6: Multi-source automated paper review.
+"""Stage 4: Multi-source automated paper review.
 
-Reviewer agents run as CLI agents in the SAME Docker image as the researcher,
-with the workspace mounted READ-ONLY. They can read all code, logs, results,
-and even re-run experiments to verify results. This is a real audit.
+Reviewer agents run as CLI agents with read-only workspace access.
+They can read all code, logs, results, and the paper itself.
 
 When evaluating multiple CLI agents (claude, codex, kimi, minimax), the agents
 NOT under test serve as reviewers. E.g., if claude is the researcher, codex,
@@ -11,12 +10,13 @@ kimi, and minimax review.
 Review sources (fully autonomous):
   1. Reference check  — verify citations are real (Semantic Scholar + CrossRef)
   2. paperreview.ai   — external online review (Stanford Agentic Reviewer)
-  3. CLI agent reviewers — other agents in Docker with read-only workspace access
+  3. CLI agent reviewers — other agents with read-only workspace access
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -286,11 +286,10 @@ def _run_cli_reviewer(
     runtime: str = "docker",
     domain: str = "ml",
 ) -> tuple[dict | None, object]:
-    """Run a CLI agent as a reviewer in Docker with read-only workspace.
+    """Run a CLI agent as a reviewer with read-only workspace.
 
-    The reviewer agent runs in the same Docker image as the researcher.
-    It gets the full workspace (code, logs, results, paper) mounted read-only.
-    It can read everything but cannot modify anything.
+    The reviewer agent gets the full workspace (code, logs, results, paper)
+    as read-only. It can read everything but cannot modify anything.
     The review is parsed from stdout (JSON output).
 
     Returns:
@@ -330,7 +329,6 @@ def _run_cli_reviewer(
     reviewer_guide_dest = workspace / "reviewer_guidelines.md"
     if not reviewer_guide_dest.exists() and reviewer_guidelines_path.exists():
         try:
-            import shutil
             shutil.copy2(reviewer_guidelines_path, reviewer_guide_dest)
         except OSError:
             pass  # workspace might already be read-only from a previous reviewer
@@ -466,17 +464,16 @@ def _score_qualitative_review(
 
     # Parse score from stdout
     if result.stdout:
-        import json as _json
         # Find JSON in output
         for line in result.stdout.strip().split("\n"):
             line = line.strip()
             if line.startswith("{") and "overall_score" in line:
                 try:
-                    data = _json.loads(line)
+                    data = json.loads(line)
                     score = data.get("overall_score")
                     if isinstance(score, (int, float)) and 0 <= score <= 10:
                         return float(score)
-                except _json.JSONDecodeError:
+                except json.JSONDecodeError:
                     pass
 
         # Try parsing from the full stdout
