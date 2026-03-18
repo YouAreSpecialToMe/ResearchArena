@@ -505,14 +505,22 @@ def _score_qualitative_review(
         "max_turns": max_turns,
     }
 
+    # Run in a temp directory so the scorer has NO memory of the research.
+    # The entire review text is in the task prompt — no workspace files needed.
+    import tempfile
+    scorer_dir = Path(tempfile.mkdtemp(prefix="ra_scorer_"))
+
     result = invoke_agent(
         agent_type=agent_type,
         task=task,
-        workspace=workspace,
+        workspace=scorer_dir,
         timeout=timeout,
         agent_config=scorer_config,
         readonly=True,
     )
+
+    # Clean up temp dir
+    shutil.rmtree(scorer_dir, ignore_errors=True)
 
     # Parse score from stdout.
     # Works with all agent output formats (stream-json, codex json, plain text).
