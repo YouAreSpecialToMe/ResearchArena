@@ -148,33 +148,11 @@ def review_paper(
         ref_feedback = "\n".join(ref_lines)
         console.print(f"  [red]REJECTED: {ref_result.unverified} fake reference(s) found.[/]")
 
-    # ── Source 1: paperreview.ai ──
-    console.print("\n[bold]Review Source 1: paperreview.ai[/]")
-    if tracker:
-        tracker.begin_action(stage="review", action="paperreview_ai")
-    pr_review = _run_paperreview(paper_pdf_path, paperreview_config, venue)
-    if pr_review:
-        # Use the first available reviewer agent to score the qualitative review
-        if reviewer_agents and workspace:
-            console.print("  Scoring paperreview.ai review with agent...")
-            scored = _score_qualitative_review(
-                pr_review, reviewer_agents[0], workspace, venue, runtime,
-                timeout=paperreview_config.get("scoring_timeout", 120),
-                max_turns=paperreview_config.get("scoring_max_turns", 5),
-            )
-            if scored is not None:
-                pr_review["overall_score"] = scored
-                pr_review["decision"] = _score_to_decision(scored, accept_threshold)
-                console.print(f"  Agent scored paperreview.ai: {scored}/10")
-
-        all_reviews.append(pr_review)
-        console.print(f"  Score: {pr_review.get('overall_score', 'N/A')}")
-        if tracker:
-            tracker.end_action(outcome="success", details=f"score={pr_review.get('overall_score')}")
-    else:
-        console.print("  [yellow]paperreview.ai review unavailable.[/]")
-        if tracker:
-            tracker.end_action(outcome="skipped", details="unavailable or not configured")
+    # ── Source 1: paperreview.ai (disabled) ──
+    # TODO: Re-enable when paperreview.ai integration is ready
+    # console.print("\n[bold]Review Source 1: paperreview.ai[/]")
+    # pr_review = _run_paperreview(paper_pdf_path, paperreview_config, venue)
+    # ...
 
     # ── Source 2: CLI agent reviewers (independent, no prior context) ──
     console.print(

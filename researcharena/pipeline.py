@@ -19,6 +19,7 @@ Iteration: if the paper doesn't pass review, we can either:
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
