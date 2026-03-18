@@ -23,7 +23,9 @@ console = Console()
 # Rate limit: Semantic Scholar allows ~100 req/5min without API key
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 CROSSREF_API = "https://api.crossref.org/works"
-REQUEST_DELAY = 0.5  # seconds between API calls
+REQUEST_DELAY = 1.0  # seconds between API calls
+REQUEST_TIMEOUT = 30  # seconds per API request
+MAX_RETRIES = 2       # retry count per API
 
 
 @dataclass
@@ -80,19 +82,22 @@ def check_references(paper_latex: str, workspace: Path | None = None) -> Referen
 
         console.print(f"  [{i+1}/{len(raw_refs)}] Checking: {title[:60]}...")
 
-        # Try Semantic Scholar first, then CrossRef
+        # Try Semantic Scholar first, then CrossRef (with retries)
         match = None
         api_error = False
         try:
-            match = _search_semantic_scholar(title, authors, year)
+            match = _search_with_retry(_search_semantic_scholar, title, authors, year)
         except Exception:
             api_error = True
 
         if not match:
             try:
-                match = _search_crossref(title, authors, year)
+                match = _search_with_retry(_search_crossref, title, authors, year)
             except Exception:
-                api_error = True
+                if api_error:
+                    pass  # both failed
+                else:
+                    api_error = True
 
         if match:
             verified += 1
@@ -258,6 +263,19 @@ def _clean_latex(text: str) -> str:
 # ── API lookups ──────────────────────────────────────────────────────────
 
 
+def _search_with_retry(search_fn, title: str, authors: str, year: str):
+    """Call a search function with retries and exponential backoff."""
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return search_fn(title, authors, year)
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                time.sleep(2 ** attempt)  # 1s, 2s backoff
+    raise last_error
+
+
 def _search_semantic_scholar(title: str, authors: str, year: str) -> dict | None:
     """Search Semantic Scholar for a paper by title.
 
@@ -269,7 +287,7 @@ def _search_semantic_scholar(title: str, authors: str, year: str) -> dict | None
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "ResearchArena/1.0")
 
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         data = json.loads(resp.read().decode())
 
     for paper in data.get("data", []):
@@ -299,7 +317,7 @@ def _search_crossref(title: str, authors: str, year: str) -> dict | None:
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "ResearchArena/1.0 (mailto:researcharena@example.com)")
 
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         data = json.loads(resp.read().decode())
 
     for item in data.get("message", {}).get("items", []):
