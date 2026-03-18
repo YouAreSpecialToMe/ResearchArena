@@ -357,18 +357,45 @@ def _run_cli_reviewer(
 def _parse_review_from_output(stdout: str) -> dict | None:
     """Extract the review JSON from the agent's stdout.
 
-    Searches from the END of stdout to find the last valid JSON object
-    containing 'overall_score' and 'decision'. This avoids matching
-    example/partial JSON that the agent may print during reasoning.
+    Handles two output formats:
+    1. Stream-json: review JSON is inside {"type":"assistant","message":{"content":[{"text":"..."}]}}
+    2. Plain text: review JSON appears directly in stdout
+
+    Searches for the last valid JSON containing 'overall_score' and 'decision'.
     """
     if not stdout:
         return None
 
-    # Collect all candidate JSON objects, return the last valid one
+    # Step 1: Extract all text content from stream-json events
+    # This handles the case where the review is embedded in a text field
+    text_content = []
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+            # Extract text from assistant messages
+            if event.get("type") == "assistant":
+                for block in event.get("message", {}).get("content", []):
+                    if block.get("type") == "text":
+                        text_content.append(block["text"])
+            # Also check result text
+            elif event.get("type") == "result":
+                result_text = event.get("result", "")
+                if result_text:
+                    text_content.append(result_text)
+        except json.JSONDecodeError:
+            # Not JSON — treat as plain text
+            text_content.append(line)
+
+    combined = "\n".join(text_content) if text_content else stdout
+
+    # Step 2: Find review JSON in the extracted text using brace matching
     candidates = []
     brace_depth = 0
     json_start = None
-    for i, c in enumerate(stdout):
+    for i, c in enumerate(combined):
         if c == '{':
             if brace_depth == 0:
                 json_start = i
@@ -376,7 +403,7 @@ def _parse_review_from_output(stdout: str) -> dict | None:
         elif c == '}':
             brace_depth -= 1
             if brace_depth == 0 and json_start is not None:
-                candidate = stdout[json_start:i + 1]
+                candidate = combined[json_start:i + 1]
                 try:
                     data = json.loads(candidate)
                     if "overall_score" in data and "decision" in data:
@@ -466,21 +493,22 @@ def _score_qualitative_review(
         readonly=True,
     )
 
-    # Parse score from stdout
+    # Parse score from stdout.
+    # The output may be stream-json (nested inside event wrappers) or plain text.
+    # In stream-json, quotes are escaped as \" so we check both forms.
     if result.stdout:
-        # Find JSON in output
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("{") and "overall_score" in line:
-                try:
-                    data = json.loads(line)
-                    score = data.get("overall_score")
-                    if isinstance(score, (int, float)) and 0 <= score <= 10:
-                        return float(score)
-                except json.JSONDecodeError:
-                    pass
+        import re
+        # Strategy 1: find overall_score": N or overall_score\": N anywhere
+        score_match = re.search(
+            r'overall_score\\?"\s*:\s*(\d+)',
+            result.stdout,
+        )
+        if score_match:
+            score = int(score_match.group(1))
+            if 0 <= score <= 10:
+                return float(score)
 
-        # Try parsing from the full stdout
+        # Strategy 2: use the general review parser (extracts text from stream-json)
         parsed = _parse_review_from_output(result.stdout)
         if parsed and parsed.get("overall_score") is not None:
             return float(parsed["overall_score"])
