@@ -72,6 +72,20 @@ Not all research requires training a model. Choose what fits your claim:
 
 ## Phase 2: Implementation
 
+### Efficient use of resources
+You have a fixed time budget and compute resources — use them wisely:
+- **Parallelize independent experiments.** If experiments don't depend on each
+  other (e.g., different seeds, different baselines, different ablations),
+  run them in parallel using `subprocess`, `multiprocessing`, or shell `&`.
+- **Estimate runtime first.** Before launching the full experiment suite, time
+  a single short run and extrapolate. If your estimate exceeds the budget,
+  reduce epochs, use smaller models, or drop non-essential ablations.
+- **Use all available GPU memory.** If your model only uses 10GB of a 80GB GPU,
+  consider running multiple experiments simultaneously on the same GPU, or
+  increasing batch size for faster convergence.
+- **Prioritize.** Run the most important experiments first (method vs. strongest
+  baseline). If time runs out, you'll at least have the core comparison.
+
 ### General principles
 - Start simple. Get a minimal version working end-to-end first.
 - Add complexity one piece at a time. Evaluate each change independently.
