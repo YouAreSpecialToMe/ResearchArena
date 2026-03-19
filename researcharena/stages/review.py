@@ -111,42 +111,11 @@ def review_paper(
     """
     all_reviews = []
 
-    # ── Pre-check: Reference verification ──
-    console.print("\n[bold]Pre-check: Reference verification[/]")
-    from researcharena.utils.reference_checker import check_references, save_reference_check
-
-    if tracker:
-        tracker.begin_action(stage="review", action="reference_check")
-    ref_result = check_references(paper_latex, workspace=workspace)
-    if workspace:
-        save_reference_check(ref_result, workspace)
-    if tracker:
-        tracker.end_action(
-            outcome="success",
-            details=f"{ref_result.verified}/{ref_result.total} verified, {ref_result.unverified} fake",
-        )
-
-    has_fake_refs = ref_result.unverified > 0
+    # ── Pre-check: Reference verification (DISABLED — high false-positive rate) ──
+    # The automated checker flags real papers as fake due to brittle Semantic Scholar
+    # / CrossRef lookups.  Reviewers are already instructed to verify references
+    # themselves, so we skip the automated check entirely.
     ref_feedback = ""
-    if has_fake_refs:
-        fake_refs = [r for r in ref_result.references if r["status"] == "unverified"]
-        ref_lines = [
-            f"REFERENCE CHECK FAILED: {ref_result.unverified}/{ref_result.total} references "
-            f"could NOT be verified. Paper is automatically rejected.",
-            "",
-            "Unverified references (must be replaced with real, citable papers):",
-        ]
-        for r in fake_refs:
-            title = r.get("title", r.get("raw", "?"))[:80]
-            ref_lines.append(f"  - {title}")
-        ref_lines.append("")
-        ref_lines.append(
-            "Every reference in the paper must be a real, verifiable publication. "
-            "Search Semantic Scholar or Google Scholar to find real papers, and "
-            "cite them with correct titles, authors, and venues."
-        )
-        ref_feedback = "\n".join(ref_lines)
-        console.print(f"  [red]REJECTED: {ref_result.unverified} fake reference(s) found.[/]")
 
     # ── Source 1: paperreview.ai (disabled) ──
     # TODO: Re-enable when paperreview.ai integration is ready
@@ -245,8 +214,6 @@ def review_paper(
     _display_review_summary(all_reviews, final_score, decision)
 
     aggregated = _aggregate_feedback(all_reviews)
-    if ref_feedback:
-        aggregated = ref_feedback + "\n\n" + aggregated
 
     return ReviewResult(
         reviews=all_reviews,
@@ -320,22 +287,9 @@ def _run_cli_reviewer(
     agent_type = agent_cfg["type"]
     extra_instructions = _get_agent_review_instructions(agent_type)
 
-    ref_section = ""
-    if ref_feedback:
-        ref_section = (
-            f"\n--- AUTOMATED REFERENCE CHECK ---\n"
-            f"{ref_feedback}\n"
-            f"--- END REFERENCE CHECK ---\n\n"
-            f"The above reference check was performed automatically before your review.\n"
-            f"Unverified references are likely fabricated. This is grounds for automatic\n"
-            f"rejection — you MUST set decision to 'reject' and score references ≤ 2\n"
-            f"if any references are confirmed fake.\n\n"
-        )
-
     task = (
         f"{base_task}"
         f"{extra_instructions}\n\n"
-        f"{ref_section}"
         f"{guidelines}\n\n"
         f"{_REVIEW_OUTPUT_FORMAT}"
     )

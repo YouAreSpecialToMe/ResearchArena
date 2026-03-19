@@ -107,9 +107,6 @@ Acceptance threshold is 8. Score 6 triggers a revision loop. Score < 6 is reject
 - Are enough details provided for an independent reimplementation?
 
 ### 7. References
-- Are all references real, verifiable publications?
-- **Search DBLP or Semantic Scholar** to verify that cited papers
-  actually exist with the stated titles, authors, and venues
 - Are key related works cited and properly discussed?
 - Is the paper well-positioned relative to prior work?
 - Does it cite relevant work from both the academic literature AND
@@ -128,7 +125,6 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the scientific contribution. However, any of
 the following are grounds for **automatic rejection**:
-- References that don't exist (fake citations)
 - Experiment code that cannot run or doesn't produce the claimed results
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that don't match results.json

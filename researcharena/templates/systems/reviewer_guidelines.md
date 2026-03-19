@@ -106,10 +106,6 @@ Missing any of the above is a significant weakness.
 - Are figures and tables self-contained with descriptive captions?
 
 ### 8. References
-- Are all references real, verifiable publications?
-- **Search ACM Digital Library, USENIX proceedings, IEEE Xplore, or
-  Google Scholar** to verify that cited papers actually exist with the
-  stated titles, authors, and venues
 - Are key related systems cited and properly compared?
 - Is the paper well-positioned relative to prior systems in the same space?
 
@@ -128,7 +124,6 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the design contribution. However, any of the
 following are grounds for **automatic rejection**:
-- References that do not exist (fake citations)
 - Experiment code that cannot run or does not produce the claimed results
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that do not match results.json

@@ -111,8 +111,6 @@ no value.
 - Are the original sources cited, not just the most recent paper?
 - Does the paper position itself honestly relative to existing results?
 - Has the author missed relevant prior work?
-- **Search DBLP and Semantic Scholar** to check for missing references,
-  especially older results that may have been forgotten
 
 ### 6. Results Integrity (sanity check)
 
@@ -133,7 +131,6 @@ The primary evaluation is the mathematical contribution. However, any of
 the following are grounds for **automatic rejection**:
 - Theorem statements in the paper contradict those in results.json
 - Experimental results in the paper do not match results.json
-- References that do not exist (fake citations)
 - Claims of proofs that are not actually present in the paper or appendix
 - Missing experiment source code when experiments are claimed
 

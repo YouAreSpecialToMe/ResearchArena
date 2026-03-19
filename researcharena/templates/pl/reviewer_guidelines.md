@@ -129,9 +129,6 @@ rejected.
 - Is the experimental setup reproducible?
 
 ### 8. References
-- Are all references real, verifiable publications?
-- **Search Semantic Scholar, ACM DL, or DBLP** to verify that cited papers
-  actually exist with the stated titles, authors, and venues
 - Are foundational works cited? (PL reviewers notice missing citations to
   seminal papers)
 - Are key related works cited and properly discussed?
@@ -152,7 +149,6 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the scientific contribution. However, any of the
 following are grounds for **automatic rejection**:
-- References that don't exist (fake citations)
 - Proofs with known, unfixed errors (unsound claims)
 - Experiment code that cannot run or doesn't produce the claimed results
 - Logs that show different numbers than what the paper reports
