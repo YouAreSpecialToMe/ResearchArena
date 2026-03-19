@@ -109,14 +109,19 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
     )
 
     if history:
-        task += "\n\n--- PREVIOUS FAILED ATTEMPTS (avoid these) ---\n"
+        task += "\n\n--- PREVIOUS ATTEMPTS (learn from these) ---\n"
         for i, h in enumerate(history):
             task += (
                 f"\nAttempt {i+1}: \"{h['idea'].get('description', h['idea'].get('title', 'N/A'))}\"\n"
-                f"  Failed at: {h['failure_stage']}\n"
-                f"  Reason: {h['failure_reason']}\n"
+                f"  Stage: {h['failure_stage']}\n"
+                f"  Outcome: {h['failure_reason']}\n"
             )
-        task += "\n--- Generate a DIFFERENT idea that avoids these problems. ---\n"
+            if h.get("best_score") is not None:
+                task += f"  Best score: {h['best_score']:.1f}/10\n"
+        task += (
+            "\n--- Generate a DIFFERENT idea. Learn from what worked and what didn't "
+            "in previous attempts. ---\n"
+        )
 
     return task
 

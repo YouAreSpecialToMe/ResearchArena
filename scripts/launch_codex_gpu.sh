@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# launch_parallel_codex.sh — Run 8 Codex researchers in parallel, one per GPU.
+# launch_codex_gpu.sh — Run 8 Codex researchers in parallel on rush-compute-03.
 #
 # Usage:
-#   bash scripts/launch_parallel_codex.sh
-#   bash scripts/launch_parallel_codex.sh --config configs/8xa6000_codex.yaml --seeds-file configs/seed_gpu_exp.yaml
+#   bash scripts/launch_codex_gpu.sh
+#   bash scripts/launch_codex_gpu.sh --config configs/8xa6000_codex.yaml --seeds-file configs/seed_gpu_exp.yaml
+#
+# Each researcher gets:
+#   - One A6000 GPU (CUDA_VISIBLE_DEVICES=N)
+#   - Its own workspace under outputs/codex/<seed>_<timestamp>/
+#   - A log file under outputs/codex/logs/
 
 set -euo pipefail
+
+cd /home/zz865/pythonProject/autoresearch
 
 CONFIG="${CONFIG:-configs/8xa6000_codex.yaml}"
 SEEDS_FILE="${SEEDS_FILE:-configs/seed_gpu_exp.yaml}"
@@ -35,12 +42,14 @@ done < "$SEEDS_FILE"
 
 TOTAL=${#SEEDS[@]}
 echo "============================================================"
-echo "  ResearchArena — Parallel Launch (Codex researcher)"
+echo "  ResearchArena — Codex GPU Parallel Launch"
+echo "  Host:       $(hostname)"
 echo "  Config:     $CONFIG"
 echo "  Seeds file: $SEEDS_FILE"
 echo "  Seeds:      $TOTAL"
 echo "  GPUs:       $NUM_GPUS × A6000"
 echo "  Researcher: Codex (gpt-5.4)"
+echo "  Timestamp:  $TIMESTAMP"
 if [[ $TOTAL -gt $NUM_GPUS ]]; then
   BATCHES=$(( (TOTAL + NUM_GPUS - 1) / NUM_GPUS ))
   echo "  Batches:    $BATCHES (${NUM_GPUS} GPUs, overflow queued)"

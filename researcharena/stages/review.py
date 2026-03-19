@@ -63,7 +63,7 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
     "integrity_check": "<brief sanity check on results consistency>"
 }
 
-overall_score uses ICLR scale: 10=seminal, 8=clear accept, 6=marginal (revision),
+overall_score scale: 10=seminal, 8=clear accept, 6=marginal (revision),
 4=reject, 2=strong reject, 0=fabricated/trivial. Threshold is 8.
 """
 
@@ -133,19 +133,10 @@ def review_paper(
     if not workspace:
         console.print("  [yellow]No workspace — skipping agent reviewers.[/]")
     else:
-        for i, agent_cfg in enumerate(reviewer_agents):
-            agent_name = agent_cfg.get("name", agent_cfg.get("type", f"Agent-{i+1}"))
-            agent_type = agent_cfg["type"]
-            console.print(f"  Running {agent_name} ({agent_type})...")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            if tracker:
-                tracker.begin_action(
-                    stage="review",
-                    action=f"agent_review:{agent_name}",
-                    agent_type=agent_type,
-                    model=agent_cfg.get("model"),
-                )
-
+        def _run_single_reviewer(agent_cfg):
+            """Run one reviewer agent. Returns (agent_cfg, review_dict, agent_result, error)."""
             try:
                 agent_review, agent_result = _run_cli_reviewer(
                     agent_cfg=agent_cfg,
@@ -156,13 +147,39 @@ def review_paper(
                     domain=domain,
                     ref_feedback=ref_feedback,
                 )
+                return (agent_cfg, agent_review, agent_result, None)
+            except Exception as e:
+                return (agent_cfg, None, None, e)
+
+        agent_names = [a.get("name", a.get("type", f"Agent-{i+1}")) for i, a in enumerate(reviewer_agents)]
+        console.print(f"  Running {len(reviewer_agents)} reviewers in parallel: {agent_names}")
+
+        with ThreadPoolExecutor(max_workers=len(reviewer_agents)) as pool:
+            futures = {pool.submit(_run_single_reviewer, cfg): cfg for cfg in reviewer_agents}
+
+            for future in as_completed(futures):
+                agent_cfg, agent_review, agent_result, error = future.result()
+                agent_name = agent_cfg.get("name", agent_cfg.get("type", "?"))
+                agent_type = agent_cfg["type"]
                 reviewer_log_files = agent_result.log_files if agent_result else None
 
-                if agent_review:
+                if tracker:
+                    tracker.begin_action(
+                        stage="review",
+                        action=f"agent_review:{agent_name}",
+                        agent_type=agent_type,
+                        model=agent_cfg.get("model"),
+                    )
+
+                if error:
+                    console.print(f"  {agent_name}: [red]Failed: {error}[/]")
+                    if tracker:
+                        tracker.end_action(outcome="failure", details=str(error)[:100])
+                elif agent_review:
                     agent_review["source"] = f"agent:{agent_name}"
                     all_reviews.append(agent_review)
                     console.print(
-                        f"    Score: {agent_review.get('overall_score', 'N/A')}, "
+                        f"  {agent_name}: Score {agent_review.get('overall_score', 'N/A')}, "
                         f"Decision: {agent_review.get('decision', 'N/A')}"
                     )
                     integrity = agent_review.get("integrity_check", "")
@@ -175,17 +192,13 @@ def review_paper(
                             log_files=reviewer_log_files,
                         )
                 else:
-                    console.print(f"    [red]No review produced.[/]")
+                    console.print(f"  {agent_name}: [red]No review produced.[/]")
                     if tracker:
                         tracker.end_action(
                             outcome="failure",
                             details="No review produced",
                             log_files=reviewer_log_files,
                         )
-            except Exception as e:
-                console.print(f"    [red]Failed: {e}[/]")
-                if tracker:
-                    tracker.end_action(outcome="failure", details=str(e)[:100])
 
     if not all_reviews:
         console.print("[red]No reviews obtained from any source.[/]")

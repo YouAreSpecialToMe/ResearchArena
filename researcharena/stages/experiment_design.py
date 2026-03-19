@@ -27,6 +27,8 @@ def run(
     max_attempts: int = 3,
     idea_attempt: int = 1,
     max_ideas: int = 5,
+    refine_attempt: int = 0,
+    max_refine: int = 3,
 ) -> tuple[dict | None, object]:
     """Let the agent implement and run experiments.
 
@@ -35,7 +37,7 @@ def run(
     Returns:
         Tuple of (parsed results dict or None, AgentResult).
     """
-    task = _build_task(workspace, prior_errors, resources, attempt, max_attempts, idea_attempt, max_ideas)
+    task = _build_task(workspace, prior_errors, resources, attempt, max_attempts, idea_attempt, max_ideas, refine_attempt, max_refine)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -56,6 +58,8 @@ def _build_task(
     max_attempts: int = 3,
     idea_attempt: int = 1,
     max_ideas: int = 5,
+    refine_attempt: int = 0,
+    max_refine: int = 3,
 ) -> str:
     res = resources or {}
     platform = res.get("platform", "gpu")
@@ -100,12 +104,15 @@ def _build_task(
 
     exp_retries_left = max_attempts - attempt
     ideas_left = max_ideas - idea_attempt
+    refines_left = max_refine - refine_attempt
     task = (
         "=== STAGE 2: EXPERIMENTS ===\n\n"
         f"BUDGET: Experiment attempt {attempt}/{max_attempts} for this idea"
         f" ({exp_retries_left} retries left)."
         f" Idea {idea_attempt}/{max_ideas}"
-        f" ({ideas_left} new ideas left if this one is abandoned).\n\n"
+        f" ({ideas_left} new ideas left if this one is abandoned)."
+        f" Refinements: {refine_attempt}/{max_refine}"
+        f" ({refines_left} refinements left).\n\n"
         "Read idea.json (your research idea from Stage 1) and "
         "experiment_guidelines.md for detailed instructions on designing "
         "and running rigorous experiments.\n\n"
@@ -138,17 +145,23 @@ def _build_task(
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
         "If your method doesn't beat baselines, report that honestly — negative "
         "results with honest analysis are valuable science.\n\n"
-        "ABANDON OPTION: At any point during experiments, if you determine this "
-        "idea is not viable, you may abandon it by writing a file called "
-        'abandon.json with: {"abandon": true, "reason": "..."}. '
-        "The pipeline will go back to ideation with a new idea. Valid reasons "
-        "to abandon include (but are not limited to):\n"
+        "OPTIONS DURING EXPERIMENTS:\n\n"
+        "REFINE OPTION: If initial results suggest the idea has potential but needs "
+        "a different angle, you may refine the idea by writing refine_idea.json with:\n"
+        '  {"refine": true, "reason": "...", "revised_idea": {<updated idea.json fields>}}\n'
+        "The pipeline will update idea.json with your revisions and restart "
+        "experiments. Use this when:\n"
+        "  - Early results reveal a more promising direction\n"
+        "  - The hypothesis needs adjustment based on initial findings\n"
+        "  - The method needs a fundamental change (not just hyperparameter tuning)\n\n"
+        "ABANDON OPTION: If the idea is not viable at all, write abandon.json with:\n"
+        '  {"abandon": true, "reason": "..."}\n'
+        "The pipeline will go back to ideation with a completely new idea. Use this when:\n"
         "  - Method clearly underperforms all baselines (not just a tuning issue)\n"
         "  - Experiment setup is infeasible (dependencies won't install, dataset "
         "too large for available resources, etc.)\n"
         "  - Code won't run after multiple debugging attempts\n"
-        "  - Approach is fundamentally intractable with available compute\n"
-        "  - Any other reason you judge the idea is not worth pursuing\n"
+        "  - Approach is fundamentally intractable with available compute\n\n"
         "Use your judgment — marginal or mixed results are still worth writing up."
     )
 
@@ -163,6 +176,8 @@ def _build_task(
 
 # Sentinel returned when the agent explicitly abandons the idea
 ABANDON_SIGNAL = "__ABANDON__"
+# Sentinel returned when the agent wants to refine the idea and retry
+REFINE_SIGNAL = "__REFINE__"
 
 
 def _parse_output(workspace: Path) -> dict | str | None:
@@ -173,6 +188,16 @@ def _parse_output(workspace: Path) -> dict | str | None:
             data = json.loads(abandon_path.read_text())
             if data.get("abandon"):
                 return ABANDON_SIGNAL
+        except json.JSONDecodeError:
+            pass
+
+    # Check for refine signal — agent wants to rethink the idea
+    refine_path = workspace / "refine_idea.json"
+    if refine_path.exists():
+        try:
+            data = json.loads(refine_path.read_text())
+            if data.get("refine"):
+                return REFINE_SIGNAL
         except json.JSONDecodeError:
             pass
 

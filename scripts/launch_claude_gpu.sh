@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+cd /home/zz865/pythonProject/autoresearch
+
 CONFIG="${CONFIG:-configs/8xa6000.yaml}"
 SEEDS_FILE="${SEEDS_FILE:-configs/seed_gpu_exp.yaml}"
 NUM_GPUS=8

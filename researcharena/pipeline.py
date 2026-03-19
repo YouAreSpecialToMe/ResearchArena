@@ -82,6 +82,7 @@ class PipelineState:
     # Per-idea counters
     experiment_attempts: int = 0
     paper_revision_attempts: int = 0
+    refine_attempts: int = 0
 
     # Per-seed counter
     idea_attempts: int = 0
@@ -89,6 +90,7 @@ class PipelineState:
     # Limits
     max_experiment_retries: int = 3
     max_paper_revisions: int = 2
+    max_refine_per_idea: int = 3
     max_ideas_per_seed: int = 5
     max_global_steps: int = 30
 
@@ -156,6 +158,7 @@ class Pipeline:
         self.state = PipelineState(
             max_experiment_retries=config["experiment"].get("max_experiment_retries_per_idea", 3),
             max_paper_revisions=config["paper"].get("max_revisions", 2),
+            max_refine_per_idea=config["experiment"].get("max_refine_per_idea", 3),
             max_ideas_per_seed=config["pipeline"]["max_ideas_per_seed"],
             max_global_steps=config["pipeline"]["max_global_steps"],
         )
@@ -305,6 +308,7 @@ class Pipeline:
         self.state.experiment_errors = []
         self.state.experiment_attempts = 0
         self.state.paper_revision_attempts = 0
+        self.state.refine_attempts = 0
 
         self.state.stage = Stage.EXPERIMENTS
 
@@ -362,6 +366,7 @@ class Pipeline:
         self.state.results = None
         self.state.experiment_errors = []
         self.state.experiment_attempts = 0
+        self.state.refine_attempts = 0  # fresh refine budget after revision
         self.state.stage = Stage.EXPERIMENTS
 
     def _run_experiments(self):
@@ -398,6 +403,8 @@ class Pipeline:
             max_attempts=self.state.max_experiment_retries,
             idea_attempt=self.state.idea_attempts,
             max_ideas=self.state.max_ideas_per_seed,
+            refine_attempt=self.state.refine_attempts,
+            max_refine=self.state.max_refine_per_idea,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
@@ -439,6 +446,64 @@ class Pipeline:
                 log_files=log_files,
             )
             self._abandon_idea("experiments", abandon_reason)
+            return
+
+        # Agent wants to refine the idea via refine_idea.json
+        if results == experiments.REFINE_SIGNAL:
+            self.state.refine_attempts += 1
+
+            # Check refine budget
+            if self.state.refine_attempts > self.state.max_refine_per_idea:
+                console.print(
+                    f"  [red]Refine budget exhausted "
+                    f"({self.state.max_refine_per_idea} refinements). Abandoning idea.[/]"
+                )
+                self.tracker.end_action(
+                    outcome="abandoned",
+                    details=f"Refine budget exhausted after {self.state.max_refine_per_idea} attempts",
+                    tokens=tokens,
+                    log_files=log_files,
+                )
+                self._abandon_idea("experiments", "Refine budget exhausted")
+                return
+
+            refine_path = self.state.workspace / "refine_idea.json"
+            refine_reason = "Agent wants to refine the idea"
+            revised_idea = None
+            if refine_path.exists():
+                try:
+                    data = json.loads(refine_path.read_text())
+                    reason = data.get("reason", "")
+                    if reason:
+                        refine_reason = f"Agent refining: {reason}"
+                    revised_idea = data.get("revised_idea")
+                except Exception:
+                    pass
+
+            console.print(
+                f"  [cyan]→ {refine_reason} "
+                f"(refinement {self.state.refine_attempts}/{self.state.max_refine_per_idea})[/]"
+            )
+            self.tracker.end_action(
+                outcome="refined",
+                details=refine_reason[:100],
+                tokens=tokens,
+                log_files=log_files,
+            )
+
+            # Update idea.json with revised fields if provided
+            if revised_idea and isinstance(revised_idea, dict):
+                self.state.idea.update(revised_idea)
+                idea_path = self.state.workspace / "idea.json"
+                idea_path.write_text(json.dumps(self.state.idea, indent=2))
+                console.print(f"  [cyan]Updated idea.json with revisions.[/]")
+
+            # Clean up refine signal and reset experiment state
+            refine_path.unlink(missing_ok=True)
+            self.state.results = None
+            self.state.experiment_errors = []
+            self.state.experiment_attempts = 0
+            self.state.stage = Stage.EXPERIMENTS
             return
 
         if results is None:
@@ -581,8 +646,8 @@ class Pipeline:
             console.print(Panel("[bold green]ACCEPTED![/]", style="green"))
             self.state.stage = Stage.ACCEPTED
 
-        elif result.avg_score >= 6:
-            # Score 6-7.x: marginal, try to improve with revision
+        elif result.avg_score >= 5:
+            # Score 5-7.x: marginal, try to improve with revision
             if self.state.paper_revision_attempts < self.state.max_paper_revisions:
                 self.state.paper_revision_attempts += 1
                 console.print(
@@ -602,7 +667,7 @@ class Pipeline:
                 ))
 
         else:
-            # Score <6: reject, abandon idea
+            # Score <5: reject, abandon idea
             console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. Abandoning idea.[/]")
             self._abandon_idea("review", (
                 f"Score {result.avg_score:.1f}. "
