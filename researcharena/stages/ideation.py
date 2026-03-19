@@ -8,6 +8,9 @@ The agent produces four structured outputs:
   2. plan.json — a detailed experiment plan with step-by-step instructions
   3. idea.json — structured idea summary (backward-compatible)
   4. references/ — directory of parsed reference papers
+
+This module handles both fresh ideation and post-review refinement via
+the same run() function — the prompt adapts based on context provided.
 """
 
 from __future__ import annotations
@@ -31,14 +34,36 @@ def run(
     resources: dict | None = None,
     attempt: int = 1,
     max_attempts: int = 5,
+    # Optional context — changes the prompt based on what's provided
     self_review_feedback: str = "",
+    reviewer_feedback: str = "",
+    previous_results: dict | None = None,
+    original_idea: dict | None = None,
+    revision_attempt: int = 0,
+    max_revisions: int = 2,
 ) -> tuple[dict | None, object]:
-    """Let the agent generate a research idea.
+    """Generate or refine a research idea.
+
+    When called without reviewer_feedback/original_idea, generates a fresh idea.
+    When called with reviewer_feedback, refines the existing idea based on
+    peer review feedback.
 
     Returns:
         Tuple of (parsed idea dict or None, AgentResult).
     """
-    task = _build_task(seed_topic, history, resources, attempt, max_attempts, self_review_feedback)
+    task = _build_task(
+        seed_topic=seed_topic,
+        history=history,
+        resources=resources,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        self_review_feedback=self_review_feedback,
+        reviewer_feedback=reviewer_feedback,
+        previous_results=previous_results,
+        original_idea=original_idea,
+        revision_attempt=revision_attempt,
+        max_revisions=max_revisions,
+    )
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -51,7 +76,19 @@ def run(
     return _parse_output(workspace), agent_result
 
 
-def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None, attempt: int = 1, max_attempts: int = 5, self_review_feedback: str = "") -> str:
+def _build_task(
+    seed_topic: str,
+    history: list[dict] | None = None,
+    resources: dict | None = None,
+    attempt: int = 1,
+    max_attempts: int = 5,
+    self_review_feedback: str = "",
+    reviewer_feedback: str = "",
+    previous_results: dict | None = None,
+    original_idea: dict | None = None,
+    revision_attempt: int = 0,
+    max_revisions: int = 2,
+) -> str:
     res = resources or {}
     platform = res.get("platform", "gpu")
     gpus = res.get("gpus", 0 if platform == "cpu" else 1)
@@ -61,7 +98,7 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
     mem = res.get("memory_gb", 32)
     hours = res.get("time_hours", 8)
 
-    remaining = max_attempts - attempt
+    is_refinement = bool(reviewer_feedback)
 
     # Build resource description based on platform
     if platform == "cpu" or gpus == 0:
@@ -90,16 +127,34 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
             "   small-to-medium scale experiments.\n"
         )
 
-    task = (
-        f"=== STAGE 1: IDEATION ===\n\n"
-        f"Your seed field is: {seed_topic}\n\n"
-        f"ATTEMPT: {attempt}/{max_attempts} "
-        f"({'LAST CHANCE — make it count!' if remaining == 0 else f'{remaining} retries remaining if this idea fails'})\n\n"
+    # ── Header: fresh ideation vs refinement ──
+    if is_refinement:
+        revisions_left = max_revisions - revision_attempt
+        task = (
+            "=== STAGE 1: IDEA REFINEMENT (post-review) ===\n\n"
+            f"Your seed field is: {seed_topic}\n\n"
+            f"BUDGET: Revision {revision_attempt}/{max_revisions}"
+            f" ({revisions_left} revisions left)."
+            f" Idea {attempt}/{max_attempts}.\n\n"
+            "Your paper was reviewed and needs improvement. Refine your idea\n"
+            "based on the reviewer feedback below, then update all outputs.\n\n"
+        )
+    else:
+        remaining = max_attempts - attempt
+        task = (
+            "=== STAGE 1: IDEATION ===\n\n"
+            f"Your seed field is: {seed_topic}\n\n"
+            f"ATTEMPT: {attempt}/{max_attempts} "
+            f"({'LAST CHANCE — make it count!' if remaining == 0 else f'{remaining} retries remaining if this idea fails'})\n\n"
+            "Come up with a novel, concrete, and feasible research idea that could\n"
+            "result in a publishable conference paper. Search the web extensively\n"
+            "for related work before committing to an idea.\n\n"
+        )
+
+    # ── Common: guidelines, resources, outputs ──
+    task += (
         "Read idea_guidelines.md carefully — it covers the full process from\n"
         "field exploration to structured output formats.\n\n"
-        "Come up with a novel, concrete, and feasible research idea that could\n"
-        "result in a publishable conference paper. Search the web extensively\n"
-        "for related work before committing to an idea.\n\n"
         f"{resource_block}\n"
         "You MUST produce FOUR outputs (see idea_guidelines.md Step 4 for details):\n"
         "  1. proposal.md — full research proposal\n"
@@ -110,6 +165,29 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         "The quality of your idea and plan directly determines experiment success."
     )
 
+    # ── Reviewer feedback (post-review refinement) ──
+    if reviewer_feedback:
+        task += (
+            "\n\n--- REVIEWER FEEDBACK (address these in your revision) ---\n"
+            f"{reviewer_feedback}\n"
+            "--- END FEEDBACK ---\n"
+        )
+
+    # ── Original idea context (for refinement) ──
+    if original_idea:
+        idea_desc = original_idea.get("description", original_idea.get("title", "N/A"))
+        idea_approach = original_idea.get("proposed_approach", "")
+        task += (
+            f"\n\nORIGINAL IDEA:\n{idea_desc}\n"
+            f"APPROACH:\n{idea_approach}\n"
+        )
+
+    # ── Previous experiment results (for refinement) ──
+    if previous_results:
+        task += "\n\nPREVIOUS EXPERIMENT RESULTS:\n"
+        task += f"{json.dumps(previous_results, indent=2)}\n"
+
+    # ── Self-review feedback ──
     if self_review_feedback:
         task += (
             "\n\n--- SELF-REVIEW FEEDBACK (address these issues) ---\n"
@@ -119,6 +197,7 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
             "specific issues above in your revised proposal and plan.\n"
         )
 
+    # ── History of past attempts ──
     if history:
         task += "\n\n--- PREVIOUS ATTEMPTS (learn from these) ---\n"
         for i, h in enumerate(history):
@@ -133,91 +212,6 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
             "\n--- Generate a DIFFERENT idea. Learn from what worked and what didn't "
             "in previous attempts. ---\n"
         )
-
-    return task
-
-
-def run_refinement(
-    agent_type: str,
-    workspace: Path,
-    original_idea: dict,
-    reviewer_feedback: str,
-    results: dict | None = None,
-    timeout: int = 1800,
-    agent_config: dict | None = None,
-    resources: dict | None = None,
-    revision_attempt: int = 1,
-    max_revisions: int = 2,
-) -> tuple[dict | None, object]:
-    """Let the agent refine an existing idea based on reviewer feedback.
-
-    Returns:
-        Tuple of (refined idea dict or None, AgentResult).
-    """
-    task = _build_refinement_task(
-        original_idea, reviewer_feedback, results,
-        resources, revision_attempt, max_revisions,
-    )
-
-    agent_result = invoke_agent(
-        agent_type=agent_type,
-        task=task,
-        workspace=workspace,
-        timeout=timeout,
-        agent_config=agent_config,
-    )
-
-    return _parse_output(workspace), agent_result
-
-
-def _build_refinement_task(
-    original_idea: dict,
-    reviewer_feedback: str,
-    results: dict | None,
-    resources: dict | None = None,
-    revision_attempt: int = 1,
-    max_revisions: int = 2,
-) -> str:
-    res = resources or {}
-    hours = res.get("time_hours", 8)
-    revisions_left = max_revisions - revision_attempt
-
-    idea_desc = original_idea.get("description", original_idea.get("title", "N/A"))
-    idea_approach = original_idea.get("proposed_approach", "")
-
-    task = (
-        "=== IDEA REFINEMENT (post-review) ===\n\n"
-        f"BUDGET: Revision {revision_attempt}/{max_revisions}"
-        f" ({revisions_left} revisions left after this).\n\n"
-        "Your paper was reviewed and REJECTED. You now have a chance to refine\n"
-        "your idea, run additional experiments, and rewrite the paper.\n\n"
-        "Read idea_guidelines.md for guidance on structuring your refined idea.\n\n"
-        f"ORIGINAL IDEA:\n{idea_desc}\n\n"
-        f"APPROACH:\n{idea_approach}\n\n"
-        "--- REVIEWER FEEDBACK ---\n"
-        f"{reviewer_feedback}\n"
-        "--- END FEEDBACK ---\n\n"
-    )
-
-    if results:
-        task += "PREVIOUS EXPERIMENT RESULTS:\n"
-        task += f"{json.dumps(results, indent=2)}\n\n"
-
-    task += (
-        "YOUR TASK:\n"
-        "1. Read the reviewer feedback carefully\n"
-        "2. Decide how to strengthen your idea — you can:\n"
-        "   - Refine the approach (fix methodological issues)\n"
-        "   - Add new components or modify existing ones\n"
-        "   - Plan additional experiments (ablations, baselines, datasets)\n"
-        "   - Pivot the framing or motivation\n"
-        "3. Update ALL structured outputs:\n"
-        "   - idea.json: update fields, add 'revision_notes' explaining changes\n"
-        "   - proposal.md: revise the relevant sections\n"
-        "   - plan.json: update the experiment plan if the approach changed\n\n"
-        f"After this, you will re-run experiments (~{hours}h budget) and rewrite the paper.\n"
-        "Focus on addressing the specific reviewer concerns."
-    )
 
     return task
 
