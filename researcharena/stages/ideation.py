@@ -3,11 +3,11 @@
 The agent gets a workspace and a seed field (e.g., "cv", "nlp"). It decides
 on its own how to explore — searching papers, brainstorming, etc.
 
-The agent produces three structured outputs:
+The agent produces four structured outputs:
   1. proposal.md — a research proposal with motivation, approach, related work
   2. plan.json — a detailed experiment plan with step-by-step instructions
   3. idea.json — structured idea summary (backward-compatible)
-  4. references/ — directory of parsed reference papers (optional)
+  4. references/ — directory of parsed reference papers
 """
 
 from __future__ import annotations
@@ -31,13 +31,14 @@ def run(
     resources: dict | None = None,
     attempt: int = 1,
     max_attempts: int = 5,
+    self_review_feedback: str = "",
 ) -> tuple[dict | None, object]:
     """Let the agent generate a research idea.
 
     Returns:
         Tuple of (parsed idea dict or None, AgentResult).
     """
-    task = _build_task(seed_topic, history, resources, attempt, max_attempts)
+    task = _build_task(seed_topic, history, resources, attempt, max_attempts, self_review_feedback)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -50,7 +51,7 @@ def run(
     return _parse_output(workspace), agent_result
 
 
-def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None, attempt: int = 1, max_attempts: int = 5) -> str:
+def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | None = None, attempt: int = 1, max_attempts: int = 5, self_review_feedback: str = "") -> str:
     res = resources or {}
     platform = res.get("platform", "gpu")
     gpus = res.get("gpus", 0 if platform == "cpu" else 1)
@@ -100,7 +101,7 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         f"{resource_block}\n"
         "Your job is to produce a thorough research proposal AND a detailed\n"
         "experiment plan. Search the web extensively for related work.\n\n"
-        "You MUST produce these THREE outputs:\n\n"
+        "You MUST produce these FOUR outputs:\n\n"
         "1. proposal.md — A research proposal with these sections:\n"
         "   - Introduction (context, problem, key insight, hypothesis)\n"
         "   - Proposed Approach (overview, method details, key innovations)\n"
@@ -110,15 +111,22 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         "   - References\n\n"
         "2. plan.json — A JSON array of experiment steps:\n"
         "   [\n"
-        '     {"category": "Environment Configuration|Baseline Experiment|Main Experiment|Analysis Experiment",\n'
+        '     {"category": "<category>",\n'
         '      "title": "short descriptive title",\n'
         '      "description": "what this step does and why",\n'
         '      "steps": {"step1": "detailed instruction", "step2": "...", ...}},\n'
         "     ...\n"
         "   ]\n"
-        "   The plan should cover: environment setup, baselines, main experiments,\n"
-        "   ablations, and evaluation. Each step must be detailed enough to follow\n"
-        "   without ambiguity.\n\n"
+        "   Suggested categories (add your own as needed):\n"
+        "     - Environment Configuration (dependencies, setup)\n"
+        "     - Data Preparation (download, preprocess, splits, statistics)\n"
+        "     - Baseline Experiment (existing methods to compare against)\n"
+        "     - Main Experiment (your proposed method)\n"
+        "     - Analysis Experiment (ablations, robustness, sensitivity)\n"
+        "     - Effectiveness Evaluation (success criteria, statistical tests)\n"
+        "     - Visualization (figures, tables, plots for the paper)\n"
+        "   The plan should be comprehensive enough to produce a publishable paper.\n"
+        "   Each step must be detailed enough to follow without ambiguity.\n\n"
         "3. idea.json — Structured summary with at least these fields:\n"
         "   - description: short description (1-3 sentences)\n"
         "   - title: paper title\n"
@@ -127,10 +135,22 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         "   - related_work: key papers and differentiation\n"
         "   - hypothesis: testable hypothesis\n"
         "   - success_criteria: what would confirm/refute the hypothesis\n\n"
-        "Optionally, create a references/ directory with parsed reference papers.\n\n"
-        "Your proposal and plan will be self-reviewed before experiments begin.\n"
-        "A weak proposal or incomplete plan will be sent back for revision."
+        "4. references/ — A directory of key reference papers. For each paper,\n"
+        "   create a subdirectory with the paper's content parsed into sections.\n"
+        "   This helps ground your proposal in real literature and ensures\n"
+        "   references are verifiable.\n\n"
+        "Aim for a proposal strong enough to be accepted at a top venue.\n"
+        "The quality of your idea and plan directly determines experiment success."
     )
+
+    if self_review_feedback:
+        task += (
+            "\n\n--- SELF-REVIEW FEEDBACK (address these issues) ---\n"
+            f"{self_review_feedback}\n"
+            "--- END FEEDBACK ---\n"
+            "Your previous proposal was reviewed and found lacking. Address the\n"
+            "specific issues above in your revised proposal and plan.\n"
+        )
 
     if history:
         task += "\n\n--- PREVIOUS ATTEMPTS (learn from these) ---\n"

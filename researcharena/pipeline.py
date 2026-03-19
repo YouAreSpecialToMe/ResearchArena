@@ -301,6 +301,7 @@ class Pipeline:
             resources=self.per_agent_resources,
             attempt=self.state.idea_attempts,
             max_attempts=self.state.max_ideas_per_seed,
+            self_review_feedback=self.state.self_review_idea_feedback,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
@@ -625,6 +626,7 @@ class Pipeline:
             max_revisions=self.state.max_paper_revisions,
             idea_attempt=self.state.idea_attempts,
             max_ideas=self.state.max_ideas_per_seed,
+            self_review_feedback=self.state.self_review_paper_feedback,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
@@ -754,6 +756,15 @@ class Pipeline:
                 tokens=tokens, log_files=log_files,
             )
             self.state.stage = Stage.PAPER
+        elif score < 4:
+            # Score < 4: experiments are fundamentally broken, abandon idea
+            console.print(f"  [red]Score {score} < 4. Experiments too weak. Abandoning idea.[/]")
+            self.tracker.end_action(
+                outcome="abandoned",
+                details=f"score={score}, abandoned (too weak)",
+                tokens=tokens, log_files=log_files,
+            )
+            self._abandon_idea("self_review_experiment", f"Self-review score {score}: {feedback}")
         else:
             self.state.self_review_experiment_attempts += 1
             self.state.self_review_experiment_feedback = feedback

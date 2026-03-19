@@ -26,6 +26,7 @@ def run(
     max_revisions: int = 2,
     idea_attempt: int = 1,
     max_ideas: int = 5,
+    self_review_feedback: str = "",
 ) -> tuple[bool, object]:
     """Let the agent write a paper.
 
@@ -34,7 +35,7 @@ def run(
     Returns:
         Tuple of (True if paper.tex was produced, AgentResult).
     """
-    task = _build_task(venue, revision_feedback, revision_attempt, max_revisions, idea_attempt, max_ideas)
+    task = _build_task(venue, revision_feedback, revision_attempt, max_revisions, idea_attempt, max_ideas, self_review_feedback)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -60,6 +61,7 @@ def _build_task(
     max_revisions: int = 2,
     idea_attempt: int = 1,
     max_ideas: int = 5,
+    self_review_feedback: str = "",
 ) -> str:
     revisions_left = max_revisions - revision_attempt
     ideas_left = max_ideas - idea_attempt
@@ -83,9 +85,12 @@ def _build_task(
         "Read paper_writing_guidelines.md for detailed instructions on "
         "paper structure, formatting, tables, figures, and references.\n\n"
         "The workspace contains:\n"
-        "  - idea.json — your research idea (from Stage 1)\n"
+        "  - proposal.md — your research proposal (from Stage 1)\n"
+        "  - plan.json — your experiment plan (from Stage 1)\n"
+        "  - idea.json — your research idea summary (from Stage 1)\n"
         "  - results.json — your experiment results (from Stage 2)\n"
-        "  - figures/ — generated figures (if any)\n\n"
+        "  - figures/ — generated figures (if any)\n"
+        "  - references/ — parsed reference papers (if any)\n\n"
         "CRITICAL: EVERY reference you cite MUST be a real, verifiable publication. "
         "Search Semantic Scholar (semanticscholar.org) to find real papers. "
         "Fake references undermine scientific integrity.\n\n"
@@ -99,6 +104,13 @@ def _build_task(
             "\n\n--- REVIEWER FEEDBACK (address these in your revision) ---\n"
             f"{revision_feedback}\n"
             "--- Revise the paper to address ALL reviewer concerns. ---\n"
+        )
+
+    if self_review_feedback:
+        task += (
+            "\n\n--- SELF-REVIEW FEEDBACK (address these issues) ---\n"
+            f"{self_review_feedback}\n"
+            "--- END FEEDBACK ---\n"
         )
 
     return task
