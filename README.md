@@ -65,36 +65,33 @@ Seed field ───────→ │  IDEATION ──→ SELF-REVIEW ──�
 
 | Stage | Agent reads | Agent produces | Guideline |
 |---|---|---|---|
-| 1. IDEATION | seed field + resources + retry budget | `proposal.md` + `plan.json` + `idea.json` | `idea_guidelines.md` |
-| 1b. SELF-REVIEW (idea) | proposal + plan + idea | score + feedback | `self_review_idea.md` |
-| 2. EXPERIMENTS | `plan.json` + `idea.json` + resources | `results.json` + `figures/` (or `abandon.json` / `refine_idea.json`) | `experiment_guidelines.md` |
-| 2b. SELF-REVIEW (experiment) | results + code + logs vs plan | score + feedback | `self_review_experiment.md` |
+| 1. IDEATION | seed field + resources + feedback (if revising) | `proposal.md` + `plan.json` + `idea.json` + `references/` | `idea_guidelines.md` |
+| 1b. REVIEW (idea) | proposal + plan + idea + references | score + feedback | `reviewer_guidelines.md` |
+| 2. EXPERIMENTS | `plan.json` + `idea.json` + resources | `results.json` + `exp/` + `figures/` | `experiment_guidelines.md` |
+| 2b. REVIEW (experiment) | results + code + logs vs plan | score + feedback | `reviewer_guidelines.md` |
 | 3. PAPER | proposal + plan + results + revision budget | `paper.tex` | `paper_writing_guidelines.md` |
-| 3b. SELF-REVIEW (paper) | paper + results + code | score + feedback | `self_review_paper.md` |
+| 3b. REVIEW (paper) | paper + results + code | score + feedback | `reviewer_guidelines.md` |
 | 4. PEER REVIEW | paper + workspace (read-only) | review scores | `reviewer_guidelines.md` |
-| 4b. REFINE IDEA | original idea + reviewer feedback + results | updated `proposal.md` + `plan.json` + `idea.json` | `idea_guidelines.md` |
 
-### Self-review gates
+### Review gates
 
-Three quality checkpoints between stages, using the researcher agent as its own reviewer:
+Three quality checkpoints between stages, using the researcher agent as a reviewer (with the same `reviewer_guidelines.md` used by peer reviewers):
 
-| Gate | Checks | Pass threshold |
+| Gate | Focus dimensions | Pass threshold |
 |---|---|---|
 | After ideation | Novelty, soundness, significance, plan quality, references | score >= 6 |
 | After experiments | Plan compliance, rigor, integrity, reproducibility | score >= 6 |
-| After paper | All 9 dimensions (pre-submission check) | score >= 6 |
+| After paper | All 9 dimensions (full review) | score >= 6 |
 
-Each gate retries up to 2 times before proceeding anyway. Self-review can be disabled per-gate or entirely via config.
+Each gate retries up to 2 times before proceeding anyway. Gates can be disabled per-stage or entirely via config.
 
-### Mid-experiment options
+### Experiment self-review: abandon on low score
 
-During experiments, the agent can:
-
-| Signal | File | What happens |
-|---|---|---|
-| **Continue** | `results.json` | Normal flow → self-review → paper |
-| **Refine** | `refine_idea.json` | Goes to REFINE_IDEA stage for proper re-ideation (up to 3x per idea) |
-| **Abandon** | `abandon.json` | Drops idea entirely, new ideation |
+| Score | Action |
+|---|---|
+| >= 6 | Proceed to paper writing |
+| 4-5 | Back to experiments with feedback (up to 2 retries) |
+| < 4 | Abandon idea, start fresh ideation |
 
 ### Runtime modes
 
@@ -282,7 +279,6 @@ agent:
 experiment:
   max_gpu_hours: 8
   max_experiment_retries_per_idea: 3
-  max_refine_per_idea: 3      # mid-experiment idea refinements
 
 paper:
   template: "neurips"
@@ -349,13 +345,14 @@ Acceptance threshold: **8**. Score 5-7 triggers a revision loop. Score < 5 is re
 
 | Outcome | Action |
 |---|---|
-| Self-review fails (score < 6) | Revise and retry (up to 2 retries per gate) |
-| Self-review budget exhausted | Proceed to next stage anyway |
-| Experiments fail (code crashes) | Retry with error context (up to 3 attempts) |
-| Agent writes `refine_idea.json` | Full re-ideation with experiment context (up to 3x) |
-| Agent writes `abandon.json` | Abandon idea, try new one |
-| Paper score 5-7 (marginal) | Refine idea → re-experiment → rewrite → re-review (up to 2 revisions) |
-| Paper score < 5 (rejected) | Abandon idea, try new one |
+| Review gate fails (score < 6) | Revise and retry (up to 2 retries per gate) |
+| Review gate budget exhausted | Proceed to next stage anyway |
+| Experiment review score < 4 | Abandon idea, start fresh |
+| Experiments fail (no results.json) | Retry with error context (up to 3 attempts) |
+| Experiment retries exhausted | Abandon idea, try new one |
+| Peer review score >= 8 | Accept |
+| Peer review score 5-7 (marginal) | Back to ideation with feedback → re-experiment → rewrite (up to 2 revisions) |
+| Peer review score < 5 (rejected) | Abandon idea, try new one |
 | Revisions exhausted | Abandon idea, try new one |
 
 The agent sees its retry budget at every stage. Best paper across all attempts is tracked.

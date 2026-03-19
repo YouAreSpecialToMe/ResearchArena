@@ -755,7 +755,7 @@ class Pipeline:
                 console.print(
                     f"  [yellow]→ Score {result.avg_score:.1f} (marginal). "
                     f"Revision {self.state.paper_revision_attempts}/"
-                    f"{self.state.max_paper_revisions}: refine idea → experiments → paper[/]"
+                    f"{self.state.max_paper_revisions}: ideation → experiments → paper → review[/]"
                 )
                 self.state.stage = Stage.IDEATION
             else:
