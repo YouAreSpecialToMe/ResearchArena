@@ -3,9 +3,11 @@
 The agent gets a workspace and a seed field (e.g., "cv", "nlp"). It decides
 on its own how to explore — searching papers, brainstorming, etc.
 
-At this stage, we only ask for initial thoughts: what's the idea, why it
-matters, and a rough approach. Concrete details like datasets, metrics,
-and baselines come later in the experiment stage.
+The agent produces three structured outputs:
+  1. proposal.md — a research proposal with motivation, approach, related work
+  2. plan.json — a detailed experiment plan with step-by-step instructions
+  3. idea.json — structured idea summary (backward-compatible)
+  4. references/ — directory of parsed reference papers (optional)
 """
 
 from __future__ import annotations
@@ -96,16 +98,38 @@ def _build_task(seed_topic: str, history: list[dict] | None, resources: dict | N
         "Come up with a novel, concrete, and feasible research idea that could "
         "result in a publishable conference paper.\n\n"
         f"{resource_block}\n"
-        "Focus on the core idea, not implementation details. You'll design "
-        "experiments and write the paper in later stages.\n\n"
-        "When done, save your idea to idea.json in the current directory with at least "
-        "these fields:\n"
-        "  - description: a short description of the idea (1-3 sentences)\n"
-        "  - motivation: why this problem matters and what gap you're addressing\n"
-        "  - proposed_approach: your high-level approach and why it should work\n"
-        "  - related_work: key existing papers and how your idea differs from them\n\n"
-        "You may include any other fields you find useful (e.g., hypothesis, "
-        "novelty_claim)."
+        "Your job is to produce a thorough research proposal AND a detailed\n"
+        "experiment plan. Search the web extensively for related work.\n\n"
+        "You MUST produce these THREE outputs:\n\n"
+        "1. proposal.md — A research proposal with these sections:\n"
+        "   - Introduction (context, problem, key insight, hypothesis)\n"
+        "   - Proposed Approach (overview, method details, key innovations)\n"
+        "   - Related Work (key papers, how your idea differs)\n"
+        "   - Experiments (planned setup, benchmarks, metrics, expected results)\n"
+        "   - Success Criteria (what would confirm/refute your hypothesis)\n"
+        "   - References\n\n"
+        "2. plan.json — A JSON array of experiment steps:\n"
+        "   [\n"
+        '     {"category": "Environment Configuration|Baseline Experiment|Main Experiment|Analysis Experiment",\n'
+        '      "title": "short descriptive title",\n'
+        '      "description": "what this step does and why",\n'
+        '      "steps": {"step1": "detailed instruction", "step2": "...", ...}},\n'
+        "     ...\n"
+        "   ]\n"
+        "   The plan should cover: environment setup, baselines, main experiments,\n"
+        "   ablations, and evaluation. Each step must be detailed enough to follow\n"
+        "   without ambiguity.\n\n"
+        "3. idea.json — Structured summary with at least these fields:\n"
+        "   - description: short description (1-3 sentences)\n"
+        "   - title: paper title\n"
+        "   - motivation: why this problem matters\n"
+        "   - proposed_approach: high-level approach\n"
+        "   - related_work: key papers and differentiation\n"
+        "   - hypothesis: testable hypothesis\n"
+        "   - success_criteria: what would confirm/refute the hypothesis\n\n"
+        "Optionally, create a references/ directory with parsed reference papers.\n\n"
+        "Your proposal and plan will be self-reviewed before experiments begin.\n"
+        "A weak proposal or incomplete plan will be sent back for revision."
     )
 
     if history:
@@ -200,9 +224,10 @@ def _build_refinement_task(
         "   - Add new components or modify existing ones\n"
         "   - Plan additional experiments (ablations, baselines, datasets)\n"
         "   - Pivot the framing or motivation\n"
-        "3. Update idea.json with your refined idea\n"
-        "   Keep the same fields but update the content. Add a 'revision_notes'\n"
-        "   field explaining what changed and why.\n\n"
+        "3. Update ALL structured outputs:\n"
+        "   - idea.json: update fields, add 'revision_notes' explaining changes\n"
+        "   - proposal.md: revise the relevant sections\n"
+        "   - plan.json: update the experiment plan if the approach changed\n\n"
         f"After this, you will re-run experiments (~{hours}h budget) and rewrite the paper.\n"
         "Focus on addressing the specific reviewer concerns."
     )
@@ -293,9 +318,10 @@ def _build_experiment_refinement_task(
         "   - Pivot to a more promising direction discovered during experiments\n"
         "   - Add or remove components that proved useful/useless\n"
         "   - Adjust the hypothesis or claims\n"
-        "4. Update idea.json with your refined idea\n"
-        "   Keep the same fields but update the content. Add a 'refinement_notes'\n"
-        "   field explaining what changed and why.\n\n"
+        "4. Update ALL structured outputs:\n"
+        "   - idea.json: update fields, add 'refinement_notes' explaining changes\n"
+        "   - proposal.md: revise the relevant sections\n"
+        "   - plan.json: update the experiment plan if the approach changed\n\n"
         f"After this, you will re-run experiments (~{hours}h budget).\n"
         "Make sure your refined idea is feasible and addresses the issues found."
     )
@@ -304,20 +330,44 @@ def _build_experiment_refinement_task(
 
 
 def _parse_output(workspace: Path) -> dict | None:
+    from rich.console import Console
+    console = Console()
+
     idea_path = workspace / "idea.json"
+    proposal_path = workspace / "proposal.md"
+    plan_path = workspace / "plan.json"
+
+    # Check for idea.json (required)
     if not idea_path.exists():
+        console.print("  [red]idea.json not found.[/]")
         return None
 
     try:
         idea = json.loads(idea_path.read_text())
     except json.JSONDecodeError:
+        console.print("  [red]idea.json is not valid JSON.[/]")
         return None
 
     # Check required fields
     missing = [f for f in REQUIRED_FIELDS if f not in idea]
     if missing:
-        from rich.console import Console
-        Console().print(f"  [yellow]idea.json missing fields: {missing}[/]")
+        console.print(f"  [yellow]idea.json missing fields: {missing}[/]")
         return None
+
+    # Check for structured outputs (warn if missing but don't fail)
+    if not proposal_path.exists():
+        console.print("  [yellow]proposal.md not found — self-review may score lower.[/]")
+    else:
+        idea["_has_proposal"] = True
+
+    if not plan_path.exists():
+        console.print("  [yellow]plan.json not found — experiments will be unstructured.[/]")
+    else:
+        try:
+            plan = json.loads(plan_path.read_text())
+            idea["_has_plan"] = True
+            idea["_plan_steps"] = len(plan) if isinstance(plan, list) else 0
+        except json.JSONDecodeError:
+            console.print("  [yellow]plan.json is not valid JSON.[/]")
 
     return idea

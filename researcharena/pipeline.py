@@ -34,6 +34,7 @@ from researcharena.stages import (
     ideation,
     paper_writing,
     review,
+    self_review,
 )
 from researcharena.utils.tracker import RunTracker, TokenUsage
 
@@ -42,9 +43,12 @@ console = Console()
 
 class Stage(Enum):
     IDEATION = "ideation"
+    SELF_REVIEW_IDEA = "self_review_idea"
     REFINE_IDEA = "refine_idea"
     EXPERIMENTS = "experiments"
+    SELF_REVIEW_EXPERIMENT = "self_review_experiment"
     PAPER = "paper"
+    SELF_REVIEW_PAPER = "self_review_paper"
     REVIEW = "review"
     ACCEPTED = "accepted"
     FAILED = "failed"
@@ -87,6 +91,14 @@ class PipelineState:
     # Context for mid-experiment refinement
     experiment_refine_reason: str = ""
 
+    # Self-review tracking
+    self_review_idea_attempts: int = 0
+    self_review_experiment_attempts: int = 0
+    self_review_paper_attempts: int = 0
+    self_review_idea_feedback: str = ""
+    self_review_experiment_feedback: str = ""
+    self_review_paper_feedback: str = ""
+
     # Per-seed counter
     idea_attempts: int = 0
 
@@ -94,8 +106,9 @@ class PipelineState:
     max_experiment_retries: int = 3
     max_paper_revisions: int = 2
     max_refine_per_idea: int = 3
+    max_self_review_retries: int = 2
     max_ideas_per_seed: int = 5
-    max_global_steps: int = 30
+    max_global_steps: int = 50
 
 
 class Pipeline:
@@ -158,10 +171,20 @@ class Pipeline:
 
         self.tracker = RunTracker()
 
+        # Self-review config
+        sr_config = config.get("self_review", {})
+        self.self_review_enabled = sr_config.get("enabled", True)
+        self.self_review_threshold = sr_config.get("threshold", 6)
+        self.self_review_timeout = sr_config.get("timeout", 900)
+        self.self_review_gates = sr_config.get("gates", {
+            "idea": True, "experiment": True, "paper": True,
+        })
+
         self.state = PipelineState(
             max_experiment_retries=config["experiment"].get("max_experiment_retries_per_idea", 3),
             max_paper_revisions=config["paper"].get("max_revisions", 2),
             max_refine_per_idea=config["experiment"].get("max_refine_per_idea", 3),
+            max_self_review_retries=sr_config.get("max_retries_per_gate", 2),
             max_ideas_per_seed=config["pipeline"]["max_ideas_per_seed"],
             max_global_steps=config["pipeline"]["max_global_steps"],
         )
@@ -224,12 +247,18 @@ class Pipeline:
 
             if stage == Stage.IDEATION:
                 self._run_ideation(seed_topic)
+            elif stage == Stage.SELF_REVIEW_IDEA:
+                self._run_self_review_idea()
             elif stage == Stage.REFINE_IDEA:
                 self._run_refine_idea()
             elif stage == Stage.EXPERIMENTS:
                 self._run_experiments()
+            elif stage == Stage.SELF_REVIEW_EXPERIMENT:
+                self._run_self_review_experiment()
             elif stage == Stage.PAPER:
                 self._run_paper()
+            elif stage == Stage.SELF_REVIEW_PAPER:
+                self._run_self_review_paper()
             elif stage == Stage.REVIEW:
                 self._run_review(accept_threshold)
 
@@ -312,8 +341,18 @@ class Pipeline:
         self.state.experiment_attempts = 0
         self.state.paper_revision_attempts = 0
         self.state.refine_attempts = 0
+        self.state.self_review_idea_attempts = 0
+        self.state.self_review_experiment_attempts = 0
+        self.state.self_review_paper_attempts = 0
+        self.state.self_review_idea_feedback = ""
+        self.state.self_review_experiment_feedback = ""
+        self.state.self_review_paper_feedback = ""
 
-        self.state.stage = Stage.EXPERIMENTS
+        # Route to self-review if enabled, otherwise straight to experiments
+        if self.self_review_enabled and self.self_review_gates.get("idea", True):
+            self.state.stage = Stage.SELF_REVIEW_IDEA
+        else:
+            self.state.stage = Stage.EXPERIMENTS
 
     def _run_refine_idea(self):
         """Refine the current idea, then re-run experiments.
@@ -440,6 +479,7 @@ class Pipeline:
             max_ideas=self.state.max_ideas_per_seed,
             refine_attempt=self.state.refine_attempts,
             max_refine=self.state.max_refine_per_idea,
+            self_review_feedback=self.state.self_review_experiment_feedback,
         )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
@@ -553,7 +593,10 @@ class Pipeline:
             log_files=log_files,
         )
         self.state.results = results
-        self.state.stage = Stage.PAPER
+        if self.self_review_enabled and self.self_review_gates.get("experiment", True):
+            self.state.stage = Stage.SELF_REVIEW_EXPERIMENT
+        else:
+            self.state.stage = Stage.PAPER
 
     def _run_paper(self):
         console.print("  Writing paper...")
@@ -614,7 +657,188 @@ class Pipeline:
             tokens=tokens,
             log_files=log_files,
         )
-        self.state.stage = Stage.REVIEW
+        if self.self_review_enabled and self.self_review_gates.get("paper", True):
+            self.state.stage = Stage.SELF_REVIEW_PAPER
+        else:
+            self.state.stage = Stage.REVIEW
+
+    # ── Self-review gates ──────────────────────────────────────────────
+
+    def _run_self_review_idea(self):
+        """Self-review the idea/proposal before committing to experiments."""
+        console.print("  Self-reviewing idea and experiment plan...")
+
+        self.tracker.begin_action(
+            stage="self_review_idea",
+            action="self_review",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.self_review_idea_attempts + 1,
+        )
+
+        score, feedback, agent_result = self_review.run_self_review(
+            agent_type=self.agent_type,
+            workspace=self.state.workspace,
+            stage="idea",
+            agent_config=self.agent_config,
+            timeout=self.self_review_timeout,
+            domain=self.domain,
+        )
+
+        tokens, log_files, _ = self._extract_tracking(agent_result)
+        console.print(f"  Self-review score: {score}/10")
+
+        if score >= self.self_review_threshold:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}).[/]")
+            self.tracker.end_action(
+                outcome="success",
+                details=f"score={score}, passed",
+                tokens=tokens, log_files=log_files,
+            )
+            self.state.stage = Stage.EXPERIMENTS
+        else:
+            self.state.self_review_idea_attempts += 1
+            self.state.self_review_idea_feedback = feedback
+            if self.state.self_review_idea_attempts > self.state.max_self_review_retries:
+                console.print(
+                    f"  [yellow]Self-review budget exhausted. Proceeding to experiments.[/]"
+                )
+                self.tracker.end_action(
+                    outcome="skipped",
+                    details=f"score={score}, budget exhausted, proceeding",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.EXPERIMENTS
+            else:
+                console.print(
+                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"Sending back for revision "
+                    f"({self.state.self_review_idea_attempts}/{self.state.max_self_review_retries}).[/]"
+                )
+                self.tracker.end_action(
+                    outcome="revision",
+                    details=f"score={score}, sent back",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.IDEATION
+
+    def _run_self_review_experiment(self):
+        """Self-review experiment results before writing the paper."""
+        console.print("  Self-reviewing experiment results...")
+
+        self.tracker.begin_action(
+            stage="self_review_experiment",
+            action="self_review",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.self_review_experiment_attempts + 1,
+        )
+
+        score, feedback, agent_result = self_review.run_self_review(
+            agent_type=self.agent_type,
+            workspace=self.state.workspace,
+            stage="experiment",
+            agent_config=self.agent_config,
+            timeout=self.self_review_timeout,
+            domain=self.domain,
+        )
+
+        tokens, log_files, _ = self._extract_tracking(agent_result)
+        console.print(f"  Self-review score: {score}/10")
+
+        if score >= self.self_review_threshold:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}).[/]")
+            self.tracker.end_action(
+                outcome="success",
+                details=f"score={score}, passed",
+                tokens=tokens, log_files=log_files,
+            )
+            self.state.stage = Stage.PAPER
+        else:
+            self.state.self_review_experiment_attempts += 1
+            self.state.self_review_experiment_feedback = feedback
+            if self.state.self_review_experiment_attempts > self.state.max_self_review_retries:
+                console.print(
+                    f"  [yellow]Self-review budget exhausted. Proceeding to paper.[/]"
+                )
+                self.tracker.end_action(
+                    outcome="skipped",
+                    details=f"score={score}, budget exhausted, proceeding",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.PAPER
+            else:
+                console.print(
+                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"Sending back for experiment revision "
+                    f"({self.state.self_review_experiment_attempts}/{self.state.max_self_review_retries}).[/]"
+                )
+                self.tracker.end_action(
+                    outcome="revision",
+                    details=f"score={score}, sent back",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.EXPERIMENTS
+
+    def _run_self_review_paper(self):
+        """Self-review the paper before sending to peer review."""
+        console.print("  Self-reviewing paper (pre-submission check)...")
+
+        self.tracker.begin_action(
+            stage="self_review_paper",
+            action="self_review",
+            agent_type=self.agent_type,
+            model=self.agent_config.get("model"),
+            attempt=self.state.self_review_paper_attempts + 1,
+        )
+
+        score, feedback, agent_result = self_review.run_self_review(
+            agent_type=self.agent_type,
+            workspace=self.state.workspace,
+            stage="paper",
+            agent_config=self.agent_config,
+            timeout=self.self_review_timeout,
+            domain=self.domain,
+        )
+
+        tokens, log_files, _ = self._extract_tracking(agent_result)
+        console.print(f"  Self-review score: {score}/10")
+
+        if score >= self.self_review_threshold:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}). Sending to peer review.[/]")
+            self.tracker.end_action(
+                outcome="success",
+                details=f"score={score}, passed",
+                tokens=tokens, log_files=log_files,
+            )
+            self.state.stage = Stage.REVIEW
+        else:
+            self.state.self_review_paper_attempts += 1
+            self.state.self_review_paper_feedback = feedback
+            if self.state.self_review_paper_attempts > self.state.max_self_review_retries:
+                console.print(
+                    f"  [yellow]Self-review budget exhausted. Sending to peer review anyway.[/]"
+                )
+                self.tracker.end_action(
+                    outcome="skipped",
+                    details=f"score={score}, budget exhausted, proceeding",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.REVIEW
+            else:
+                console.print(
+                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"Sending back for paper revision "
+                    f"({self.state.self_review_paper_attempts}/{self.state.max_self_review_retries}).[/]"
+                )
+                self.tracker.end_action(
+                    outcome="revision",
+                    details=f"score={score}, sent back",
+                    tokens=tokens, log_files=log_files,
+                )
+                self.state.stage = Stage.PAPER
+
+    # ── Peer review ──────────────────────────────────────────────────
 
     def _run_review(self, accept_threshold: float):
         console.print("  Collecting reviews...")

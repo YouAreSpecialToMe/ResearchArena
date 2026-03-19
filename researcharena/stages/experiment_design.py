@@ -29,6 +29,7 @@ def run(
     max_ideas: int = 5,
     refine_attempt: int = 0,
     max_refine: int = 3,
+    self_review_feedback: str = "",
 ) -> tuple[dict | None, object]:
     """Let the agent implement and run experiments.
 
@@ -37,7 +38,7 @@ def run(
     Returns:
         Tuple of (parsed results dict or None, AgentResult).
     """
-    task = _build_task(workspace, prior_errors, resources, attempt, max_attempts, idea_attempt, max_ideas, refine_attempt, max_refine)
+    task = _build_task(workspace, prior_errors, resources, attempt, max_attempts, idea_attempt, max_ideas, refine_attempt, max_refine, self_review_feedback)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -60,6 +61,7 @@ def _build_task(
     max_ideas: int = 5,
     refine_attempt: int = 0,
     max_refine: int = 3,
+    self_review_feedback: str = "",
 ) -> str:
     res = resources or {}
     platform = res.get("platform", "gpu")
@@ -113,22 +115,29 @@ def _build_task(
         f" ({ideas_left} new ideas left if this one is abandoned)."
         f" Refinements: {refine_attempt}/{max_refine}"
         f" ({refines_left} refinements left).\n\n"
-        "Read idea.json (your research idea from Stage 1) and "
-        "experiment_guidelines.md for detailed instructions on designing "
-        "and running rigorous experiments.\n\n"
+        "Read these files from Stage 1:\n"
+        "  - idea.json: your research idea summary\n"
+        "  - proposal.md: full research proposal (if available)\n"
+        "  - plan.json: your detailed experiment plan (if available)\n"
+        "  - experiment_guidelines.md: general experiment guidelines\n\n"
         f"{resource_block}\n"
-        "Your job is to conduct the full experimental workflow for the research "
-        "idea described in idea.json:\n\n"
+        "If plan.json exists, FOLLOW IT step by step — it contains your\n"
+        "pre-designed experiment plan with detailed instructions for each step.\n"
+        "Execute every step in order. If a step is infeasible, document why\n"
+        "and adjust accordingly.\n\n"
+        "If plan.json does not exist, design experiments from scratch based\n"
+        "on idea.json and experiment_guidelines.md.\n\n"
+        "Whether following a plan or designing from scratch, ensure:\n\n"
         "1. EXPERIMENT DESIGN\n"
-        "   - Choose appropriate datasets (use standard benchmarks when possible)\n"
+        "   - Use standard benchmarks when possible\n"
         "   - Define evaluation metrics relevant to your claims\n"
-        "   - Select at least 2 meaningful baselines for comparison\n"
-        "   - Plan ablation studies to show each component's contribution\n\n"
+        "   - Include at least 2 meaningful baselines\n"
+        "   - Plan ablation studies\n\n"
         f"{impl_block}"
         "3. EXECUTION\n"
         "   - Run your method AND all baselines on the same data splits\n"
         "   - Run with at least 3 different random seeds for error bars\n"
-        "   - Run ablation experiments (remove components one at a time)\n"
+        "   - Run ablation experiments\n"
         "   - If something crashes, debug and fix it — iterate until it works\n\n"
         "4. RESULTS\n"
         "   - Save all results to results.json with this structure:\n"
@@ -164,6 +173,13 @@ def _build_task(
         "  - Approach is fundamentally intractable with available compute\n\n"
         "Use your judgment — marginal or mixed results are still worth writing up."
     )
+
+    if self_review_feedback:
+        task += (
+            "\n\n--- SELF-REVIEW FEEDBACK (address these issues) ---\n"
+            f"{self_review_feedback}\n"
+            "--- END FEEDBACK ---\n"
+        )
 
     if prior_errors:
         task += "\n\n--- PREVIOUS ATTEMPTS FAILED ---\n"
