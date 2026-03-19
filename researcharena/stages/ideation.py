@@ -9,8 +9,9 @@ The agent produces four structured outputs:
   3. idea.json — structured idea summary (backward-compatible)
   4. references/ — directory of parsed reference papers
 
-This module handles both fresh ideation and post-review refinement via
-the same run() function — the prompt adapts based on context provided.
+This module handles both fresh ideation and refinement via the same run()
+function — the prompt adapts based on context provided (feedback, previous
+results, etc.).
 """
 
 from __future__ import annotations
@@ -34,9 +35,8 @@ def run(
     resources: dict | None = None,
     attempt: int = 1,
     max_attempts: int = 5,
-    # Optional context — changes the prompt based on what's provided
-    self_review_feedback: str = "",
-    reviewer_feedback: str = "",
+    # Optional context — enriches the prompt when provided
+    feedback: str = "",
     previous_results: dict | None = None,
     original_idea: dict | None = None,
     revision_attempt: int = 0,
@@ -44,9 +44,9 @@ def run(
 ) -> tuple[dict | None, object]:
     """Generate or refine a research idea.
 
-    When called without reviewer_feedback/original_idea, generates a fresh idea.
-    When called with reviewer_feedback, refines the existing idea based on
-    peer review feedback.
+    When called without feedback, generates a fresh idea.
+    When called with feedback (from self-review or peer review),
+    refines the existing idea based on that feedback.
 
     Returns:
         Tuple of (parsed idea dict or None, AgentResult).
@@ -57,8 +57,7 @@ def run(
         resources=resources,
         attempt=attempt,
         max_attempts=max_attempts,
-        self_review_feedback=self_review_feedback,
-        reviewer_feedback=reviewer_feedback,
+        feedback=feedback,
         previous_results=previous_results,
         original_idea=original_idea,
         revision_attempt=revision_attempt,
@@ -82,8 +81,7 @@ def _build_task(
     resources: dict | None = None,
     attempt: int = 1,
     max_attempts: int = 5,
-    self_review_feedback: str = "",
-    reviewer_feedback: str = "",
+    feedback: str = "",
     previous_results: dict | None = None,
     original_idea: dict | None = None,
     revision_attempt: int = 0,
@@ -98,7 +96,7 @@ def _build_task(
     mem = res.get("memory_gb", 32)
     hours = res.get("time_hours", 8)
 
-    is_refinement = bool(reviewer_feedback)
+    is_refinement = bool(feedback) and bool(original_idea)
 
     # Build resource description based on platform
     if platform == "cpu" or gpus == 0:
@@ -131,13 +129,13 @@ def _build_task(
     if is_refinement:
         revisions_left = max_revisions - revision_attempt
         task = (
-            "=== STAGE 1: IDEA REFINEMENT (post-review) ===\n\n"
+            "=== STAGE 1: IDEA REFINEMENT ===\n\n"
             f"Your seed field is: {seed_topic}\n\n"
             f"BUDGET: Revision {revision_attempt}/{max_revisions}"
             f" ({revisions_left} revisions left)."
             f" Idea {attempt}/{max_attempts}.\n\n"
-            "Your paper was reviewed and needs improvement. Refine your idea\n"
-            "based on the reviewer feedback below, then update all outputs.\n\n"
+            "Your previous attempt needs improvement. Refine your idea\n"
+            "based on the feedback below, then update all outputs.\n\n"
         )
     else:
         remaining = max_attempts - attempt
@@ -165,11 +163,11 @@ def _build_task(
         "The quality of your idea and plan directly determines experiment success."
     )
 
-    # ── Reviewer feedback (post-review refinement) ──
-    if reviewer_feedback:
+    # ── Feedback (from self-review or peer review) ──
+    if feedback:
         task += (
-            "\n\n--- REVIEWER FEEDBACK (address these in your revision) ---\n"
-            f"{reviewer_feedback}\n"
+            "\n\n--- FEEDBACK (address these issues) ---\n"
+            f"{feedback}\n"
             "--- END FEEDBACK ---\n"
         )
 
@@ -186,16 +184,6 @@ def _build_task(
     if previous_results:
         task += "\n\nPREVIOUS EXPERIMENT RESULTS:\n"
         task += f"{json.dumps(previous_results, indent=2)}\n"
-
-    # ── Self-review feedback ──
-    if self_review_feedback:
-        task += (
-            "\n\n--- SELF-REVIEW FEEDBACK (address these issues) ---\n"
-            f"{self_review_feedback}\n"
-            "--- END FEEDBACK ---\n"
-            "Your previous proposal was reviewed and found lacking. Address the\n"
-            "specific issues above in your revised proposal and plan.\n"
-        )
 
     # ── History of past attempts ──
     if history:

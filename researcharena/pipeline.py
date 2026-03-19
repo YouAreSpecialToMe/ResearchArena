@@ -282,10 +282,13 @@ class Pipeline:
             attempt=self.state.idea_attempts,
         )
 
-        # Collect reviewer feedback if this is a post-review refinement
-        reviewer_feedback = ""
+        # Collect all feedback (self-review + peer review) into one string
+        feedback_parts = []
+        if self.state.self_review_idea_feedback:
+            feedback_parts.append(f"Self-review:\n{self.state.self_review_idea_feedback}")
         if self.state.review_result:
-            reviewer_feedback = self.state.review_result.aggregated_feedback
+            feedback_parts.append(f"Peer review:\n{self.state.review_result.aggregated_feedback}")
+        feedback = "\n\n".join(feedback_parts)
 
         idea, agent_result = ideation.run(
             agent_type=self.agent_type,
@@ -297,8 +300,7 @@ class Pipeline:
             resources=self.per_agent_resources,
             attempt=self.state.idea_attempts,
             max_attempts=self.state.max_ideas_per_seed,
-            self_review_feedback=self.state.self_review_idea_feedback,
-            reviewer_feedback=reviewer_feedback,
+            feedback=feedback,
             previous_results=self.state.results,
             original_idea=self.state.idea,
             revision_attempt=self.state.paper_revision_attempts,
