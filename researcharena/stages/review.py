@@ -49,6 +49,7 @@ Output your review as a JSON object to stdout. Print ONLY the JSON:
         "reproducibility": <int 1-10>,
         "experimental_rigor": <int 1-10>,
         "references": <int 1-10>,
+        "reference_integrity": <int 1-10>,
         "results_integrity": <int 1-10>
     },
     "overall_score": <int, one of: 0, 2, 4, 6, 8, 10>,
@@ -199,17 +200,8 @@ def review_paper(
     scores = [r["overall_score"] for r in all_reviews if r.get("overall_score") is not None]
     avg_score = sum(scores) / len(scores) if scores else 5.0
 
-    # If fake references were found, cap the score — reviewers are informed
-    # and should reject, but we enforce the cap as a safety net.
-    if has_fake_refs and avg_score > 4.0:
-        final_score = 4.0
-        decision = "reject"
-        console.print(
-            f"  Reviewer avg: {avg_score:.1f}, capped to 4.0 (fake references detected)"
-        )
-    else:
-        final_score = avg_score
-        decision = _score_to_decision(final_score, accept_threshold)
+    final_score = avg_score
+    decision = _score_to_decision(final_score, accept_threshold)
 
     _display_review_summary(all_reviews, final_score, decision)
 

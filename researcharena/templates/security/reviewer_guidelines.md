@@ -137,7 +137,13 @@ This is especially critical in security papers:
 - Is the paper well-positioned relative to prior art?
 - Are both attack and defense perspectives represented in related work?
 
-### 10. Results Integrity (sanity check -- but violations mean reject)
+### 10. Reference Integrity
+- Are all references real, verifiable publications?
+- **Search IEEE Xplore, ACM DL, USENIX proceedings, and Semantic Scholar** to verify that cited papers actually exist with the stated titles, authors, and venues
+- Do the cited titles, authors, and venues match the actual publications?
+- Are there any hallucinated or fabricated citations?
+
+### 11. Results Integrity (sanity check -- but violations mean reject)
 You have access to the experiment workspace (code, logs, results.json).
 You MUST verify ALL of the following:
 - Read results.json and compare EVERY number in the paper's tables against it
@@ -149,6 +155,7 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the scientific contribution. However, any of
 the following are grounds for **automatic rejection**:
+- References that don't exist (fake citations)
 - Experiment code that cannot run or doesn't produce the claimed results
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that don't match results.json

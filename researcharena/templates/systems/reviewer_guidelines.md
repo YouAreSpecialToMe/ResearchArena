@@ -109,7 +109,13 @@ Missing any of the above is a significant weakness.
 - Are key related systems cited and properly compared?
 - Is the paper well-positioned relative to prior systems in the same space?
 
-### 9. Results Integrity (sanity check -- but violations mean reject)
+### 9. Reference Integrity
+- Are all references real, verifiable publications?
+- **Search ACM Digital Library, USENIX proceedings, IEEE Xplore, or Google Scholar** to verify that cited papers actually exist with the stated titles, authors, and venues
+- Do the cited titles, authors, and venues match the actual publications?
+- Are there any hallucinated or fabricated citations?
+
+### 10. Results Integrity (sanity check -- but violations mean reject)
 You have access to the experiment workspace (code, logs, results.json).
 You MUST verify ALL of the following:
 - Read results.json and compare EVERY number in the paper's tables against it
@@ -124,6 +130,7 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the design contribution. However, any of the
 following are grounds for **automatic rejection**:
+- References that don't exist (fake citations)
 - Experiment code that cannot run or does not produce the claimed results
 - Logs that show different numbers than what the paper reports
 - Numbers in the paper that do not match results.json

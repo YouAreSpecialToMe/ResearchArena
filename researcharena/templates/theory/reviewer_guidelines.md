@@ -112,7 +112,14 @@ no value.
 - Does the paper position itself honestly relative to existing results?
 - Has the author missed relevant prior work?
 
-### 6. Results Integrity (sanity check)
+### 6. Reference Integrity
+
+- Are all references real, verifiable publications?
+- **Search DBLP and Semantic Scholar** to verify that cited papers actually exist with the stated titles, authors, and venues
+- Do the cited titles, authors, and venues match the actual publications?
+- Are there any hallucinated or fabricated citations?
+
+### 7. Results Integrity (sanity check)
 
 You have access to the experiment workspace (code, logs, results.json).
 You MUST verify ALL of the following:
@@ -129,6 +136,7 @@ You MUST verify ALL of the following:
 
 The primary evaluation is the mathematical contribution. However, any of
 the following are grounds for **automatic rejection**:
+- References that don't exist (fake citations)
 - Theorem statements in the paper contradict those in results.json
 - Experimental results in the paper do not match results.json
 - Claims of proofs that are not actually present in the paper or appendix
