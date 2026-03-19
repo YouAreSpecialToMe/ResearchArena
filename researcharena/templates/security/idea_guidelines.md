@@ -1,196 +1,201 @@
-# Idea Generation Guidelines (Computer Security)
+# Idea Generation Guidelines
 
-How to go from a seed topic to a novel, feasible security research idea.
+How to go from a seed field to a novel, feasible research idea.
 
-Distilled from practices at CCS, IEEE S&P, USENIX Security, and NDSS,
-combined with the ResearchAgent methodology and "Can LLMs Generate Novel
-Research Ideas?" (Si et al.).
+Distilled from John Schulman's "Opinionated Guide to ML Research", the
+ResearchAgent methodology, "Can LLMs Generate Novel Research Ideas?" (Si et al.),
+and standard academic research practices.
 
 ## Step 1: Explore the field
 
 Start by understanding what already exists. DO NOT skip this step.
 
 ### Search for existing work (newest to oldest)
-- Search IEEE Xplore (ieeexplore.ieee.org), ACM Digital Library (dl.acm.org),
-  USENIX proceedings (usenix.org/conferences), IACR ePrint (eprint.iacr.org),
-  and Google Scholar (scholar.google.com) for papers in your seed area
-- For vulnerability-related work, search CVE databases (cve.mitre.org, nvd.nist.gov)
-  and exploit databases (exploit-db.com) to understand the real-world landscape
+- Search arXiv (arxiv.org), Semantic Scholar (semanticscholar.org), and
+  Google Scholar (scholar.google.com) for papers in your seed field
 - **Start with the newest papers first** — sort by date, read the most
-  recent work before going to older foundational papers. Security is a
-  fast-moving field; attacks and defenses become outdated quickly.
+  recent work before going to older foundational papers. This ensures
+  you know the current frontier before proposing something new.
 - Recommended search order:
-  1. Last 6 months — what attacks/defenses are current?
-  2. Last 1-2 years — what are the state-of-the-art techniques?
+  1. Last 6 months — what's happening right now?
+  2. Last 1-2 years — what are the current state-of-the-art methods?
   3. Foundational papers — what are the classic approaches?
 - Look for:
-  - Systematization of Knowledge (SoK) papers — they survey entire subfields
-    and identify open problems (highly valued in security venues)
-  - Top-tier venue papers (CCS, S&P, USENIX Security, NDSS) — they define
-    the standard for rigorous security research
-  - Industry reports and CVE advisories — they reveal real-world impact
+  - Survey papers — they summarize the landscape and list open problems
+  - Highly-cited recent papers — they define the current state of the art
+  - Workshop papers — they often contain early-stage ideas and emerging trends
 
 ### Build a mental map
-- What are the main attack vectors in this area?
-- What defenses exist, and what are their known limitations?
-- What threat models do existing papers assume?
-- What are the standard evaluation benchmarks and datasets?
-- What are the known open problems?
-- Are there techniques from adjacent fields (ML, PL, systems, crypto)
-  that could apply here?
+- What are the main approaches in this area?
+- What are the established benchmarks and metrics?
+- What are the known limitations of current methods?
+- What problems are considered "open" or "unsolved"?
+- What recent techniques from OTHER fields could apply here?
 
 ### Find the gaps
-- Read the "Limitations" and "Discussion" sections of recent papers —
-  security papers often acknowledge attacks they cannot handle
-- Look for defenses that have not been tested against adaptive adversaries
-- Identify threat models that are too weak or too strong for real-world use
-- Look for areas where measurement studies are missing (how prevalent is X?)
-- Check if formal guarantees have been established or if results are purely empirical
+- Read the "Limitations" and "Future Work" sections of recent papers
+- Look for recurring complaints in reviews (on OpenReview, if available)
+- Identify assumptions that current methods make — can you relax them?
+- Look for problems where simple baselines still perform surprisingly well
+  (this signals the community hasn't cracked it yet)
 
 ## Step 2: Generate candidate ideas
 
-### Types of security contributions
-
-Security research spans several distinct contribution types. Choose one:
-
-| Type | Example | Key requirement |
-|---|---|---|
-| New attack | Exploiting a vulnerability in protocol X | Demonstrate practical feasibility and real impact |
-| New defense | Detecting/preventing attack class Y | Show effectiveness AND acceptable performance overhead |
-| Vulnerability analysis | Finding flaws in deployed system Z | Responsible disclosure, systematic methodology |
-| Protocol analysis | Formal/empirical analysis of protocol P | Prove security properties or find violations |
-| Privacy mechanism | New technique for data privacy | Formal privacy guarantees (e.g., differential privacy) |
-| Measurement study | Large-scale analysis of phenomenon W | Statistically rigorous, representative data |
-| Systematization of Knowledge | Survey and taxonomy of area A | Comprehensive coverage, new insights from synthesis |
-
 ### Two approaches (choose one or combine)
 
-**Goal-driven** (recommended): Start with a security problem.
-- "Defense X doesn't handle adaptive adversaries. Can we build one that does?"
-- "Protocol Y assumes a trusted third party. Can we remove that assumption?"
-- "Attack class Z is growing in the wild but no systematic study exists."
+**Goal-driven** (recommended): Start with a problem you want to solve.
+- "Current methods for X fail when Y happens. How can we fix that?"
+- "Task Z requires too much labeled data. Can we do it with less?"
 - The goal constrains your search and makes the contribution clear.
 
-**Idea-driven**: Start with a technique and find security applications.
-- "Technique A from ML/PL/crypto could detect attack class B."
-- Riskier — verify the technique actually provides security guarantees.
+**Idea-driven**: Start with a technique and find where it applies.
+- "Technique A works well for B. Could it also work for C?"
+- Riskier — you may find the idea already exists or doesn't work.
 
-### What makes a good security research idea
+### What makes a good research idea
 - **Novel**: Not already done. You MUST verify this (Step 3).
-- **Feasible**: Can be implemented, tested, and evaluated within your constraints.
-- **Clear threat model**: The attacker's capabilities, goals, and trust
-  assumptions are precisely defined.
-- **Testable**: There is a concrete evaluation plan (attack success rate,
-  defense detection rate, performance overhead, formal proof).
-- **Significant**: The attack is practical, the defense is deployable, or
-  the analysis reveals important findings about real systems.
+- **Feasible**: Can be implemented and tested within your resource constraints.
+- **Clear**: The contribution is easy to explain in one sentence.
+- **Testable**: There's a concrete way to evaluate whether it works.
+- **Significant**: If it works, the community would care.
 
-### What makes a BAD security research idea
-- No clear threat model ("we defend against all attacks")
-- Unrealistic threat model — too strong attacker (knows everything) or
-  too weak attacker (nobody would bother)
-- Attack on a system nobody uses or a protocol nobody deploys
-- Defense that has unacceptable performance overhead (10x slowdown)
-- Defense that doesn't consider adversarial evasion
-- Measurement study on non-representative data
+### What makes a BAD research idea
+- Too broad ("improve NLP") — needs a specific problem and approach
+- Too incremental ("change hyperparameter X from 0.1 to 0.01")
+- Not verifiable (no way to test if it worked)
+- Requires resources you don't have (100 GPUs, proprietary data)
 - Already exists (you didn't check the literature)
-- Requires access to systems or data you don't have
 
-### The threat model (CRITICAL for security research)
-
-Every security idea MUST define a clear threat model. Before proceeding, answer:
-
-1. **Who is the attacker?** (remote network attacker, malicious insider,
-   compromised library, nation-state, etc.)
-2. **What are the attacker's capabilities?** (can they modify network traffic?
-   execute code on the target? control training data? access side channels?)
-3. **What are the attacker's goals?** (steal data, deny service, evade detection,
-   compromise integrity, violate privacy?)
-4. **What are the trust assumptions?** (what components are trusted? what is
-   outside the attacker's reach?)
-5. **What is in scope and out of scope?** (physical attacks? social engineering?
-   denial of service?)
-
-A paper without a precise threat model will be rejected at any top venue.
-
-## Step 3: Verify novelty (CRITICAL -- do not skip)
+## Step 3: Verify novelty (CRITICAL — do not skip)
 
 Before committing to an idea, verify it hasn't been done:
 
 ### Search specifically for your idea
-- Search IEEE Xplore, ACM DL, USENIX proceedings, and IACR ePrint with
-  keywords from your proposed attack/defense/analysis
-- Search for the PROBLEM you're addressing, not just your approach
-- Check if your attack variant has already been demonstrated
-- Check if your defense mechanism is a special case of existing work
+- Search Semantic Scholar and arXiv with keywords from your proposed method
+- Search for the PROBLEM you're solving, not just your approach
+- Check if your idea is a special case of something more general that exists
 - Look at the "Related Work" sections of papers closest to your idea
 
-### Common novelty traps in security
-- Your attack exists but under a different name (security jargon varies
-  across communities: systems security, network security, crypto, PL)
-- Your defense was proposed but shown to be bypassable (check follow-up work)
-- Your idea is a straightforward application of a known technique to a
-  known problem without new insight
+### Common novelty traps
+- Your idea exists but under a different name (jargon varies across subfields)
+- Your idea was tried and didn't work (check for negative results too)
+- Your idea is a minor variation of an existing approach
 - A concurrent paper (posted in the last few months) does the same thing
-- The vulnerability you found was already reported in a CVE
 
 ### If your idea already exists
-- Can you demonstrate the attack on a newer or more realistic system?
-- Can you improve the defense to handle evasion attacks?
-- Can you provide formal guarantees where only empirical results existed?
-- Can you scale the analysis to a larger, more representative dataset?
+- DON'T give up immediately. Ask: can you improve on it? Apply it to a
+  new domain? Combine it with something else? Scale it up?
 - If it truly exists with no room for improvement, go back to Step 2
 
-## Step 4: Refine and document
+## Step 4: Produce structured outputs
 
-### Write your idea.json with:
+You must produce FOUR outputs. Each serves a different purpose:
+
+### 4.1 proposal.md — Research Proposal
+
+A thorough document with these sections:
+- **Introduction**: Context, problem statement, key insight, hypothesis
+- **Proposed Approach**: Overview, method details, key innovations
+- **Related Work**: Key papers, how your idea differs, positioning
+- **Experiments**: Planned setup, benchmarks, metrics, expected results
+- **Success Criteria**: What would confirm or refute your hypothesis
+- **References**: Full citation list (all must be real, verifiable papers)
+
+### 4.2 plan.json — Experiment Plan
+
+A JSON array of experiment steps that will be followed in the experiment stage:
+```json
+[
+  {
+    "category": "<category>",
+    "title": "short descriptive title",
+    "description": "what this step does and why",
+    "steps": {
+      "step1": "detailed instruction with specifics",
+      "step2": "...",
+      ...
+    }
+  },
+  ...
+]
+```
+
+Suggested categories (add your own as needed):
+- **Environment Configuration** — dependencies, setup
+- **Data Preparation** — download, preprocess, splits, statistics
+- **Baseline Experiment** — existing methods to compare against
+- **Main Experiment** — your proposed method
+- **Analysis Experiment** — ablations, robustness, sensitivity
+- **Effectiveness Evaluation** — success criteria, statistical tests
+- **Visualization** — figures, tables, plots for the paper
+
+The plan should be comprehensive enough to produce a publishable paper.
+Each step must be detailed enough to follow without ambiguity — include
+specific datasets, model architectures, hyperparameters, evaluation metrics,
+and expected output formats.
+
+### 4.3 idea.json — Structured Summary
+
+A JSON object with at least these fields:
 - **description**: 1-3 sentences explaining what you're proposing
-- **motivation**: why this problem matters, what gap you're filling,
-  what real-world impact this has
+- **title**: paper title
+- **motivation**: why this problem matters, what gap you're filling
 - **proposed_approach**: your high-level method and why it should work
-- **threat_model**: attacker capabilities, trust assumptions, scope
 - **related_work**: key existing papers and how your idea differs
-  (use REAL papers you found in Steps 1 and 3 -- include titles and authors)
+  (use REAL papers you found in Steps 1 and 3 — include titles and authors)
+- **hypothesis**: testable hypothesis
+- **success_criteria**: what would confirm/refute the hypothesis
+
+### 4.4 references/ — Parsed Reference Papers
+
+Create a directory with key reference papers. For each paper, create a
+subdirectory containing the paper's content parsed into sections:
+```
+references/
+├── Paper-Title-One/
+│   ├── meta/
+│   │   ├── meta_info.txt       # title, authors, venue, year, URL
+│   │   └── bibtex.txt          # BibTeX entry
+│   └── sections/
+│       ├── abstract.md
+│       ├── 1 Introduction.md
+│       ├── 2 Related Work.md
+│       └── ...
+├── Paper-Title-Two/
+│   └── ...
+```
+
+This grounds your proposal in real literature and ensures references are
+verifiable by reviewers.
 
 ### Sanity checks before moving on
-- Is the threat model clearly defined and realistic?
-- Can you explain the idea in one sentence to a security researcher?
-- Is there a clear experiment or proof that would validate the idea?
-- For attacks: is the target system relevant and widely deployed?
-- For defenses: is the performance overhead likely acceptable?
-- Do you have the resources (systems, data, tools) to evaluate it?
-- Is the expected contribution significant enough for CCS/S&P/USENIX/NDSS?
-
-### Ethical considerations
-- If your research discovers real vulnerabilities, plan for responsible
-  disclosure BEFORE starting experiments
-- Follow your institution's IRB requirements for any human-subjects research
-- Consider dual-use implications: could your attack be misused?
-- Document your ethical reasoning -- reviewers will evaluate it
+- Can you explain the idea in one sentence to a non-expert?
+- Is there a clear experiment that would test the idea?
+- Do you have the resources (data, compute, time) to do it?
+- Is the expected contribution large enough for a paper?
+- Is the experiment plan detailed enough to follow step by step?
+- Are all references real, verifiable publications?
 
 ## General principles
 
-### From John Schulman (adapted for security)
+### From John Schulman
 - Your ability to choose the right problem is more important than raw skill
-- Watch which security problems matter in the real world -- this develops taste
-- Goal-driven research (solving a real security problem) has lower scooping
-  risk than technique-driven research
-- There's no shame in working on ideas from the literature or from real incidents
+- Watch which ideas prosper and which are forgotten — this develops taste
+- Goal-driven research has lower scooping risk than idea-driven research
+- There's no shame in working on ideas suggested by others or by the literature
 
 ### From "Can LLMs Generate Novel Research Ideas?" (Si et al.)
-- AI-generated ideas tend to be novel but lack feasibility -- ground yours
-  in practical security constraints
-- Vague threat models and hand-wavy security arguments are the #1 weakness
-- Missing comparisons to existing defenses are a common failure
-- Verify your idea against existing work -- reviewers WILL find the paper
-  you missed
+- AI-generated ideas tend to be novel but lack feasibility — ground yours
+  in practical constraints
+- Vague implementation details are the #1 weakness — be specific about how
+  your method actually works
+- Missing baselines and unrealistic assumptions are common failures
+- Verify your idea against existing work — 80% of reviewer rejections
+  cite existing papers that the authors missed
 
-### Security-specific principles
-- Think adversarially: if you propose a defense, immediately ask "how would
-  I bypass this?" If you can think of an evasion, so will the reviewer.
-- Realism matters: attacks on toy systems and defenses with unrealistic
-  assumptions will be rejected
-- Impact matters: connect your work to real-world systems, protocols,
-  or deployments whenever possible
-- Rigor matters: formal proofs, systematic evaluations, and honest
-  limitations analysis are expected at top venues
+### From ResearchAgent (Baek et al.)
+- Connect ideas across papers, not just within one paper
+- Look for shared concepts across different subfields
+- Iterative refinement improves idea quality — but diminishing returns
+  after 2-3 rounds
+- Both citation relationships AND underlying concepts matter for novelty

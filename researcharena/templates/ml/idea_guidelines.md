@@ -87,20 +87,94 @@ Before committing to an idea, verify it hasn't been done:
   new domain? Combine it with something else? Scale it up?
 - If it truly exists with no room for improvement, go back to Step 2
 
-## Step 4: Refine and document
+## Step 4: Produce structured outputs
 
-### Write your idea.json with:
+You must produce FOUR outputs. Each serves a different purpose:
+
+### 4.1 proposal.md — Research Proposal
+
+A thorough document with these sections:
+- **Introduction**: Context, problem statement, key insight, hypothesis
+- **Proposed Approach**: Overview, method details, key innovations
+- **Related Work**: Key papers, how your idea differs, positioning
+- **Experiments**: Planned setup, benchmarks, metrics, expected results
+- **Success Criteria**: What would confirm or refute your hypothesis
+- **References**: Full citation list (all must be real, verifiable papers)
+
+### 4.2 plan.json — Experiment Plan
+
+A JSON array of experiment steps that will be followed in the experiment stage:
+```json
+[
+  {
+    "category": "<category>",
+    "title": "short descriptive title",
+    "description": "what this step does and why",
+    "steps": {
+      "step1": "detailed instruction with specifics",
+      "step2": "...",
+      ...
+    }
+  },
+  ...
+]
+```
+
+Suggested categories (add your own as needed):
+- **Environment Configuration** — dependencies, setup
+- **Data Preparation** — download, preprocess, splits, statistics
+- **Baseline Experiment** — existing methods to compare against
+- **Main Experiment** — your proposed method
+- **Analysis Experiment** — ablations, robustness, sensitivity
+- **Effectiveness Evaluation** — success criteria, statistical tests
+- **Visualization** — figures, tables, plots for the paper
+
+The plan should be comprehensive enough to produce a publishable paper.
+Each step must be detailed enough to follow without ambiguity — include
+specific datasets, model architectures, hyperparameters, evaluation metrics,
+and expected output formats.
+
+### 4.3 idea.json — Structured Summary
+
+A JSON object with at least these fields:
 - **description**: 1-3 sentences explaining what you're proposing
+- **title**: paper title
 - **motivation**: why this problem matters, what gap you're filling
 - **proposed_approach**: your high-level method and why it should work
 - **related_work**: key existing papers and how your idea differs
   (use REAL papers you found in Steps 1 and 3 — include titles and authors)
+- **hypothesis**: testable hypothesis
+- **success_criteria**: what would confirm/refute the hypothesis
+
+### 4.4 references/ — Parsed Reference Papers
+
+Create a directory with key reference papers. For each paper, create a
+subdirectory containing the paper's content parsed into sections:
+```
+references/
+├── Paper-Title-One/
+│   ├── meta/
+│   │   ├── meta_info.txt       # title, authors, venue, year, URL
+│   │   └── bibtex.txt          # BibTeX entry
+│   └── sections/
+│       ├── abstract.md
+│       ├── 1 Introduction.md
+│       ├── 2 Related Work.md
+│       └── ...
+├── Paper-Title-Two/
+│   └── ...
+```
+
+This grounds your proposal in real literature and ensures references are
+verifiable by reviewers.
 
 ### Sanity checks before moving on
 - Can you explain the idea in one sentence to a non-expert?
 - Is there a clear experiment that would test the idea?
 - Do you have the resources (data, compute, time) to do it?
 - Is the expected contribution large enough for a paper?
+- Is the experiment plan detailed enough to follow step by step?
+- Are all references real, verifiable publications?
 
 ## General principles
 

@@ -1,190 +1,201 @@
-# Idea Generation Guidelines (Systems)
+# Idea Generation Guidelines
 
-How to go from a seed topic to a novel, feasible systems research idea.
+How to go from a seed field to a novel, feasible research idea.
 
-Distilled from "How to Write a Great Research Paper" (Peyton Jones), "Writing Good
-Systems Research Papers" guides, OSDI/SOSP/EuroSys CFPs, and the systems research
-tradition of building real artifacts.
+Distilled from John Schulman's "Opinionated Guide to ML Research", the
+ResearchAgent methodology, "Can LLMs Generate Novel Research Ideas?" (Si et al.),
+and standard academic research practices.
 
 ## Step 1: Explore the field
 
 Start by understanding what already exists. DO NOT skip this step.
 
 ### Search for existing work (newest to oldest)
-- Search USENIX proceedings (usenix.org), ACM Digital Library (dl.acm.org),
-  IEEE Xplore (ieeexplore.ieee.org), and Google Scholar (scholar.google.com)
-  for papers in your seed area
-- Systems papers are published at conferences, NOT typically on arXiv.
-  Search conference proceedings directly:
-  - Operating systems / storage: OSDI, SOSP, EuroSys, FAST, ATC
-  - Networking: NSDI, SIGCOMM, CoNEXT
-  - Architecture: ISCA, MICRO, ASPLOS, HPCA
-  - Databases: VLDB, SIGMOD, OSDI (increasingly)
-  - Security: USENIX Security, Oakland, CCS
-- **Start with the newest papers first** -- sort by date, read the most
-  recent work before going to older foundational papers
+- Search arXiv (arxiv.org), Semantic Scholar (semanticscholar.org), and
+  Google Scholar (scholar.google.com) for papers in your seed field
+- **Start with the newest papers first** — sort by date, read the most
+  recent work before going to older foundational papers. This ensures
+  you know the current frontier before proposing something new.
 - Recommended search order:
-  1. Last 6 months -- what systems are people building right now?
-  2. Last 1-2 years -- what are the current state-of-the-art systems?
-  3. Foundational papers -- what are the classic designs that define the area?
+  1. Last 6 months — what's happening right now?
+  2. Last 1-2 years — what are the current state-of-the-art methods?
+  3. Foundational papers — what are the classic approaches?
 - Look for:
-  - Best Paper Award winners -- they define what the community values
-  - Industry papers (Google, Meta, Microsoft, Amazon) -- they reveal real-world pain points
-  - Measurement and characterization papers -- they expose new problems worth solving
+  - Survey papers — they summarize the landscape and list open problems
+  - Highly-cited recent papers — they define the current state of the art
+  - Workshop papers — they often contain early-stage ideas and emerging trends
 
 ### Build a mental map
-- What are the dominant system designs in this area?
-- What hardware trends are changing the landscape (new storage media, accelerators, network speeds)?
-- What workload shifts are happening (AI training, microservices, edge computing)?
-- What are the known bottlenecks -- where do current systems break down?
-- What tradeoffs do existing systems make, and are those tradeoffs still justified?
+- What are the main approaches in this area?
+- What are the established benchmarks and metrics?
+- What are the known limitations of current methods?
+- What problems are considered "open" or "unsolved"?
+- What recent techniques from OTHER fields could apply here?
 
 ### Find the gaps
 - Read the "Limitations" and "Future Work" sections of recent papers
-- Look for industry blog posts describing operational pain points that
-  academic systems have not yet addressed
-- Identify assumptions that current systems make -- have those assumptions
-  been invalidated by new hardware, new workloads, or new scale?
-- Look for areas where practitioners resort to ugly hacks -- that signals
-  the current abstractions are wrong
-- Check if a design from one domain (e.g., databases) could solve a problem
-  in another (e.g., OS scheduling)
+- Look for recurring complaints in reviews (on OpenReview, if available)
+- Identify assumptions that current methods make — can you relax them?
+- Look for problems where simple baselines still perform surprisingly well
+  (this signals the community hasn't cracked it yet)
 
 ## Step 2: Generate candidate ideas
 
-### The central question in systems research
-
-Systems research is about building things that work. Every idea must answer:
-**What real problem does this solve, and why can't existing systems solve it?**
-
-If you cannot name a concrete workload or deployment scenario where current
-systems fail, you do not yet have a systems research idea.
-
 ### Two approaches (choose one or combine)
 
-**Problem-driven** (strongly recommended for systems):
-- Start with a real-world pain point or performance bottleneck
-- "System X breaks down under workload Y because of design decision Z. We
-  can fix this by rethinking Z."
-- "New hardware H makes old assumption A obsolete. A system redesigned
-  around H's properties can achieve N times better performance."
-- The best systems papers identify a problem that practitioners already
-  feel but nobody has properly solved.
+**Goal-driven** (recommended): Start with a problem you want to solve.
+- "Current methods for X fail when Y happens. How can we fix that?"
+- "Task Z requires too much labeled data. Can we do it with less?"
+- The goal constrains your search and makes the contribution clear.
 
-**Technique-driven** (higher risk):
-- "Technique T from area A could be applied to build a better system for B."
-- Must still have a clear problem it solves -- a technique looking for a
-  problem is not enough.
+**Idea-driven**: Start with a technique and find where it applies.
+- "Technique A works well for B. Could it also work for C?"
+- Riskier — you may find the idea already exists or doesn't work.
 
-### What makes a good systems research idea
-- **Novel design**: Proposes a new system design, architecture, abstraction,
-  or interface -- not just a parameter tweak to an existing system
-- **Real problem**: Addresses a genuine bottleneck, failure mode, or
-  limitation in real workloads
-- **Buildable**: Can be implemented as a working prototype (systems papers
-  require running code, not just theory)
-- **Evaluable**: There are meaningful benchmarks or workloads to test against
-- **Insightful**: The design embodies a non-obvious insight about WHY the
-  problem exists and why existing approaches miss it
+### What makes a good research idea
+- **Novel**: Not already done. You MUST verify this (Step 3).
+- **Feasible**: Can be implemented and tested within your resource constraints.
+- **Clear**: The contribution is easy to explain in one sentence.
+- **Testable**: There's a concrete way to evaluate whether it works.
+- **Significant**: If it works, the community would care.
 
-### Types of systems contributions
-- **New system**: A complete system design that solves a problem existing
-  systems cannot (e.g., Raft for consensus, Spark for iterative analytics)
-- **New abstraction or interface**: A better way to expose functionality
-  (e.g., MapReduce, exokernels, RDMA verbs)
-- **Performance improvement**: Significant speedup through architectural
-  redesign, not just implementation tuning (e.g., kernel bypass, zero-copy)
-- **Reliability/availability**: New mechanisms for fault tolerance,
-  consistency, or recovery (e.g., Paxos, PBFT, CRDTs)
-- **Scalability**: Designs that work at scales where existing systems fail
-- **Resource efficiency**: Doing more with less (memory, energy, network bandwidth)
-- **Measurement and characterization**: Rigorous study of real workloads
-  that reveals surprising findings and motivates new designs
+### What makes a BAD research idea
+- Too broad ("improve NLP") — needs a specific problem and approach
+- Too incremental ("change hyperparameter X from 0.1 to 0.01")
+- Not verifiable (no way to test if it worked)
+- Requires resources you don't have (100 GPUs, proprietary data)
+- Already exists (you didn't check the literature)
 
-### What makes a BAD systems idea
-- No working system ("we propose but did not implement")
-- Solves a problem nobody actually has (cool technique, no real use case)
-- Marginal improvement that could be achieved by tuning the existing system
-- Ignores practical constraints (assumes hardware that does not exist,
-  workloads that are unrealistic)
-- Reinvents an existing system without understanding why the original was
-  designed that way
+## Step 3: Verify novelty (CRITICAL — do not skip)
 
-## Step 3: Verify novelty (CRITICAL -- do not skip)
-
-Before committing to an idea, verify it has not been done:
+Before committing to an idea, verify it hasn't been done:
 
 ### Search specifically for your idea
-- Search ACM DL, USENIX proceedings, and IEEE Xplore with keywords from
-  your proposed design
-- Search for the PROBLEM you are solving, not just your approach
-- Check if your design is a special case of a more general existing system
+- Search Semantic Scholar and arXiv with keywords from your proposed method
+- Search for the PROBLEM you're solving, not just your approach
+- Check if your idea is a special case of something more general that exists
 - Look at the "Related Work" sections of papers closest to your idea
-- Check industry systems -- companies sometimes build what academia has not
-  published (check engineering blog posts from major tech companies)
 
-### Common novelty traps in systems
-- Your system exists but is called something different (naming is inconsistent
-  across OS, networking, and database communities)
-- Your idea was tried in a different era with different hardware -- check if
-  old ideas have been revisited with modern hardware
-- An industry system already does this but has not been published academically
-- Your improvement comes from better engineering, not a new design insight
-  (important: systems papers need a design contribution, not just faster code)
+### Common novelty traps
+- Your idea exists but under a different name (jargon varies across subfields)
+- Your idea was tried and didn't work (check for negative results too)
+- Your idea is a minor variation of an existing approach
+- A concurrent paper (posted in the last few months) does the same thing
 
 ### If your idea already exists
-- Can you handle a workload or scale that the existing system cannot?
-- Can you provide a stronger guarantee (consistency, durability, fault tolerance)?
-- Can you achieve similar performance with a fundamentally simpler design?
-- Can you adapt the idea to new hardware (persistent memory, CXL, SmartNICs)?
-- If none of these, go back to Step 2
+- DON'T give up immediately. Ask: can you improve on it? Apply it to a
+  new domain? Combine it with something else? Scale it up?
+- If it truly exists with no room for improvement, go back to Step 2
 
-## Step 4: Refine and document
+## Step 4: Produce structured outputs
 
-### Write your idea.json with:
-- **description**: 1-3 sentences explaining what system you are building
-  and what problem it solves
-- **motivation**: the real-world pain point or bottleneck, with evidence
-  (measurements, industry reports, published characterization studies)
-- **proposed_approach**: your system design at a high level -- what are the
-  key components and why each design decision is made
-- **related_work**: key existing systems and papers, and how your design
-  differs (use REAL papers and systems you found in Steps 1 and 3 --
-  include titles, authors, and venues)
+You must produce FOUR outputs. Each serves a different purpose:
+
+### 4.1 proposal.md — Research Proposal
+
+A thorough document with these sections:
+- **Introduction**: Context, problem statement, key insight, hypothesis
+- **Proposed Approach**: Overview, method details, key innovations
+- **Related Work**: Key papers, how your idea differs, positioning
+- **Experiments**: Planned setup, benchmarks, metrics, expected results
+- **Success Criteria**: What would confirm or refute your hypothesis
+- **References**: Full citation list (all must be real, verifiable papers)
+
+### 4.2 plan.json — Experiment Plan
+
+A JSON array of experiment steps that will be followed in the experiment stage:
+```json
+[
+  {
+    "category": "<category>",
+    "title": "short descriptive title",
+    "description": "what this step does and why",
+    "steps": {
+      "step1": "detailed instruction with specifics",
+      "step2": "...",
+      ...
+    }
+  },
+  ...
+]
+```
+
+Suggested categories (add your own as needed):
+- **Environment Configuration** — dependencies, setup
+- **Data Preparation** — download, preprocess, splits, statistics
+- **Baseline Experiment** — existing methods to compare against
+- **Main Experiment** — your proposed method
+- **Analysis Experiment** — ablations, robustness, sensitivity
+- **Effectiveness Evaluation** — success criteria, statistical tests
+- **Visualization** — figures, tables, plots for the paper
+
+The plan should be comprehensive enough to produce a publishable paper.
+Each step must be detailed enough to follow without ambiguity — include
+specific datasets, model architectures, hyperparameters, evaluation metrics,
+and expected output formats.
+
+### 4.3 idea.json — Structured Summary
+
+A JSON object with at least these fields:
+- **description**: 1-3 sentences explaining what you're proposing
+- **title**: paper title
+- **motivation**: why this problem matters, what gap you're filling
+- **proposed_approach**: your high-level method and why it should work
+- **related_work**: key existing papers and how your idea differs
+  (use REAL papers you found in Steps 1 and 3 — include titles and authors)
+- **hypothesis**: testable hypothesis
+- **success_criteria**: what would confirm/refute the hypothesis
+
+### 4.4 references/ — Parsed Reference Papers
+
+Create a directory with key reference papers. For each paper, create a
+subdirectory containing the paper's content parsed into sections:
+```
+references/
+├── Paper-Title-One/
+│   ├── meta/
+│   │   ├── meta_info.txt       # title, authors, venue, year, URL
+│   │   └── bibtex.txt          # BibTeX entry
+│   └── sections/
+│       ├── abstract.md
+│       ├── 1 Introduction.md
+│       ├── 2 Related Work.md
+│       └── ...
+├── Paper-Title-Two/
+│   └── ...
+```
+
+This grounds your proposal in real literature and ensures references are
+verifiable by reviewers.
 
 ### Sanity checks before moving on
-- Can you explain the system's key insight in one sentence?
-- Can you build a working prototype?
-- Is there a clear workload or benchmark to evaluate against?
-- Can you name at least two real baseline systems to compare with?
-- Is the expected improvement large enough to matter in practice
-  (systems reviewers expect meaningful gains, not 5% improvements)?
+- Can you explain the idea in one sentence to a non-expert?
+- Is there a clear experiment that would test the idea?
+- Do you have the resources (data, compute, time) to do it?
+- Is the expected contribution large enough for a paper?
+- Is the experiment plan detailed enough to follow step by step?
+- Are all references real, verifiable publications?
 
 ## General principles
 
-### From "Writing Good Systems Papers"
-- The key contribution is the DESIGN, not the implementation. Your paper
-  must explain WHY you made each design choice, not just WHAT you built.
-- A system that works is necessary but not sufficient. You need a
-  principled design with clear reasoning.
-- Performance numbers alone do not make a contribution. Reviewers want to
-  learn something generalizable from your system.
+### From John Schulman
+- Your ability to choose the right problem is more important than raw skill
+- Watch which ideas prosper and which are forgotten — this develops taste
+- Goal-driven research has lower scooping risk than idea-driven research
+- There's no shame in working on ideas suggested by others or by the literature
 
-### From OSDI/SOSP tradition
-- Build real systems that solve real problems for real users
-- The best systems papers change how people think about a problem, not just
-  how fast they can solve it
-- Negative results are valuable when they expose fundamental limitations
-  of existing approaches
-- Simplicity is a virtue. A simpler design that achieves 90% of the
-  performance of a complex one is often the better contribution.
+### From "Can LLMs Generate Novel Research Ideas?" (Si et al.)
+- AI-generated ideas tend to be novel but lack feasibility — ground yours
+  in practical constraints
+- Vague implementation details are the #1 weakness — be specific about how
+  your method actually works
+- Missing baselines and unrealistic assumptions are common failures
+- Verify your idea against existing work — 80% of reviewer rejections
+  cite existing papers that the authors missed
 
-### Problem selection
-- Your ability to pick the right problem is more important than your
-  implementation skill
-- Talk to practitioners (or read their blog posts / conference talks) to
-  find problems that matter in practice
-- A well-motivated problem with a clean solution beats a poorly motivated
-  problem with a sophisticated solution every time
-- Watch what problems the best groups are working on, but also look for
-  problems they are ignoring
+### From ResearchAgent (Baek et al.)
+- Connect ideas across papers, not just within one paper
+- Look for shared concepts across different subfields
+- Iterative refinement improves idea quality — but diminishing returns
+  after 2-3 rounds
+- Both citation relationships AND underlying concepts matter for novelty

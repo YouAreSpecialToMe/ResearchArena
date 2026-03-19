@@ -1,208 +1,201 @@
-# Idea Generation Guidelines (Theory)
+# Idea Generation Guidelines
 
-How to go from a seed topic to a novel theoretical contribution in
-algorithms, complexity, or combinatorics.
+How to go from a seed field to a novel, feasible research idea.
 
-Distilled from practices in the STOC/FOCS/SODA/COLT communities, Oded
-Goldreich's advice on theoretical research, and standard conventions in
-theoretical computer science.
+Distilled from John Schulman's "Opinionated Guide to ML Research", the
+ResearchAgent methodology, "Can LLMs Generate Novel Research Ideas?" (Si et al.),
+and standard academic research practices.
 
 ## Step 1: Explore the field
 
-Start by understanding what is already known. Theory has a long history --
-results may be decades old. DO NOT skip this step.
+Start by understanding what already exists. DO NOT skip this step.
 
-### Search for existing work
-
-- Search ECCC (eccc.weizmann.ac.il) for complexity theory results
-- Search arXiv sections: cs.DS (data structures and algorithms), cs.CC
-  (computational complexity), cs.CG (computational geometry), cs.LG
-  (learning theory, for COLT-style work)
-- Search DBLP (dblp.org) for author and title lookups
-- Search conference proceedings directly: STOC, FOCS, SODA, COLT, ICALP,
-  ESA, APPROX/RANDOM, SoCG, CCC
-- Search Semantic Scholar (semanticscholar.org) and Google Scholar for
-  citation graphs and related work
-- **Start with the most recent results** -- what are the current best bounds?
-  Then trace back to the foundational papers that introduced the problem.
+### Search for existing work (newest to oldest)
+- Search arXiv (arxiv.org), Semantic Scholar (semanticscholar.org), and
+  Google Scholar (scholar.google.com) for papers in your seed field
+- **Start with the newest papers first** — sort by date, read the most
+  recent work before going to older foundational papers. This ensures
+  you know the current frontier before proposing something new.
 - Recommended search order:
-  1. Last 1-2 years -- what are the newest upper and lower bounds?
-  2. Last 5-10 years -- what techniques drove recent progress?
-  3. Foundational papers -- who defined the problem and what were the
-     original bounds?
+  1. Last 6 months — what's happening right now?
+  2. Last 1-2 years — what are the current state-of-the-art methods?
+  3. Foundational papers — what are the classic approaches?
+- Look for:
+  - Survey papers — they summarize the landscape and list open problems
+  - Highly-cited recent papers — they define the current state of the art
+  - Workshop papers — they often contain early-stage ideas and emerging trends
 
 ### Build a mental map
-
-- What is the best known upper bound for the problem?
-- What is the best known lower bound?
-- What is the conjectured optimal bound (if any)?
-- What computational model are results stated in? (RAM, comparison model,
-  cell probe, streaming, query complexity, circuit complexity, etc.)
-- What are the main algorithmic paradigms used? (divide and conquer,
-  dynamic programming, LP/SDP relaxations, spectral methods, algebraic
-  techniques, primal-dual, multiplicative weights, etc.)
-- What are the main barrier results? (oracle separations, natural proofs
-  barrier, algebrization, communication complexity lower bounds, etc.)
-- Are there conditional hardness results? (assuming P != NP, ETH, SETH,
-  3SUM conjecture, OMv conjecture, etc.)
+- What are the main approaches in this area?
+- What are the established benchmarks and metrics?
+- What are the known limitations of current methods?
+- What problems are considered "open" or "unsolved"?
+- What recent techniques from OTHER fields could apply here?
 
 ### Find the gaps
-
-- Read survey papers and open problems lists (e.g., the Open Problems
-  column in SIGACT News, workshop open problem sessions)
-- Identify problems where there is a gap between upper and lower bounds
-- Look for problems where the best algorithm uses a technique that "should"
-  be improvable (e.g., brute-force enumeration as a subroutine)
-- Check if known results hold in stronger or weaker models -- can you
-  prove a result in a more general model, or a stronger result in a
-  restricted model?
-- Look for connections to other problems -- does a new result in area A
-  have implications for area B?
+- Read the "Limitations" and "Future Work" sections of recent papers
+- Look for recurring complaints in reviews (on OpenReview, if available)
+- Identify assumptions that current methods make — can you relax them?
+- Look for problems where simple baselines still perform surprisingly well
+  (this signals the community hasn't cracked it yet)
 
 ## Step 2: Generate candidate ideas
 
-### Types of theoretical contributions
+### Two approaches (choose one or combine)
 
-Not all theory papers are alike. Identify which type of contribution you
-are aiming for:
+**Goal-driven** (recommended): Start with a problem you want to solve.
+- "Current methods for X fail when Y happens. How can we fix that?"
+- "Task Z requires too much labeled data. Can we do it with less?"
+- The goal constrains your search and makes the contribution clear.
 
-| Contribution type | What you prove | Example statement |
-|---|---|---|
-| Faster algorithm | Improved time or space | "We give an O(n log n) algorithm for X, improving the O(n^{3/2}) bound of [Author, Year]" |
-| New lower bound | Impossibility result | "Any comparison-based algorithm for X requires Omega(n log n) time" |
-| Improved approximation | Better ratio | "We give a 1.5-approximation for X, improving the 2-approximation of [Author, Year]" |
-| Hardness of approximation | Approximation lower bound | "X is NP-hard to approximate within 1.99 unless P = NP" |
-| New algorithmic technique | Framework or method | "We introduce a technique based on Y that yields improved algorithms for problems A, B, and C" |
-| Structural / combinatorial | Property of objects | "Every graph with property X also has property Y" |
-| Tight bound | Matching upper and lower | "We show that the complexity of X is Theta(n log n)" |
-| New complexity class result | Separation or collapse | "We show that X is complete for class Y under Z reductions" |
+**Idea-driven**: Start with a technique and find where it applies.
+- "Technique A works well for B. Could it also work for C?"
+- Riskier — you may find the idea already exists or doesn't work.
 
-### The contribution IS the theorem
+### What makes a good research idea
+- **Novel**: Not already done. You MUST verify this (Step 3).
+- **Feasible**: Can be implemented and tested within your resource constraints.
+- **Clear**: The contribution is easy to explain in one sentence.
+- **Testable**: There's a concrete way to evaluate whether it works.
+- **Significant**: If it works, the community would care.
 
-In theory, the main contribution is a precisely stated theorem. Formulate
-your idea as a concrete claim:
+### What makes a BAD research idea
+- Too broad ("improve NLP") — needs a specific problem and approach
+- Too incremental ("change hyperparameter X from 0.1 to 0.01")
+- Not verifiable (no way to test if it worked)
+- Requires resources you don't have (100 GPUs, proprietary data)
+- Already exists (you didn't check the literature)
 
-- BAD: "We study the X problem using new techniques"
-- GOOD: "We give an O(n sqrt(log n)) algorithm for X in the Y model,
-  improving the O(n log n) bound of [Author, Year]"
+## Step 3: Verify novelty (CRITICAL — do not skip)
 
-If you cannot state a precise theorem, your idea is not ready.
+Before committing to an idea, verify it hasn't been done:
 
-### What makes a good theory contribution
+### Search specifically for your idea
+- Search Semantic Scholar and arXiv with keywords from your proposed method
+- Search for the PROBLEM you're solving, not just your approach
+- Check if your idea is a special case of something more general that exists
+- Look at the "Related Work" sections of papers closest to your idea
 
-- **Fundamental problem**: The problem is well-studied, widely known, and
-  progress on it would be noted by the community (e.g., maximum flow,
-  shortest paths, satisfiability, graph coloring)
-- **Significant improvement**: The improvement is more than a constant
-  factor -- ideally a polynomial improvement or a qualitatively new bound
-- **Novel technique**: The proof introduces a new idea, not a routine
-  application of known methods
-- **Clean result**: The theorem statement is elegant and easy to state
-- **Opens doors**: The technique or result likely leads to further progress
+### Common novelty traps
+- Your idea exists but under a different name (jargon varies across subfields)
+- Your idea was tried and didn't work (check for negative results too)
+- Your idea is a minor variation of an existing approach
+- A concurrent paper (posted in the last few months) does the same thing
 
-### What makes a BAD theory contribution
+### If your idea already exists
+- DON'T give up immediately. Ask: can you improve on it? Apply it to a
+  new domain? Combine it with something else? Scale it up?
+- If it truly exists with no room for improvement, go back to Step 2
 
-- Marginal improvement on a non-fundamental problem (small constant factor
-  on an obscure variant)
-- Straightforward application of a known technique to a new problem with
-  no new insight
-- Result that follows easily from combining two known results
-- Bounds that are far from tight with no evidence the approach could be
-  pushed further
-- Unverifiable claims -- the proof is incomplete or contains gaps
+## Step 4: Produce structured outputs
 
-## Step 3: Verify novelty (CRITICAL -- do not skip)
+You must produce FOUR outputs. Each serves a different purpose:
 
-Theory has a very long memory. A result may have been proved in the 1970s
-in a different community or under a different name.
+### 4.1 proposal.md — Research Proposal
 
-### Search specifically for your claimed result
+A thorough document with these sections:
+- **Introduction**: Context, problem statement, key insight, hypothesis
+- **Proposed Approach**: Overview, method details, key innovations
+- **Related Work**: Key papers, how your idea differs, positioning
+- **Experiments**: Planned setup, benchmarks, metrics, expected results
+- **Success Criteria**: What would confirm or refute your hypothesis
+- **References**: Full citation list (all must be real, verifiable papers)
 
-- Search for the PROBLEM by all its known names (terminology varies across
-  communities and decades)
-- Search for the BOUND -- has someone already achieved O(n log n) for this
-  problem?
-- Check textbooks: Cormen et al. (CLRS), Vazirani (approximation),
-  Arora-Barak (complexity), Motwani-Raghavan (randomized algorithms),
-  Williamson-Shmoys (approximation), Grotschel-Lovasz-Schrijver,
-  Schrijver (combinatorial optimization)
-- Check if your result is implied by a more general result
-- Search DBLP for all papers by the leading researchers on this problem
+### 4.2 plan.json — Experiment Plan
 
-### Common novelty traps in theory
+A JSON array of experiment steps that will be followed in the experiment stage:
+```json
+[
+  {
+    "category": "<category>",
+    "title": "short descriptive title",
+    "description": "what this step does and why",
+    "steps": {
+      "step1": "detailed instruction with specifics",
+      "step2": "...",
+      ...
+    }
+  },
+  ...
+]
+```
 
-- Your result was proved in a different computational model and the
-  translation is straightforward
-- Your result is a special case of a known, more general theorem
-- Your technique was used before for a related problem and the extension
-  is routine
-- The result is "folklore" -- known to experts but never formally published
-  (search lecture notes, blog posts by researchers like Lipton, Trevisan,
-  O'Donnell, etc.)
-- A concurrent or very recent paper (last few months) proves the same
-  or a stronger result
+Suggested categories (add your own as needed):
+- **Environment Configuration** — dependencies, setup
+- **Data Preparation** — download, preprocess, splits, statistics
+- **Baseline Experiment** — existing methods to compare against
+- **Main Experiment** — your proposed method
+- **Analysis Experiment** — ablations, robustness, sensitivity
+- **Effectiveness Evaluation** — success criteria, statistical tests
+- **Visualization** — figures, tables, plots for the paper
 
-### If your result is already known
+The plan should be comprehensive enough to produce a publishable paper.
+Each step must be detailed enough to follow without ambiguity — include
+specific datasets, model architectures, hyperparameters, evaluation metrics,
+and expected output formats.
 
-- Can you improve the bound further?
-- Can you prove it in a stronger model or with weaker assumptions?
-- Can you simplify the proof significantly? (Simpler proofs of known
-  results ARE publishable in theory, especially for important theorems)
-- Can you extend it to a more general setting?
-- If none of these, go back to Step 2
+### 4.3 idea.json — Structured Summary
 
-## Step 4: Refine and document
+A JSON object with at least these fields:
+- **description**: 1-3 sentences explaining what you're proposing
+- **title**: paper title
+- **motivation**: why this problem matters, what gap you're filling
+- **proposed_approach**: your high-level method and why it should work
+- **related_work**: key existing papers and how your idea differs
+  (use REAL papers you found in Steps 1 and 3 — include titles and authors)
+- **hypothesis**: testable hypothesis
+- **success_criteria**: what would confirm/refute the hypothesis
 
-### Write your idea.json with:
+### 4.4 references/ — Parsed Reference Papers
 
-- **description**: The main theorem statement, stated precisely with
-  asymptotic bounds, computational model, and any assumptions
-- **motivation**: Why this problem matters, what gap in knowledge it fills,
-  and what the previous best bounds were
-- **proposed_approach**: The high-level proof strategy -- what technique
-  you plan to use and why it should yield the claimed bound
-- **related_work**: Key prior results with precise bounds and citations
-  (use REAL papers -- include title, authors, venue, year). List the
-  history of bounds for the problem.
+Create a directory with key reference papers. For each paper, create a
+subdirectory containing the paper's content parsed into sections:
+```
+references/
+├── Paper-Title-One/
+│   ├── meta/
+│   │   ├── meta_info.txt       # title, authors, venue, year, URL
+│   │   └── bibtex.txt          # BibTeX entry
+│   └── sections/
+│       ├── abstract.md
+│       ├── 1 Introduction.md
+│       ├── 2 Related Work.md
+│       └── ...
+├── Paper-Title-Two/
+│   └── ...
+```
+
+This grounds your proposal in real literature and ensures references are
+verifiable by reviewers.
 
 ### Sanity checks before moving on
-
-- Is the theorem statement precise? (model, assumptions, bounds all specified)
-- Is the claimed bound plausible? (Does it violate any known lower bound?
-  Is it consistent with known special cases?)
-- Do you have a proof sketch? (At minimum, know the high-level approach
-  and why each step should work)
-- Is the improvement significant enough for a venue like STOC/FOCS/SODA/COLT?
-- Have you checked all known names and formulations of the problem?
+- Can you explain the idea in one sentence to a non-expert?
+- Is there a clear experiment that would test the idea?
+- Do you have the resources (data, compute, time) to do it?
+- Is the expected contribution large enough for a paper?
+- Is the experiment plan detailed enough to follow step by step?
+- Are all references real, verifiable publications?
 
 ## General principles
 
-### On choosing problems
+### From John Schulman
+- Your ability to choose the right problem is more important than raw skill
+- Watch which ideas prosper and which are forgotten — this develops taste
+- Goal-driven research has lower scooping risk than idea-driven research
+- There's no shame in working on ideas suggested by others or by the literature
 
-- Work on problems that are fundamental and well-studied -- a great result
-  on a central problem is always valued
-- Avoid inventing artificial problems just to solve them -- unless the
-  problem captures something genuinely new and interesting
-- A clean, surprising result on a simple problem is better than a
-  complicated result on a complicated problem
-- Closing gaps (matching upper and lower bounds) is inherently satisfying
-  and valued by the community
+### From "Can LLMs Generate Novel Research Ideas?" (Si et al.)
+- AI-generated ideas tend to be novel but lack feasibility — ground yours
+  in practical constraints
+- Vague implementation details are the #1 weakness — be specific about how
+  your method actually works
+- Missing baselines and unrealistic assumptions are common failures
+- Verify your idea against existing work — 80% of reviewer rejections
+  cite existing papers that the authors missed
 
-### On techniques
-
-- The technique is often as important as the result -- a new algorithmic
-  idea that applies to many problems is more influential than an isolated
-  improvement
-- Understand why previous approaches got stuck -- this tells you what new
-  ingredient is needed
-- Look for connections across areas: algebraic, combinatorial, probabilistic,
-  geometric, information-theoretic arguments often cross-pollinate
-- Simple proofs are better than complicated ones, all else being equal
-
-### On theory culture
-
-- Correctness is paramount -- an incorrect proof is worse than no proof
-- Elegance matters -- clean formulations and proofs are valued
-- History matters -- cite the originators of problems and techniques,
-  not just the most recent paper
-- Precise statements matter -- vague or informal claims are not acceptable
+### From ResearchAgent (Baek et al.)
+- Connect ideas across papers, not just within one paper
+- Look for shared concepts across different subfields
+- Iterative refinement improves idea quality — but diminishing returns
+  after 2-3 rounds
+- Both citation relationships AND underlying concepts matter for novelty
