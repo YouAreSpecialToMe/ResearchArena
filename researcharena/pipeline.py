@@ -84,6 +84,9 @@ class PipelineState:
     paper_revision_attempts: int = 0
     refine_attempts: int = 0
 
+    # Context for mid-experiment refinement
+    experiment_refine_reason: str = ""
+
     # Per-seed counter
     idea_attempts: int = 0
 
@@ -313,33 +316,63 @@ class Pipeline:
         self.state.stage = Stage.EXPERIMENTS
 
     def _run_refine_idea(self):
-        """Refine the current idea based on reviewer feedback, then re-run experiments."""
-        console.print("  Refining idea based on reviewer feedback...")
+        """Refine the current idea, then re-run experiments.
+
+        Handles two cases:
+        - Post-review: reviewer feedback drives the refinement (refine budget resets)
+        - Mid-experiment: agent's own findings drive the refinement
+        """
+        is_from_experiment = bool(self.state.experiment_refine_reason)
+
+        if is_from_experiment:
+            console.print(
+                f"  Refining idea based on experiment findings "
+                f"(refinement {self.state.refine_attempts}/{self.state.max_refine_per_idea})..."
+            )
+        else:
+            console.print("  Refining idea based on reviewer feedback...")
 
         self.tracker.begin_action(
             stage="refine_idea",
-            action="refine_idea",
+            action="refine_idea_experiment" if is_from_experiment else "refine_idea_review",
             agent_type=self.agent_type,
             model=self.agent_config.get("model"),
-            attempt=self.state.paper_revision_attempts,
+            attempt=self.state.refine_attempts if is_from_experiment else self.state.paper_revision_attempts,
         )
 
-        feedback = ""
-        if self.state.review_result:
-            feedback = self.state.review_result.aggregated_feedback
+        if is_from_experiment:
+            # Mid-experiment refinement: agent goes through proper ideation
+            refined_idea, agent_result = ideation.run_experiment_refinement(
+                agent_type=self.agent_type,
+                workspace=self.state.workspace,
+                original_idea=self.state.idea,
+                refine_reason=self.state.experiment_refine_reason,
+                results=self.state.results,
+                timeout=self.config["agent"].get("ideation_timeout", 1800),
+                agent_config=self.agent_config,
+                resources=self.per_agent_resources,
+                refine_attempt=self.state.refine_attempts,
+                max_refine=self.state.max_refine_per_idea,
+            )
+            self.state.experiment_refine_reason = ""  # clear context
+        else:
+            # Post-review refinement: reviewer feedback drives the refinement
+            feedback = ""
+            if self.state.review_result:
+                feedback = self.state.review_result.aggregated_feedback
 
-        refined_idea, agent_result = ideation.run_refinement(
-            agent_type=self.agent_type,
-            workspace=self.state.workspace,
-            original_idea=self.state.idea,
-            reviewer_feedback=feedback,
-            results=self.state.results,
-            timeout=self.config["agent"].get("ideation_timeout", 1800),
-            agent_config=self.agent_config,
-            resources=self.per_agent_resources,
-            revision_attempt=self.state.paper_revision_attempts,
-            max_revisions=self.state.max_paper_revisions,
-        )
+            refined_idea, agent_result = ideation.run_refinement(
+                agent_type=self.agent_type,
+                workspace=self.state.workspace,
+                original_idea=self.state.idea,
+                reviewer_feedback=feedback,
+                results=self.state.results,
+                timeout=self.config["agent"].get("ideation_timeout", 1800),
+                agent_config=self.agent_config,
+                resources=self.per_agent_resources,
+                revision_attempt=self.state.paper_revision_attempts,
+                max_revisions=self.state.max_paper_revisions,
+            )
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
 
@@ -366,7 +399,9 @@ class Pipeline:
         self.state.results = None
         self.state.experiment_errors = []
         self.state.experiment_attempts = 0
-        self.state.refine_attempts = 0  # fresh refine budget after revision
+        if not is_from_experiment:
+            # Post-review: fresh refine budget
+            self.state.refine_attempts = 0
         self.state.stage = Stage.EXPERIMENTS
 
     def _run_experiments(self):
@@ -467,21 +502,21 @@ class Pipeline:
                 self._abandon_idea("experiments", "Refine budget exhausted")
                 return
 
+            # Read refine reason from refine_idea.json
             refine_path = self.state.workspace / "refine_idea.json"
             refine_reason = "Agent wants to refine the idea"
-            revised_idea = None
             if refine_path.exists():
                 try:
                     data = json.loads(refine_path.read_text())
                     reason = data.get("reason", "")
                     if reason:
-                        refine_reason = f"Agent refining: {reason}"
-                    revised_idea = data.get("revised_idea")
+                        refine_reason = reason
                 except Exception:
                     pass
+                refine_path.unlink(missing_ok=True)
 
             console.print(
-                f"  [cyan]→ {refine_reason} "
+                f"  [cyan]→ Refining idea: {refine_reason} "
                 f"(refinement {self.state.refine_attempts}/{self.state.max_refine_per_idea})[/]"
             )
             self.tracker.end_action(
@@ -491,19 +526,9 @@ class Pipeline:
                 log_files=log_files,
             )
 
-            # Update idea.json with revised fields if provided
-            if revised_idea and isinstance(revised_idea, dict):
-                self.state.idea.update(revised_idea)
-                idea_path = self.state.workspace / "idea.json"
-                idea_path.write_text(json.dumps(self.state.idea, indent=2))
-                console.print(f"  [cyan]Updated idea.json with revisions.[/]")
-
-            # Clean up refine signal and reset experiment state
-            refine_path.unlink(missing_ok=True)
-            self.state.results = None
-            self.state.experiment_errors = []
-            self.state.experiment_attempts = 0
-            self.state.stage = Stage.EXPERIMENTS
+            # Route to REFINE_IDEA stage for a proper ideation pass
+            self.state.experiment_refine_reason = refine_reason
+            self.state.stage = Stage.REFINE_IDEA
             return
 
         if results is None:

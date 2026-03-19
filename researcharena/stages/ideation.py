@@ -210,6 +210,99 @@ def _build_refinement_task(
     return task
 
 
+def run_experiment_refinement(
+    agent_type: str,
+    workspace: Path,
+    original_idea: dict,
+    refine_reason: str,
+    results: dict | None = None,
+    timeout: int = 1800,
+    agent_config: dict | None = None,
+    resources: dict | None = None,
+    refine_attempt: int = 1,
+    max_refine: int = 3,
+) -> tuple[dict | None, object]:
+    """Let the agent refine an idea mid-experiment based on experimental findings.
+
+    Unlike post-review refinement, this is triggered by the agent itself during
+    experiments when it discovers the idea needs a different direction.
+
+    Returns:
+        Tuple of (refined idea dict or None, AgentResult).
+    """
+    task = _build_experiment_refinement_task(
+        original_idea, refine_reason, results,
+        resources, refine_attempt, max_refine,
+    )
+
+    agent_result = invoke_agent(
+        agent_type=agent_type,
+        task=task,
+        workspace=workspace,
+        timeout=timeout,
+        agent_config=agent_config,
+    )
+
+    return _parse_output(workspace), agent_result
+
+
+def _build_experiment_refinement_task(
+    original_idea: dict,
+    refine_reason: str,
+    results: dict | None,
+    resources: dict | None = None,
+    refine_attempt: int = 1,
+    max_refine: int = 3,
+) -> str:
+    res = resources or {}
+    hours = res.get("time_hours", 8)
+    refines_left = max_refine - refine_attempt
+
+    idea_desc = original_idea.get("description", original_idea.get("title", "N/A"))
+    idea_approach = original_idea.get("proposed_approach", "")
+
+    task = (
+        "=== IDEA REFINEMENT (mid-experiment) ===\n\n"
+        f"BUDGET: Refinement {refine_attempt}/{max_refine}"
+        f" ({refines_left} refinements left after this).\n\n"
+        "During experiments, you determined the idea needs refinement.\n"
+        "You now have a chance to rethink and revise the idea with the benefit\n"
+        "of what you learned from running experiments.\n\n"
+        "Read idea_guidelines.md for guidance on structuring your idea.\n\n"
+        f"ORIGINAL IDEA:\n{idea_desc}\n\n"
+        f"APPROACH:\n{idea_approach}\n\n"
+        "--- REASON FOR REFINEMENT ---\n"
+        f"{refine_reason}\n"
+        "--- END REASON ---\n\n"
+    )
+
+    if results:
+        task += "EXPERIMENT FINDINGS SO FAR:\n"
+        task += f"{json.dumps(results, indent=2)}\n\n"
+
+    # Check for any partial results or logs in workspace
+    task += (
+        "You have access to the full workspace — review any code, logs, and\n"
+        "partial results from previous experiment attempts.\n\n"
+        "YOUR TASK:\n"
+        "1. Search for related work — your refined idea should be grounded\n"
+        "   in what actually exists in the literature\n"
+        "2. Analyze what went wrong or what could be improved\n"
+        "3. Revise the idea — you can:\n"
+        "   - Change the approach based on experimental findings\n"
+        "   - Pivot to a more promising direction discovered during experiments\n"
+        "   - Add or remove components that proved useful/useless\n"
+        "   - Adjust the hypothesis or claims\n"
+        "4. Update idea.json with your refined idea\n"
+        "   Keep the same fields but update the content. Add a 'refinement_notes'\n"
+        "   field explaining what changed and why.\n\n"
+        f"After this, you will re-run experiments (~{hours}h budget).\n"
+        "Make sure your refined idea is feasible and addresses the issues found."
+    )
+
+    return task
+
+
 def _parse_output(workspace: Path) -> dict | None:
     idea_path = workspace / "idea.json"
     if not idea_path.exists():
