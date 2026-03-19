@@ -1,9 +1,8 @@
-"""Self-review gates for idea, experiment, and paper stages.
+"""Review gates for idea, experiment, and paper stages.
 
-Each gate runs the researcher agent as its own reviewer, using a
-stage-specific subset of the reviewer guidelines. The agent evaluates
-its own work and produces a score + feedback. If the score is below
-the threshold, the pipeline routes back for refinement.
+Each gate invokes the agent to review the work in the workspace using
+stage-specific subsets of the reviewer guidelines. Produces a score +
+feedback used by the pipeline to decide whether to proceed or revise.
 """
 
 from __future__ import annotations
@@ -16,21 +15,13 @@ from researcharena.utils.agent_runner import invoke_agent
 # Template directory
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
-# Stage -> template filename mapping
-_TEMPLATE_FILES = {
-    "idea": "self_review_idea.md",
-    "experiment": "self_review_experiment.md",
-    "paper": "self_review_paper.md",
-}
 
-
-def _load_guidelines(stage: str, domain: str = "ml") -> str:
-    """Load self-review guidelines for the given stage and domain."""
-    domain_path = _TEMPLATES_DIR / domain / _TEMPLATE_FILES[stage]
+def _load_reviewer_guidelines(domain: str = "ml") -> str:
+    """Load the full reviewer guidelines for the domain."""
+    domain_path = _TEMPLATES_DIR / domain / "reviewer_guidelines.md"
     if domain_path.exists():
         return domain_path.read_text()
-    # Fallback to ml
-    return (_TEMPLATES_DIR / "ml" / _TEMPLATE_FILES[stage]).read_text()
+    return (_TEMPLATES_DIR / "ml" / "reviewer_guidelines.md").read_text()
 
 
 def run_self_review(
@@ -41,21 +32,21 @@ def run_self_review(
     timeout: int = 900,
     domain: str = "ml",
 ) -> tuple[float, str, object]:
-    """Run a self-review for the given stage.
+    """Run a review for the given stage.
 
     Args:
         agent_type: The CLI agent type (claude, codex, etc.)
         workspace: The workspace directory containing artifacts to review
         stage: One of "idea", "experiment", "paper"
         agent_config: Agent configuration dict
-        timeout: Max seconds for the self-review
+        timeout: Max seconds for the review
         domain: Domain for guideline templates
 
     Returns:
         (score, feedback, agent_result)
     """
-    guidelines = _load_guidelines(stage, domain)
-    task = _build_task(stage, guidelines)
+    reviewer_guidelines = _load_reviewer_guidelines(domain)
+    task = _build_task(stage, reviewer_guidelines)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -70,34 +61,70 @@ def run_self_review(
     return score, feedback, agent_result
 
 
-def _build_task(stage: str, guidelines: str) -> str:
-    """Build the self-review task prompt."""
-    stage_descriptions = {
+def _build_task(stage: str, reviewer_guidelines: str) -> str:
+    """Build the review task prompt."""
+    stage_tasks = {
         "idea": (
-            "You are reviewing your research proposal and experiment plan.\n"
-            "Evaluate proposal.md, plan.json, and references/ in the workspace.\n"
-            "Be critical — it is better to catch problems before running experiments."
+            "You are reviewing a research proposal and experiment plan.\n\n"
+            "Evaluate the following artifacts in the workspace:\n"
+            "  - proposal.md: the research proposal\n"
+            "  - plan.json: the experiment plan\n"
+            "  - idea.json: the idea summary\n"
+            "  - references/: parsed reference papers\n\n"
+            "Focus on these dimensions from the reviewer guidelines:\n"
+            "  - Novelty: is the idea genuinely new? Search online to verify.\n"
+            "  - Soundness: is the methodology appropriate?\n"
+            "  - Significance: does this problem matter?\n"
+            "  - References: are citations real and relevant?\n"
+            "  - Plan quality: is the experiment plan complete and feasible?\n"
         ),
         "experiment": (
-            "You are reviewing your experiment results before writing the paper.\n"
-            "Evaluate results.json, experiment code, logs, and figures/ against plan.json.\n"
-            "Be honest — weak results should be flagged now, not hidden in the paper."
+            "You are reviewing experiment results.\n\n"
+            "Evaluate the following artifacts in the workspace:\n"
+            "  - results.json: experiment results\n"
+            "  - exp/: experiment code and per-experiment results\n"
+            "  - plan.json: the original experiment plan\n"
+            "  - figures/: generated figures\n\n"
+            "Focus on these dimensions from the reviewer guidelines:\n"
+            "  - Soundness: do results support the claims?\n"
+            "  - Experimental rigor: baselines, ablations, error bars, seeds?\n"
+            "  - Results integrity: do code and logs match results.json?\n"
+            "  - Reproducibility: are details specified?\n"
+            "  - Plan compliance: were all planned steps executed?\n"
         ),
         "paper": (
-            "You are doing a final pre-submission review of your paper.\n"
-            "Evaluate paper.tex/paper.pdf against results.json and experiment code.\n"
-            "This is your last chance to catch issues before peer review."
+            "You are reviewing a research paper.\n\n"
+            "Evaluate the following artifacts in the workspace:\n"
+            "  - paper.tex / paper.pdf: the paper\n"
+            "  - results.json: experiment results\n"
+            "  - exp/: experiment code and logs\n\n"
+            "Apply ALL dimensions from the reviewer guidelines below.\n"
+            "This is a full review — evaluate novelty, soundness, significance,\n"
+            "clarity, reproducibility, rigor, references, and results integrity.\n"
         ),
     }
 
+    output_format = (
+        "\n\nOutput your review as a JSON object. Print ONLY the JSON:\n"
+        "{\n"
+        '    "score": <int, one of: 0, 2, 4, 6, 8, 10>,\n'
+        '    "summary": "<2-3 sentence summary>",\n'
+        '    "strengths": ["<strength1>", ...],\n'
+        '    "weaknesses": ["<weakness1>", ...],\n'
+        '    "feedback": "<specific, actionable feedback for improvement>"\n'
+        "}\n\n"
+        "Score scale: 10=exceptional, 8=strong, 6=acceptable with concerns,\n"
+        "4=major issues, 2=fundamental flaws, 0=not viable.\n"
+    )
+
     return (
-        f"=== SELF-REVIEW: {stage.upper()} ===\n\n"
-        f"{stage_descriptions[stage]}\n\n"
-        "IMPORTANT: Be rigorous and honest. Do NOT inflate your score.\n"
-        "Search the web to verify novelty claims and reference integrity.\n"
-        "A score of 6 means 'acceptable with concerns' — only give 8+ if\n"
-        "the work is genuinely strong.\n\n"
-        f"{guidelines}"
+        f"=== REVIEW: {stage.upper()} ===\n\n"
+        f"{stage_tasks[stage]}\n"
+        "Be rigorous. Search the web to verify novelty and references.\n\n"
+        "--- REVIEWER GUIDELINES ---\n"
+        f"{reviewer_guidelines}\n"
+        "--- END GUIDELINES ---\n"
+        f"{output_format}"
     )
 
 
