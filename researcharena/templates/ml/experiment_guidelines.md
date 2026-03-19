@@ -154,16 +154,57 @@ From Michael Lones' "How to Avoid ML Pitfalls":
 - DO NOT forget to inspect your model — verify it learns meaningful patterns,
   not spurious correlations
 
-## Phase 5: What to Save
+## Phase 5: Workspace Structure
 
-Save everything needed to write the paper:
+Organize experiments so that each step has its own folder with code, results,
+and logs. This makes it easy to verify which code produced which results and
+ensures reproducibility.
 
 ```
-results.json          # structured results (see format below)
-figures/              # comparison plots, ablation charts, analysis visualizations
+exp/
+├── <experiment_name>/              # one folder per experiment/condition
+│   ├── run.py                      # experiment script
+│   ├── config.yaml (or .json)      # hyperparameters, settings
+│   ├── results.json                # per-experiment results
+│   └── logs/                       # training/eval logs, stdout
+│
+├── <baseline_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+├── <ablation_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+└── shared/                         # shared utilities across experiments
+    ├── data_loader.py              # data loading, preprocessing
+    ├── metrics.py                  # evaluation metrics
+    ├── models.py                   # model definitions
+    └── utils.py                    # common helpers
+
+data/                               # downloaded/processed datasets
+figures/                            # generated figures for the paper
+results.json                        # aggregated final results (see below)
 ```
 
-### results.json format
+### Per-experiment results
+
+Each `exp/<name>/results.json` should capture that experiment's output:
+```json
+{
+  "experiment": "<name>",
+  "metrics": {"metric1": {"mean": 0.87, "std": 0.002}, ...},
+  "config": {"lr": 0.001, "epochs": 50, "seed": [42, 123, 456], ...},
+  "runtime_minutes": 45
+}
+```
+
+### Aggregated results.json (workspace root)
+
+After all experiments complete, compile a summary `results.json` at the
+workspace root that aggregates across all experiments:
 
 ```json
 {
@@ -194,6 +235,27 @@ figures/              # comparison plots, ablation charts, analysis visualizatio
 Adapt the structure to your experiment type. The key requirement:
 structured, machine-readable, complete, and honest.
 
+### Figures
+
+Save publication-ready figures to `figures/`:
+- Comparison plots (your method vs baselines)
+- Ablation charts (impact of each component)
+- Training curves (loss/metric over epochs)
+- Analysis visualizations (distributions, embeddings, etc.)
+
+Each figure should be self-contained with axis labels, legends, and titles.
+
+## Phase 6: Plan Compliance
+
+If you have a `plan.json` from the ideation stage:
+- Execute every step in order
+- Create a subfolder under `exp/` for each plan step
+- If a step is infeasible, document why in that step's folder (create a
+  `SKIPPED.md` with the reason) and move on
+- After all steps, verify that the plan's success criteria are met
+- If results contradict the hypothesis, report this honestly — negative
+  results with good analysis are valuable
+
 ## Reproducibility Checklist
 
 Before finishing, verify:
@@ -205,5 +267,7 @@ Before finishing, verify:
 - [ ] Ablation study for each novel component
 - [ ] No data leakage (verified)
 - [ ] All configuration documented in results.json
+- [ ] Each experiment has its own folder under exp/ with code and results
 - [ ] Figures saved for key results
 - [ ] Negative results reported honestly (if any)
+- [ ] Aggregated results.json at workspace root matches per-experiment results

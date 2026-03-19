@@ -1,278 +1,273 @@
-# Experiment Guidelines (Programming Languages)
+# Experiment Guidelines
 
-Distilled from the SIGPLAN Empirical Evaluation Checklist, best practices from
-PLDI/POPL/OOPSLA/ICFP artifact evaluation, and established norms in static
-analysis, compiler, and verification research.
-
-## Key difference from ML experiments
-
-PL experiments are fundamentally different from ML experiments. There is
-usually no training, no loss curves, and no random seeds. Instead, PL
-experiments involve formal proofs, running tools on codebases, measuring
-compilation performance, or synthesizing programs. Choose the right
-evaluation methodology for your contribution type.
+Distilled from Michael Lones' "How to Avoid ML Pitfalls", NeurIPS reproducibility
+checklist, REFORMS consensus framework, and Google's Rules of ML.
 
 ## Phase 1: Experiment Design (do this BEFORE writing code)
 
-### 1.1 Identify your contribution type and evaluation strategy
-
-| Contribution type | Primary evaluation | What to measure |
-|---|---|---|
-| Type system / formal semantics | Soundness proof | Proof correctness (pen-and-paper or mechanized) |
-| Static analysis | Run on real codebases | Precision, recall, false positive rate, analysis time |
-| Compiler optimization | Benchmark suites | Speedup, compile time overhead, code size |
-| Program synthesis | Synthesis benchmarks | Synthesis time, success rate, program quality |
-| Verification / model checking | Verification benchmarks | Verification time, proof size, expressiveness |
-| DSL design | Case studies + performance | Expressiveness, usability, performance vs. hand-written code |
-| Runtime system | Standard workloads | Throughput, latency, memory usage, pause times |
-| Bug finding tool | Run on known buggy code | Bugs found, false positives, analysis time |
-
-### 1.2 Formulate your claim
+### 1.1 Formulate your claim
 
 Before any implementation, write down:
 - **What is your hypothesis?** State it as a testable claim.
-  Examples:
-  - "Our type system is sound: well-typed programs do not get stuck."
-  - "Our analysis finds 30% more null-pointer bugs than tool X with fewer
-    false positives on the same benchmarks."
-  - "Our optimization produces code that is 15% faster on SPEC CPU 2017 with
-    less than 5% compile time overhead."
+  Example: "Method X improves accuracy over baseline Y on task Z because of property W."
 - **What evidence would convince a skeptical reader?**
-- **What would DISPROVE your claim?** Design experiments that could fail.
+- **What would DISPROVE your claim?** Design experiments that could fail — if your
+  experiment cannot possibly produce a negative result, it's not informative.
 
-### 1.3 Select baselines fairly
+### 1.2 Choose the right experiment type
+
+Not all research requires training a model. Choose what fits your claim:
+
+| Claim type | Experiment type | What to measure |
+|---|---|---|
+| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
+| "Component A is critical" | Ablation study | Performance with/without A |
+| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
+| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
+| "This property holds" | Analysis/probing | Measurements on existing models/data |
+| "This is faster/cheaper" | Systems experiment | Latency, throughput, memory, FLOPs |
+| "This benchmark is better" | Benchmark evaluation | Existing methods on new benchmark |
+| "This failure mode exists" | Failure analysis | Controlled examples that trigger failure |
+
+### 1.3 Select what to measure
+
+- Use standard metrics for your task (accuracy, F1, BLEU, FID, perplexity, etc.)
+- Report ALL standard metrics, not just the one where you win
+- If you propose a new metric, also report standard ones for comparison
+- Consider both performance AND cost: FLOPs, latency, memory, training time
+- For systems claims, report percentiles (p50, p95, p99), not just mean
+
+### 1.4 Choose datasets that test your claim
+
+- Use standard benchmarks when possible — they enable comparison with published work
+- Choose datasets that are relevant to your claim, not just convenient
+- If your claim is about robustness, test on distribution-shifted data
+- If your claim is about efficiency, test at multiple scales
+- If your claim is about generalization, test on multiple datasets
+- Document: data source, size, splits, preprocessing, any filtering applied
+
+### 1.5 Select baselines fairly
 
 - Include at least 2 meaningful baselines:
-  - One established tool or technique (the current standard)
-  - One recent published method (the current state of the art)
-- Run all baselines with equivalent effort (same machine, same time limits,
-  same benchmarks)
-- If a baseline tool is unavailable, cite published numbers and clearly state
-  you didn't rerun it
+  - One simple baseline (random, majority class, linear model, naive approach)
+  - One strong baseline (recent published method or established approach)
+- Run all baselines with equivalent effort (same compute, same tuning)
+- If a baseline is too expensive to run yourself, cite published numbers
+  and clearly state you didn't rerun it
 - Never compare against intentionally weak baselines to inflate your results
-- If comparing against commercial tools, be transparent about version and
-  configuration
 
-## Phase 2: Evaluation by Contribution Type
+### 1.6 Plan ablation studies
 
-### 2.1 Type systems and formal semantics
+- For each novel component in your method, plan to remove it and measure impact
+- If your contribution is a single technique, vary its key parameters instead
+- Plan which components to ablate BEFORE running experiments, not after seeing results
 
-**Soundness proofs** are the primary evidence:
-- State your main theorem precisely (e.g., progress + preservation, or
-  type safety as a single statement)
-- **Mechanized proofs** (in Coq, Lean, Agda, or Isabelle) are increasingly
-  expected and score higher with reviewers:
-  - Provide the full proof development as an artifact
-  - State which version of the proof assistant you used
-  - Document any axioms assumed (e.g., functional extensionality, classical logic)
-  - Measure: lines of proof code, time to check, ratio of proof to spec
-- **Pen-and-paper proofs**: acceptable but scrutinized more heavily:
-  - Include full proofs in the appendix
-  - State every lemma and its proof sketch
-  - Be explicit about which cases are "routine" vs. non-trivial
-- **Supplementary evaluation**: implement a type checker and run it on
-  example programs to demonstrate the type system is practical
+### 1.7 Think about confounders
 
-### 2.2 Static analyses
+- What else could explain your results besides your method?
+- Are you comparing with the same preprocessing, data splits, and compute budget?
+- Could the improvement come from more parameters, more data, or more compute
+  rather than from your actual contribution?
+- If using published baselines, are the setups truly comparable?
 
-**Run on real-world codebases**, not just microbenchmarks:
-- Use widely-used open-source projects (e.g., from GitHub top-starred repos
-  in the target language, Apache projects, or the DaCapo suite for Java)
-- Report the following metrics:
-  - **Precision**: fraction of reported issues that are real (not false positives)
-  - **Recall**: fraction of real issues that are found (if ground truth is known)
-  - **False positive rate**: number of false alarms per 1000 lines of code
-  - **Bugs found**: real, previously unknown bugs found (and reported/fixed upstream)
-  - **Analysis time**: wall-clock time and memory usage
-  - **Scalability**: how time/memory grows with program size (lines of code)
-- Standard benchmark suites by area:
-  - **Java analysis**: DaCapo, XCorpus
-  - **C analysis**: Juliet Test Suite (NIST), SPEC CPU 2017, GNU coreutils
-  - **Security analysis**: Juliet, OWASP Benchmark, CVE databases
-  - **Concurrency analysis**: SCTBench, CDSChecker benchmarks
-- Compare against prior tools on the SAME benchmarks they used, plus new ones
-- If your analysis finds real bugs, file bug reports and note whether they
-  were confirmed by developers
+## Phase 2: Implementation
 
-### 2.3 Compiler optimizations
+### Efficient use of resources
+You have a fixed time budget and compute resources — use them wisely:
+- **Parallelize independent experiments.** If experiments don't depend on each
+  other (e.g., different seeds, different baselines, different ablations),
+  run them in parallel using `subprocess`, `multiprocessing`, or shell `&`.
+- **Estimate runtime first.** Before launching the full experiment suite, time
+  a single short run and extrapolate. If your estimate exceeds the budget,
+  reduce epochs, use smaller models, or drop non-essential ablations.
+- **Use all available GPU memory.** If your model only uses 10GB of a 80GB GPU,
+  consider running multiple experiments simultaneously on the same GPU, or
+  increasing batch size for faster convergence.
+- **Prioritize.** Run the most important experiments first (method vs. strongest
+  baseline). If time runs out, you'll at least have the core comparison.
 
-**Use standard benchmark suites**:
-- **SPEC CPU 2017**: the gold standard for CPU-bound performance evaluation
-- **PolyBench/C**: for polyhedral and loop optimizations
-- **DaCapo**: for JVM optimizations
-- **Embench**: for embedded systems compilers
-- **LLVM test-suite**: for LLVM-based optimizations
-- **NPB (NAS Parallel Benchmarks)**: for parallel optimizations
+### General principles
+- Start simple. Get a minimal version working end-to-end first.
+- Add complexity one piece at a time. Evaluate each change independently.
+- Copy proven implementations from related papers before writing from scratch.
+- Use well-tested libraries (PyTorch, HuggingFace, scikit-learn, etc.)
+- Fix random seeds for reproducibility.
 
-**What to measure**:
-- **Speedup**: geometric mean speedup over baseline across benchmark suite
-- **Compile time overhead**: additional time to compile with the optimization
-- **Code size impact**: change in binary size
-- **Correctness**: verify output matches baseline for all benchmarks
-- Report per-benchmark results, not just aggregate — some optimizations help
-  some programs and hurt others
+### If training models
+- Verify loss at initialization matches theory (e.g., -log(1/n_classes) for softmax)
+- Overfit a single batch first — if you can't, your code has a bug
+- Turn off regularization initially (no dropout, augmentation, weight decay)
+- Use Adam optimizer with lr=3e-4 as a starting point
+- Use random search over grid search for hyperparameters
+- Disable learning rate decay until final tuning
 
-**Methodology**:
-- Run each benchmark at least 3 times, report median
-- Use performance counters (perf, PAPI) for micro-architectural analysis
-- Pin processes to cores, disable turbo boost, minimize background load
-- Report hardware: CPU model, cache sizes, memory, OS, compiler version
-- Warm up JIT compilers before measuring (for JVM/JS experiments)
+### If doing analysis/probing
+- Clearly document what you're measuring and why
+- Use controlled setups where possible (synthetic data with known properties)
+- Verify your measurement tool doesn't interfere with what you're measuring
 
-### 2.4 Program synthesis
-
-**What to measure**:
-- **Success rate**: fraction of benchmarks solved within the time limit
-- **Synthesis time**: time to produce a correct solution (median and distribution)
-- **Quality of synthesized programs**: size, readability, performance compared
-  to human-written solutions
-- **Generalization**: does the synthesizer handle unseen problem variants?
-
-**Standard benchmarks**:
-- **SyGuS-Comp benchmarks**: for syntax-guided synthesis
-- **Karel benchmarks**: for program synthesis from examples
-- **Domain-specific benchmarks**: string transformations (FlashFill),
-  SQL queries, tensor computations, etc.
-
-**Methodology**:
-- Set a reasonable time limit (e.g., 5 minutes per benchmark)
-- Report cumulative solved problems over time (cactus plot)
-- Compare against the same benchmarks used by competing synthesizers
-
-### 2.5 Verification and model checking
-
-**What to measure**:
-- **Verification time**: time to prove/disprove properties
-- **Expressiveness**: what properties can be expressed and verified?
-- **Proof burden**: how much annotation or specification is needed from the user?
-- **Scalability**: how verification time grows with program size
-- **False alarms**: for incomplete methods, what is the false positive rate?
-
-**Standard benchmarks**:
-- **SV-COMP**: the standard competition for software verification tools
-- **VerifyThis**: verification challenges
-- **SMTLIB benchmarks**: for SMT-based verification
-- **Boogie/Dafny benchmarks**: for deductive verification
-
-### 2.6 DSL design and implementation
-
-**Evaluate along multiple axes**:
-- **Expressiveness**: can the DSL express the intended class of programs?
-  Demonstrate with non-trivial case studies.
-- **Performance**: compare DSL-generated code against hand-written code in a
-  general-purpose language
-- **Usability**: if applicable, user studies or LOC comparisons
-- **Correctness**: prove or test that the DSL compiler/interpreter is correct
+### If doing systems experiments
+- Run multiple times to account for variance
+- Report median and percentiles, not just mean
+- Warm up the system before measuring (avoid cold-start effects)
+- Control for background processes, other workloads, thermal throttling
 
 ## Phase 3: Rigorous Evaluation
 
-### Handling non-determinism
-- PL tools are often deterministic. If yours is, state this explicitly (no
-  need for multiple random seeds)
-- If your tool has non-determinism (randomized search, heuristic ordering,
-  parallel execution), run multiple times and report statistics
-- For performance measurements, always run multiple times to account for
-  system variance — report median and min/max or IQR
+### Multiple runs (non-negotiable)
+- Run every experiment with at least 3 different random seeds
+- Report mean +/- standard deviation across runs
+- Use the SAME seeds for your method and all baselines (paired comparison)
+- Never report best-of-N runs — always report the average
 
-### Threats to validity
-- **Internal validity**: could something other than your technique explain the
-  results? (e.g., differences in implementation quality, language version)
-- **External validity**: do your benchmarks represent real-world usage? Are
-  they diverse enough?
-- **Construct validity**: do your metrics actually measure what you claim?
-  (e.g., false positive rate depends on ground truth quality)
+### Ablation studies (required)
+- Remove each novel component one at a time
+- Show quantitative impact: "without component X, metric drops from Y to Z"
+- This proves every part of your method contributes
 
-### Avoid common pitfalls
-- DO NOT cherry-pick benchmarks where your tool wins
-- DO NOT compare a polished implementation against a research prototype
-- DO NOT set time limits that favor your tool
-- DO NOT count "warnings" or "potential issues" as bugs found without validation
-- DO NOT claim soundness without a proof
-- DO NOT report only aggregate numbers — per-benchmark breakdowns reveal where
-  your technique helps and where it doesn't
-- DO NOT use microbenchmarks alone — real-world code is essential
-- DO NOT ignore compile time or analysis time — a 2x speedup that costs 10x
-  compile time may not be worth it
+### Statistical significance
+- Report 95% confidence intervals when claiming superiority
+- If confidence intervals overlap, you cannot claim your method is better
+- For multiple comparisons, apply correction (Bonferroni or similar)
+- Distinguish statistical significance from practical significance
 
-## Phase 4: What to Save
+### Avoid data leakage (REFORMS checklist)
+- Preprocessing statistics (mean, std, scaling) computed from training data ONLY
+- Feature selection done on training data ONLY, not full dataset
+- Data augmentation applied AFTER train/test split, not before
+- For time series, use temporal splits (no future data in training)
+- Test set used ONCE for final evaluation, not for iterative model selection
 
-Save everything needed to write the paper:
+## Phase 4: Common Pitfalls
+
+From Michael Lones' "How to Avoid ML Pitfalls":
+
+- DO NOT tune hyperparameters on the test set — use a validation set
+- DO NOT compare against baselines with different preprocessing or splits
+- DO NOT report only the metric where your method wins
+- DO NOT claim SOTA without comparing against actual SOTA methods
+- DO NOT treat benchmark results as ground truth — small improvements may be noise
+- DO NOT ignore negative results — report them honestly with analysis
+- DO NOT draw conclusions beyond your tested conditions
+- DO NOT assume deep learning is always better — test simpler alternatives too
+- DO NOT use a single train/test split — use cross-validation or multiple seeds
+- DO NOT forget to inspect your model — verify it learns meaningful patterns,
+  not spurious correlations
+
+## Phase 5: Workspace Structure
+
+Organize experiments so that each step has its own folder with code, results,
+and logs. This makes it easy to verify which code produced which results and
+ensures reproducibility.
 
 ```
-results.json          # structured results (see format below)
-figures/              # comparison plots, performance charts, cactus plots
-proofs/               # mechanized proof development (if applicable)
-benchmarks/           # benchmark programs or pointers to them
+exp/
+├── <experiment_name>/              # one folder per experiment/condition
+│   ├── run.py                      # experiment script
+│   ├── config.yaml (or .json)      # hyperparameters, settings
+│   ├── results.json                # per-experiment results
+│   └── logs/                       # training/eval logs, stdout
+│
+├── <baseline_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+├── <ablation_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+└── shared/                         # shared utilities across experiments
+    ├── data_loader.py              # data loading, preprocessing
+    ├── metrics.py                  # evaluation metrics
+    ├── models.py                   # model definitions
+    └── utils.py                    # common helpers
+
+data/                               # downloaded/processed datasets
+figures/                            # generated figures for the paper
+results.json                        # aggregated final results (see below)
 ```
 
-### results.json format (adapt to your contribution type)
+### Per-experiment results
+
+Each `exp/<name>/results.json` should capture that experiment's output:
+```json
+{
+  "experiment": "<name>",
+  "metrics": {"metric1": {"mean": 0.87, "std": 0.002}, ...},
+  "config": {"lr": 0.001, "epochs": 50, "seed": [42, 123, 456], ...},
+  "runtime_minutes": 45
+}
+```
+
+### Aggregated results.json (workspace root)
+
+After all experiments complete, compile a summary `results.json` at the
+workspace root that aggregates across all experiments:
 
 ```json
 {
   "method": {
-    "benchmarks_solved": 47,
-    "total_benchmarks": 50,
-    "median_time_seconds": 12.3,
-    "false_positives": 5,
-    "bugs_found": 23
+    "metric1": {"mean": 0.8734, "std": 0.0021},
+    "metric2": {"mean": 0.8521, "std": 0.0034}
   },
   "baselines": {
-    "tool_A": {
-      "benchmarks_solved": 38,
-      "total_benchmarks": 50,
-      "median_time_seconds": 45.7,
-      "false_positives": 12,
-      "bugs_found": 18
+    "baseline_name_1": {
+      "metric1": {"mean": 0.8102, "std": 0.0018}
     }
   },
-  "per_benchmark": {
-    "benchmark_1": {
-      "method_time": 2.1,
-      "method_result": "safe",
-      "tool_A_time": 5.3,
-      "tool_A_result": "safe"
+  "ablations": {
+    "without_component_A": {
+      "metric1": {"mean": 0.8401, "std": 0.0025}
     }
   },
   "config": {
-    "experiment_type": "static_analysis_evaluation",
-    "benchmark_suite": "DaCapo + XCorpus",
-    "time_limit_seconds": 300,
-    "hardware": "Intel Xeon E5-2680 v4, 128GB RAM",
-    "os": "Ubuntu 22.04",
-    "tool_version": "1.0.0",
-    "total_runtime_minutes": 240
+    "experiment_type": "empirical_evaluation",
+    "dataset": "dataset_name",
+    "seeds": [42, 123, 456],
+    "hardware": "1x GPU",
+    "total_runtime_minutes": 120
   }
 }
 ```
 
-### For formal contributions, also save:
+Adapt the structure to your experiment type. The key requirement:
+structured, machine-readable, complete, and honest.
 
-```json
-{
-  "proof": {
-    "assistant": "Coq 8.18",
-    "total_loc": 5200,
-    "spec_loc": 800,
-    "proof_loc": 4400,
-    "check_time_seconds": 120,
-    "axioms": ["functional_extensionality"],
-    "main_theorems": ["soundness", "completeness"]
-  }
-}
-```
+### Figures
 
-## Artifact Evaluation Checklist
+Save publication-ready figures to `figures/`:
+- Comparison plots (your method vs baselines)
+- Ablation charts (impact of each component)
+- Training curves (loss/metric over epochs)
+- Analysis visualizations (distributions, embeddings, etc.)
 
-SIGPLAN venues have artifact evaluation. Before finishing, verify:
+Each figure should be self-contained with axis labels, legends, and titles.
+
+## Phase 6: Plan Compliance
+
+If you have a `plan.json` from the ideation stage:
+- Execute every step in order
+- Create a subfolder under `exp/` for each plan step
+- If a step is infeasible, document why in that step's folder (create a
+  `SKIPPED.md` with the reason) and move on
+- After all steps, verify that the plan's success criteria are met
+- If results contradict the hypothesis, report this honestly — negative
+  results with good analysis are valuable
+
+## Reproducibility Checklist
+
+Before finishing, verify:
 - [ ] Claim is clearly stated and testable
-- [ ] Evaluation type matches the contribution type
+- [ ] Experiment type matches the claim
+- [ ] Fixed random seeds used throughout
 - [ ] At least 2 meaningful baselines compared fairly
-- [ ] Benchmarks are standard or well-justified
-- [ ] Per-benchmark results reported (not just aggregates)
-- [ ] Analysis time and memory usage reported
-- [ ] Threats to validity discussed
-- [ ] All tool versions, hardware, and OS documented in results.json
+- [ ] Results from 3+ runs with mean +/- std
+- [ ] Ablation study for each novel component
+- [ ] No data leakage (verified)
+- [ ] All configuration documented in results.json
+- [ ] Each experiment has its own folder under exp/ with code and results
 - [ ] Figures saved for key results
 - [ ] Negative results reported honestly (if any)
-- [ ] Proof development compiles cleanly (if applicable)
-- [ ] Artifact is self-contained and reproducible (for AE submission)
+- [ ] Aggregated results.json at workspace root matches per-experiment results

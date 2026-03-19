@@ -80,13 +80,6 @@ def _build_task(
             f"   - RAM: {mem}GB\n"
             f"   - Time limit: ~{hours} hours total for ALL experiments\n"
             "   - NO GPU available — all computation must run on CPU.\n"
-            "   Plan your experiments to fit within these resources.\n"
-        )
-        impl_block = (
-            "2. IMPLEMENTATION\n"
-            "   - Write clean, runnable experiment code\n"
-            "   - Install any packages you need (pip install)\n"
-            "   - All computation runs on CPU — optimize accordingly\n\n"
         )
     else:
         resource_block = (
@@ -95,13 +88,6 @@ def _build_task(
             f"   - RAM: {mem}GB\n"
             f"   - CPU: {cpus} cores\n"
             f"   - Time limit: ~{hours} hours total for ALL experiments\n"
-            "   Plan your experiments to fit within these resources.\n"
-        )
-        impl_block = (
-            "2. IMPLEMENTATION\n"
-            "   - Write clean, runnable experiment code\n"
-            "   - Install any packages you need (pip install)\n"
-            "   - Use GPUs for training (CUDA is available)\n\n"
         )
 
     exp_retries_left = max_attempts - attempt
@@ -127,29 +113,15 @@ def _build_task(
         "and adjust accordingly.\n\n"
         "If plan.json does not exist, design experiments from scratch based\n"
         "on idea.json and experiment_guidelines.md.\n\n"
-        "Whether following a plan or designing from scratch, ensure:\n\n"
-        "1. EXPERIMENT DESIGN\n"
-        "   - Use standard benchmarks when possible\n"
-        "   - Define evaluation metrics relevant to your claims\n"
-        "   - Include at least 2 meaningful baselines\n"
-        "   - Plan ablation studies\n\n"
-        f"{impl_block}"
-        "3. EXECUTION\n"
-        "   - Run your method AND all baselines on the same data splits\n"
-        "   - Run with at least 3 different random seeds for error bars\n"
-        "   - Run ablation experiments\n"
-        "   - If something crashes, debug and fix it — iterate until it works\n\n"
-        "4. RESULTS\n"
-        "   - Save all results to results.json with this structure:\n"
-        "     {\n"
-        '       "method": {"metric1": mean±std, ...},\n'
-        '       "baselines": {"baseline1": {"metric1": mean±std, ...}, ...},\n'
-        '       "ablations": {"no_component_X": {"metric1": mean±std, ...}, ...},\n'
-        '       "config": {"seeds": [...], "dataset": "...", "epochs": N, ...}\n'
-        "     }\n"
-        "   - Save any figures (training curves, comparison plots) to figures/\n\n"
-        "You have full autonomy — install packages, write multiple files, "
-        "debug and fix errors, run multiple experiment variants, etc.\n\n"
+        "Read experiment_guidelines.md carefully — it covers experiment design,\n"
+        "implementation, workspace structure, and the reproducibility checklist.\n\n"
+        "Key requirements:\n"
+        "- At least 2 meaningful baselines\n"
+        "- At least 3 random seeds with mean +/- std\n"
+        "- Ablation studies for each novel component\n"
+        "- Organize code under exp/ with one subfolder per experiment\n"
+        "- Save aggregated results.json at workspace root\n"
+        "- Save figures to figures/\n\n"
         "CRITICAL: Every number in results.json MUST come from actually running "
         "the experiment code. DO NOT fabricate, hardcode, or manually write results. "
         "If your method doesn't beat baselines, report that honestly — negative "

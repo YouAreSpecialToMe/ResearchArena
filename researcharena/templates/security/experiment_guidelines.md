@@ -1,8 +1,7 @@
-# Experiment Guidelines (Computer Security)
+# Experiment Guidelines
 
-Distilled from reviewing practices at CCS, IEEE S&P, USENIX Security, and NDSS,
-combined with best practices from systems security, network security, and
-applied cryptography research.
+Distilled from Michael Lones' "How to Avoid ML Pitfalls", NeurIPS reproducibility
+checklist, REFORMS consensus framework, and Google's Rules of ML.
 
 ## Phase 1: Experiment Design (do this BEFORE writing code)
 
@@ -10,276 +9,225 @@ applied cryptography research.
 
 Before any implementation, write down:
 - **What is your hypothesis?** State it as a testable claim.
-  Examples:
-  - Attack: "Our attack can extract secret keys from implementation X with
-    Y% success rate using Z resources."
-  - Defense: "Our defense detects attack class X with Y% detection rate
-    and less than Z% false positive rate, with at most W% performance overhead."
-  - Analysis: "Protocol X is vulnerable to attack Y under threat model Z."
-  - Measurement: "X% of deployed systems are vulnerable to attack Y."
-- **What evidence would convince a skeptical reviewer?**
-- **What would DISPROVE your claim?** Design experiments that could fail.
+  Example: "Method X improves accuracy over baseline Y on task Z because of property W."
+- **What evidence would convince a skeptical reader?**
+- **What would DISPROVE your claim?** Design experiments that could fail — if your
+  experiment cannot possibly produce a negative result, it's not informative.
 
 ### 1.2 Choose the right experiment type
 
-Security research uses different evaluation approaches than ML. Choose what
-fits your claim:
+Not all research requires training a model. Choose what fits your claim:
 
 | Claim type | Experiment type | What to measure |
 |---|---|---|
-| "Our attack works" | Attack demonstration | Success rate, time to exploit, required access/resources |
-| "Our defense detects X" | Detection evaluation | True positive rate, false positive rate, detection latency |
-| "Our defense prevents X" | Prevention evaluation | Attack success rate with/without defense, evasion resistance |
-| "Our defense is practical" | Performance evaluation | Latency overhead, throughput impact, memory cost |
-| "Protocol X is secure" | Formal verification | Proof in ProVerif/Tamarin/EasyCrypt, or counterexample |
-| "Protocol X is broken" | Protocol attack | Concrete attack trace, exploit demonstration |
-| "X is widespread" | Measurement study | Prevalence statistics, temporal trends, demographic breakdown |
-| "Our crypto scheme is secure" | Security proof + benchmarks | Reduction-based proof, parameter analysis, implementation benchmarks |
-| "Component A is critical" | Ablation/component analysis | Performance with/without A |
+| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
+| "Component A is critical" | Ablation study | Performance with/without A |
+| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
+| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
+| "This property holds" | Analysis/probing | Measurements on existing models/data |
+| "This is faster/cheaper" | Systems experiment | Latency, throughput, memory, FLOPs |
+| "This benchmark is better" | Benchmark evaluation | Existing methods on new benchmark |
+| "This failure mode exists" | Failure analysis | Controlled examples that trigger failure |
 
 ### 1.3 Select what to measure
 
-Metrics depend on your contribution type:
+- Use standard metrics for your task (accuracy, F1, BLEU, FID, perplexity, etc.)
+- Report ALL standard metrics, not just the one where you win
+- If you propose a new metric, also report standard ones for comparison
+- Consider both performance AND cost: FLOPs, latency, memory, training time
+- For systems claims, report percentiles (p50, p95, p99), not just mean
 
-**For attacks:**
-- Success rate (% of attempts that succeed)
-- Time to exploit (seconds/minutes/hours)
-- Required resources (compute, network access, physical proximity)
-- Required attacker capabilities (what privileges are needed?)
-- Stealthiness (can the attack be detected by existing defenses?)
-- Impact (what exactly is compromised? confidentiality, integrity, availability?)
+### 1.4 Choose datasets that test your claim
 
-**For defenses:**
-- Detection rate / true positive rate (% of attacks correctly identified)
-- False positive rate (% of benign activity incorrectly flagged) -- this is
-  often the most important metric; high false positive rates make defenses unusable
-- False negative rate (% of attacks missed)
-- Performance overhead:
-  - Latency: added delay per operation (ms, us)
-  - Throughput: reduction in requests/second or transactions/second
-  - Memory: additional RAM/storage required
-  - CPU: additional processing load
-- Evasion resistance: does the defense hold against adaptive adversaries?
-- Deployment cost: what changes are required to adopt this defense?
-
-**For protocol/formal analysis:**
-- Security properties verified (authentication, confidentiality, integrity,
-  forward secrecy, etc.)
-- Assumptions required for the proof
-- Verification time and model size (for automated provers)
-- Any attacks found, with concrete traces
-
-**For measurement studies:**
-- Sample size and representativeness
-- Confidence intervals for prevalence estimates
-- Temporal trends (is the problem growing or shrinking?)
-- Breakdown by category (OS, version, geography, sector)
-- Limitations of the measurement methodology
-
-**For cryptographic constructions:**
-- Security parameter analysis (what parameters achieve 128-bit security?)
-- Key sizes, ciphertext sizes, signature sizes
-- Computation time (encryption, decryption, signing, verification)
-- Comparison with existing schemes at equivalent security levels
-
-### 1.4 Choose evaluation targets and datasets
-
-- **For attacks**: test against real, widely-deployed systems or faithful
-  reproductions of them. Attacks on toy systems are not convincing.
-- **For defenses**: evaluate on realistic workloads and real attack datasets.
-  Use established benchmarks when they exist:
-  - Network intrusion: CICIDS, CTU-13, or capture your own traffic
-  - Malware: VirusTotal, MalwareBazaar, or curated collections
-  - Web security: OWASP benchmarks, real-world vulnerability databases
-  - Binary analysis: LAVA-M, Magma, or real CVEs
-  - Fuzzing: Google FuzzBench, OSS-Fuzz targets
-- **For measurement studies**: use representative datasets. Clearly document
-  any sampling bias and its implications.
-- Document: data source, collection methodology, size, time period,
-  any filtering or preprocessing applied, ethical considerations for
-  data collection
+- Use standard benchmarks when possible — they enable comparison with published work
+- Choose datasets that are relevant to your claim, not just convenient
+- If your claim is about robustness, test on distribution-shifted data
+- If your claim is about efficiency, test at multiple scales
+- If your claim is about generalization, test on multiple datasets
+- Document: data source, size, splits, preprocessing, any filtering applied
 
 ### 1.5 Select baselines fairly
 
 - Include at least 2 meaningful baselines:
-  - One simple baseline (signature matching, rule-based, standard config)
-  - One strong baseline (recent published defense/attack from a top venue)
-- Run all baselines with equivalent effort on the same evaluation setup
-- If a baseline tool is publicly available, run it yourself rather than
-  citing numbers from a different evaluation setup
-- If a baseline is too complex to reproduce, cite published numbers and
-  clearly state the comparison is indirect
-- Never compare against intentionally weak baselines
+  - One simple baseline (random, majority class, linear model, naive approach)
+  - One strong baseline (recent published method or established approach)
+- Run all baselines with equivalent effort (same compute, same tuning)
+- If a baseline is too expensive to run yourself, cite published numbers
+  and clearly state you didn't rerun it
+- Never compare against intentionally weak baselines to inflate your results
 
-### 1.6 Plan for adaptive adversaries
+### 1.6 Plan ablation studies
 
-This is unique to security and CRITICAL:
-- If you propose a defense, you MUST evaluate against adversaries who
-  know about your defense and actively try to evade it
-- Design at least one adaptive attack: an attacker who knows your
-  detection algorithm and modifies their behavior accordingly
-- If your defense relies on a secret (key, model, threshold), evaluate
-  what happens if the secret is partially or fully compromised
-- A defense that only works against non-adaptive adversaries will be
-  rejected at top venues
+- For each novel component in your method, plan to remove it and measure impact
+- If your contribution is a single technique, vary its key parameters instead
+- Plan which components to ablate BEFORE running experiments, not after seeing results
 
 ### 1.7 Think about confounders
 
-- Could your attack succeed due to a misconfiguration rather than a
-  fundamental vulnerability?
-- Could your defense's performance come from the dataset being easy
-  rather than your technique being good?
-- Are you comparing defenses at the same false positive rate?
-- Is the performance overhead measured under realistic load conditions?
-- Could environmental factors (network conditions, hardware differences)
-  explain your results?
+- What else could explain your results besides your method?
+- Are you comparing with the same preprocessing, data splits, and compute budget?
+- Could the improvement come from more parameters, more data, or more compute
+  rather than from your actual contribution?
+- If using published baselines, are the setups truly comparable?
 
 ## Phase 2: Implementation
 
+### Efficient use of resources
+You have a fixed time budget and compute resources — use them wisely:
+- **Parallelize independent experiments.** If experiments don't depend on each
+  other (e.g., different seeds, different baselines, different ablations),
+  run them in parallel using `subprocess`, `multiprocessing`, or shell `&`.
+- **Estimate runtime first.** Before launching the full experiment suite, time
+  a single short run and extrapolate. If your estimate exceeds the budget,
+  reduce epochs, use smaller models, or drop non-essential ablations.
+- **Use all available GPU memory.** If your model only uses 10GB of a 80GB GPU,
+  consider running multiple experiments simultaneously on the same GPU, or
+  increasing batch size for faster convergence.
+- **Prioritize.** Run the most important experiments first (method vs. strongest
+  baseline). If time runs out, you'll at least have the core comparison.
+
 ### General principles
-- Start simple. Get a minimal proof of concept working first.
-- Add complexity one piece at a time. Test each change independently.
-- Use established security tools and frameworks:
-  - Fuzzing: AFL++, libFuzzer, honggfuzz
-  - Binary analysis: angr, Ghidra, Binary Ninja
-  - Network: Scapy, Wireshark, tcpdump
-  - Crypto: OpenSSL, libsodium, PyCryptodome
-  - Formal verification: ProVerif, Tamarin, CBMC, KLEE
-  - Web security: Burp Suite, OWASP ZAP
-  - Containers/VMs: Docker, QEMU for isolated testing
-- Fix random seeds where applicable (fuzzing, ML-based detection, etc.)
+- Start simple. Get a minimal version working end-to-end first.
+- Add complexity one piece at a time. Evaluate each change independently.
+- Copy proven implementations from related papers before writing from scratch.
+- Use well-tested libraries (PyTorch, HuggingFace, scikit-learn, etc.)
+- Fix random seeds for reproducibility.
 
-### If implementing attacks
-- Work in an isolated environment (VMs, containers, air-gapped networks)
-- Document every step of the attack for reproducibility
-- Capture evidence: packet captures, logs, screenshots, traces
-- Measure timing precisely (use hardware counters for side channels)
-- Test against multiple versions/configurations of the target
+### If training models
+- Verify loss at initialization matches theory (e.g., -log(1/n_classes) for softmax)
+- Overfit a single batch first — if you can't, your code has a bug
+- Turn off regularization initially (no dropout, augmentation, weight decay)
+- Use Adam optimizer with lr=3e-4 as a starting point
+- Use random search over grid search for hyperparameters
+- Disable learning rate decay until final tuning
 
-### If implementing defenses
-- Instrument the system to measure performance overhead accurately
-- Test with realistic workloads, not just microbenchmarks
-- Include both benign and malicious traffic in your evaluation
-- Measure overhead under varying load conditions (idle, normal, peak)
-- Implement logging for detection events (true/false positives/negatives)
+### If doing analysis/probing
+- Clearly document what you're measuring and why
+- Use controlled setups where possible (synthetic data with known properties)
+- Verify your measurement tool doesn't interfere with what you're measuring
 
-### If doing formal verification
-- Start with a simplified model, then add complexity
-- Document all abstractions and simplifications
-- Verify known-secure protocols first to validate your model
-- Report verification time, number of states explored, any manual steps
-
-### If doing measurement studies
-- Automate data collection for reproducibility
-- Implement rate limiting and follow ethical scanning guidelines
-- Log all raw data before processing
-- Use established scanning tools (ZMap, Censys, Shodan APIs) when possible
-- Follow responsible scanning practices (identify yourself, provide opt-out)
+### If doing systems experiments
+- Run multiple times to account for variance
+- Report median and percentiles, not just mean
+- Warm up the system before measuring (avoid cold-start effects)
+- Control for background processes, other workloads, thermal throttling
 
 ## Phase 3: Rigorous Evaluation
 
-### Multiple runs (required where applicable)
-- Run every non-deterministic experiment at least 3 times
-- For attacks: report success rate over multiple attempts
-- For defenses with ML components: use multiple random seeds
-- For performance measurements: report median and percentiles (p50, p95, p99)
-- For fuzzing: run for the same duration with different seeds
+### Multiple runs (non-negotiable)
+- Run every experiment with at least 3 different random seeds
+- Report mean +/- standard deviation across runs
+- Use the SAME seeds for your method and all baselines (paired comparison)
+- Never report best-of-N runs — always report the average
 
-### Ablation studies (required for multi-component systems)
-- Remove or disable each novel component one at a time
-- Show quantitative impact: "without component X, detection rate drops
-  from Y% to Z%" or "without optimization X, overhead increases from Y% to Z%"
-- This proves every part of your system contributes
+### Ablation studies (required)
+- Remove each novel component one at a time
+- Show quantitative impact: "without component X, metric drops from Y to Z"
+- This proves every part of your method contributes
 
-### Evasion analysis (required for defenses)
-- Test against at least one adaptive adversary (see Phase 1, Section 1.6)
-- Document which evasion strategies you considered and tested
-- If your defense can be evaded, acknowledge it honestly and discuss
-  the conditions under which evasion is possible
-- Consider polymorphic attacks, mimicry attacks, and adversarial examples
-  as applicable
-
-### Performance overhead analysis (required for defenses)
-- Measure overhead on realistic benchmarks:
-  - Web servers: requests/second, response latency
-  - Databases: transactions/second, query latency
-  - Applications: end-to-end task completion time
-  - System-level: CPU utilization, memory consumption, I/O overhead
-- Compare: unprotected system vs. your defense vs. existing defenses
-- Report both average case and worst case
-- Test at multiple scales (1x, 10x, 100x typical load)
-
-### Scalability analysis (recommended)
-- How does your system scale with input size, network size, or attack complexity?
-- Report resource consumption at multiple scales
-- Identify bottlenecks and discuss practical deployment limits
-
-### Statistical rigor
-- Report confidence intervals for rates and proportions
-- For measurement studies, account for sampling bias
-- For comparisons, use appropriate statistical tests
+### Statistical significance
+- Report 95% confidence intervals when claiming superiority
+- If confidence intervals overlap, you cannot claim your method is better
+- For multiple comparisons, apply correction (Bonferroni or similar)
 - Distinguish statistical significance from practical significance
+
+### Avoid data leakage (REFORMS checklist)
+- Preprocessing statistics (mean, std, scaling) computed from training data ONLY
+- Feature selection done on training data ONLY, not full dataset
+- Data augmentation applied AFTER train/test split, not before
+- For time series, use temporal splits (no future data in training)
+- Test set used ONCE for final evaluation, not for iterative model selection
 
 ## Phase 4: Common Pitfalls
 
-Security-specific pitfalls:
+From Michael Lones' "How to Avoid ML Pitfalls":
 
-- DO NOT evaluate defenses only against non-adaptive adversaries
-- DO NOT ignore false positive rates -- a defense with 99% detection but
-  10% false positives is often useless in practice
-- DO NOT test attacks only on default/misconfigured targets
-- DO NOT measure performance overhead on toy workloads
-- DO NOT claim formal security guarantees without a formal proof
-- DO NOT use outdated or unrepresentative datasets
-- DO NOT scan or attack systems without authorization
-- DO NOT ignore ethical considerations (responsible disclosure, IRB approval)
-- DO NOT compare defenses at different false positive rate operating points
-- DO NOT cherry-pick attack scenarios where your defense works best
-- DO NOT assume the attacker is static -- real attackers adapt
-- DO NOT report only aggregate metrics -- break down by attack type/category
+- DO NOT tune hyperparameters on the test set — use a validation set
+- DO NOT compare against baselines with different preprocessing or splits
+- DO NOT report only the metric where your method wins
+- DO NOT claim SOTA without comparing against actual SOTA methods
+- DO NOT treat benchmark results as ground truth — small improvements may be noise
+- DO NOT ignore negative results — report them honestly with analysis
+- DO NOT draw conclusions beyond your tested conditions
+- DO NOT assume deep learning is always better — test simpler alternatives too
+- DO NOT use a single train/test split — use cross-validation or multiple seeds
+- DO NOT forget to inspect your model — verify it learns meaningful patterns,
+  not spurious correlations
 
-## Phase 5: What to Save
+## Phase 5: Workspace Structure
 
-Save everything needed to write the paper:
+Organize experiments so that each step has its own folder with code, results,
+and logs. This makes it easy to verify which code produced which results and
+ensures reproducibility.
 
 ```
-results.json          # structured results (see format below)
-figures/              # performance charts, ROC curves, overhead graphs
+exp/
+├── <experiment_name>/              # one folder per experiment/condition
+│   ├── run.py                      # experiment script
+│   ├── config.yaml (or .json)      # hyperparameters, settings
+│   ├── results.json                # per-experiment results
+│   └── logs/                       # training/eval logs, stdout
+│
+├── <baseline_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+├── <ablation_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+└── shared/                         # shared utilities across experiments
+    ├── data_loader.py              # data loading, preprocessing
+    ├── metrics.py                  # evaluation metrics
+    ├── models.py                   # model definitions
+    └── utils.py                    # common helpers
+
+data/                               # downloaded/processed datasets
+figures/                            # generated figures for the paper
+results.json                        # aggregated final results (see below)
 ```
 
-### results.json format
+### Per-experiment results
+
+Each `exp/<name>/results.json` should capture that experiment's output:
+```json
+{
+  "experiment": "<name>",
+  "metrics": {"metric1": {"mean": 0.87, "std": 0.002}, ...},
+  "config": {"lr": 0.001, "epochs": 50, "seed": [42, 123, 456], ...},
+  "runtime_minutes": 45
+}
+```
+
+### Aggregated results.json (workspace root)
+
+After all experiments complete, compile a summary `results.json` at the
+workspace root that aggregates across all experiments:
 
 ```json
 {
   "method": {
-    "detection_rate": {"mean": 0.9734, "std": 0.0021},
-    "false_positive_rate": {"mean": 0.0023, "std": 0.0005},
-    "latency_overhead_ms": {"mean": 2.3, "std": 0.4},
-    "throughput_overhead_pct": {"mean": 4.7, "std": 0.8}
+    "metric1": {"mean": 0.8734, "std": 0.0021},
+    "metric2": {"mean": 0.8521, "std": 0.0034}
   },
   "baselines": {
-    "baseline_defense_1": {
-      "detection_rate": {"mean": 0.9102, "std": 0.0018},
-      "false_positive_rate": {"mean": 0.0087, "std": 0.0012}
+    "baseline_name_1": {
+      "metric1": {"mean": 0.8102, "std": 0.0018}
     }
   },
   "ablations": {
     "without_component_A": {
-      "detection_rate": {"mean": 0.9201, "std": 0.0025}
-    }
-  },
-  "evasion_analysis": {
-    "adaptive_attack_1": {
-      "detection_rate_under_evasion": {"mean": 0.8901, "std": 0.0034}
+      "metric1": {"mean": 0.8401, "std": 0.0025}
     }
   },
   "config": {
-    "experiment_type": "defense_evaluation",
-    "target_system": "system_name_and_version",
+    "experiment_type": "empirical_evaluation",
     "dataset": "dataset_name",
     "seeds": [42, 123, 456],
-    "hardware": "description",
-    "total_runtime_minutes": 240
+    "hardware": "1x GPU",
+    "total_runtime_minutes": 120
   }
 }
 ```
@@ -287,20 +235,39 @@ figures/              # performance charts, ROC curves, overhead graphs
 Adapt the structure to your experiment type. The key requirement:
 structured, machine-readable, complete, and honest.
 
+### Figures
+
+Save publication-ready figures to `figures/`:
+- Comparison plots (your method vs baselines)
+- Ablation charts (impact of each component)
+- Training curves (loss/metric over epochs)
+- Analysis visualizations (distributions, embeddings, etc.)
+
+Each figure should be self-contained with axis labels, legends, and titles.
+
+## Phase 6: Plan Compliance
+
+If you have a `plan.json` from the ideation stage:
+- Execute every step in order
+- Create a subfolder under `exp/` for each plan step
+- If a step is infeasible, document why in that step's folder (create a
+  `SKIPPED.md` with the reason) and move on
+- After all steps, verify that the plan's success criteria are met
+- If results contradict the hypothesis, report this honestly — negative
+  results with good analysis are valuable
+
 ## Reproducibility Checklist
 
 Before finishing, verify:
 - [ ] Claim is clearly stated and testable
-- [ ] Threat model is precisely defined
 - [ ] Experiment type matches the claim
-- [ ] Evaluation uses realistic systems/workloads, not toy examples
+- [ ] Fixed random seeds used throughout
 - [ ] At least 2 meaningful baselines compared fairly
-- [ ] Results from multiple runs with mean +/- std (where applicable)
+- [ ] Results from 3+ runs with mean +/- std
 - [ ] Ablation study for each novel component
-- [ ] Evasion analysis against adaptive adversaries (for defenses)
-- [ ] Performance overhead measured on realistic benchmarks (for defenses)
-- [ ] False positive rate reported (for detection systems)
+- [ ] No data leakage (verified)
 - [ ] All configuration documented in results.json
-- [ ] Figures saved for key results (ROC curves, overhead plots, etc.)
-- [ ] Ethical considerations documented (responsible disclosure, IRB)
+- [ ] Each experiment has its own folder under exp/ with code and results
+- [ ] Figures saved for key results
 - [ ] Negative results reported honestly (if any)
+- [ ] Aggregated results.json at workspace root matches per-experiment results

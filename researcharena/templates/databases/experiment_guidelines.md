@@ -1,8 +1,7 @@
-# Experiment Guidelines (Databases)
+# Experiment Guidelines
 
-Distilled from SIGMOD/VLDB experimental methodology standards, the SIGMOD
-reproducibility initiative, TPC benchmark specifications, and database
-systems evaluation best practices.
+Distilled from Michael Lones' "How to Avoid ML Pitfalls", NeurIPS reproducibility
+checklist, REFORMS consensus framework, and Google's Rules of ML.
 
 ## Phase 1: Experiment Design (do this BEFORE writing code)
 
@@ -10,289 +9,225 @@ systems evaluation best practices.
 
 Before any implementation, write down:
 - **What is your hypothesis?** State it as a testable claim.
-  Example: "Our join algorithm reduces execution time by 2x over hash join
-  on skewed TPC-H workloads because it avoids partition imbalance."
-- **What evidence would convince a skeptical database reviewer?**
-- **What would DISPROVE your claim?** Design experiments that could fail — if
-  your experiment cannot possibly produce a negative result, it's not
-  informative.
+  Example: "Method X improves accuracy over baseline Y on task Z because of property W."
+- **What evidence would convince a skeptical reader?**
+- **What would DISPROVE your claim?** Design experiments that could fail — if your
+  experiment cannot possibly produce a negative result, it's not informative.
 
 ### 1.2 Choose the right experiment type
 
-Not all database research requires building a full system. Choose what fits
-your claim:
+Not all research requires training a model. Choose what fits your claim:
 
 | Claim type | Experiment type | What to measure |
 |---|---|---|
-| "Our method outperforms X" | Empirical comparison | Latency, throughput on benchmarks |
-| "Component A is critical" | Ablation / micro-benchmark | Performance with/without A |
-| "This scales to large data" | Scalability experiment | Metrics vs. data size / clients |
-| "Our theory predicts X" | Theoretical validation | Synthetic setup with known properties |
-| "This is faster/cheaper" | Systems experiment | Latency, throughput, memory, I/O |
-| "This structure is better" | Data structure evaluation | Build time, lookup, space overhead |
-| "This protocol is correct" | Correctness argument | Formal proof + stress tests |
-| "This tradeoff exists" | Sensitivity analysis | Metrics vs. tuning parameters |
+| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
+| "Component A is critical" | Ablation study | Performance with/without A |
+| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
+| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
+| "This property holds" | Analysis/probing | Measurements on existing models/data |
+| "This is faster/cheaper" | Systems experiment | Latency, throughput, memory, FLOPs |
+| "This benchmark is better" | Benchmark evaluation | Existing methods on new benchmark |
+| "This failure mode exists" | Failure analysis | Controlled examples that trigger failure |
 
 ### 1.3 Select what to measure
 
-Standard database metrics (report all that are relevant to your claim):
+- Use standard metrics for your task (accuracy, F1, BLEU, FID, perplexity, etc.)
+- Report ALL standard metrics, not just the one where you win
+- If you propose a new metric, also report standard ones for comparison
+- Consider both performance AND cost: FLOPs, latency, memory, training time
+- For systems claims, report percentiles (p50, p95, p99), not just mean
 
-**Performance metrics:**
-- Query execution time (wall-clock, report median and percentiles: p50, p95, p99)
-- Throughput (transactions/sec for OLTP, queries/sec for analytics)
-- Latency distribution (not just average — tail latency matters)
+### 1.4 Choose datasets that test your claim
 
-**Resource metrics:**
-- Memory consumption (peak and steady-state)
-- Storage overhead (bytes per record, space amplification)
-- I/O volume (bytes read/written, number of I/O operations)
-- CPU utilization and cache miss rates (when relevant)
-
-**Construction/setup metrics (for data structures and indexes):**
-- Build time / index construction time
-- Bulk load performance
-- Insert/update/delete throughput
-
-**Scalability metrics:**
-- Report metrics as a function of: data size (scale factor), number of
-  concurrent clients/threads, selectivity, data skew
-- Show behavior at multiple scales — a single data point is not a
-  scalability experiment
-
-### 1.4 Choose benchmarks that test your claim
-
-Use standard benchmarks when possible — they enable comparison with
-published work and are familiar to reviewers.
-
-**Analytics / OLAP:**
-- TPC-H: standard decision-support benchmark (8 tables, 22 queries,
-  scale factors 1-1000)
-- TPC-DS: more complex decision-support (24 tables, 99 queries, more
-  realistic schema and query mix)
-- Star Schema Benchmark (SSB): simplified star-schema analytics
-- JOB (Join Order Benchmark): real-world join queries on IMDb data,
-  specifically designed to stress cardinality estimation
-
-**Transactional / OLTP:**
-- TPC-C: standard OLTP benchmark (warehouse model, 5 transaction types)
-- YCSB (Yahoo Cloud Serving Benchmark): key-value workloads with
-  configurable read/write ratio, request distribution, record size
-- TATP (Telecom Application Transaction Processing)
-- SmallBank: simple banking transactions for concurrency control evaluation
-
-**Specialized:**
-- Microbenchmarks: custom workloads that isolate your specific contribution
-  (e.g., point lookups, range scans, skewed inserts). Always pair these
-  with a standard benchmark.
-- Real-world datasets: use publicly available real data when it strengthens
-  your claim (e.g., OpenStreetMap for spatial, Wikipedia edit history for
-  temporal, LDBC Social Network for graph workloads)
+- Use standard benchmarks when possible — they enable comparison with published work
+- Choose datasets that are relevant to your claim, not just convenient
+- If your claim is about robustness, test on distribution-shifted data
+- If your claim is about efficiency, test at multiple scales
+- If your claim is about generalization, test on multiple datasets
+- Document: data source, size, splits, preprocessing, any filtering applied
 
 ### 1.5 Select baselines fairly
 
 - Include at least 2 meaningful baselines:
-  - One established system or textbook approach (e.g., PostgreSQL's hash
-    join, B-tree index, 2PL concurrency control)
-  - One recent published method that represents the state of the art
-- Use well-known open-source systems as baselines when possible:
-  PostgreSQL, MySQL, DuckDB, SQLite, LevelDB/RocksDB, or the specific
-  system your technique extends
-- Run all baselines on the same hardware with equivalent tuning effort
-  - This means: same buffer pool size, same number of threads, same
-    storage device, same compiler optimization level
-  - Tune baseline systems properly — an untuned PostgreSQL is not a fair
-    baseline (configure shared_buffers, work_mem, effective_cache_size, etc.)
+  - One simple baseline (random, majority class, linear model, naive approach)
+  - One strong baseline (recent published method or established approach)
+- Run all baselines with equivalent effort (same compute, same tuning)
 - If a baseline is too expensive to run yourself, cite published numbers
-  and clearly state the hardware differences
-- Never compare against intentionally weak or misconfigured baselines
+  and clearly state you didn't rerun it
+- Never compare against intentionally weak baselines to inflate your results
 
-### 1.6 Plan ablation and sensitivity studies
+### 1.6 Plan ablation studies
 
-- For each novel component in your system/algorithm, plan to disable it
-  and measure the impact
-- Plan parameter sensitivity experiments: vary key parameters one at a time
-  and show how they affect performance
-  - Data size (scale factor): e.g., 1GB, 10GB, 100GB
-  - Selectivity: vary predicate selectivity from low to high
-  - Skew: vary Zipfian parameter from uniform (0.0) to highly skewed (1.5)
-  - Number of concurrent clients: e.g., 1, 2, 4, 8, 16, 32, 64
-  - For data structures: vary key size, value size, fill factor
-- Plan which parameters to vary BEFORE running experiments, not after
-  seeing results
+- For each novel component in your method, plan to remove it and measure impact
+- If your contribution is a single technique, vary its key parameters instead
+- Plan which components to ablate BEFORE running experiments, not after seeing results
 
 ### 1.7 Think about confounders
 
-- What else could explain your results besides your technique?
-- Is the improvement from your algorithm or from a systems-level trick
-  (better memory allocation, SIMD, prefetching)?
-- Are you comparing with the same buffer pool size, thread count, and
-  storage configuration?
-- Could the improvement disappear on different hardware (SSD vs. HDD,
-  different CPU architecture, different memory size)?
-- Are you measuring warm cache or cold cache performance? Be explicit.
-- Is the workload hitting the bottleneck your technique addresses, or
-  is something else the bottleneck?
+- What else could explain your results besides your method?
+- Are you comparing with the same preprocessing, data splits, and compute budget?
+- Could the improvement come from more parameters, more data, or more compute
+  rather than from your actual contribution?
+- If using published baselines, are the setups truly comparable?
 
 ## Phase 2: Implementation
 
+### Efficient use of resources
+You have a fixed time budget and compute resources — use them wisely:
+- **Parallelize independent experiments.** If experiments don't depend on each
+  other (e.g., different seeds, different baselines, different ablations),
+  run them in parallel using `subprocess`, `multiprocessing`, or shell `&`.
+- **Estimate runtime first.** Before launching the full experiment suite, time
+  a single short run and extrapolate. If your estimate exceeds the budget,
+  reduce epochs, use smaller models, or drop non-essential ablations.
+- **Use all available GPU memory.** If your model only uses 10GB of a 80GB GPU,
+  consider running multiple experiments simultaneously on the same GPU, or
+  increasing batch size for faster convergence.
+- **Prioritize.** Run the most important experiments first (method vs. strongest
+  baseline). If time runs out, you'll at least have the core comparison.
+
 ### General principles
-- Start simple. Get a minimal prototype working end-to-end first.
-- Implement inside an existing system when possible (e.g., extend
-  PostgreSQL, modify DuckDB, build on RocksDB) rather than from scratch.
-  This gives you a realistic systems context and credible baselines.
+- Start simple. Get a minimal version working end-to-end first.
 - Add complexity one piece at a time. Evaluate each change independently.
-- Use well-tested libraries for supporting infrastructure (e.g., folly,
-  abseil, jemalloc for memory management).
-- Fix random seeds for reproducibility in any randomized components.
+- Copy proven implementations from related papers before writing from scratch.
+- Use well-tested libraries (PyTorch, HuggingFace, scikit-learn, etc.)
+- Fix random seeds for reproducibility.
 
-### Systems implementation practices
-- Profile before optimizing — use perf, VTune, or similar tools to find
-  the actual bottleneck
-- Control memory allocation — use a custom allocator or at least track
-  allocations to report accurate memory usage
-- Compile with optimizations (-O2 or -O3) for all systems including
-  baselines — debug builds are not valid benchmarks
-- Pin threads to cores and disable hyperthreading if evaluating
-  concurrent performance
-- Use direct I/O (O_DIRECT) or explicitly manage the OS page cache when
-  I/O performance matters
-- Flush caches between cold-start measurements
+### If training models
+- Verify loss at initialization matches theory (e.g., -log(1/n_classes) for softmax)
+- Overfit a single batch first — if you can't, your code has a bug
+- Turn off regularization initially (no dropout, augmentation, weight decay)
+- Use Adam optimizer with lr=3e-4 as a starting point
+- Use random search over grid search for hyperparameters
+- Disable learning rate decay until final tuning
 
-### For data structure experiments
-- Implement the data structure correctly first, verify with unit tests
-- Measure construction cost separately from query performance
-- Report space overhead (bytes per key, or total size vs. raw data size)
-- Test with realistic key distributions (not just sequential integers)
-- Evaluate both point queries AND range queries if the structure supports both
+### If doing analysis/probing
+- Clearly document what you're measuring and why
+- Use controlled setups where possible (synthetic data with known properties)
+- Verify your measurement tool doesn't interfere with what you're measuring
 
-### For query processing experiments
-- Use EXPLAIN/EXPLAIN ANALYZE to verify query plans are what you expect
-- Ensure all systems use the same data (same generator seed, same loading)
-- Run queries in the same order across all systems
-- Drop OS caches between cold runs: `sync && echo 3 > /proc/sys/vm/drop_caches`
-
-### For concurrency control experiments
-- Verify correctness first: run a checker (e.g., Elle, or custom
-  serializability verifier) before measuring performance
-- Vary contention levels: low contention (uniform random access) to high
-  contention (hot keys with Zipfian skew)
-- Report both throughput AND abort rate — high throughput with high abort
-  rate is misleading
-- Show latency distribution, not just average (tail latency reveals
-  problems that averages hide)
+### If doing systems experiments
+- Run multiple times to account for variance
+- Report median and percentiles, not just mean
+- Warm up the system before measuring (avoid cold-start effects)
+- Control for background processes, other workloads, thermal throttling
 
 ## Phase 3: Rigorous Evaluation
 
 ### Multiple runs (non-negotiable)
-- Run every experiment at least 3 times (5 is better for high-variance
-  workloads like OLTP under contention)
-- Report median and standard deviation across runs
-- Use the SAME configuration for your method and all baselines
-- Never report best-of-N runs — always report the median or mean
-- For throughput experiments, run for a sufficient duration (at least 60
-  seconds after warmup) to reach steady state
+- Run every experiment with at least 3 different random seeds
+- Report mean +/- standard deviation across runs
+- Use the SAME seeds for your method and all baselines (paired comparison)
+- Never report best-of-N runs — always report the average
 
-### Warmup
-- Always include a warmup phase before measurement
-- For buffer pool / cache experiments: run the workload once to populate
-  caches, then measure subsequent runs
-- For throughput experiments: discard the first 10-30 seconds of
-  measurements to avoid startup transients
-- Report whether numbers are warm-cache or cold-cache, and justify the choice
+### Ablation studies (required)
+- Remove each novel component one at a time
+- Show quantitative impact: "without component X, metric drops from Y to Z"
+- This proves every part of your method contributes
 
-### Scalability experiments (expected for most database papers)
-- Show how performance changes as data size grows:
-  - At least 3 scale points (e.g., 1GB, 10GB, 100GB or SF1, SF10, SF100)
-  - Ideally show the scaling trend (linear, sublinear, superlinear)
-- Show how performance changes as concurrency grows:
-  - Vary thread/client count: 1, 2, 4, 8, 16, 32, 64 (or more)
-  - Report speedup relative to single-threaded baseline
-- Show how performance changes with workload characteristics:
-  - Selectivity: from highly selective to full scan
-  - Skew: from uniform to highly skewed (Zipfian parameter 0.0 to 1.5)
-  - Read/write ratio: from read-heavy to write-heavy
+### Statistical significance
+- Report 95% confidence intervals when claiming superiority
+- If confidence intervals overlap, you cannot claim your method is better
+- For multiple comparisons, apply correction (Bonferroni or similar)
+- Distinguish statistical significance from practical significance
 
-### Statistical reporting
-- Report median and standard deviation for all measurements
-- For latency measurements, report percentiles (p50, p95, p99)
-- If claiming superiority, the improvement should be clear from the
-  numbers — if confidence intervals overlap significantly, you cannot
-  claim your method is better
-- Be careful with geometric means for summarizing across queries — they
-  can hide regressions on individual queries
+### Avoid data leakage (REFORMS checklist)
+- Preprocessing statistics (mean, std, scaling) computed from training data ONLY
+- Feature selection done on training data ONLY, not full dataset
+- Data augmentation applied AFTER train/test split, not before
+- For time series, use temporal splits (no future data in training)
+- Test set used ONCE for final evaluation, not for iterative model selection
 
-### Avoid common evaluation mistakes
-- DO NOT tune your system on the test queries and leave baselines untuned
-- DO NOT compare your optimized C++ code against an unoptimized baseline
-- DO NOT report only the queries/workloads where your method wins
-- DO NOT claim scalability from only two data points
-- DO NOT ignore regression on some queries while highlighting overall
-  improvement — report per-query results
-- DO NOT measure on unrealistically small data (a few MB) and claim it
-  generalizes — database techniques must work at scale
-- DO NOT forget to report the system configuration (buffer pool size,
-  number of threads, storage device type, OS version)
+## Phase 4: Common Pitfalls
 
-## Phase 4: What to Save
+From Michael Lones' "How to Avoid ML Pitfalls":
 
-Save everything needed to write the paper:
+- DO NOT tune hyperparameters on the test set — use a validation set
+- DO NOT compare against baselines with different preprocessing or splits
+- DO NOT report only the metric where your method wins
+- DO NOT claim SOTA without comparing against actual SOTA methods
+- DO NOT treat benchmark results as ground truth — small improvements may be noise
+- DO NOT ignore negative results — report them honestly with analysis
+- DO NOT draw conclusions beyond your tested conditions
+- DO NOT assume deep learning is always better — test simpler alternatives too
+- DO NOT use a single train/test split — use cross-validation or multiple seeds
+- DO NOT forget to inspect your model — verify it learns meaningful patterns,
+  not spurious correlations
+
+## Phase 5: Workspace Structure
+
+Organize experiments so that each step has its own folder with code, results,
+and logs. This makes it easy to verify which code produced which results and
+ensures reproducibility.
 
 ```
-results.json          # structured results (see format below)
-figures/              # comparison plots, scalability curves, latency CDFs
+exp/
+├── <experiment_name>/              # one folder per experiment/condition
+│   ├── run.py                      # experiment script
+│   ├── config.yaml (or .json)      # hyperparameters, settings
+│   ├── results.json                # per-experiment results
+│   └── logs/                       # training/eval logs, stdout
+│
+├── <baseline_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+├── <ablation_name>/
+│   ├── run.py
+│   ├── results.json
+│   └── logs/
+│
+└── shared/                         # shared utilities across experiments
+    ├── data_loader.py              # data loading, preprocessing
+    ├── metrics.py                  # evaluation metrics
+    ├── models.py                   # model definitions
+    └── utils.py                    # common helpers
+
+data/                               # downloaded/processed datasets
+figures/                            # generated figures for the paper
+results.json                        # aggregated final results (see below)
 ```
 
-### results.json format
+### Per-experiment results
+
+Each `exp/<name>/results.json` should capture that experiment's output:
+```json
+{
+  "experiment": "<name>",
+  "metrics": {"metric1": {"mean": 0.87, "std": 0.002}, ...},
+  "config": {"lr": 0.001, "epochs": 50, "seed": [42, 123, 456], ...},
+  "runtime_minutes": 45
+}
+```
+
+### Aggregated results.json (workspace root)
+
+After all experiments complete, compile a summary `results.json` at the
+workspace root that aggregates across all experiments:
 
 ```json
 {
   "method": {
-    "tpch_sf10": {
-      "total_time_sec": {"median": 12.34, "std": 0.45},
-      "q1_time_ms": {"median": 340, "std": 12},
-      "q3_time_ms": {"median": 890, "std": 25}
-    },
-    "throughput_txn_per_sec": {"median": 45000, "std": 1200},
-    "memory_mb": 512,
-    "index_build_time_sec": 8.3,
-    "storage_overhead_mb": 128
+    "metric1": {"mean": 0.8734, "std": 0.0021},
+    "metric2": {"mean": 0.8521, "std": 0.0034}
   },
   "baselines": {
-    "postgresql": {
-      "tpch_sf10": {
-        "total_time_sec": {"median": 28.91, "std": 0.82}
-      }
-    },
-    "duckdb": {
-      "tpch_sf10": {
-        "total_time_sec": {"median": 15.67, "std": 0.33}
-      }
+    "baseline_name_1": {
+      "metric1": {"mean": 0.8102, "std": 0.0018}
     }
   },
   "ablations": {
     "without_component_A": {
-      "tpch_sf10": {
-        "total_time_sec": {"median": 19.45, "std": 0.56}
-      }
+      "metric1": {"mean": 0.8401, "std": 0.0025}
     }
   },
-  "scalability": {
-    "sf1": {"total_time_sec": {"median": 1.2, "std": 0.05}},
-    "sf10": {"total_time_sec": {"median": 12.34, "std": 0.45}},
-    "sf100": {"total_time_sec": {"median": 145.6, "std": 3.2}}
-  },
   "config": {
-    "experiment_type": "systems_evaluation",
-    "benchmarks": ["TPC-H", "JOB"],
-    "scale_factors": [1, 10, 100],
-    "hardware": "64-core Intel Xeon, 256GB RAM, NVMe SSD",
-    "os": "Ubuntu 22.04",
-    "compiler": "gcc 12.2 -O3",
-    "buffer_pool_mb": 4096,
-    "threads": 16,
-    "runs_per_experiment": 5,
-    "warmup_runs": 2,
-    "total_runtime_hours": 48
+    "experiment_type": "empirical_evaluation",
+    "dataset": "dataset_name",
+    "seeds": [42, 123, 456],
+    "hardware": "1x GPU",
+    "total_runtime_minutes": 120
   }
 }
 ```
@@ -300,18 +235,39 @@ figures/              # comparison plots, scalability curves, latency CDFs
 Adapt the structure to your experiment type. The key requirement:
 structured, machine-readable, complete, and honest.
 
+### Figures
+
+Save publication-ready figures to `figures/`:
+- Comparison plots (your method vs baselines)
+- Ablation charts (impact of each component)
+- Training curves (loss/metric over epochs)
+- Analysis visualizations (distributions, embeddings, etc.)
+
+Each figure should be self-contained with axis labels, legends, and titles.
+
+## Phase 6: Plan Compliance
+
+If you have a `plan.json` from the ideation stage:
+- Execute every step in order
+- Create a subfolder under `exp/` for each plan step
+- If a step is infeasible, document why in that step's folder (create a
+  `SKIPPED.md` with the reason) and move on
+- After all steps, verify that the plan's success criteria are met
+- If results contradict the hypothesis, report this honestly — negative
+  results with good analysis are valuable
+
 ## Reproducibility Checklist
 
 Before finishing, verify:
 - [ ] Claim is clearly stated and testable
 - [ ] Experiment type matches the claim
-- [ ] Standard benchmark(s) used (TPC-H, TPC-C, YCSB, JOB, etc.)
-- [ ] At least 2 meaningful baselines compared fairly (same hardware, fair tuning)
-- [ ] Results from 3+ runs with median and standard deviation
-- [ ] Scalability experiment with at least 3 data sizes
-- [ ] Parameter sensitivity study (selectivity, skew, concurrency, etc.)
+- [ ] Fixed random seeds used throughout
+- [ ] At least 2 meaningful baselines compared fairly
+- [ ] Results from 3+ runs with mean +/- std
 - [ ] Ablation study for each novel component
-- [ ] System configuration fully documented (hardware, OS, buffer sizes, threads)
-- [ ] Warm/cold cache behavior specified
-- [ ] Figures saved for key results (bar charts, line plots, latency CDFs)
-- [ ] Negative results or regressions reported honestly (if any)
+- [ ] No data leakage (verified)
+- [ ] All configuration documented in results.json
+- [ ] Each experiment has its own folder under exp/ with code and results
+- [ ] Figures saved for key results
+- [ ] Negative results reported honestly (if any)
+- [ ] Aggregated results.json at workspace root matches per-experiment results
