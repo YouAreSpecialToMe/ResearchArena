@@ -92,8 +92,6 @@ class PipelineState:
     self_review_idea_feedback: str = ""
     self_review_experiment_feedback: str = ""
     self_review_paper_feedback: str = ""
-    self_review_idea_best_score: float = 0.0
-    self_review_idea_no_improve_count: int = 0
 
     # Per-seed counter
     idea_attempts: int = 0
@@ -364,8 +362,6 @@ class Pipeline:
             self.state.self_review_idea_feedback = ""
             self.state.self_review_experiment_feedback = ""
             self.state.self_review_paper_feedback = ""
-            self.state.self_review_idea_best_score = 0.0
-            self.state.self_review_idea_no_improve_count = 0
 
         # Route to self-review if enabled, otherwise straight to experiments
         if self.self_review_enabled and self.self_review_gates.get("idea", True):
@@ -546,9 +542,9 @@ class Pipeline:
             )
             self.state.self_review_idea_feedback = ""  # clear for next stage
             self.state.stage = Stage.EXPERIMENTS
-        elif score < 4:
-            # Score < 4: idea is fundamentally weak, abandon and try new one
-            console.print(f"  [red]Score {score} < 4. Idea too weak. Abandoning.[/]")
+        elif score <= 4:
+            # Score <= 4: idea is too weak, abandon and try new one
+            console.print(f"  [red]Score {score} <= 4. Idea too weak. Abandoning.[/]")
             self.tracker.end_action(
                 outcome="abandoned",
                 details=f"score={score}, abandoned (too weak)",
@@ -557,29 +553,11 @@ class Pipeline:
             self.state.self_review_idea_feedback = ""
             self._abandon_idea("self_review_idea", f"Self-review score {score}: {feedback}")
         else:
-            # Score 4-7: revise in same workspace
+            # Score 5-7: revise in same workspace
             self.state.self_review_idea_attempts += 1
             self.state.self_review_idea_feedback = feedback
 
-            # Track improvement — abandon if no progress after 2 consecutive retries
-            if score > self.state.self_review_idea_best_score:
-                self.state.self_review_idea_best_score = score
-                self.state.self_review_idea_no_improve_count = 0
-            else:
-                self.state.self_review_idea_no_improve_count += 1
-
-            if self.state.self_review_idea_no_improve_count >= 2:
-                console.print(
-                    f"  [red]Score not improving ({score}/10 for 2 retries). Abandoning idea.[/]"
-                )
-                self.tracker.end_action(
-                    outcome="abandoned",
-                    details=f"score={score}, no improvement after 2 retries",
-                    tokens=tokens, log_files=log_files,
-                )
-                self.state.self_review_idea_feedback = ""
-                self._abandon_idea("self_review_idea", f"Score stuck at {score}, not improving: {feedback}")
-            elif self.state.self_review_idea_attempts > self.state.max_self_review_retries:
+            if self.state.self_review_idea_attempts > self.state.max_self_review_retries:
                 console.print(
                     f"  [yellow]Self-review budget exhausted. Proceeding to experiments.[/]"
                 )
