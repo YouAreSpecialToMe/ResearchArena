@@ -68,35 +68,7 @@ Run experiments in dependency order:
 3. Ablations (can run in parallel after method works)
 4. Analysis + visualization (after results are in)
 
-## Phase 2: Implementation
-
-### General principles
-- Start simple. Get a minimal version working end-to-end first.
-- Add complexity one piece at a time. Evaluate each change independently.
-- Copy proven implementations from related papers before writing from scratch.
-- Use well-tested libraries (PyTorch, HuggingFace, scikit-learn, etc.)
-- Fix random seeds for reproducibility.
-
-### If training models
-- Verify loss at initialization matches theory (e.g., -log(1/n_classes) for softmax)
-- Overfit a single batch first — if you can't, your code has a bug
-- Turn off regularization initially (no dropout, augmentation, weight decay)
-- Use Adam optimizer with lr=3e-4 as a starting point
-- Use random search over grid search for hyperparameters
-- Disable learning rate decay until final tuning
-
-### If doing analysis/probing
-- Clearly document what you're measuring and why
-- Use controlled setups where possible (synthetic data with known properties)
-- Verify your measurement tool doesn't interfere with what you're measuring
-
-### If doing systems experiments
-- Run multiple times to account for variance
-- Report median and percentiles, not just mean
-- Warm up the system before measuring (avoid cold-start effects)
-- Control for background processes, other workloads, thermal throttling
-
-## Phase 3: Workspace Structure
+## Phase 2: Workspace Structure
 
 Organize experiments so that each step has its own folder with code, results,
 and logs. This makes it easy to verify which code produced which results.
