@@ -347,20 +347,21 @@ class Pipeline:
             log_files=log_files,
         )
 
-        # Reset per-idea state
+        # Update idea — only reset counters for fresh ideas, not revisions
         self.state.idea = idea
-
-        self.state.review_result = None
         self.state.workspace = workspace
-        self.state.experiment_errors = []
-        self.state.experiment_attempts = 0
-        self.state.paper_revision_attempts = 0
-        self.state.self_review_idea_attempts = 0
-        self.state.self_review_experiment_attempts = 0
-        self.state.self_review_paper_attempts = 0
-        self.state.self_review_idea_feedback = ""
-        self.state.self_review_experiment_feedback = ""
-        self.state.self_review_paper_feedback = ""
+
+        if not is_revision:
+            self.state.review_result = None
+            self.state.experiment_errors = []
+            self.state.experiment_attempts = 0
+            self.state.paper_revision_attempts = 0
+            self.state.self_review_idea_attempts = 0
+            self.state.self_review_experiment_attempts = 0
+            self.state.self_review_paper_attempts = 0
+            self.state.self_review_idea_feedback = ""
+            self.state.self_review_experiment_feedback = ""
+            self.state.self_review_paper_feedback = ""
 
         # Route to self-review if enabled, otherwise straight to experiments
         if self.self_review_enabled and self.self_review_gates.get("idea", True):
