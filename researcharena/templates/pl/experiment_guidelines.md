@@ -54,21 +54,12 @@ wait
 - For API-based experiments (LLM scoring), use `asyncio` or thread pools
   to make concurrent API calls
 
-### Runtime estimation
-Before launching the full suite:
-1. Time a single short run (1 epoch, small subset) on 1 GPU
-2. Extrapolate to the full run
-3. Divide by the number of GPUs for parallel runtime
-4. If STILL over budget after parallelization, then reduce scope
-
-### Do NOT scope down prematurely
-If your pilot shows a single experiment takes N minutes on 1 GPU and you
-have K GPUs, total parallel runtime is roughly N/K. Check this calculation
-before dropping ANY experiments from the plan. Example:
-- Pilot: 180 min on 1 GPU
-- You have 8 GPUs
-- Parallel runtime: ~23 min
-- Don't drop experiments just because the single-GPU time looks long!
+### Follow the plan — do not scope down
+Your plan.json was designed with the available resources in mind.
+Execute ALL steps. If a step truly cannot run (dependency failure,
+out-of-memory), document it in that step's `SKIPPED.md` and move on.
+Do NOT drop experiments just because a single-GPU pilot looks slow —
+use parallel execution across all GPUs.
 
 ### Prioritize execution order
 Run experiments in dependency order:

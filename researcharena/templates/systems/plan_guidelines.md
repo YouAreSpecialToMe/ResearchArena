@@ -94,6 +94,28 @@ Suggested categories (add your own as needed):
 - Don't use a single train/test split
 - Don't assume deep learning is always better — test simpler alternatives
 
+## Feasibility and Runtime Estimation
+
+Before finalizing the plan, estimate whether it fits the resource budget:
+
+1. **Estimate per-experiment runtime**: How long does one training run /
+   evaluation / API call take? Use published benchmarks or rough estimates
+   based on model size and dataset size.
+2. **Count independent experiments**: How many baselines, seeds, ablations,
+   and datasets? Identify which can run in parallel.
+3. **Divide by available parallelism**: If you have K GPUs and N independent
+   GPU experiments, parallel runtime ≈ N/K × per-experiment time. For CPU
+   tasks, divide by available cores.
+4. **Compare to budget**: If estimated parallel runtime exceeds the time
+   budget, simplify the plan (fewer seeds, smaller models, fewer datasets)
+   BEFORE finalizing — not during execution.
+
+Example:
+- 5 baselines + 1 method + 3 ablations = 9 experiments × 3 seeds = 27 runs
+- Each run: ~30 min on 1 GPU
+- With 8 GPUs: 27/8 ≈ 4 batches × 30 min = ~2 hours
+- Budget is 8 hours → plenty of room for visualization + analysis
+
 ## Plan Quality Checklist
 
 Before finalizing plan.json, verify:
@@ -104,6 +126,6 @@ Before finalizing plan.json, verify:
 - [ ] Ablation studies planned for each novel component
 - [ ] At least 3 random seeds specified
 - [ ] Success criteria clearly defined
-- [ ] Plan is feasible within the resource constraints
-- [ ] Total runtime estimate accounts for parallel GPU usage
+- [ ] Runtime estimate fits the resource budget with parallel execution
+- [ ] Plan accounts for ALL available GPUs and CPUs
 - [ ] Visualization step included for paper figures
