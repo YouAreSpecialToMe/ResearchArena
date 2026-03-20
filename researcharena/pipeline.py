@@ -71,7 +71,6 @@ class PipelineState:
 
     # Current artifacts
     idea: dict | None = None
-    results: dict | None = None
     review_result: review.ReviewResult | None = None
     workspace: Path | None = None  # current idea's workspace
 
@@ -301,7 +300,7 @@ class Pipeline:
             attempt=self.state.idea_attempts,
             max_attempts=self.state.max_ideas_per_seed,
             feedback=feedback,
-            previous_results=self.state.results,
+            previous_results=None,  # agent reads results from workspace directly
             original_idea=self.state.idea,
             revision_attempt=self.state.paper_revision_attempts,
             max_revisions=self.state.max_paper_revisions,
@@ -338,7 +337,7 @@ class Pipeline:
 
         # Reset per-idea state
         self.state.idea = idea
-        self.state.results = None
+
         self.state.review_result = None
         self.state.workspace = workspace
         self.state.experiment_errors = []
@@ -380,7 +379,7 @@ class Pipeline:
             attempt=self.state.experiment_attempts,
         )
 
-        results, agent_result = experiments.run(
+        _, agent_result = experiments.run(
             agent_type=self.agent_type,
             workspace=self.state.workspace,
             timeout=self.config["experiment"].get("max_gpu_hours", 8) * 3600,
@@ -396,31 +395,17 @@ class Pipeline:
 
         tokens, log_files, fail_cat = self._extract_tracking(agent_result)
 
-        # On timeout, child processes (e.g., python experiment.py) may still
-        # be running and produce results.json after the agent CLI is killed.
-        # Wait briefly and re-check.
-        if results is None and fail_cat == "timeout":
-            results_path = self.state.workspace / "results.json"
-            for _wait in (2, 5, 10):
-                time.sleep(_wait)
-                if results_path.exists():
-                    try:
-                        results = json.loads(results_path.read_text())
-                        console.print(
-                            f"  [yellow]Agent timed out but results.json was "
-                            f"found (child process completed).[/]"
-                        )
-                        break
-                    except json.JSONDecodeError:
-                        pass
+        # Check if agent crashed or timed out without producing any output
+        has_exp_dir = (self.state.workspace / "exp").exists()
+        has_results = (self.state.workspace / "results.json").exists()
 
-        if results is None:
+        if not has_exp_dir and not has_results:
             error_log = self._collect_error_log()
             self.state.experiment_errors.append(error_log)
-            console.print("  [red]Agent failed to produce results.json.[/]")
+            console.print("  [red]Agent produced no experiment outputs.[/]")
             self.tracker.end_action(
                 outcome="failure",
-                details="No results.json produced",
+                details="No exp/ directory or results.json produced",
                 tokens=tokens,
                 log_files=log_files,
                 failure_category=fail_cat,
@@ -428,14 +413,14 @@ class Pipeline:
             self.state.stage = Stage.EXPERIMENTS  # retry
             return
 
-        console.print("  [green]Experiments succeeded.[/]")
+        console.print("  [green]Experiments completed.[/]")
         self.tracker.end_action(
             outcome="success",
-            details="Experiments completed, results.json written",
+            details="Experiment outputs found",
             tokens=tokens,
             log_files=log_files,
         )
-        self.state.results = results
+        # Self-review will evaluate the quality of experiment outputs
         if self.self_review_enabled and self.self_review_gates.get("experiment", True):
             self.state.stage = Stage.SELF_REVIEW_EXPERIMENT
         else:
