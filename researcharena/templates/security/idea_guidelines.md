@@ -87,9 +87,9 @@ Before committing to an idea, verify it hasn't been done:
   new domain? Combine it with something else? Scale it up?
 - If it truly exists with no room for improvement, go back to Step 2
 
-## Step 4: Produce structured outputs
+## Step 4: Produce outputs
 
-You must produce FOUR outputs. Each serves a different purpose:
+You must produce THREE outputs in this step:
 
 ### 4.1 proposal.md — Research Proposal
 
@@ -101,93 +101,7 @@ A thorough document with these sections:
 - **Success Criteria**: What would confirm or refute your hypothesis
 - **References**: Full citation list (all must be real, verifiable papers)
 
-### 4.2 plan.json — Experiment Plan
-
-A JSON array of experiment steps that will be followed in the experiment stage:
-```json
-[
-  {
-    "category": "<category>",
-    "title": "short descriptive title",
-    "description": "what this step does and why",
-    "steps": {
-      "step1": "detailed instruction with specifics",
-      "step2": "...",
-      ...
-    }
-  },
-  ...
-]
-```
-
-Suggested categories (add your own as needed):
-- **Environment Configuration** — dependencies, setup
-- **Data Preparation** — download, preprocess, splits, statistics
-- **Baseline Experiment** — existing methods to compare against
-- **Main Experiment** — your proposed method
-- **Analysis Experiment** — ablations, robustness, sensitivity
-- **Effectiveness Evaluation** — success criteria, statistical tests
-- **Visualization** — figures, tables, plots for the paper
-
-The plan should be comprehensive enough to produce a publishable paper.
-Each step must be detailed enough to follow without ambiguity — include
-specific datasets, model architectures, hyperparameters, evaluation metrics,
-and expected output formats.
-
-**When designing your experiment plan, apply these principles:**
-
-**Formulate testable claims:**
-- State your hypothesis as a testable claim
-- Design experiments that could fail — if they can't produce a negative
-  result, they're not informative
-- Define what would DISPROVE your claim
-
-**Choose the right experiment type:**
-
-| Claim type | Experiment type | What to measure |
-|---|---|---|
-| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
-| "Component A is critical" | Ablation study | Performance with/without A |
-| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
-| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
-| "This property holds" | Analysis/probing | Measurements on existing models/data |
-
-**Select metrics carefully:**
-- Use standard metrics for your task
-- Report ALL standard metrics, not just the one where you win
-- Consider both performance AND cost (FLOPs, latency, memory)
-
-**Choose datasets that test your claim:**
-- Use standard benchmarks when possible
-- If claiming robustness, test on distribution-shifted data
-- If claiming generalization, test on multiple datasets
-
-**Select baselines fairly:**
-- At least 2 meaningful baselines (one simple, one strong/recent)
-- Run all baselines with equivalent effort
-- Never compare against intentionally weak baselines
-
-**Plan ablation studies:**
-- For each novel component, plan to remove it and measure impact
-- Plan ablations BEFORE running experiments
-
-**Think about confounders:**
-- Could the improvement come from more parameters/data/compute?
-- Are comparisons fair (same preprocessing, splits, compute budget)?
-
-**Rigorous evaluation:**
-- At least 3 different random seeds with mean ± std
-- Use the SAME seeds for method and all baselines
-- Report 95% confidence intervals when claiming superiority
-- Avoid data leakage (preprocessing stats from train only, etc.)
-
-**Common pitfalls to avoid in your plan:**
-- Don't tune hyperparameters on the test set
-- Don't report only the metric where you win
-- Don't ignore negative results
-- Don't use a single train/test split
-
-### 4.3 idea.json — Structured Summary
+### 4.2 idea.json — Structured Summary
 
 A JSON object with at least these fields:
 - **description**: 1-3 sentences explaining what you're proposing
@@ -199,7 +113,7 @@ A JSON object with at least these fields:
 - **hypothesis**: testable hypothesis
 - **success_criteria**: what would confirm/refute the hypothesis
 
-### 4.4 references/ — Parsed Reference Papers
+### 4.3 references/ — Parsed Reference Papers
 
 Create a directory with key reference papers. For each paper, create a
 subdirectory containing the paper's content parsed into sections:
@@ -226,7 +140,6 @@ verifiable by reviewers.
 - Is there a clear experiment that would test the idea?
 - Do you have the resources (data, compute, time) to do it?
 - Is the expected contribution large enough for a paper?
-- Is the experiment plan detailed enough to follow step by step?
 - Are all references real, verifiable publications?
 
 ## General principles

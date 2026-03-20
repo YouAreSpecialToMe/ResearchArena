@@ -140,15 +140,14 @@ def _build_idea_task(
 
     # ── Body ──
     task += (
-        "Read idea_guidelines.md carefully — it covers the full process from\n"
-        "field exploration to structured output formats.\n\n"
+        "Read idea_guidelines.md carefully — it covers field exploration,\n"
+        "novelty verification, and output formats.\n\n"
         f"{resource_block}\n"
-        "In this step, produce THREE outputs (experiment plan comes next):\n"
+        "Produce THREE outputs (see idea_guidelines.md Step 4 for details):\n"
         "  1. proposal.md — full research proposal\n"
         "  2. idea.json — structured idea summary\n"
         "  3. references/ — parsed reference papers\n\n"
-        "Do NOT write plan.json yet — that comes in the next step after\n"
-        "your proposal is finalized.\n\n"
+        "Do NOT write plan.json yet — that comes in the next step.\n\n"
         "Aim for a proposal strong enough to be accepted at a top venue."
     )
 
@@ -208,10 +207,10 @@ def _build_plan_task(
         "=== STAGE 1b: EXPERIMENT PLANNING ===\n\n"
         f"Your seed field is: {seed_topic}\n\n"
         "Read the proposal.md and idea.json you just created, along with\n"
-        "the experiment design principles in idea_guidelines.md.\n\n"
+        "plan_guidelines.md for experiment design principles and plan format.\n\n"
         f"{resource_block}\n"
         "Design a detailed, step-by-step experiment plan and save it as plan.json.\n\n"
-        "See idea_guidelines.md Step 4.2 for the exact format. Your plan should:\n"
+        "See plan_guidelines.md for the exact format. Your plan should:\n"
         "- Cover environment setup, data preparation, baselines, main experiments,\n"
         "  ablations, evaluation, and visualization\n"
         "- Be detailed enough to follow without ambiguity\n"
@@ -219,7 +218,7 @@ def _build_plan_task(
         "  evaluation metrics, and expected output formats\n"
         "- Be feasible within the resource constraints above\n"
         "- Account for parallel execution across available GPUs\n\n"
-        "Apply the experiment design principles from idea_guidelines.md:\n"
+        "Apply the experiment design principles from plan_guidelines.md:\n"
         "  - At least 2 meaningful baselines (one simple, one strong)\n"
         "  - Ablation studies for each novel component\n"
         "  - At least 3 random seeds\n"

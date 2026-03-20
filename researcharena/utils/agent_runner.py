@@ -74,9 +74,10 @@ def _build_agent_instructions(agent_type: str, platform: str = "gpu") -> str:
         "investigate it rigorously, and communicate your findings in a research paper.\n\n"
         "The research is conducted in stages. Each stage has a dedicated guideline\n"
         "file in this workspace — read it before starting each stage:\n\n"
-        "  Stage 1 — IDEATION:     Read idea_guidelines.md\n"
-        "  Stage 2 — EXPERIMENTS:  Read experiment_guidelines.md\n"
-        "  Stage 3 — PAPER:        Read paper_writing_guidelines.md\n\n"
+        "  Stage 1a — IDEATION:    Read idea_guidelines.md\n"
+        "  Stage 1b — PLANNING:    Read plan_guidelines.md\n"
+        "  Stage 2  — EXPERIMENTS: Read experiment_guidelines.md\n"
+        "  Stage 3  — PAPER:       Read paper_writing_guidelines.md\n\n"
         "You will receive a task prompt telling you which stage you are in and\n"
         "what output is expected. Follow the corresponding guideline closely.\n\n"
         "You have full access to this workspace — install packages, run code,\n"
@@ -811,6 +812,7 @@ def _setup_workspace(agent_type: str, workspace: Path, platform: str = "gpu", do
     # Copy domain-specific guideline templates
     for filename in [
         "idea_guidelines.md",
+        "plan_guidelines.md",
         "experiment_guidelines.md",
         "paper_writing_guidelines.md",
     ]:
