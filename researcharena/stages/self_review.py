@@ -1,8 +1,8 @@
 """Review gates for idea, experiment, and paper stages.
 
 Each gate invokes the agent to review the work in the workspace using
-stage-specific subsets of the reviewer guidelines. Produces a score +
-feedback used by the pipeline to decide whether to proceed or revise.
+stage-specific criteria. Produces a score + feedback used by the pipeline
+to decide whether to proceed or revise.
 """
 
 from __future__ import annotations
@@ -12,16 +12,19 @@ from pathlib import Path
 
 from researcharena.utils.agent_runner import invoke_agent
 
-# Template directory
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
-
-def _load_reviewer_guidelines(domain: str = "ml") -> str:
-    """Load the full reviewer guidelines for the domain."""
-    domain_path = _TEMPLATES_DIR / domain / "reviewer_guidelines.md"
-    if domain_path.exists():
-        return domain_path.read_text()
-    return (_TEMPLATES_DIR / "ml" / "reviewer_guidelines.md").read_text()
+_OUTPUT_FORMAT = (
+    "\n\nOutput your review as a JSON object. Print ONLY the JSON:\n"
+    "{\n"
+    '    "score": <int, one of: 0, 2, 4, 6, 8, 10>,\n'
+    '    "summary": "<2-3 sentence summary>",\n'
+    '    "strengths": ["<strength1>", ...],\n'
+    '    "weaknesses": ["<weakness1>", ...],\n'
+    '    "feedback": "<specific, actionable feedback for improvement>"\n'
+    "}\n\n"
+    "Score scale: 10=exceptional, 8=strong, 6=acceptable with concerns,\n"
+    "4=major issues, 2=fundamental flaws, 0=not viable.\n"
+)
 
 
 def run_self_review(
@@ -45,8 +48,7 @@ def run_self_review(
     Returns:
         (score, feedback, agent_result)
     """
-    reviewer_guidelines = _load_reviewer_guidelines(domain)
-    task = _build_task(stage, reviewer_guidelines)
+    task = _build_task(stage)
 
     agent_result = invoke_agent(
         agent_type=agent_type,
@@ -61,70 +63,132 @@ def run_self_review(
     return score, feedback, agent_result
 
 
-def _build_task(stage: str, reviewer_guidelines: str) -> str:
-    """Build the review task prompt."""
-    stage_tasks = {
-        "idea": (
-            "You are reviewing a research proposal and experiment plan.\n\n"
-            "Evaluate the following artifacts in the workspace:\n"
-            "  - proposal.md: the research proposal\n"
-            "  - plan.json: the experiment plan\n"
-            "  - idea.json: the idea summary\n"
-            "  - references/: parsed reference papers\n\n"
-            "Focus on these dimensions from the reviewer guidelines:\n"
-            "  - Novelty: is the idea genuinely new? Search online to verify.\n"
-            "  - Soundness: is the methodology appropriate?\n"
-            "  - Significance: does this problem matter?\n"
-            "  - References: are citations real and relevant?\n"
-            "  - Plan quality: is the experiment plan complete and feasible?\n"
-        ),
-        "experiment": (
-            "You are reviewing experiment results.\n\n"
-            "Evaluate the following artifacts in the workspace:\n"
-            "  - results.json: experiment results\n"
-            "  - exp/: experiment code and per-experiment results\n"
-            "  - plan.json: the original experiment plan\n"
-            "  - figures/: generated figures\n\n"
-            "Focus on these dimensions from the reviewer guidelines:\n"
-            "  - Soundness: do results support the claims?\n"
-            "  - Experimental rigor: baselines, ablations, error bars, seeds?\n"
-            "  - Results integrity: do code and logs match results.json?\n"
-            "  - Reproducibility: are details specified?\n"
-            "  - Plan compliance: were all planned steps executed?\n"
-        ),
-        "paper": (
-            "You are reviewing a research paper.\n\n"
-            "Evaluate the following artifacts in the workspace:\n"
-            "  - paper.tex / paper.pdf: the paper\n"
-            "  - results.json: experiment results\n"
-            "  - exp/: experiment code and logs\n\n"
-            "Apply ALL dimensions from the reviewer guidelines below.\n"
-            "This is a full review — evaluate novelty, soundness, significance,\n"
-            "clarity, reproducibility, rigor, references, and results integrity.\n"
-        ),
-    }
-
-    output_format = (
-        "\n\nOutput your review as a JSON object. Print ONLY the JSON:\n"
-        "{\n"
-        '    "score": <int, one of: 0, 2, 4, 6, 8, 10>,\n'
-        '    "summary": "<2-3 sentence summary>",\n'
-        '    "strengths": ["<strength1>", ...],\n'
-        '    "weaknesses": ["<weakness1>", ...],\n'
-        '    "feedback": "<specific, actionable feedback for improvement>"\n'
-        "}\n\n"
-        "Score scale: 10=exceptional, 8=strong, 6=acceptable with concerns,\n"
-        "4=major issues, 2=fundamental flaws, 0=not viable.\n"
+def _build_idea_review() -> str:
+    return (
+        "You are reviewing a research proposal and experiment plan.\n\n"
+        "Evaluate the following artifacts in the workspace:\n"
+        "  - proposal.md: the research proposal\n"
+        "  - plan.json: the experiment plan\n"
+        "  - idea.json: the idea summary\n"
+        "  - references/: parsed reference papers\n\n"
+        "## Evaluation Criteria\n\n"
+        "### Novelty (most important)\n"
+        "- Does the proposal present a genuinely new idea?\n"
+        "- **You MUST search online** (arXiv, Semantic Scholar, Google Scholar)\n"
+        "  to check whether similar work already exists\n"
+        "- Search the exact proposed method name, the core technique + domain,\n"
+        "  and the key components combined\n"
+        "- If you find substantially similar published work, score <= 4\n\n"
+        "### Soundness\n"
+        "- Is the proposed methodology appropriate for the problem?\n"
+        "- Are assumptions stated and reasonable?\n"
+        "- Could the approach plausibly work?\n\n"
+        "### Significance\n"
+        "- Does this problem matter to the research community?\n"
+        "- Would the results (positive or negative) be useful?\n\n"
+        "### Reference Quality\n"
+        "- Are key related works cited in the proposal?\n"
+        "- Are the references real, verifiable publications?\n"
+        "- Search online to verify at least 3 key references actually exist\n\n"
+        "### Experiment Plan Quality\n"
+        "- Is plan.json complete? Does it cover: setup, baselines, main experiments,\n"
+        "  ablations, evaluation, and visualization?\n"
+        "- Are the planned experiments feasible within the resource constraints?\n"
+        "- Is each step detailed enough to follow without ambiguity?\n"
+        "- Are at least 2 meaningful baselines planned?\n"
+        "- Are success criteria clearly defined?\n"
     )
+
+
+def _build_experiment_review() -> str:
+    return (
+        "You are reviewing experiment results.\n\n"
+        "Evaluate the following artifacts in the workspace:\n"
+        "  - results.json: aggregated experiment results\n"
+        "  - exp/: experiment code and per-experiment results\n"
+        "  - plan.json: the original experiment plan\n"
+        "  - figures/: generated figures\n\n"
+        "## Evaluation Criteria\n\n"
+        "### Plan Compliance\n"
+        "- Were all steps in plan.json executed?\n"
+        "- If steps were skipped, is there a documented reason?\n"
+        "- Were all planned baselines implemented and run?\n"
+        "- Were all planned ablations completed?\n\n"
+        "### Experimental Rigor\n"
+        "- Are there at least 2 meaningful baselines with fair comparisons?\n"
+        "- Are ablation studies present showing each component's contribution?\n"
+        "- Are error bars / confidence intervals reported?\n"
+        "- Are results from multiple runs (at least 3 different seeds)?\n"
+        "- Are comparisons fair (same data, same compute budget)?\n\n"
+        "### Results Integrity\n"
+        "- Does results.json contain actual experimental output (not hardcoded)?\n"
+        "- Do experiment logs in exp/*/logs/ show real training/evaluation runs?\n"
+        "- Do the numbers in results.json match what the logs show?\n"
+        "- Does the code in exp/ implement what proposal.md describes?\n\n"
+        "### Soundness\n"
+        "- Do the results support the claims in proposal.md?\n"
+        "- Are there confounding factors that could explain the results?\n"
+        "- If the method underperforms baselines, is this acknowledged?\n\n"
+        "### Reproducibility\n"
+        "- Are all hyperparameters recorded in results.json or configs?\n"
+        "- Is the data described (source, splits, preprocessing)?\n"
+        "- Could someone reproduce these results from the code?\n"
+    )
+
+
+def _build_paper_review() -> str:
+    return (
+        "You are reviewing a research paper before submission.\n\n"
+        "Evaluate the following artifacts in the workspace:\n"
+        "  - paper.tex / paper.pdf: the paper\n"
+        "  - results.json: experiment results\n"
+        "  - exp/: experiment code and logs\n"
+        "  - proposal.md: the original proposal\n\n"
+        "## Evaluation Criteria\n\n"
+        "### Paper Writing Quality\n"
+        "- Is the paper well-organized with clear structure?\n"
+        "- Are contributions explicitly stated in the introduction?\n"
+        "- Is the writing clear and concise? Any grammatical issues?\n"
+        "- Are figures and tables self-contained with descriptive captions?\n"
+        "- Is notation consistent throughout?\n"
+        "- Does the abstract accurately summarize the paper?\n"
+        "- Is the related work section comprehensive and fairly positioned?\n\n"
+        "### Results Consistency (critical)\n"
+        "- Compare EVERY number in the paper's tables against results.json\n"
+        "- Flag ANY mismatch — even small rounding differences\n"
+        "- Do figures accurately represent the data in results.json?\n"
+        "- Are claims in the text supported by the numbers shown?\n\n"
+        "### Logical Flow\n"
+        "- Does the paper tell a coherent story from motivation to conclusion?\n"
+        "- Does the method section clearly explain HOW the approach works?\n"
+        "- Are experimental choices (datasets, metrics, baselines) justified?\n"
+        "- Do the conclusions follow from the results shown?\n"
+        "- Are limitations honestly discussed?\n\n"
+        "### Reference Quality\n"
+        "- Are all cited references real, verifiable publications?\n"
+        "- Search online to spot-check at least 3 references\n"
+        "- Are key related works properly cited and discussed?\n\n"
+        "### Completeness\n"
+        "- Does the paper have all required sections?\n"
+        "- Are all experiments from results.json reported in the paper?\n"
+        "- Are ablation results included?\n"
+        "- Is there a reproducibility section or appendix?\n"
+    )
+
+
+def _build_task(stage: str) -> str:
+    """Build the review task prompt for the given stage."""
+    builders = {
+        "idea": _build_idea_review,
+        "experiment": _build_experiment_review,
+        "paper": _build_paper_review,
+    }
 
     return (
         f"=== REVIEW: {stage.upper()} ===\n\n"
-        f"{stage_tasks[stage]}\n"
-        "Be rigorous. Search the web to verify novelty and references.\n\n"
-        "--- REVIEWER GUIDELINES ---\n"
-        f"{reviewer_guidelines}\n"
-        "--- END GUIDELINES ---\n"
-        f"{output_format}"
+        f"{builders[stage]()}\n"
+        "Be rigorous. If you find issues, flag them specifically.\n"
+        f"{_OUTPUT_FORMAT}"
     )
 
 
