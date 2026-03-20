@@ -167,11 +167,16 @@ class Pipeline:
         # Self-review config
         sr_config = config.get("self_review", {})
         self.self_review_enabled = sr_config.get("enabled", True)
-        self.self_review_threshold = sr_config.get("threshold", 6)
         self.self_review_timeout = sr_config.get("timeout", 900)
         self.self_review_gates = sr_config.get("gates", {
             "idea": True, "experiment": True, "paper": True,
         })
+        # Per-gate thresholds: idea and paper are strict, experiment is lenient
+        default_thresholds = {"idea": 8, "experiment": 6, "paper": 8}
+        self.self_review_thresholds = {
+            **default_thresholds,
+            **sr_config.get("thresholds", {}),
+        }
 
         self.state = PipelineState(
             max_experiment_retries=config["experiment"].get("max_experiment_retries_per_idea", 3),
@@ -495,6 +500,7 @@ class Pipeline:
 
     def _run_self_review_idea(self):
         """Self-review the idea/proposal before committing to experiments."""
+        stage_key = "idea"
         console.print("  Self-reviewing idea and experiment plan...")
 
         self.tracker.begin_action(
@@ -517,8 +523,8 @@ class Pipeline:
         tokens, log_files, _ = self._extract_tracking(agent_result)
         console.print(f"  Self-review score: {score}/10")
 
-        if score >= self.self_review_threshold:
-            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}).[/]")
+        if score >= self.self_review_thresholds[stage_key]:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_thresholds[stage_key]}).[/]")
             self.tracker.end_action(
                 outcome="success",
                 details=f"score={score}, passed",
@@ -540,7 +546,7 @@ class Pipeline:
                 self.state.stage = Stage.EXPERIMENTS
             else:
                 console.print(
-                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"  [yellow]Score {score} < {self.self_review_thresholds[stage_key]}. "
                     f"Sending back for revision "
                     f"({self.state.self_review_idea_attempts}/{self.state.max_self_review_retries}).[/]"
                 )
@@ -553,6 +559,7 @@ class Pipeline:
 
     def _run_self_review_experiment(self):
         """Self-review experiment results before writing the paper."""
+        stage_key = "experiment"
         console.print("  Self-reviewing experiment results...")
 
         self.tracker.begin_action(
@@ -575,8 +582,8 @@ class Pipeline:
         tokens, log_files, _ = self._extract_tracking(agent_result)
         console.print(f"  Self-review score: {score}/10")
 
-        if score >= self.self_review_threshold:
-            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}).[/]")
+        if score >= self.self_review_thresholds[stage_key]:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_thresholds[stage_key]}).[/]")
             self.tracker.end_action(
                 outcome="success",
                 details=f"score={score}, passed",
@@ -607,7 +614,7 @@ class Pipeline:
                 self.state.stage = Stage.PAPER
             else:
                 console.print(
-                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"  [yellow]Score {score} < {self.self_review_thresholds[stage_key]}. "
                     f"Sending back for experiment revision "
                     f"({self.state.self_review_experiment_attempts}/{self.state.max_self_review_retries}).[/]"
                 )
@@ -620,6 +627,7 @@ class Pipeline:
 
     def _run_self_review_paper(self):
         """Self-review the paper before sending to peer review."""
+        stage_key = "paper"
         console.print("  Self-reviewing paper (pre-submission check)...")
 
         self.tracker.begin_action(
@@ -642,8 +650,8 @@ class Pipeline:
         tokens, log_files, _ = self._extract_tracking(agent_result)
         console.print(f"  Self-review score: {score}/10")
 
-        if score >= self.self_review_threshold:
-            console.print(f"  [green]Passed self-review (>= {self.self_review_threshold}). Sending to peer review.[/]")
+        if score >= self.self_review_thresholds[stage_key]:
+            console.print(f"  [green]Passed self-review (>= {self.self_review_thresholds[stage_key]}). Sending to peer review.[/]")
             self.tracker.end_action(
                 outcome="success",
                 details=f"score={score}, passed",
@@ -665,7 +673,7 @@ class Pipeline:
                 self.state.stage = Stage.REVIEW
             else:
                 console.print(
-                    f"  [yellow]Score {score} < {self.self_review_threshold}. "
+                    f"  [yellow]Score {score} < {self.self_review_thresholds[stage_key]}. "
                     f"Sending back for paper revision "
                     f"({self.state.self_review_paper_attempts}/{self.state.max_self_review_retries}).[/]"
                 )
