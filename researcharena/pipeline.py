@@ -177,6 +177,7 @@ class Pipeline:
             **default_thresholds,
             **sr_config.get("thresholds", {}),
         }
+        self.self_review_abandon_threshold = sr_config.get("abandon_threshold", 4)
 
         self.state = PipelineState(
             max_experiment_retries=config["experiment"].get("max_experiment_retries_per_idea", 3),
@@ -542,9 +543,9 @@ class Pipeline:
             )
             self.state.self_review_idea_feedback = ""  # clear for next stage
             self.state.stage = Stage.EXPERIMENTS
-        elif score <= 4:
-            # Score <= 4: idea is too weak, abandon and try new one
-            console.print(f"  [red]Score {score} <= 4. Idea too weak. Abandoning.[/]")
+        elif score <= self.self_review_abandon_threshold:
+            # Score too low: idea is too weak, abandon and try new one
+            console.print(f"  [red]Score {score} <= {self.self_review_abandon_threshold}. Idea too weak. Abandoning.[/]")
             self.tracker.end_action(
                 outcome="abandoned",
                 details=f"score={score}, abandoned (too weak)",
@@ -615,9 +616,9 @@ class Pipeline:
                 tokens=tokens, log_files=log_files,
             )
             self.state.stage = Stage.PAPER
-        elif score < 4:
-            # Score < 4: experiments are fundamentally broken, abandon idea
-            console.print(f"  [red]Score {score} < 4. Experiments too weak. Abandoning idea.[/]")
+        elif score <= self.self_review_abandon_threshold:
+            # Score too low: experiments are fundamentally broken, abandon idea
+            console.print(f"  [red]Score {score} <= {self.self_review_abandon_threshold}. Experiments too weak. Abandoning idea.[/]")
             self.tracker.end_action(
                 outcome="abandoned",
                 details=f"score={score}, abandoned (too weak)",
@@ -776,6 +777,10 @@ class Pipeline:
                     f"{self.state.max_paper_revisions}: ideation → experiments → paper → review[/]"
                 )
                 self.state.stage = Stage.IDEATION
+            elif self.state.max_paper_revisions == 0:
+                # No revisions allowed — done
+                console.print(f"  [yellow]→ Score {result.avg_score:.1f}. No revisions configured.[/]")
+                self.state.stage = Stage.FAILED
             else:
                 console.print(
                     f"  [yellow]→ Score {result.avg_score:.1f} after all revisions. "
@@ -787,12 +792,16 @@ class Pipeline:
                 ))
 
         else:
-            # Score <5: reject, abandon idea
-            console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. Abandoning idea.[/]")
-            self._abandon_idea("review", (
-                f"Score {result.avg_score:.1f}. "
-                f"Feedback: {result.aggregated_feedback}"
-            ))
+            # Score <5: reject
+            if self.state.max_paper_revisions == 0:
+                console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. No revisions configured.[/]")
+                self.state.stage = Stage.FAILED
+            else:
+                console.print(f"  [yellow]→ Score {result.avg_score:.1f}: rejected. Abandoning idea.[/]")
+                self._abandon_idea("review", (
+                    f"Score {result.avg_score:.1f}. "
+                    f"Feedback: {result.aggregated_feedback}"
+                ))
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
