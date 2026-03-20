@@ -1,44 +1,81 @@
 # Experiment Execution Guidelines
 
 How to execute your experiment plan efficiently and rigorously.
-Experiment design principles are in idea_guidelines.md — you should
+Experiment design principles are in plan_guidelines.md — you should
 have already applied them when creating plan.json.
 
-## Phase 1: Resource Usage
+## Phase 1: Maximize Resource Usage
 
-### Use ALL available GPUs
-Check how many GPUs you have (`nvidia-smi`) and distribute work across them.
-Use `CUDA_VISIBLE_DEVICES=N` to pin different experiments to different GPUs:
+Your goal is to use ALL available resources efficiently. Check what you
+have before starting:
 ```bash
+nvidia-smi          # GPUs: count, memory, current usage
+nproc               # CPU cores
+free -h             # RAM
+```
+
+### Parallel execution strategy
+
+Identify independent experiments in your plan (different seeds, baselines,
+ablations, datasets) and run them simultaneously:
+
+```bash
+# Example: 8 GPUs, 6 independent experiments
 CUDA_VISIBLE_DEVICES=0 python exp/baseline1/run.py &
 CUDA_VISIBLE_DEVICES=1 python exp/baseline2/run.py &
-CUDA_VISIBLE_DEVICES=2 python exp/method/run.py &
-# ... etc
+CUDA_VISIBLE_DEVICES=2 python exp/method_seed42/run.py &
+CUDA_VISIBLE_DEVICES=3 python exp/method_seed123/run.py &
+CUDA_VISIBLE_DEVICES=4 python exp/method_seed456/run.py &
+CUDA_VISIBLE_DEVICES=5 python exp/ablation1/run.py &
 wait  # wait for all to finish
 ```
-If one experiment only needs 1 GPU, you can run 8 experiments in parallel.
 
-### Parallelize independent experiments
-If experiments don't depend on each other (different seeds, baselines,
-ablations), run them in parallel across GPUs or using `subprocess` / shell `&`.
+For CPU-bound work (data preprocessing, evaluation, API calls):
+```bash
+# Run multiple CPU tasks in parallel
+python exp/preprocess_dataset1.py &
+python exp/preprocess_dataset2.py &
+python exp/preprocess_dataset3.py &
+wait
+```
 
-### Estimate runtime first
-Time a single short run on one GPU and extrapolate. Divide by the number
-of GPUs for parallel runtime. If your estimate STILL exceeds the budget
-after parallelization, then reduce scope.
+### GPU utilization
+- **Pin experiments to GPUs** with `CUDA_VISIBLE_DEVICES=N`
+- If a model uses only part of GPU memory, run multiple experiments
+  per GPU (e.g., 2 small models on one 48GB GPU)
+- Increase batch size to fill GPU memory — larger batches = faster training
+- For inference-only experiments (embedding, evaluation), consider
+  running several on the same GPU
+
+### CPU utilization
+- Use `multiprocessing` or `concurrent.futures.ProcessPoolExecutor` for
+  CPU-bound data processing
+- Parallelize data loading with `num_workers` in PyTorch DataLoaders
+- For API-based experiments (LLM scoring), use `asyncio` or thread pools
+  to make concurrent API calls
+
+### Runtime estimation
+Before launching the full suite:
+1. Time a single short run (1 epoch, small subset) on 1 GPU
+2. Extrapolate to the full run
+3. Divide by the number of GPUs for parallel runtime
+4. If STILL over budget after parallelization, then reduce scope
 
 ### Do NOT scope down prematurely
-If your pilot shows a single experiment takes N minutes on 1 GPU, and you
-have K GPUs, total parallel runtime is roughly N/K — check this before
-dropping experiments from the plan.
+If your pilot shows a single experiment takes N minutes on 1 GPU and you
+have K GPUs, total parallel runtime is roughly N/K. Check this calculation
+before dropping ANY experiments from the plan. Example:
+- Pilot: 180 min on 1 GPU
+- You have 8 GPUs
+- Parallel runtime: ~23 min
+- Don't drop experiments just because the single-GPU time looks long!
 
-### Use all available GPU memory
-If your model only uses 10GB of a 48GB GPU, consider running multiple
-experiments simultaneously on the same GPU, or increasing batch size.
-
-### Prioritize
-Run the most important experiments first (method vs. strongest baseline).
-If time runs out, you'll at least have the core comparison.
+### Prioritize execution order
+Run experiments in dependency order:
+1. Data preparation (must finish first)
+2. Baselines + method (can run in parallel)
+3. Ablations (can run in parallel after method works)
+4. Analysis + visualization (after results are in)
 
 ## Phase 2: Implementation
 
