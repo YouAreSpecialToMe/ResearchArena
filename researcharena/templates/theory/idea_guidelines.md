@@ -134,6 +134,59 @@ Each step must be detailed enough to follow without ambiguity — include
 specific datasets, model architectures, hyperparameters, evaluation metrics,
 and expected output formats.
 
+**When designing your experiment plan, apply these principles:**
+
+**Formulate testable claims:**
+- State your hypothesis as a testable claim
+- Design experiments that could fail — if they can't produce a negative
+  result, they're not informative
+- Define what would DISPROVE your claim
+
+**Choose the right experiment type:**
+
+| Claim type | Experiment type | What to measure |
+|---|---|---|
+| "Our method outperforms X" | Empirical comparison | Metrics on shared benchmarks |
+| "Component A is critical" | Ablation study | Performance with/without A |
+| "This scales better" | Scaling experiment | Performance vs. data/compute/params |
+| "Our theory predicts X" | Theoretical validation | Synthetic setup with known ground truth |
+| "This property holds" | Analysis/probing | Measurements on existing models/data |
+
+**Select metrics carefully:**
+- Use standard metrics for your task
+- Report ALL standard metrics, not just the one where you win
+- Consider both performance AND cost (FLOPs, latency, memory)
+
+**Choose datasets that test your claim:**
+- Use standard benchmarks when possible
+- If claiming robustness, test on distribution-shifted data
+- If claiming generalization, test on multiple datasets
+
+**Select baselines fairly:**
+- At least 2 meaningful baselines (one simple, one strong/recent)
+- Run all baselines with equivalent effort
+- Never compare against intentionally weak baselines
+
+**Plan ablation studies:**
+- For each novel component, plan to remove it and measure impact
+- Plan ablations BEFORE running experiments
+
+**Think about confounders:**
+- Could the improvement come from more parameters/data/compute?
+- Are comparisons fair (same preprocessing, splits, compute budget)?
+
+**Rigorous evaluation:**
+- At least 3 different random seeds with mean ± std
+- Use the SAME seeds for method and all baselines
+- Report 95% confidence intervals when claiming superiority
+- Avoid data leakage (preprocessing stats from train only, etc.)
+
+**Common pitfalls to avoid in your plan:**
+- Don't tune hyperparameters on the test set
+- Don't report only the metric where you win
+- Don't ignore negative results
+- Don't use a single train/test split
+
 ### 4.3 idea.json — Structured Summary
 
 A JSON object with at least these fields:
