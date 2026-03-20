@@ -131,25 +131,71 @@ def _build_task(stage: str, reviewer_guidelines: str) -> str:
 def _parse_output(agent_result) -> tuple[float, str]:
     """Parse score and feedback from agent output.
 
-    Searches for a JSON object in stdout containing 'score' and 'feedback'.
+    Handles two formats:
+    - Plain text (Claude): search for JSON blocks containing 'score'
+    - JSONL streaming (Codex): extract text from agent_message items, then
+      search for JSON blocks within those messages
+
     Returns (score, feedback). Defaults to (0, "") on parse failure.
     """
     if not agent_result or not agent_result.stdout:
-        return 0.0, "Self-review produced no output."
+        return 0.0, "Review produced no output."
 
     stdout = agent_result.stdout
 
-    # Try to find JSON in the output
-    # Look for the outermost { ... } containing "score"
-    best_score = 0.0
-    best_feedback = ""
+    # Extract text content — handle JSONL streaming format (Codex, Kimi)
+    # by pulling text from agent_message items
+    text_parts = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if not isinstance(obj, dict):
+                text_parts.append(line)
+                continue
+            # Codex JSONL: {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+            if obj.get("type") in ("item.completed", "item.started"):
+                item = obj.get("item", {})
+                if item.get("type") == "agent_message":
+                    text_parts.append(item.get("text", ""))
+            # Claude stream-json: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+            elif obj.get("type") == "assistant":
+                for block in obj.get("message", {}).get("content", []):
+                    if block.get("type") == "text":
+                        text_parts.append(block["text"])
+            elif obj.get("type") == "result":
+                text_parts.append(obj.get("result", ""))
+            # Kimi: {"role":"assistant","content":[{"type":"text","text":"..."}]}
+            elif obj.get("role") == "assistant":
+                content = obj.get("content", [])
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+            # Direct JSON with score field
+            elif "score" in obj:
+                text_parts.append(json.dumps(obj))
+        except json.JSONDecodeError:
+            # Plain text line — include it
+            text_parts.append(line)
 
-    # Try parsing from the last JSON block (most likely the final output)
+    text = "\n".join(text_parts) if text_parts else stdout
+
+    # Find JSON blocks containing "score"
+    return _extract_score_from_text(text)
+
+
+def _extract_score_from_text(text: str) -> tuple[float, str]:
+    """Find the last JSON object with a 'score' field in the text."""
     brace_depth = 0
     json_start = -1
     candidates = []
 
-    for i, ch in enumerate(stdout):
+    for i, ch in enumerate(text):
         if ch == '{':
             if brace_depth == 0:
                 json_start = i
@@ -157,7 +203,7 @@ def _parse_output(agent_result) -> tuple[float, str]:
         elif ch == '}':
             brace_depth -= 1
             if brace_depth == 0 and json_start >= 0:
-                candidates.append(stdout[json_start:i + 1])
+                candidates.append(text[json_start:i + 1])
                 json_start = -1
 
     # Try candidates from last to first (final output most likely)
@@ -165,16 +211,15 @@ def _parse_output(agent_result) -> tuple[float, str]:
         try:
             data = json.loads(candidate)
             if "score" in data:
-                best_score = float(data["score"])
-                best_feedback = data.get("feedback", "")
-                # Also collect weaknesses as additional feedback
+                score = float(data["score"])
+                feedback = data.get("feedback", "")
                 weaknesses = data.get("weaknesses", [])
-                if weaknesses and not best_feedback:
-                    best_feedback = "; ".join(weaknesses)
+                if weaknesses and not feedback:
+                    feedback = "; ".join(weaknesses)
                 elif weaknesses:
-                    best_feedback += "\nWeaknesses: " + "; ".join(weaknesses)
-                break
+                    feedback += "\nWeaknesses: " + "; ".join(weaknesses)
+                return score, feedback
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
 
-    return best_score, best_feedback
+    return 0.0, ""
