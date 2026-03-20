@@ -559,15 +559,15 @@ class Pipeline:
 
             if self.state.self_review_idea_attempts > self.state.max_self_review_retries:
                 console.print(
-                    f"  [yellow]Self-review budget exhausted. Proceeding to experiments.[/]"
+                    f"  [red]Self-review budget exhausted (score {score} < {threshold}). Abandoning idea.[/]"
                 )
                 self.tracker.end_action(
-                    outcome="skipped",
-                    details=f"score={score}, budget exhausted, proceeding",
+                    outcome="abandoned",
+                    details=f"score={score}, budget exhausted, abandoned",
                     tokens=tokens, log_files=log_files,
                 )
                 self.state.self_review_idea_feedback = ""
-                self.state.stage = Stage.EXPERIMENTS
+                self._abandon_idea("self_review_idea", f"Could not reach score {threshold} after {self.state.max_self_review_retries} retries (best: {score})")
             else:
                 console.print(
                     f"  [yellow]Score {score} < {threshold}. "
