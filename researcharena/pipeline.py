@@ -269,14 +269,21 @@ class Pipeline:
     # ── Stage handlers ──────────────────────────────────────────────────
 
     def _run_ideation(self, seed_topic: str):
-        if self.state.idea_attempts >= self.state.max_ideas_per_seed:
-            console.print(f"[red]Exhausted idea budget ({self.state.max_ideas_per_seed}).[/]")
-            self.state.stage = Stage.FAILED
-            return
+        # Reuse current workspace if revising (self-review feedback exists),
+        # otherwise create a new workspace for a fresh idea
+        is_revision = bool(self.state.self_review_idea_feedback) and self.state.workspace is not None
 
-        self.state.idea_attempts += 1
-        workspace = self.base_dir / f"idea_{self.state.idea_attempts:02d}"
-        console.print(f"  Idea {self.state.idea_attempts}/{self.state.max_ideas_per_seed}")
+        if is_revision:
+            workspace = self.state.workspace
+            console.print(f"  Revising idea {self.state.idea_attempts}/{self.state.max_ideas_per_seed}")
+        else:
+            if self.state.idea_attempts >= self.state.max_ideas_per_seed:
+                console.print(f"[red]Exhausted idea budget ({self.state.max_ideas_per_seed}).[/]")
+                self.state.stage = Stage.FAILED
+                return
+            self.state.idea_attempts += 1
+            workspace = self.base_dir / f"idea_{self.state.idea_attempts:02d}"
+            console.print(f"  Idea {self.state.idea_attempts}/{self.state.max_ideas_per_seed}")
 
         self.tracker.begin_action(
             stage="ideation",
@@ -523,15 +530,29 @@ class Pipeline:
         tokens, log_files, _ = self._extract_tracking(agent_result)
         console.print(f"  Self-review score: {score}/10")
 
-        if score >= self.self_review_thresholds[stage_key]:
-            console.print(f"  [green]Passed self-review (>= {self.self_review_thresholds[stage_key]}).[/]")
+        threshold = self.self_review_thresholds[stage_key]
+
+        if score >= threshold:
+            console.print(f"  [green]Passed self-review (>= {threshold}).[/]")
             self.tracker.end_action(
                 outcome="success",
                 details=f"score={score}, passed",
                 tokens=tokens, log_files=log_files,
             )
+            self.state.self_review_idea_feedback = ""  # clear for next stage
             self.state.stage = Stage.EXPERIMENTS
+        elif score < 4:
+            # Score < 4: idea is fundamentally weak, abandon and try new one
+            console.print(f"  [red]Score {score} < 4. Idea too weak. Abandoning.[/]")
+            self.tracker.end_action(
+                outcome="abandoned",
+                details=f"score={score}, abandoned (too weak)",
+                tokens=tokens, log_files=log_files,
+            )
+            self.state.self_review_idea_feedback = ""
+            self._abandon_idea("self_review_idea", f"Self-review score {score}: {feedback}")
         else:
+            # Score 4-7: revise in same workspace
             self.state.self_review_idea_attempts += 1
             self.state.self_review_idea_feedback = feedback
             if self.state.self_review_idea_attempts > self.state.max_self_review_retries:
@@ -543,18 +564,20 @@ class Pipeline:
                     details=f"score={score}, budget exhausted, proceeding",
                     tokens=tokens, log_files=log_files,
                 )
+                self.state.self_review_idea_feedback = ""
                 self.state.stage = Stage.EXPERIMENTS
             else:
                 console.print(
-                    f"  [yellow]Score {score} < {self.self_review_thresholds[stage_key]}. "
-                    f"Sending back for revision "
+                    f"  [yellow]Score {score} < {threshold}. "
+                    f"Revising idea in same workspace "
                     f"({self.state.self_review_idea_attempts}/{self.state.max_self_review_retries}).[/]"
                 )
                 self.tracker.end_action(
                     outcome="revision",
-                    details=f"score={score}, sent back",
+                    details=f"score={score}, revising",
                     tokens=tokens, log_files=log_files,
                 )
+                # Stay in same workspace — _run_ideation will detect feedback and reuse it
                 self.state.stage = Stage.IDEATION
 
     def _run_self_review_experiment(self):
