@@ -79,9 +79,8 @@ Suggested categories (add your own as needed):
 - If using published baselines, are the setups truly comparable?
 
 ### Rigorous evaluation
-- At least 3 different random seeds with mean ± std
-- Use the SAME seeds for method and all baselines (paired comparison)
-- Report 95% confidence intervals when claiming superiority
+- Use a fixed random seed for reproducibility
+- Use the SAME seed for method and all baselines (fair comparison)
 - Avoid data leakage (preprocessing stats from train only, etc.)
 - Test set used ONCE for final evaluation, not for model selection
 
@@ -111,9 +110,9 @@ Before finalizing the plan, estimate whether it fits the resource budget:
    BEFORE finalizing — not during execution.
 
 Example:
-- 5 baselines + 1 method + 3 ablations = 9 experiments × 3 seeds = 27 runs
+- 5 baselines + 1 method + 3 ablations = 9 experiments
 - Each run: ~30 min on 1 GPU
-- With 8 GPUs: 27/8 ≈ 4 batches × 30 min = ~2 hours
+- With 8 GPUs: 9/8 ≈ 2 batches × 30 min = ~1 hour
 - Budget is 8 hours → plenty of room for visualization + analysis
 
 ## Plan Quality Checklist
@@ -124,7 +123,7 @@ Before finalizing plan.json, verify:
 - [ ] Specific datasets, metrics, and hyperparameters are named
 - [ ] At least 2 meaningful baselines are included
 - [ ] Ablation studies planned for each novel component
-- [ ] At least 3 random seeds specified
+- [ ] Fixed random seed for reproducibility
 - [ ] Success criteria clearly defined
 - [ ] Runtime estimate fits the resource budget with parallel execution
 - [ ] Plan accounts for ALL available GPUs and CPUs

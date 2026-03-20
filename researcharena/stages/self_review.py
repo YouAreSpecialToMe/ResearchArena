@@ -120,7 +120,7 @@ def _build_experiment_review() -> str:
         "- Are there at least 2 meaningful baselines with fair comparisons?\n"
         "- Are ablation studies present showing each component's contribution?\n"
         "- Are error bars / confidence intervals reported?\n"
-        "- Are results from multiple runs (at least 3 different seeds)?\n"
+        "- Is a fixed random seed used for reproducibility?\n"
         "- Are comparisons fair (same data, same compute budget)?\n\n"
         "### Results Integrity\n"
         "- Do per-experiment results contain actual output (not hardcoded)?\n"

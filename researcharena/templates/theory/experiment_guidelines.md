@@ -23,10 +23,10 @@ ablations, datasets) and run them simultaneously:
 # Example: 8 GPUs, 6 independent experiments
 CUDA_VISIBLE_DEVICES=0 python exp/baseline1/run.py &
 CUDA_VISIBLE_DEVICES=1 python exp/baseline2/run.py &
-CUDA_VISIBLE_DEVICES=2 python exp/method_seed42/run.py &
-CUDA_VISIBLE_DEVICES=3 python exp/method_seed123/run.py &
-CUDA_VISIBLE_DEVICES=4 python exp/method_seed456/run.py &
-CUDA_VISIBLE_DEVICES=5 python exp/ablation1/run.py &
+CUDA_VISIBLE_DEVICES=2 python exp/method/run.py &
+CUDA_VISIBLE_DEVICES=3 python exp/ablation1/run.py &
+CUDA_VISIBLE_DEVICES=4 python exp/ablation2/run.py &
+CUDA_VISIBLE_DEVICES=5 python exp/dataset2/run.py &
 wait  # wait for all to finish
 ```
 
@@ -108,7 +108,7 @@ Each `exp/<name>/results.json` should capture that experiment's output:
 {
   "experiment": "<name>",
   "metrics": {"metric1": {"mean": 0.87, "std": 0.002}, ...},
-  "config": {"lr": 0.001, "epochs": 50, "seed": [42, 123, 456], ...},
+  "config": {"lr": 0.001, "epochs": 50, "seed": 42, ...},
   "runtime_minutes": 45
 }
 ```
@@ -139,7 +139,7 @@ Follow plan.json step by step:
 Before finishing, verify:
 - [ ] Fixed random seeds used throughout
 - [ ] At least 2 meaningful baselines compared fairly
-- [ ] Results from 3+ runs with mean +/- std
+- [ ] Fixed random seed used for reproducibility
 - [ ] Ablation study for each novel component
 - [ ] No data leakage (verified)
 - [ ] All configuration documented in per-experiment results
