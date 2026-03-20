@@ -1,282 +1,212 @@
-# Paper Writing Guidelines (Theory)
+# Paper Writing Guidelines
 
-How to write a theoretical computer science paper for venues like
-STOC, FOCS, SODA, and COLT.
-
-Distilled from Oded Goldreich's writing advice, Ian Parberry's guide to
-TCS paper writing, STOC/FOCS formatting conventions, and standard practices
-in the algorithms and complexity community.
+Distilled from Simon Peyton Jones, NeurIPS/ICML/ICLR formatting requirements,
+and technical writing best practices.
 
 ## Core Principle
 
-A theory paper presents a precise mathematical result and a rigorous proof.
-The paper must convince the reader that (1) the result is significant,
-(2) the result is correct, and (3) the techniques are interesting. Every
-section serves this goal.
+Your paper tells a story: problem → why it matters → your approach → evidence
+it works → what it means. Every section serves this narrative.
+
+## Start from proposal.md
+
+You already wrote a research proposal (proposal.md) with introduction,
+approach, related work, and references. **Use it as your foundation**:
+
+- **Introduction**: Adapt from proposal.md's Introduction section. Add
+  concrete results now that experiments are done.
+- **Related Work**: Expand from proposal.md's Related Work section. Use
+  the BibTeX entries in references/ for your bibliography.
+- **Method**: Expand from proposal.md's Proposed Approach section. Add
+  full technical details, notation, and algorithm descriptions.
+- **References**: Start from the citations in proposal.md and references/.
+  Add any new papers discovered during experiments.
+
+Do NOT rewrite from scratch — refine and expand what you already have.
 
 ## Structure
 
 Write in this order (not the order they appear in the paper):
 
-1. Theorem statements and proofs (the core work)
-2. Preliminaries (what the reader needs)
-3. Introduction (now you know what to motivate and summarize)
-4. Abstract LAST (distill the completed paper)
+1. Methods → Experiments → Contributions list → Conclusion
+2. Then Introduction (now you know what to introduce)
+3. Then Related Work
+4. Abstract LAST (summarize the completed paper)
 
 Final paper order:
 
 ```
 1. Title
-2. Abstract (one paragraph, 100-200 words)
-3. Introduction
-   3a. Problem statement and motivation
-   3b. Our results (precise theorem statements)
-   3c. Our techniques / proof overview
-   3d. Related work
-   3e. Paper organization
-4. Preliminaries (definitions, notation, known tools)
-5. Main Result (theorem + proof, possibly split into sections)
-6. Extensions / Additional Results (if any)
-7. Conclusion and Open Problems
-8. References
-9. Appendix (deferred proofs, full calculations)
+2. Abstract (150-250 words, one paragraph)
+3. Introduction (problem, gap, contributions list, paper roadmap)
+4. Related Work (funnel: broad → narrow, end with your positioning)
+5. Method (complete, reproducible description)
+6. Experiments (setup, results tables, ablations, analysis)
+7. Discussion / Limitations
+8. Conclusion
+9. References
 ```
-
-## Format and Length
-
-- STOC/FOCS: extended abstract format, typically 10-12 pages in ACM
-  two-column format. The paper should be self-contained but proofs of
-  secondary lemmas can be deferred to an appendix.
-- SODA: similar to STOC/FOCS, up to 12 pages in SIAM format
-- COLT: JMLR/PMLR format, main body typically 12-15 pages plus appendix
-- Use the official style file for the target venue
-- The main body must contain the key ideas. The appendix is for
-  completeness, not for essential content that the reviewer must read.
 
 ## Abstract
 
-- ONE paragraph, 100-200 words
-- Structure: problem statement -> main result (with precise bound) ->
-  brief mention of technique -> significance
-- Must state the main theorem, including the bound, explicitly
-- Example: "We give an O(m sqrt(n))-time algorithm for computing maximum
-  bipartite matching, improving the O(mn)-time algorithm of Hopcroft and
-  Karp (1973). Our approach is based on a new decomposition of augmenting
-  paths using persistent data structures. This resolves a question posed
-  by [Author] and implies improved bounds for several related problems."
-- No citations in the abstract (refer to results by author names and year
-  if needed, but no \cite commands)
+- ONE paragraph, 150-250 words
+- Structure: context → problem → method → key result → implication
+- Must be self-contained — readable without the rest of the paper
+- No citations in the abstract
+- Include one concrete quantitative result if possible
 
 ## Introduction
 
-The introduction is the most important part of a theory paper. Most
-reviewers form their opinion primarily from the introduction.
+- Start with what is known (context)
+- Identify the gap (what's missing or broken)
+- State your approach (one sentence)
+- List contributions explicitly:
+  ```latex
+  Our contributions are:
+  \begin{itemize}
+    \item We propose X, which addresses Y.
+    \item We show that Z through experiments on A and B.
+    \item We release our code and data at [URL].
+  \end{itemize}
+  ```
+- End with a roadmap: "Section 2 reviews..., Section 3 describes..., Section 4 presents..."
 
-### Problem statement and motivation (0.5-1 page)
+## Related Work
 
-- Define the problem precisely but accessibly
-- Explain why it matters: is it a fundamental problem? Does it have
-  applications? Is it a long-standing open question?
-- State the previous best bounds and who achieved them
-- Frame the gap: "The best known algorithm runs in O(n^2) time. No
-  super-linear lower bound is known. Can we do better?"
+- Organize by approach/concept, NOT chronologically
+- Funnel structure: broad field → specific subproblem → directly competing methods
+- For each group of related papers, explain:
+  1. What they do
+  2. How your work differs
+- End with: "Unlike [prior work], our approach..."
+- Every cited paper must be REAL and verifiable. Search Semantic Scholar
+  (semanticscholar.org) to confirm papers exist before citing them.
 
-### Our results (0.5-1 page)
+## Method
 
-- State your main theorem formally in the introduction. Use a Theorem
-  environment. This is the most important part of the paper.
-- If you have multiple results, state them all here, ordered by importance
-- Explicitly compare with prior work: "This improves the O(n^2) bound of
-  [Author, Year] to O(n^{3/2}). Previously, the O(n^{3/2}) bound was
-  known only for the special case of [restricted class]."
-- If the result is tight, state the matching lower bound
-- If the result has corollaries or applications, list them
+- Complete enough that an expert can reimplement from the paper alone
+- State all assumptions explicitly
+- Include: model architecture, loss function, training algorithm
+- Use clear notation, define every symbol on first use
+- Include a method overview figure if the approach has multiple components
 
-### Our techniques / proof overview (1-2 pages)
+## Experiments
 
-- This subsection is crucial and often makes or breaks the paper
-- Explain the high-level proof strategy in intuitive terms
-- What is the key new idea? Why do previous approaches fail, and what
-  new ingredient do you introduce?
-- Walk through the proof at a conceptual level: "We proceed in three
-  steps. First, we show that... This allows us to... Finally, we
-  combine these to obtain..."
-- Use small examples or toy cases to illustrate the key idea
-- A reader who reads only the introduction should come away understanding
-  WHAT you proved, WHY it matters, and HOW the proof works at a high level
+- Structure: Setup → Main results → Ablations → Analysis
 
-### Related work (0.5-1 page)
+### Setup subsection
+- Datasets: name, size, splits, preprocessing
+- Baselines: what they are, why chosen, how trained (fair comparison)
+- Metrics: which ones, why appropriate
+- Implementation: optimizer, lr, epochs, batch size, hardware, training time
+- Seeds: how many, which values
 
-- Organize by problem/technique, not chronologically
-- Give a history of results on your problem: who proved what bound, when,
-  and using what technique
-- Discuss related problems and techniques
-- Be generous with citations -- theory values proper attribution of ideas
-- Cite the original source of a result, not just the most recent paper
-  that uses it
+### Results subsection
+- Main comparison table with your method vs all baselines
+- Bold the best value in each column
+- Include ↑ or ↓ to indicate if higher/lower is better
+- Every number in the paper must match experiment results in exp/ exactly
 
-### Paper organization
+### Ablation subsection
+- One table showing: full method, then remove each component
+- Proves every component contributes
 
-- One paragraph: "In Section 2 we introduce notation and state
-  preliminary results. In Section 3 we prove our main theorem. In
-  Section 4 we extend the result to weighted graphs. Section 5
-  concludes with open problems."
+### Analysis subsection (optional but strengthens paper)
+- Failure cases: where does your method fail and why?
+- Qualitative examples: show what the model actually produces
+- Training curves: show convergence behavior
 
-## Preliminaries
-
-- Define the computational model (word RAM, comparison model, real RAM,
-  Turing machine, etc.)
-- State all notation: G = (V, E) for graphs, [n] = {1, ..., n}, etc.
-- State definitions for all concepts used in the proof (formally, with
-  Definition environments)
-- State known results you will use as black boxes (with Theorem or Lemma
-  environments and citations)
-- Keep this section short -- only include what the reader needs for
-  the proof. Do not write a textbook chapter.
-
-## Main Result
-
-### Theorem-Lemma-Proof structure
-
-Theory papers follow a strict formal structure:
+## Tables
 
 ```latex
-\begin{theorem}\label{thm:main}
-Let $G = (V, E)$ be an undirected graph with $n$ vertices and $m$ edges.
-Algorithm~\ref{alg:main} computes a maximum matching in $G$ in
-$O(m \sqrt{n})$ time.
-\end{theorem}
-
-The proof proceeds by establishing the following two lemmas.
-
-\begin{lemma}\label{lem:phases}
-The algorithm terminates after at most $O(\sqrt{n})$ phases.
-\end{lemma}
-
-\begin{proof}
-[Proof of Lemma~\ref{lem:phases}]
-...
-\end{proof}
-
-\begin{lemma}\label{lem:phase-time}
-Each phase can be implemented in $O(m)$ time.
-\end{lemma}
-
-\begin{proof}
-[Proof of Lemma~\ref{lem:phase-time}]
-...
-\end{proof}
-
-\begin{proof}[Proof of Theorem~\ref{thm:main}]
-By Lemma~\ref{lem:phases}, there are $O(\sqrt{n})$ phases. By
-Lemma~\ref{lem:phase-time}, each takes $O(m)$ time. The total time
-is $O(m\sqrt{n})$.
-\end{proof}
+\begin{table}[t]
+\caption{Comparison on [Dataset]. Best results in \textbf{bold}. ↑ means higher is better.}
+\label{tab:main}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Accuracy ↑ & F1 ↑ & Latency (ms) ↓ \\
+\midrule
+Baseline A & 82.1 ± 0.3 & 79.4 ± 0.5 & 12.3 \\
+Baseline B & 84.7 ± 0.2 & 81.2 ± 0.4 & 15.7 \\
+\textbf{Ours} & \textbf{87.3 ± 0.2} & \textbf{84.1 ± 0.3} & 14.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
 ```
 
-### Proof writing guidelines
+Rules:
+- Use booktabs (\toprule, \midrule, \bottomrule) — no vertical lines
+- Caption goes ABOVE the table
+- Self-contained caption: readable without main text
+- Reference every table in the text: "As shown in Table~\ref{tab:main}..."
+- Numbers must match experiment results exactly
 
-- **Start with the proof outline**: before diving into details, tell the
-  reader the plan ("We prove this in three steps...")
-- **Highlight the key idea**: when you reach the novel part of the proof,
-  signal it ("The key observation is that...")
-- **Be rigorous but readable**: every step must be justified, but routine
-  calculations should be deferred to the appendix if they are long
-- **Use proof sketches for minor results**: for lemmas whose proofs use
-  standard techniques, a sketch in the main body with a full proof in
-  the appendix is acceptable
-- **Label and number everything**: every theorem, lemma, claim,
-  definition, and equation should have a label for cross-referencing
-- **Case analysis**: when doing case analysis, clearly state what the
-  cases are and why they are exhaustive before proving each case
-
-### Algorithms
-
-If presenting an algorithm:
+## Figures
 
 ```latex
-\begin{algorithm}[t]
-\caption{Maximum Matching via Augmenting Paths}\label{alg:main}
-\begin{algorithmic}[1]
-\Require Graph $G = (V, E)$
-\Ensure Maximum matching $M$
-\State $M \gets \emptyset$
-\While{there exists an augmenting path $P$ w.r.t.\ $M$}
-    \State $M \gets M \oplus P$
-\EndWhile
-\State \Return $M$
-\end{algorithmic}
-\end{algorithm}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/training_curve.pdf}
+\caption{Training loss over epochs. Our method (blue) converges faster
+than Baseline A (orange) and Baseline B (green).}
+\label{fig:training}
+\end{figure}
 ```
 
-- Use pseudocode, not implementation code
-- The pseudocode should match the proof exactly -- if the proof analyzes
-  a while loop, the algorithm should have a while loop
-- Include a correctness proof (often a loop invariant argument) and a
-  runtime analysis
+Rules:
+- Caption goes BELOW the figure
+- Self-contained caption
+- Use PDF or vector format when possible (not low-res PNG)
+- Readable at print size (font ≥ 8pt in the figure)
+- Reference every figure: "Figure~\ref{fig:training} shows..."
+- Use consistent colors across all figures
 
-## Extensions and Corollaries
+## Discussion / Limitations
 
-- State each extension as a formal corollary or theorem
-- If the extension requires significant new ideas, give the proof
-- If it follows routinely, sketch the proof and note what changes
+- Discuss what the results mean, not just what they are
+- Honestly acknowledge limitations:
+  - "Our method assumes X, which may not hold in Y scenarios"
+  - "We evaluated on Z datasets; generalization to other domains is untested"
+- Reviewers reward honesty — hiding limitations gets papers rejected
 
-## Conclusion and Open Problems
+## Conclusion
 
-- Summarize the main result in one sentence
-- State concrete open problems arising from your work:
-  - "Can the running time be improved to O(m log n)?"
-  - "Does our technique extend to directed graphs?"
-  - "Is the O(n^{1/3}) gap between our upper and lower bound tight?"
-- Open problems should be specific and well-posed, not vague wishes
+- Restate the problem and your approach (one sentence each)
+- Summarize key findings with concrete numbers
+- State broader implications
+- Suggest future work
+- DO NOT introduce new results or claims here
 - 0.5-1 page
 
 ## References (CRITICAL)
 
 - EVERY reference must be a REAL, VERIFIABLE publication
-- Search DBLP (dblp.org) and Semantic Scholar (semanticscholar.org) to
-  verify papers exist with the stated titles, authors, and venues
-- Fake or hallucinated citations are unacceptable in any context
-- Prefer published conference or journal versions over arXiv preprints
-- Cite the original source of a result, not just the most recent use
-- For classic results, cite the original paper (even if decades old)
-- Include 15-40 references for a typical theory paper
-- Use consistent formatting: authors, title, venue, year
+- Search Semantic Scholar (semanticscholar.org) to find and verify papers
+- Fake or hallucinated citations undermine scientific integrity
+- Use correct format: authors, title, venue, year
+- Prefer published conference/journal papers over arXiv preprints
+- Include 15-30 references for a typical ML paper
+- Use \citep{} for parenthetical: "(Smith et al., 2023)"
+- Use \citet{} for textual: "Smith et al. (2023) showed..."
 
-## LaTeX Best Practices for Theory Papers
+## LaTeX Best Practices
 
-- Use the venue's official style file
-- Use AMS math environments: theorem, lemma, proposition, corollary,
-  definition, remark, proof
-- Use \newtheorem to define numbered theorem environments
-- Use booktabs for any tables (no vertical lines)
-- Define macros for repeated notation:
-  ```latex
-  \newcommand{\OPT}{\mathrm{OPT}}
-  \newcommand{\poly}{\mathrm{poly}}
-  \newcommand{\polylog}{\mathrm{polylog}}
-  \newcommand{\eps}{\varepsilon}
-  ```
-- Use ~ for non-breaking spaces: Theorem~\ref{thm:main},
-  Lemma~\ref{lem:key}, Algorithm~\ref{alg:main}
-- Use \qedhere at the end of proofs that end in a displayed equation
-  or item list
-- Do NOT include training curves, model architectures, or ML-specific
-  visualizations -- this is a mathematics/algorithms paper
+- Use the venue's official style file (neurips_2025.sty, etc.)
+- Use booktabs for tables (no vertical lines)
+- Use \usepackage{hyperref} for clickable references
+- Define notation with \newcommand for consistency
+- Use ~ for non-breaking spaces before references: Table~\ref{tab:main}
+- Compile at least twice to resolve references
+- 8-10 pages for main content (excluding references and appendix)
 
-## Common Mistakes That Get Theory Papers Rejected
+## Common Mistakes That Get Papers Rejected
 
-- Main theorem not stated precisely in the introduction
-- No proof overview / techniques section -- the reviewer cannot tell if
-  the ideas are novel
-- Proof has gaps ("it is easy to see" for something that is not easy)
-- Result is correct but incremental -- small improvement with no new ideas
-- Result is correct but technique is a straightforward application of
-  a known method
-- Computational model not specified or inappropriate for the claimed bound
-- Poor comparison with prior work -- failing to cite relevant results or
-  misstating previous bounds
-- Overly long or unfocused -- the paper tries to do too much instead of
-  presenting one clean result
-- Appendix contains essential material that should be in the main body
-- Fabricated or hallucinated references
+- No explicit contributions list in the introduction
+- Claims not supported by evidence in the experiments
+- Numbers in text don't match experiment results
+- No ablation study
+- Unfair baseline comparisons
+- Fabricated references
+- No limitations discussion
+- Poor writing quality / unclear main contribution

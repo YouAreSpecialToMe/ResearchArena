@@ -1,269 +1,180 @@
-# Paper Writing Guidelines (Systems)
+# Paper Writing Guidelines
 
-Distilled from "How to Write a Great Research Paper" (Peyton Jones), OSDI/SOSP/EuroSys
-author guidelines, USENIX and ACM formatting requirements, and established systems
-paper conventions.
+Distilled from Simon Peyton Jones, NeurIPS/ICML/ICLR formatting requirements,
+and technical writing best practices.
 
 ## Core Principle
 
-A systems paper tells the story of a real artifact you built: the problem it
-solves, WHY the design is the way it is, evidence that it works, and what
-others can learn from it. The key insight is in the DESIGN, not the code.
+Your paper tells a story: problem → why it matters → your approach → evidence
+it works → what it means. Every section serves this narrative.
+
+## Start from proposal.md
+
+You already wrote a research proposal (proposal.md) with introduction,
+approach, related work, and references. **Use it as your foundation**:
+
+- **Introduction**: Adapt from proposal.md's Introduction section. Add
+  concrete results now that experiments are done.
+- **Related Work**: Expand from proposal.md's Related Work section. Use
+  the BibTeX entries in references/ for your bibliography.
+- **Method**: Expand from proposal.md's Proposed Approach section. Add
+  full technical details, notation, and algorithm descriptions.
+- **References**: Start from the citations in proposal.md and references/.
+  Add any new papers discovered during experiments.
+
+Do NOT rewrite from scratch — refine and expand what you already have.
 
 ## Structure
 
 Write in this order (not the order they appear in the paper):
 
-1. Design -> Implementation -> Evaluation -> Contributions list -> Conclusion
+1. Methods → Experiments → Contributions list → Conclusion
 2. Then Introduction (now you know what to introduce)
-3. Then Related Work (typically at the END in systems papers)
+3. Then Related Work
 4. Abstract LAST (summarize the completed paper)
 
 Final paper order:
 
 ```
 1. Title
-2. Abstract (200-300 words, one paragraph)
-3. Introduction (problem, motivation, key insight, contributions, roadmap)
-4. Background / Motivation (why the problem is hard, what existing systems get wrong)
-5. Design (the core of the paper -- system architecture and design rationale)
-6. Implementation (key implementation details, lines of code, effort)
-7. Evaluation (benchmarks, comparisons, microbenchmarks, scalability)
-8. Related Work (positioned AFTER evaluation in most systems papers)
-9. Conclusion
-10. References
+2. Abstract (150-250 words, one paragraph)
+3. Introduction (problem, gap, contributions list, paper roadmap)
+4. Related Work (funnel: broad → narrow, end with your positioning)
+5. Method (complete, reproducible description)
+6. Experiments (setup, results tables, ablations, analysis)
+7. Discussion / Limitations
+8. Conclusion
+9. References
 ```
-
-Note: systems papers typically place Related Work near the end, after Evaluation.
-This is the opposite of ML papers. The reasoning is that readers need to
-understand your design before they can appreciate how it differs from prior work.
-
-## Format and Length
-
-- **USENIX venues** (OSDI, SOSP, ATC, NSDI, FAST): USENIX format, typically
-  12-14 pages excluding references. Check the specific CFP for exact limits.
-- **ACM venues** (ASPLOS, ISCA, MICRO, EuroSys): ACM sigplan or sigarch format,
-  typically 12-14 pages excluding references.
-- Systems papers are longer than ML papers. Use the space for thorough
-  design explanation and evaluation. Do NOT pad -- use it productively.
 
 ## Abstract
 
-- ONE paragraph, 200-300 words (systems abstracts tend to be slightly longer
-  than ML paper abstracts)
-- Structure: problem -> why existing systems fail -> your key insight ->
-  your system name -> key result -> implication
-- Must be self-contained -- readable without the rest of the paper
+- ONE paragraph, 150-250 words
+- Structure: context → problem → method → key result → implication
+- Must be self-contained — readable without the rest of the paper
 - No citations in the abstract
-- Include one or two concrete quantitative results:
-  "SystemName achieves 3.2x higher throughput than BaselineSystem on
-  workload W while reducing tail latency by 58%."
-- Name your system in the abstract
+- Include one concrete quantitative result if possible
 
 ## Introduction
 
-- **Paragraph 1**: What is the problem and why does it matter?
-  Ground it in a real scenario.
-- **Paragraph 2**: Why is this hard? What do existing systems do wrong?
-  Be specific about the limitation.
-- **Paragraph 3**: What is your key insight? One sentence that captures
-  the core design idea. This is the most important sentence in the paper.
-- **Paragraph 4**: What did you build? Brief system overview (2-3 sentences).
-- **Paragraph 5**: What are the results? Headline numbers.
-- **Paragraph 6**: Contributions list:
+- Start with what is known (context)
+- Identify the gap (what's missing or broken)
+- State your approach (one sentence)
+- List contributions explicitly:
   ```latex
   Our contributions are:
   \begin{itemize}
-    \item We identify [problem/bottleneck] in existing systems through
-          [measurement/analysis] (\S\ref{sec:motivation}).
-    \item We design and implement \textsc{SystemName}, which addresses
-          this through [key technique] (\S\ref{sec:design}).
-    \item We evaluate \textsc{SystemName} on [workloads] and show it
-          achieves [key result] compared to [baselines] (\S\ref{sec:eval}).
+    \item We propose X, which addresses Y.
+    \item We show that Z through experiments on A and B.
+    \item We release our code and data at [URL].
   \end{itemize}
   ```
-- **Final sentence**: Paper roadmap using section references.
+- End with a roadmap: "Section 2 reviews..., Section 3 describes..., Section 4 presents..."
 
-## Background / Motivation
+## Related Work
 
-This section is critical in systems papers. It must convince the reader
-that the problem is real and that existing solutions are inadequate.
+- Organize by approach/concept, NOT chronologically
+- Funnel structure: broad field → specific subproblem → directly competing methods
+- For each group of related papers, explain:
+  1. What they do
+  2. How your work differs
+- End with: "Unlike [prior work], our approach..."
+- Every cited paper must be REAL and verifiable. Search Semantic Scholar
+  (semanticscholar.org) to confirm papers exist before citing them.
 
-- Explain the domain and relevant background (assume a systems-literate
-  but not domain-expert reader)
-- Show evidence that the problem exists:
-  - Measurements from real systems or production traces
-  - Performance breakdown showing where time/resources are wasted
-  - Example scenarios that expose the limitation
-- Explain WHY existing systems cannot solve this problem -- what
-  fundamental design choice prevents them from doing better?
-- End with a clear statement of your design goal
+## Method
 
-## Design (the core of a systems paper)
+- Complete enough that an expert can reimplement from the paper alone
+- State all assumptions explicitly
+- Include: model architecture, loss function, training algorithm
+- Use clear notation, define every symbol on first use
+- Include a method overview figure if the approach has multiple components
 
-This is where systems papers succeed or fail. The design section must
-explain not just WHAT you built, but WHY you made each design decision.
+## Experiments
 
-### System architecture
-- Start with an architecture overview figure (this is expected in every
-  systems paper). Show the major components and how they interact.
-- Walk through the architecture top-down: overall structure first, then
-  dive into each component
-- Use a running example or a request/operation walkthrough to make the
-  design concrete
-
-### Design rationale (CRITICAL)
-- For each major design decision, explain:
-  1. What alternatives you considered
-  2. Why you chose this approach
-  3. What tradeoff it embodies
-- Example: "We use a log-structured design rather than in-place updates
-  because workload W is write-heavy and sequential I/O on SSDs is 10x
-  faster than random I/O."
-- Reviewers reject papers where design decisions seem arbitrary
-
-### Key techniques
-- Describe each novel technique or mechanism in detail
-- Use pseudocode for algorithms (keep it concise -- not full source code)
-- Include diagrams for data structures and protocols
-- Explain correctness arguments for protocols (especially for distributed
-  systems, concurrency control, or crash recovery)
-
-### Handling corner cases
-- Address failure modes: what happens when a node crashes, a disk fails,
-  the network partitions?
-- Discuss consistency and correctness guarantees explicitly
-- Do not sweep hard cases under the rug -- reviewers will find them
-
-## Implementation
-
-- Brief but informative (typically 0.5-1 page)
-- Report: language, lines of code, key libraries used, development effort
-- Describe implementation challenges and how you solved them
-- Mention any limitations of the prototype vs. a production system
-- State what hardware features you exploit (if any)
-
-## Evaluation
-
-Systems evaluations must be thorough. A typical evaluation has 5-8 figures
-spanning 3-5 pages. Structure as:
+- Structure: Setup → Main results → Ablations → Analysis
 
 ### Setup subsection
-- **Hardware**: CPU model, core count, memory (size and type), storage
-  (model, capacity), network (NIC, bandwidth), any accelerators
-- **Software**: OS, kernel version, compiler and flags, key library versions
-- **Baselines**: what systems, what versions, how configured
-- **Workloads**: which benchmarks, what parameters (key count, value size,
-  read/write ratio, skew distribution, number of clients)
-- **Methodology**: warmup duration, measurement duration, number of iterations,
-  how percentiles are computed
+- Datasets: name, size, splits, preprocessing
+- Baselines: what they are, why chosen, how trained (fair comparison)
+- Metrics: which ones, why appropriate
+- Implementation: optimizer, lr, epochs, batch size, hardware, training time
+- Seeds: how many, which values
 
-### End-to-end performance (the headline result)
-- Full system comparison on representative workloads
-- Show throughput AND latency (not just one)
-- Include a throughput-latency curve (throughput on X, latency on Y, varying
-  offered load) -- this is the gold standard for systems evaluation
-- Bold the best result; explain significant differences
+### Results subsection
+- Main comparison table with your method vs all baselines
+- Bold the best value in each column
+- Include ↑ or ↓ to indicate if higher/lower is better
+- Every number in the paper must match experiment results in exp/ exactly
 
-### Microbenchmarks (understanding the design)
-- Isolate each key component and measure its contribution
-- Example: "To understand the benefit of our new index structure, we
-  replaced it with a B-tree and measured throughput."
-- This is the systems equivalent of an ablation study
+### Ablation subsection
+- One table showing: full method, then remove each component
+- Proves every component contributes
 
-### Scalability
-- Show performance as you vary: number of threads/cores, number of nodes,
-  data size, number of clients
-- Include a scalability plot (linear X axis, performance on Y axis)
-- Show ideal linear scaling as a reference line
-- Explain where and why scalability plateaus
-
-### Sensitivity analysis
-- Vary key workload parameters one at a time:
-  - Read/write ratio (100/0, 95/5, 50/50, 0/100)
-  - Key distribution (uniform vs. Zipfian with varying skew)
-  - Value size (small, medium, large)
-  - Number of concurrent clients
-- Show that your system is robust, not tuned for one specific workload
-
-### Comparison fairness
-- Use the same hardware for all systems
-- Tune baselines fairly (use recommended configurations)
-- If baselines have different feature sets, acknowledge and explain
+### Analysis subsection (optional but strengthens paper)
+- Failure cases: where does your method fail and why?
+- Qualitative examples: show what the model actually produces
+- Training curves: show convergence behavior
 
 ## Tables
 
 ```latex
 \begin{table}[t]
-\caption{End-to-end throughput (Kops/sec) on YCSB workloads. Best in \textbf{bold}.}
-\label{tab:throughput}
+\caption{Comparison on [Dataset]. Best results in \textbf{bold}. ↑ means higher is better.}
+\label{tab:main}
 \centering
-\begin{tabular}{lcccc}
+\begin{tabular}{lccc}
 \toprule
-System & YCSB-A & YCSB-B & YCSB-C & YCSB-F \\
+Method & Accuracy ↑ & F1 ↑ & Latency (ms) ↓ \\
 \midrule
-Redis & 312 & 485 & 520 & 289 \\
-RocksDB & 198 & 423 & 467 & 176 \\
-\textsc{OurSystem} & \textbf{1,024} & \textbf{1,380} & \textbf{1,455} & \textbf{892} \\
+Baseline A & 82.1 ± 0.3 & 79.4 ± 0.5 & 12.3 \\
+Baseline B & 84.7 ± 0.2 & 81.2 ± 0.4 & 15.7 \\
+\textbf{Ours} & \textbf{87.3 ± 0.2} & \textbf{84.1 ± 0.3} & 14.1 \\
 \bottomrule
 \end{tabular}
 \end{table}
 ```
 
 Rules:
-- Use booktabs (\toprule, \midrule, \bottomrule) -- no vertical lines
+- Use booktabs (\toprule, \midrule, \bottomrule) — no vertical lines
 - Caption goes ABOVE the table
 - Self-contained caption: readable without main text
-- Reference every table in the text: "As shown in Table~\ref{tab:throughput}..."
-- Numbers must match results.json exactly
+- Reference every table in the text: "As shown in Table~\ref{tab:main}..."
+- Numbers must match experiment results exactly
 
 ## Figures
-
-Systems papers are figure-heavy. Common figure types:
-
-- **Architecture diagram**: required. Show components and data flow.
-- **Throughput-latency curve**: the standard systems performance figure.
-- **Scalability plot**: performance vs. cores/nodes/data size.
-- **CDF of latency**: shows full latency distribution.
-- **Breakdown chart**: stacked bar showing where time is spent.
-- **Time-series plot**: behavior over time (e.g., during failure recovery).
 
 ```latex
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/throughput_latency.pdf}
-\caption{Throughput vs. p99 latency under increasing load (YCSB-A,
-Zipfian, 16B keys, 1KB values). \textsc{OurSystem} sustains
-1M ops/sec at sub-50\textmu{}s p99 latency.}
-\label{fig:throughput_latency}
+\includegraphics[width=0.8\linewidth]{figures/training_curve.pdf}
+\caption{Training loss over epochs. Our method (blue) converges faster
+than Baseline A (orange) and Baseline B (green).}
+\label{fig:training}
 \end{figure}
 ```
 
 Rules:
 - Caption goes BELOW the figure
-- Self-contained caption with workload parameters
-- Use PDF or vector format (not low-res PNG)
-- Readable at print size (font >= 8pt, distinguishable line styles)
-- Reference every figure: "Figure~\ref{fig:throughput_latency} shows..."
-- Use consistent colors and line styles across all figures
+- Self-contained caption
+- Use PDF or vector format when possible (not low-res PNG)
+- Readable at print size (font ≥ 8pt in the figure)
+- Reference every figure: "Figure~\ref{fig:training} shows..."
+- Use consistent colors across all figures
 
-## Related Work (near the end)
+## Discussion / Limitations
 
-- Organize by category of system, not chronologically:
-  - "Key-value stores: ..."
-  - "Log-structured systems: ..."
-  - "Hardware-accelerated systems: ..."
-- For each category, explain what those systems do and how yours differs
-- Be respectful but clear about limitations of prior work
-- End with: "Unlike [closest prior system], \textsc{OurSystem}..."
-- Every cited paper must be REAL and verifiable. Search ACM DL, USENIX
-  proceedings, IEEE Xplore, or Google Scholar to confirm papers exist.
+- Discuss what the results mean, not just what they are
+- Honestly acknowledge limitations:
+  - "Our method assumes X, which may not hold in Y scenarios"
+  - "We evaluated on Z datasets; generalization to other domains is untested"
+- Reviewers reward honesty — hiding limitations gets papers rejected
 
 ## Conclusion
 
-- Restate the problem and your system (one sentence each)
-- Summarize key results with concrete numbers
-- State the broader lesson or design principle that others can learn from
+- Restate the problem and your approach (one sentence each)
+- Summarize key findings with concrete numbers
+- State broader implications
 - Suggest future work
 - DO NOT introduce new results or claims here
 - 0.5-1 page
@@ -271,40 +182,31 @@ Rules:
 ## References (CRITICAL)
 
 - EVERY reference must be a REAL, VERIFIABLE publication
-- Search ACM Digital Library, USENIX proceedings, IEEE Xplore, or Google
-  Scholar to find and verify papers
-- Fake or hallucinated citations undermine scientific integrity and are
-  grounds for automatic rejection
+- Search Semantic Scholar (semanticscholar.org) to find and verify papers
+- Fake or hallucinated citations undermine scientific integrity
 - Use correct format: authors, title, venue, year
-- Prefer published conference proceedings over technical reports or arXiv
-- Include 30-50 references for a typical systems paper (more than ML papers)
-- Use \cite{} for parenthetical citations and \citet{} for textual
+- Prefer published conference/journal papers over arXiv preprints
+- Include 15-30 references for a typical ML paper
+- Use \citep{} for parenthetical: "(Smith et al., 2023)"
+- Use \citet{} for textual: "Smith et al. (2023) showed..."
 
 ## LaTeX Best Practices
 
-- Use the venue's official style file (check the CFP)
-  - USENIX: usenix-2020-09.sty or current equivalent
-  - ACM: acmart.cls with sigplan or sigarch option
+- Use the venue's official style file (neurips_2025.sty, etc.)
 - Use booktabs for tables (no vertical lines)
 - Use \usepackage{hyperref} for clickable references
-- Use \textsc{SystemName} consistently throughout the paper
-- Use ~ for non-breaking spaces: Table~\ref{tab:main}, Figure~\ref{fig:arch}
-- Use \S for section symbol: \S\ref{sec:design}
-- Use siunitx for units: \SI{1.5}{\micro\second}, \SI{100}{Gbps}
+- Define notation with \newcommand for consistency
+- Use ~ for non-breaking spaces before references: Table~\ref{tab:main}
 - Compile at least twice to resolve references
+- 8-10 pages for main content (excluding references and appendix)
 
-## Common Mistakes That Get Systems Papers Rejected
+## Common Mistakes That Get Papers Rejected
 
-- No clear problem statement or motivation (why should anyone care?)
-- Design decisions without rationale ("we use X" but not "we use X because...")
-- No system architecture diagram
-- Evaluation only at low load (not showing saturation or overload behavior)
-- Only mean latency reported (no percentiles)
-- Unfair baseline comparison (misconfigured or outdated baselines)
-- No microbenchmarks (reviewer cannot tell which design decisions matter)
-- No scalability evaluation
-- Evaluation on only one workload
-- Fabricated or unverifiable references
-- Implementation described but no design insight explained
-- Claims about production readiness without production-scale evaluation
-- Ignoring failure handling and correctness
+- No explicit contributions list in the introduction
+- Claims not supported by evidence in the experiments
+- Numbers in text don't match experiment results
+- No ablation study
+- Unfair baseline comparisons
+- Fabricated references
+- No limitations discussion
+- Poor writing quality / unclear main contribution
