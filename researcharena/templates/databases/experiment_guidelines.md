@@ -146,4 +146,3 @@ Before finishing, verify:
 - [ ] Each experiment has its own folder under exp/ with code and results
 - [ ] Figures saved for key results
 - [ ] Negative results reported honestly (if any)
-- [ ] All available GPUs utilized
