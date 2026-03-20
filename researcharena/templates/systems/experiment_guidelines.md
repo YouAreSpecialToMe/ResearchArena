@@ -74,17 +74,32 @@ Not all research requires training a model. Choose what fits your claim:
 
 ### Efficient use of resources
 You have a fixed time budget and compute resources — use them wisely:
+- **Use ALL available GPUs.** Check how many GPUs you have (e.g., `nvidia-smi`)
+  and distribute work across them. Use `CUDA_VISIBLE_DEVICES=N` to pin
+  different experiments to different GPUs. For example, with 8 GPUs:
+  ```bash
+  CUDA_VISIBLE_DEVICES=0 python exp/baseline1/run.py &
+  CUDA_VISIBLE_DEVICES=1 python exp/baseline2/run.py &
+  CUDA_VISIBLE_DEVICES=2 python exp/method/run.py &
+  # ... etc
+  wait  # wait for all to finish
+  ```
+  If one experiment only needs 1 GPU, you can run 8 experiments in parallel.
 - **Parallelize independent experiments.** If experiments don't depend on each
   other (e.g., different seeds, different baselines, different ablations),
-  run them in parallel using `subprocess`, `multiprocessing`, or shell `&`.
+  run them in parallel across GPUs or using `subprocess` / shell `&`.
 - **Estimate runtime first.** Before launching the full experiment suite, time
-  a single short run and extrapolate. If your estimate exceeds the budget,
-  reduce epochs, use smaller models, or drop non-essential ablations.
-- **Use all available GPU memory.** If your model only uses 10GB of a 80GB GPU,
+  a single short run on one GPU and extrapolate. Divide by the number of GPUs
+  for parallel runtime. If your estimate STILL exceeds the budget after
+  parallelization, reduce scope.
+- **Use all available GPU memory.** If your model only uses 10GB of a 48GB GPU,
   consider running multiple experiments simultaneously on the same GPU, or
   increasing batch size for faster convergence.
 - **Prioritize.** Run the most important experiments first (method vs. strongest
   baseline). If time runs out, you'll at least have the core comparison.
+- **Do NOT scope down prematurely.** If your pilot shows a single experiment
+  takes N minutes on 1 GPU, and you have K GPUs, total parallel runtime is
+  roughly N/K — check this before dropping experiments from the plan.
 
 ### General principles
 - Start simple. Get a minimal version working end-to-end first.
