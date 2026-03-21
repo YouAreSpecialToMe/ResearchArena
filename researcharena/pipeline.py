@@ -371,7 +371,11 @@ class Pipeline:
             self.state.stage = Stage.EXPERIMENTS
 
     def _run_experiments(self):
-        self.state.experiment_attempts += 1
+        # Only count as a retry if there were prior errors (real failure),
+        # not when returning from self-review revision
+        is_self_review_revision = bool(self.state.self_review_experiment_feedback)
+        if not is_self_review_revision:
+            self.state.experiment_attempts += 1
 
         if self.state.experiment_attempts > self.state.max_experiment_retries:
             console.print("  [red]Experiment budget exhausted. Abandoning idea.[/]")
@@ -380,10 +384,16 @@ class Pipeline:
             ))
             return
 
-        console.print(
-            f"  Experiment attempt {self.state.experiment_attempts}/"
-            f"{self.state.max_experiment_retries}"
-        )
+        if is_self_review_revision:
+            console.print(
+                f"  Re-running experiments (self-review revision, attempt "
+                f"{self.state.experiment_attempts}/{self.state.max_experiment_retries})"
+            )
+        else:
+            console.print(
+                f"  Experiment attempt {self.state.experiment_attempts}/"
+                f"{self.state.max_experiment_retries}"
+            )
 
         self.tracker.begin_action(
             stage="experiments",

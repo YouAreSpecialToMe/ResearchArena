@@ -285,16 +285,16 @@ def _extract_score_from_text(text: str) -> tuple[float, str]:
         for attempt_str in [candidate, re.sub(r',\s*}', '}', re.sub(r',\s*]', ']', candidate))]:
             try:
                 data = json.loads(attempt_str)
-                if "score" in data:
-                    score = float(data["score"])
-                    feedback = data.get("feedback", "")
-                    weaknesses = data.get("weaknesses", [])
-                    if weaknesses and not feedback:
-                        feedback = "; ".join(weaknesses)
-                    elif weaknesses:
-                        feedback += "\nWeaknesses: " + "; ".join(weaknesses)
-                    return score, feedback
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
+            if "score" in data:
+                score = float(data["score"])
+                feedback = data.get("feedback", "")
+                weaknesses = data.get("weaknesses", [])
+                if weaknesses and not feedback:
+                    feedback = "; ".join(weaknesses)
+                elif weaknesses:
+                    feedback += "\nWeaknesses: " + "; ".join(weaknesses)
+                return score, feedback
 
     return 0.0, ""
