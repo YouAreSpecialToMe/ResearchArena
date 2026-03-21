@@ -6,10 +6,10 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=60g
-#SBATCH --gres=gpu:1
-#SBATCH -t 168:00:00
+#SBATCH --gres=gpu:nvidia_rtx_a6000:1
+#SBATCH -t 48:00:00
 #SBATCH --partition=rush
-#SBATCH -w rush-compute-03
+#SBATCH --nodelist=rush-compute-02
 #SBATCH --array=0-7
 
 set -euo pipefail
@@ -31,8 +31,8 @@ done < "$SEEDS_FILE"
 
 SEED="${SEEDS[$SLURM_ARRAY_TASK_ID]}"
 SLUG=$(echo "$SEED" | tr ' ' '_' | tr '/' '_' | tr '[:upper:]' '[:lower:]')
+WORKSPACE="outputs/codex/${SLUG}_${TIMESTAMP}"
 
-# Redirect logs to codex_<research_name>.out/.err
 LOG_OUT="outputs/codex/logs/codex_${SLUG}.out"
 LOG_ERR="outputs/codex/logs/codex_${SLUG}.err"
 exec > >(tee -a "$LOG_OUT") 2> >(tee -a "$LOG_ERR" >&2)
@@ -41,16 +41,16 @@ echo "============================================================"
 echo "  ResearchArena — Codex GPU Job"
 echo "  Config:    $CONFIG"
 echo "  Seed:      $SEED"
+echo "  Workspace: $WORKSPACE"
 echo "  Task ID:   $SLURM_ARRAY_TASK_ID"
 echo "  Node:      $(hostname)"
-echo "  GPUs:      1 × A6000"
+echo "  GPU:       1× NVIDIA RTX A6000 (48GB)"
 echo "  CPUs:      4"
 echo "  Memory:    60 GB"
-echo "  Time:      48 hours"
 echo "============================================================"
 
 researcharena run \
   --config "$CONFIG" \
   --seed "$SEED" \
-  --workspace "outputs/codex/${SLUG}_${TIMESTAMP}" \
+  --workspace "$WORKSPACE" \
   --platform gpu

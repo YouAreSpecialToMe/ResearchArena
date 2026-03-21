@@ -412,6 +412,10 @@ def _parse_review_from_output(stdout: str) -> dict | None:
         except (json.JSONDecodeError, ValueError):
             combined = combined.replace('\\"', '"').replace('\\n', '\n')
 
+    # Strip markdown code fences (e.g., ```json ... ```) that some agents use
+    import re
+    combined = re.sub(r'```(?:json)?\s*\n?', '', combined)
+
     # Step 2: Find review JSON in the extracted text using brace matching
     candidates = []
     brace_depth = 0
@@ -425,12 +429,15 @@ def _parse_review_from_output(stdout: str) -> dict | None:
             brace_depth -= 1
             if brace_depth == 0 and json_start is not None:
                 candidate = combined[json_start:i + 1]
-                try:
-                    data = json.loads(candidate)
-                    if "overall_score" in data and "decision" in data:
-                        candidates.append(data)
-                except json.JSONDecodeError:
-                    pass
+                # Try parsing, with fallback for trailing commas
+                for attempt_str in [candidate, re.sub(r',\s*}', '}', re.sub(r',\s*]', ']', candidate))]:
+                    try:
+                        data = json.loads(attempt_str)
+                        if "overall_score" in data and "decision" in data:
+                            candidates.append(data)
+                            break
+                    except json.JSONDecodeError:
+                        continue
                 json_start = None
 
     # Return the LAST match (most likely the actual review, not an example)

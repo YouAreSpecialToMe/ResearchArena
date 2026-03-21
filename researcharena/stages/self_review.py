@@ -252,12 +252,18 @@ def _parse_output(agent_result) -> tuple[float, str]:
 
     text = "\n".join(text_parts) if text_parts else stdout
 
+    # Strip markdown code fences
+    import re
+    text = re.sub(r'```(?:json)?\s*\n?', '', text)
+
     # Find JSON blocks containing "score"
     return _extract_score_from_text(text)
 
 
 def _extract_score_from_text(text: str) -> tuple[float, str]:
     """Find the last JSON object with a 'score' field in the text."""
+    import re
+
     brace_depth = 0
     json_start = -1
     candidates = []
@@ -275,8 +281,12 @@ def _extract_score_from_text(text: str) -> tuple[float, str]:
 
     # Try candidates from last to first (final output most likely)
     for candidate in reversed(candidates):
-        try:
-            data = json.loads(candidate)
+        # Try parsing, with fallback for trailing commas
+        for attempt_str in [candidate, re.sub(r',\s*}', '}', re.sub(r',\s*]', ']', candidate))]:
+            try:
+                data = json.loads(attempt_str)
+            except json.JSONDecodeError:
+                continue
             if "score" in data:
                 score = float(data["score"])
                 feedback = data.get("feedback", "")
