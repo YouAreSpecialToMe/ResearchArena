@@ -366,13 +366,14 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text":
                         text_content.append(block["text"])
-                    # Claude may output review via Bash tool_use (cat <<EOF)
+                    # Claude may output review via tool calls (Bash cat, Write)
                     elif block.get("type") == "tool_use":
                         inp = block.get("input", {})
                         if isinstance(inp, dict):
-                            cmd = inp.get("command", "")
-                            if cmd:
-                                text_content.append(cmd)
+                            for field in ("command", "content"):
+                                val = inp.get(field, "")
+                                if val:
+                                    text_content.append(val)
             # User messages with tool_result content (review output from tool calls)
             elif event.get("type") == "user":
                 for block in event.get("message", {}).get("content", []):
@@ -384,12 +385,13 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                             for sub in content:
                                 if isinstance(sub, dict):
                                     text_content.append(sub.get("text", ""))
-                # Also check tool_use_result.stdout (Claude stream-json format)
+                # Also check tool_use_result fields (Claude stream-json format)
                 tool_result = event.get("tool_use_result", {})
                 if isinstance(tool_result, dict):
-                    stdout_text = tool_result.get("stdout", "")
-                    if stdout_text:
-                        text_content.append(stdout_text)
+                    for field in ("stdout", "content"):
+                        val = tool_result.get(field, "")
+                        if val:
+                            text_content.append(val)
             elif event.get("type") == "result":
                 result_text = event.get("result", "")
                 if result_text:
