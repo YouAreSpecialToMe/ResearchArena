@@ -366,6 +366,30 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text":
                         text_content.append(block["text"])
+                    # Claude may output review via Bash tool_use (cat <<EOF)
+                    elif block.get("type") == "tool_use":
+                        inp = block.get("input", {})
+                        if isinstance(inp, dict):
+                            cmd = inp.get("command", "")
+                            if cmd:
+                                text_content.append(cmd)
+            # User messages with tool_result content (review output from tool calls)
+            elif event.get("type") == "user":
+                for block in event.get("message", {}).get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        content = block.get("content", "")
+                        if isinstance(content, str):
+                            text_content.append(content)
+                        elif isinstance(content, list):
+                            for sub in content:
+                                if isinstance(sub, dict):
+                                    text_content.append(sub.get("text", ""))
+                # Also check tool_use_result.stdout (Claude stream-json format)
+                tool_result = event.get("tool_use_result", {})
+                if isinstance(tool_result, dict):
+                    stdout_text = tool_result.get("stdout", "")
+                    if stdout_text:
+                        text_content.append(stdout_text)
             elif event.get("type") == "result":
                 result_text = event.get("result", "")
                 if result_text:
@@ -400,6 +424,20 @@ def _parse_review_from_output(stdout: str) -> dict | None:
         except json.JSONDecodeError:
             # Not JSON — treat as plain text (Minimax, custom agents)
             text_content.append(line)
+
+    # Step 1.5: Try parsing each text chunk individually as a review JSON.
+    # This catches cases where Claude outputs the review via a tool call
+    # and the result is a clean JSON string (before concatenation pollutes it).
+    for chunk in reversed(text_content):
+        chunk = chunk.strip()
+        if not chunk or "overall_score" not in chunk:
+            continue
+        try:
+            data = json.loads(chunk)
+            if isinstance(data, dict) and "overall_score" in data and "decision" in data:
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
 
     combined = "\n".join(text_content) if text_content else stdout
 
