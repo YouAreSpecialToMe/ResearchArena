@@ -390,7 +390,7 @@ def _parse_review_from_output(stdout: str) -> dict | None:
                 if isinstance(tool_result, dict):
                     for field in ("stdout", "content"):
                         val = tool_result.get(field, "")
-                        if val:
+                        if isinstance(val, str) and val:
                             text_content.append(val)
             elif event.get("type") == "result":
                 result_text = event.get("result", "")
@@ -430,16 +430,41 @@ def _parse_review_from_output(stdout: str) -> dict | None:
     # Step 1.5: Try parsing each text chunk individually as a review JSON.
     # This catches cases where Claude outputs the review via a tool call
     # and the result is a clean JSON string (before concatenation pollutes it).
+    import re as _re
     for chunk in reversed(text_content):
         chunk = chunk.strip()
         if not chunk or "overall_score" not in chunk:
             continue
+        # Try direct parse first
         try:
             data = json.loads(chunk)
             if isinstance(data, dict) and "overall_score" in data and "decision" in data:
                 return data
         except (json.JSONDecodeError, ValueError):
             pass
+        # Try extracting JSON from within the chunk (e.g. markdown code fences
+        # or preamble text before the JSON object)
+        # Use brace matching on this single chunk
+        cleaned = _re.sub(r'```(?:json)?\s*\n?', '', chunk)
+        brace_depth = 0
+        json_start = None
+        for i, c in enumerate(cleaned):
+            if c == '{':
+                if brace_depth == 0:
+                    json_start = i
+                brace_depth += 1
+            elif c == '}':
+                brace_depth -= 1
+                if brace_depth == 0 and json_start is not None:
+                    candidate = cleaned[json_start:i + 1]
+                    for attempt in [candidate, _re.sub(r',\s*}', '}', _re.sub(r',\s*]', ']', candidate))]:
+                        try:
+                            data = json.loads(attempt)
+                            if isinstance(data, dict) and "overall_score" in data and "decision" in data:
+                                return data
+                        except json.JSONDecodeError:
+                            continue
+                    json_start = None
 
     combined = "\n".join(text_content) if text_content else stdout
 
