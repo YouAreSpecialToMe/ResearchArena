@@ -139,8 +139,8 @@ class ResumablePipeline(Pipeline):
                     end_time=0,
                     elapsed_seconds=a.get("elapsed_seconds", 0),
                     tokens=TokenUsage(
-                        input=tokens.get("input_tokens", 0),
-                        output=tokens.get("output_tokens", 0),
+                        input_tokens=tokens.get("input_tokens", 0),
+                        output_tokens=tokens.get("output_tokens", 0),
                     ),
                     outcome=a.get("outcome", ""),
                     details=a.get("details", ""),

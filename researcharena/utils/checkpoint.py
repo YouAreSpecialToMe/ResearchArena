@@ -7,7 +7,7 @@ enabling resume after preemption or crash.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 
 CHECKPOINT_FILENAME = "checkpoint.json"
@@ -58,8 +58,10 @@ def save_checkpoint(state, base_dir: Path, tracker=None) -> Path:
 
     # Also save tracker actions so we don't lose tracking data
     if tracker is not None:
-        data["_tracker_actions"] = tracker.actions if hasattr(tracker, "actions") else []
-        data["_tracker_elapsed"] = tracker.elapsed if hasattr(tracker, "elapsed") else 0
+        data["_tracker_actions"] = [
+            a.to_dict() if hasattr(a, "to_dict") else a
+            for a in (tracker.actions if hasattr(tracker, "actions") else [])
+        ]
 
     checkpoint_path.write_text(json.dumps(data, indent=2, default=str))
     return checkpoint_path
