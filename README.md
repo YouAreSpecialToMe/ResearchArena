@@ -213,6 +213,31 @@ researcharena run --seed "query optimization" --agent claude --platform cpu
 researcharena run --seed "computer vision" --workspace outputs/claude/cv_run1
 ```
 
+### Run with checkpoint/resume (recommended for SLURM)
+
+Use `run_resumable` instead of `run` to automatically checkpoint after each
+pipeline step. If the job is preempted or crashes, resubmitting it resumes
+from the last completed step instead of starting over.
+
+```bash
+# Same arguments as `researcharena run`
+python -m researcharena.run_resumable \
+  --config configs/claude_cpu.yaml \
+  --seed "compiler optimization" \
+  --platform cpu \
+  --workspace outputs/claude_t1_compiler_optimization
+
+# In SLURM scripts, replace:
+#   researcharena run --config ... --seed ... --workspace ...
+# with:
+#   python -m researcharena.run_resumable --config ... --seed ... --workspace ...
+```
+
+A `checkpoint.json` is saved in the workspace after every step. On completion
+it is automatically removed. If the job is interrupted, the checkpoint tells
+the pipeline exactly where to resume (stage, step number, idea attempt,
+self-review counters, tracker history).
+
 ### Run 8 parallel experiments on SLURM
 
 ```bash
@@ -389,6 +414,8 @@ outputs/claude/computer_vision_20260319_143052/
 researcharena/
 ├── cli.py                       # CLI entry point (run, bench, review-only, list-seeds)
 ├── pipeline.py                  # State machine orchestrator
+├── pipeline_resumable.py        # Resumable pipeline with auto-checkpoint
+├── run_resumable.py             # CLI entry point for resumable runs
 ├── stages/
 │   ├── ideation.py              # Stage 1: structured proposal + plan + idea
 │   ├── self_review.py           # Self-review gates (idea, experiment, paper)
@@ -398,6 +425,7 @@ researcharena/
 ├── utils/
 │   ├── agent_runner.py          # Local + Docker/Podman execution
 │   ├── tracker.py               # Time, tokens, cost tracking
+│   ├── checkpoint.py            # Pipeline state checkpoint/resume
 │   ├── config.py                # YAML config loading
 │   ├── paperreview.py           # paperreview.ai automation
 │   └── reference_checker.py     # Citation verification (disabled, high false-positive rate)
