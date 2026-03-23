@@ -67,7 +67,8 @@ def main():
 @click.option("--platform", default=None, type=click.Choice(["gpu", "cpu"]), help="Platform (gpu/cpu)")
 @click.option("--domain", default=None, type=click.Choice(["ml", "systems", "databases", "pl", "theory", "security"]), help="Domain (selects guideline templates)")
 @click.option("--workspace", "-w", default=None, help="Override output workspace directory")
-def run(config, seed, agent, model, max_ideas, platform, domain, workspace):
+@click.option("--resume", "-r", default=None, type=click.Path(exists=True), help="Resume from existing idea workspace (e.g., outputs/kimi/run_3/computer_vision/idea_01)")
+def run(config, seed, agent, model, max_ideas, platform, domain, workspace, resume):
     """Run the full research pipeline with a CLI agent."""
     cfg = load_config(config)
 
@@ -95,7 +96,11 @@ def run(config, seed, agent, model, max_ideas, platform, domain, workspace):
     from researcharena.pipeline import Pipeline
 
     pipeline = Pipeline(cfg)
-    result = pipeline.run()
+
+    if resume:
+        result = pipeline.resume(resume)
+    else:
+        result = pipeline.run()
 
     # Save final summary
     summary_path = Path(cfg["experiment"]["workspace"]) / "summary.json"

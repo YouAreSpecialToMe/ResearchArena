@@ -216,6 +216,64 @@ class Pipeline:
 
         return domain_default
 
+    def resume(self, idea_dir: str | Path) -> dict:
+        """Resume the pipeline from an existing workspace.
+
+        Detects what's already done and starts from the appropriate stage.
+        """
+        idea_dir = Path(idea_dir)
+        if not idea_dir.exists():
+            console.print(f"[red]Workspace {idea_dir} does not exist.[/]")
+            return {}
+
+        # Detect current state from workspace contents
+        has_idea = (idea_dir / "idea.json").exists()
+        has_proposal = (idea_dir / "proposal.md").exists()
+        has_plan = (idea_dir / "plan.json").exists()
+        has_exp = (idea_dir / "exp").exists()
+        has_paper = (idea_dir / "paper.tex").exists()
+        has_reviews = (idea_dir / "reviews.json").exists()
+
+        # Set workspace
+        self.state.workspace = idea_dir
+        self.state.idea_attempts = 1
+
+        # Load existing idea
+        if has_idea:
+            try:
+                self.state.idea = json.loads((idea_dir / "idea.json").read_text())
+            except:
+                pass
+
+        # Determine starting stage
+        if has_reviews:
+            console.print("[green]Reviews found — already complete.[/]")
+            return {}
+        elif has_paper:
+            console.print("[cyan]Paper found — resuming from REVIEW.[/]")
+            if self.self_review_enabled and self.self_review_gates.get("paper", True):
+                self.state.stage = Stage.SELF_REVIEW_PAPER
+            else:
+                self.state.stage = Stage.REVIEW
+        elif has_exp:
+            console.print("[cyan]Experiments found — resuming from EXPERIMENTS (re-run to complete).[/]")
+            self.state.stage = Stage.EXPERIMENTS
+        elif has_idea and has_proposal and has_plan:
+            console.print("[cyan]Idea + plan found — resuming from SELF_REVIEW_IDEA.[/]")
+            if self.self_review_enabled and self.self_review_gates.get("idea", True):
+                self.state.stage = Stage.SELF_REVIEW_IDEA
+            else:
+                self.state.stage = Stage.EXPERIMENTS
+        elif has_idea and has_proposal:
+            console.print("[cyan]Idea found, no plan — resuming from IDEATION (plan step).[/]")
+            self.state.stage = Stage.IDEATION
+        else:
+            console.print("[cyan]Empty workspace — starting from IDEATION.[/]")
+            self.state.stage = Stage.IDEATION
+
+        console.print(f"  Starting stage: {self.state.stage.value}")
+        return self.run()
+
     def run(self) -> dict:
         seed_topic = self.config["seed_topic"]
         accept_threshold = self.config["review"]["accept_threshold"]
