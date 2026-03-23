@@ -63,7 +63,11 @@ def save_checkpoint(state, base_dir: Path, tracker=None) -> Path:
             for a in (tracker.actions if hasattr(tracker, "actions") else [])
         ]
 
-    checkpoint_path.write_text(json.dumps(data, indent=2, default=str))
+    # Atomic write: write to temp file then rename, so a kill mid-write
+    # won't corrupt the checkpoint (rename is atomic on POSIX)
+    tmp_path = checkpoint_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, default=str))
+    tmp_path.rename(checkpoint_path)
     return checkpoint_path
 
 
