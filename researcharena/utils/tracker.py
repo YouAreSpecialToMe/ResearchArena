@@ -124,11 +124,12 @@ class ActionRecord:
 class RunTracker:
     """Tracks all actions, timing, and token usage for a pipeline run."""
 
-    def __init__(self):
+    def __init__(self, save_dir: str | Path | None = None):
         self.actions: list[ActionRecord] = []
         self.run_start: float = 0.0
         self.run_end: float = 0.0
         self._current: ActionRecord | None = None
+        self._save_dir: Path | None = Path(save_dir) if save_dir else None
 
     def start_run(self):
         self.run_start = time.time()
@@ -181,6 +182,10 @@ class RunTracker:
         record.cost_usd = self._estimate_cost(record)
         self.actions.append(record)
         self._current = None
+
+        # Auto-save after each action so progress survives crashes/kills
+        if self._save_dir:
+            self.save(self._save_dir)
 
     # ── Token parsing from CLI agent output ───────────────────────────
 

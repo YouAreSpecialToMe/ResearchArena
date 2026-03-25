@@ -162,7 +162,7 @@ class Pipeline:
         self.base_dir = Path(config["experiment"]["workspace"])
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        self.tracker = RunTracker()
+        self.tracker = RunTracker(save_dir=self.base_dir)
 
         # Self-review config
         sr_config = config.get("self_review", {})
