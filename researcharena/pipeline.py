@@ -245,6 +245,39 @@ class Pipeline:
             except:
                 pass
 
+        # Load existing results
+        results_path = idea_dir / "results.json"
+        if results_path.exists():
+            try:
+                self.state.results = json.loads(results_path.read_text())
+            except:
+                pass
+
+        # Restore retry counts from tracker.json (saved after each action)
+        tracker_path = self.base_dir / "tracker.json"
+        if tracker_path.exists():
+            try:
+                tracker_data = json.loads(tracker_path.read_text())
+                for action in tracker_data.get("actions", []):
+                    stage = action.get("stage", "")
+                    outcome = action.get("outcome", "")
+                    if stage == "experiments" and outcome in ("failure", "timeout"):
+                        self.state.experiment_attempts += 1
+                    elif stage == "paper" and outcome == "failure":
+                        self.state.paper_revision_attempts += 1
+                    elif stage == "self_review_idea" and outcome == "revision":
+                        self.state.self_review_idea_attempts += 1
+                    elif stage == "self_review_experiment" and outcome == "revision":
+                        self.state.self_review_experiment_attempts += 1
+                    elif stage == "self_review_paper" and outcome == "revision":
+                        self.state.self_review_paper_attempts += 1
+                console.print(
+                    f"  Restored retry counts: experiments={self.state.experiment_attempts}, "
+                    f"paper_revisions={self.state.paper_revision_attempts}"
+                )
+            except Exception:
+                pass
+
         # Determine starting stage
         if has_reviews:
             console.print("[green]Reviews found — already complete.[/]")
