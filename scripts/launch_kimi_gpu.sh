@@ -77,19 +77,13 @@ for (( start=0; start<TOTAL; start+=NUM_GPUS )); do
 
     echo "  [GPU $GPU_ID] $SEED"
 
-    # Cap virtual memory at MEM_LIMIT_GB per researcher to prevent OOM
-    MEM_LIMIT_GB="${MEM_LIMIT_GB:-128}"
-    MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
-
-    (
-      ulimit -v $MEM_LIMIT_KB 2>/dev/null || true
-      CUDA_VISIBLE_DEVICES=$GPU_ID \
-        researcharena run \
-          --config "$CONFIG" \
-          --seed "$SEED" \
-          --workspace "outputs/${AGENT}/${SLUG}_${TIMESTAMP}" \
-          --platform gpu
-    ) > "$LOG_FILE" 2>&1 &
+    CUDA_VISIBLE_DEVICES=$GPU_ID \
+      researcharena run \
+        --config "$CONFIG" \
+        --seed "$SEED" \
+        --workspace "outputs/${AGENT}/${SLUG}_${TIMESTAMP}" \
+        --platform gpu \
+      > "$LOG_FILE" 2>&1 &
 
     PIDS+=($!)
     BATCH_SEEDS+=("$SEED")

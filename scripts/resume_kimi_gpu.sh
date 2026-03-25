@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${CONFIG:-configs/8xh100_kimi.yaml}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 
 # Find all idea_01 dirs from the latest batch that need work
 WORKSPACES=()
@@ -59,16 +59,11 @@ for (( start=0; start<TOTAL; start+=BATCH_SIZE )); do
 
         echo "  [GPU $GPU_ID] Resuming: $name"
 
-        MEM_LIMIT_GB="${MEM_LIMIT_GB:-128}"
-        MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
-
-        (
-          ulimit -v $MEM_LIMIT_KB 2>/dev/null || true
-          CUDA_VISIBLE_DEVICES=$GPU_ID \
-              researcharena run \
-                  --config "$CONFIG" \
-                  --resume "$ws"
-        ) > "$LOG_FILE" 2>&1 &
+        CUDA_VISIBLE_DEVICES=$GPU_ID \
+            researcharena run \
+                --config "$CONFIG" \
+                --resume "$ws" \
+            > "$LOG_FILE" 2>&1 &
 
         PIDS+=($!)
         BATCH_NAMES+=("$name")
