@@ -255,8 +255,18 @@ class Pipeline:
                 self.state.stage = Stage.SELF_REVIEW_PAPER
             else:
                 self.state.stage = Stage.REVIEW
+        elif (idea_dir / "results.json").exists():
+            console.print("[cyan]Results found — resuming from PAPER.[/]")
+            try:
+                self.state.results = json.loads((idea_dir / "results.json").read_text())
+            except Exception:
+                pass
+            if self.self_review_enabled and self.self_review_gates.get("experiment", True):
+                self.state.stage = Stage.SELF_REVIEW_EXPERIMENT
+            else:
+                self.state.stage = Stage.PAPER
         elif has_exp:
-            console.print("[cyan]Experiments found — resuming from EXPERIMENTS (re-run to complete).[/]")
+            console.print("[cyan]Experiments found but no results.json — resuming from EXPERIMENTS.[/]")
             self.state.stage = Stage.EXPERIMENTS
         elif has_idea and has_proposal and has_plan:
             console.print("[cyan]Idea + plan found — resuming from SELF_REVIEW_IDEA.[/]")
