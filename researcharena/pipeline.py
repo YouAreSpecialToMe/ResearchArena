@@ -474,7 +474,7 @@ class Pipeline:
     def _run_experiments(self):
         # Only count as a retry if there were prior errors (real failure),
         # not when returning from self-review revision
-        is_self_review_revision = bool(self.state.self_review_experiment_feedback)
+        is_self_review_revision = self.state.self_review_experiment_attempts > 0
         if not is_self_review_revision:
             self.state.experiment_attempts += 1
 
