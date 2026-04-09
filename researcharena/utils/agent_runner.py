@@ -298,6 +298,15 @@ def _invoke_local(
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 
+    # Isolate agent memory per workspace.
+    # Set HOME to a workspace-local directory so each idea gets its own
+    # config/memory. Auth credentials are seeded from the real home.
+    agent_home = workspace / ".agent_home"
+    agent_home.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(agent_home)
+    real_home = Path.home()
+    _seed_agent_auth(agent_type, real_home, agent_home)
+
     # GPU assignment (or explicit block for CPU platform)
     cuda_devices = agent_config.get("cuda_devices")
     if cuda_devices:
@@ -836,6 +845,41 @@ def _setup_workspace(agent_type: str, workspace: Path, platform: str = "gpu", do
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(_build_agent_instructions(agent_type, platform))
+
+
+# ── Agent auth seeding ────────────────────────────────────────────────
+
+
+def _seed_agent_auth(agent_type: str, real_home: Path, agent_home: Path):
+    """Copy authentication credentials into the isolated agent home.
+
+    Only copies auth files (API keys, login tokens), NOT memory or history.
+    This runs once per workspace — subsequent stages reuse the same home.
+    """
+    auth_files = {
+        "claude": [
+            ".claude.json",           # main config with auth tokens
+        ],
+        "codex": [
+            ".codex/auth.json",       # auth tokens
+            ".codex/config.toml",     # settings (may include auth)
+        ],
+        "kimi": [
+            ".kimi/auth.json",
+            ".kimi/config.json",
+        ],
+        "minimax": [
+            ".mini-agent/auth.json",
+            ".mini-agent/config.json",
+        ],
+    }
+
+    for rel_path in auth_files.get(agent_type, []):
+        src = real_home / rel_path
+        dst = agent_home / rel_path
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 # ── Runtime detection ──────────────────────────────────────────────────
