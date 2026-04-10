@@ -298,15 +298,6 @@ def _invoke_local(
     env["NONINTERACTIVE"] = "1"
     env["CI"] = "1"
 
-    # Isolate agent memory per workspace.
-    # Set HOME to a workspace-local directory so each idea gets its own
-    # config/memory. Auth credentials are seeded from the real home.
-    agent_home = workspace / ".agent_home"
-    agent_home.mkdir(parents=True, exist_ok=True)
-    env["HOME"] = str(agent_home)
-    real_home = Path.home()
-    _seed_agent_auth(agent_type, real_home, agent_home)
-
     # GPU assignment (or explicit block for CPU platform)
     cuda_devices = agent_config.get("cuda_devices")
     if cuda_devices:
