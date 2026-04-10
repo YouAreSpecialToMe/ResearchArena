@@ -858,7 +858,8 @@ def _seed_agent_auth(agent_type: str, real_home: Path, agent_home: Path):
     """
     auth_files = {
         "claude": [
-            ".claude.json",           # main config with auth tokens
+            ".claude.json",           # main config with account info
+            ".claude/.credentials.json",  # actual auth tokens
         ],
         "codex": [
             ".codex/auth.json",       # auth tokens
