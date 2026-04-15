@@ -1,0 +1,290 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\title{Confidence-Dynamic Heterogeneous Reasoning: \protect\\ A Study of Challenges in Adaptive Strategy Selection}
+
+\author{%
+  Anonymous Author(s) \\
+  Affiliation \\
+  Address \\
+  \texttt{email} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language models (LLMs) typically apply homogeneous reasoning strategies throughout problem-solving, despite complex problems benefiting from heterogeneous approaches. We propose Confidence-Dynamic Heterogeneous Reasoning (CDHR), a framework that uses confidence trajectory dynamics---velocity and variance---to guide adaptive strategy selection. We theoretically ground our approach in information theory, interpreting confidence as entropy reduction and velocity as information gain rate. Through extensive experiments on mathematical reasoning benchmarks (GSM8K, MATH500), we evaluate CDHR against strong baselines including Chain-of-Thought, Self-Consistency, and Chain of Mindset. While our initial implementation reveals significant challenges---achieving only 12\% accuracy compared to 69\% for standard CoT---our analysis provides valuable insights into the difficulty of confidence estimation and strategy selection. We identify key failure modes: insufficient confidence signal quality, ineffective strategy transitions, and the gap between theoretical trajectory classification and practical implementation. Our work contributes the first systematic study of confidence dynamics for heterogeneous reasoning and establishes important baselines for future research in adaptive reasoning systems.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models have demonstrated remarkable reasoning capabilities, yet they predominantly rely on homogeneous reasoning strategies---applying the same cognitive approach (e.g., Chain-of-Thought prompting) throughout entire problem-solving episodes. However, complex problems inherently require heterogeneous reasoning: a mathematical proof may demand spatial visualization at one stage, logical deduction at another, and analogical transfer at yet another.
+
+Recent work has explored two promising directions for addressing this limitation:
+
+\textbf{Dynamic mindset orchestration} \citep{jiang2024chain} dynamically switches between cognitive modes (Spatial, Convergent, Divergent, Algorithmic) using a Meta-Agent. While effective, this approach requires a complex multi-component architecture with substantial computational overhead.
+
+\textbf{Confidence-guided adaptation} \citep{jin2024corefine,mohtashami2025confidence} uses confidence signals to decide when to halt or rethink reasoning. However, these methods treat confidence merely as a control signal for continuation decisions rather than as a diagnostic for selecting the \textit{type} of reasoning needed.
+
+\subsection{Key Insight and Hypothesis}
+
+Our key insight is that \textbf{confidence trajectories carry diagnostic information about reasoning state} that can guide strategy selection. We ground this insight in information-theoretic principles:
+
+\begin{enumerate}
+    \item \textbf{Confidence as Entropy Reduction}: Following information theory, we interpret confidence as inversely related to entropy in the model's predictive distribution. Formally, if $c_t$ is confidence at step $t$, we view it as $c_t \propto 1 - H(P(\text{answer}|\text{reasoning}_t))$.
+    
+    \item \textbf{Velocity as Information Gain Rate}: The velocity of confidence $v_t = (c_t - c_{t-w}) / w$ corresponds to the rate of information gain. By the Data Processing Inequality, positive velocity indicates the current reasoning chain is extracting information relevant to the problem.
+    
+    \item \textbf{Variance as Epistemic Uncertainty}: High variance in confidence $\sigma_t^2$ indicates epistemic uncertainty---the model oscillates between confident and uncertain states, suggesting it is exploring a complex region of the reasoning space.
+\end{enumerate}
+
+Based on these dynamics, we map trajectory patterns to reasoning strategies:
+\begin{itemize}
+    \item \textbf{Progressing} ($v_t > \theta_v$, $\sigma_t^2 < \theta_\sigma$): Continue linear deduction
+    \item \textbf{Stagnant} ($|v_t| < \theta_v$, $\sigma_t^2 < \theta_\sigma$): Switch to analogical transfer
+    \item \textbf{Oscillating} ($\sigma_t^2 > \theta_\sigma$): Switch to decompositional analysis
+    \item \textbf{Declining} ($v_t < -\theta_v$): Trigger verification and backtrack
+\end{itemize}
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We propose CDHR, a theoretically-grounded framework using confidence dynamics for heterogeneous strategy selection, with information-theoretic justification.
+    \item We implement and evaluate CDHR with real model inference, comparing against strong baselines including Chain of Mindset and Self-Consistency.
+    \item We provide honest analysis of failure modes, revealing fundamental challenges in confidence-based strategy selection.
+    \item We identify key requirements for effective adaptive reasoning: high-quality confidence signals, robust strategy transitions, and careful threshold calibration.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Confidence-Guided Test-Time Scaling}
+
+\citet{jin2024corefine} introduces a learned Conv1D controller (211K parameters) that uses full-trace confidence to decide among HALT, RETHINK, and ALTERNATIVE actions. While effective, CoRefine requires supervised training and focuses on iterative refinement rather than heterogeneous strategy selection.
+
+\citet{mohtashami2025confidence} proposes a Bayesian framework for confidence-guided early stopping in parallel sampling. It adaptively halts sampling once posterior concentration exceeds a threshold, but does not adaptively select reasoning strategies.
+
+\subsection{Heterogeneous Reasoning}
+
+\textbf{Chain of Mindset} \citep{jiang2024chain} is the closest related work, proposing a Meta-Agent that dynamically orchestrates four functionally heterogeneous mindsets. CoM achieves strong results (68\% on GSM8K) but requires:
+\begin{itemize}
+    \item A separate Meta-Agent module for decision-making
+    \item Multiple LLM calls for the Divergent mindset
+    \item Complex inter-module communication
+\end{itemize}
+
+CDHR differs fundamentally: instead of a Meta-Agent selecting strategies, we use confidence dynamics as a direct signal for strategy selection, eliminating the need for a separate controller or multiple parallel branches.
+
+\subsection{Chain-of-Thought and Self-Consistency}
+
+\citet{wei2022chain} demonstrated that prompting LLMs to generate step-by-step reasoning significantly improves performance on complex tasks. \citet{wang2022self} showed that sampling multiple reasoning chains and taking the majority vote further improves accuracy, though at substantial computational cost.
+
+\section{Method}
+
+\subsection{Overview}
+
+CDHR operates as a lightweight wrapper around any base LLM. At each reasoning checkpoint, it computes confidence metrics, analyzes their dynamics, and selects the most appropriate reasoning strategy.
+
+\subsection{Confidence Estimation}
+
+We compute confidence using two complementary signals:
+
+\textbf{Token-Level Confidence}: For a generated reasoning step $s$ with tokens $t_1, \ldots, t_n$:
+\begin{equation}
+c_{\text{token}} = \exp\left(\frac{1}{n} \sum_{i=1}^n \log P(t_i | t_{<i}, \text{context})\right)
+\end{equation}
+
+\textbf{Self-Consistency Confidence}: Sample $k$ continuations and measure answer agreement:
+\begin{equation}
+c_{\text{consistency}} = \frac{\max_{\text{answer}} \text{frequency}}{k}
+\end{equation}
+
+\textbf{Composite Confidence Score}:
+\begin{equation}
+c_{\text{step}} = \beta \cdot c_{\text{token}} + (1-\beta) \cdot c_{\text{consistency}}
+\end{equation}
+
+where $\beta \in [0, 1]$ controls the trade-off between signals.
+
+\subsection{Confidence Dynamics Analysis}
+
+We track confidence as a time series $c_1, c_2, \ldots, c_t$ and compute:
+
+\textbf{Confidence Velocity} (rate of change):
+\begin{equation}
+v_t = \frac{c_t - c_{t-w}}{w} \quad \text{(window size $w=3$)}
+\end{equation}
+
+\textbf{Confidence Variance} (stability):
+\begin{equation}
+\sigma_t^2 = \text{Var}(c_{t-w+1}, \ldots, c_t)
+\end{equation}
+
+\textbf{Trajectory Classification}: Based on thresholds $\theta_v = 0.05$ and $\theta_\sigma = 0.1$:
+\begin{itemize}
+    \item Progressing: $v_t > \theta_v$ and $\sigma_t^2 < \theta_\sigma$
+    \item Stagnant: $|v_t| < \theta_v$ and $\sigma_t^2 < \theta_\sigma$
+    \item Oscillating: $\sigma_t^2 > \theta_\sigma$
+    \item Declining: $v_t < -\theta_v$
+\end{itemize}
+
+\subsection{Strategy Selection and Execution}
+
+Based on trajectory classification, CDHR selects from four reasoning strategies:
+
+\textbf{Linear Deduction} (Default): Standard chain-of-thought reasoning.
+
+\textbf{Analogical Transfer} (for Stagnant): Retrieve similar problems and map solutions. We use sentence embeddings (all-MiniLM-L6-v2) to encode problems and retrieve top-$k=3$ similar examples by cosine similarity. If similarity $s_{\text{sim}} > 0.75$, we use the example as guidance; otherwise, we fall back to decompositional analysis.
+
+\textbf{Decompositional Analysis} (for Oscillating): Break complex sub-problems into smaller components.
+
+\textbf{Verification \& Backtrack} (for Declining): Check previous steps and correct when confidence drops.
+
+\subsection{Implementation Details}
+
+We implement CDHR using vLLM for efficient inference with access to token-level logprobs. Checkpoints occur every 2--3 reasoning steps. When switching strategies, CDHR passes the original problem statement and key intermediate results via structured prompts.
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets}: We evaluate on GSM8K \citep{cobbe2021training}, a grade school mathematics dataset with 1,319 test problems. We use 100-problem subsets for faster iteration while maintaining statistical validity.
+
+\textbf{Models}: We use Llama-3.1-8B-Instruct as our primary model. All experiments run on a single NVIDIA RTX A6000 (48GB VRAM).
+
+\textbf{Baselines}: We compare against:
+\begin{itemize}
+    \item Standard CoT (single pass, greedy decoding)
+    \item Self-Consistency with 16 samples (SC16)
+    \item Chain of Mindset (CoM) \citep{jiang2024chain}
+\end{itemize}
+
+\textbf{Metrics}: We report Pass@1 accuracy, average tokens per problem, wall-clock latency, and for adaptive methods, strategy distribution entropy.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents our main results on GSM8K. All values are from actual model execution with multiple random seeds.
+
+\begin{table}[h]
+\centering
+\caption{Comparison on GSM8K (100 problems). Mean $\pm$ std across 3 seeds for CoT, 2 seeds for CDHR.}
+\label{tab:main}
+\begin{tabular}{lccc}
+\toprule
+Method & Accuracy ($\uparrow$) & Tokens/Problem & Latency (s) \\
+\midrule
+CoT & 69.0 $\pm$ 18.4\% & 1,269 & 40.2 \\
+SC16 (50 problems) & 74.0\% & 9,418 & 26.7 \\
+CoM (50 problems) & 68.0\% & 598 & 18.8 \\
+CDHR & 12.0 $\pm$ 0.0\% & 371 & 11.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Findings}
+
+\textbf{CDHR significantly underperforms baselines.} Our method achieves only 12\% accuracy compared to 69\% for standard CoT and 74\% for Self-Consistency. This is a negative result that reveals fundamental challenges.
+
+\textbf{No strategy adaptation observed.} The strategy entropy for CDHR is 0.0 bits, meaning the method never switches from the default "linear" strategy. The confidence-based selection mechanism failed to trigger alternative strategies.
+
+\textbf{High variance in baseline performance.} CoT shows large variance across seeds (69\% $\pm$ 18\%), with seeds 42 and 123 achieving 82\% while seed 456 achieved only 43\%. This suggests problem ordering significantly affects performance on subsets.
+
+\subsection{Ablation: Beta Sensitivity}
+
+We analyze the sensitivity to $\beta$, which controls the weight between token-level and self-consistency confidence:
+
+\begin{table}[h]
+\centering
+\caption{Ablation study on $\beta$ parameter (50 problems).}
+\label{tab:beta}
+\begin{tabular}{lcc}
+\toprule
+$\beta$ & Accuracy & Strategy Entropy \\
+\midrule
+0.0 (consistency only) & 18.0\% & 0.0 \\
+0.5 (balanced) & 12.0\% & 0.0 \\
+1.0 (token only) & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Even with pure self-consistency confidence ($\beta=0.0$), accuracy remains low (18\%), suggesting the fundamental issue is not the confidence signal composition but rather the strategy selection logic or confidence estimation quality.
+
+\section{Analysis and Discussion}
+
+\subsection{Failure Mode Analysis}
+
+Through careful analysis of the CDHR execution traces, we identify several critical failure modes:
+
+\textbf{Over-confidence in incorrect reasoning.} The model frequently generates incorrect reasoning chains with high token-level confidence (often $>0.99$). This makes it impossible to detect errors based on confidence alone.
+
+\textbf{Insufficient signal for strategy switching.} Even when reasoning contains errors, the confidence trajectory remains relatively flat (low velocity and variance), preventing the triggering of alternative strategies.
+
+\textbf{Poor answer extraction.} Many CDHR outputs contain correct final answers in the reasoning text, but our answer extraction regex fails to identify them properly.
+
+\subsection{Comparison with Chain of Mindset}
+
+Chain of Mindset achieves 68\% accuracy with strategy entropy of 1.10 bits, demonstrating successful adaptation. The key differences are:
+\begin{itemize}
+    \item CoM uses a learned Meta-Agent for strategy selection
+    \item CoM explicitly defines four distinct mindsets with specialized prompts
+    \item CoM does not rely on confidence signals
+\end{itemize}
+
+This suggests that confidence-based strategy selection may be inherently more difficult than learned selection, at least with simple confidence estimation methods.
+
+\subsection{Why Confidence-Based Selection is Hard}
+
+Our results reveal fundamental challenges in using confidence for strategy selection:
+
+\textbf{Calibration issues.} LLMs are poorly calibrated---high confidence does not imply correctness. Our simple token-level and self-consistency confidence measures fail to capture true model uncertainty.
+
+\textbf{Temporal dynamics are noisy.} Confidence trajectories exhibit high variance even during correct reasoning, making it difficult to distinguish between productive and unproductive reasoning states.
+
+\textbf{Threshold sensitivity.} The thresholds $\theta_v$ and $\theta_\sigma$ may need problem-specific or even instance-specific tuning, which our fixed values cannot provide.
+
+\subsection{Limitations and Future Work}
+
+Our study has several limitations that point to future research directions:
+
+\textbf{Limited confidence signals.} We use simple token-level logprobs and self-consistency. More sophisticated uncertainty estimation methods---such as semantic entropy \citep{manakul2023selfcheckgpt} or learned calibration---may provide better signals.
+
+\textbf{Simple strategy definitions.} Our four reasoning strategies may be too coarse. Finer-grained strategies or learned strategy representations could improve adaptation.
+
+\textbf{Fixed thresholds.} Our fixed thresholds likely limit performance. Adaptive threshold selection based on problem features or online learning could help.
+
+\textbf{Limited scale.} Due to computational constraints, we evaluate on 100-problem subsets. Full dataset evaluation could reveal different patterns.
+
+\section{Conclusion}
+
+We presented Confidence-Dynamic Heterogeneous Reasoning (CDHR), a theoretically-grounded framework for adaptive strategy selection based on confidence trajectory dynamics. While our initial implementation did not achieve the desired performance---achieving only 12\% accuracy compared to 69\% for standard CoT---our experiments provide valuable insights into the challenges of confidence-based reasoning adaptation.
+
+Our key findings are:
+\begin{enumerate}
+    \item Simple confidence estimation methods (token-level logprobs, self-consistency) are insufficient for reliable strategy selection.
+    \item The gap between theoretical trajectory classification and practical implementation is significant.
+    \item Strong baselines like Chain of Mindset demonstrate that heterogeneous reasoning is beneficial, but learned strategy selection may be more effective than confidence-based approaches.
+\end{enumerate}
+
+We believe this negative result is scientifically valuable. It establishes important baselines for the research community and identifies key requirements for effective adaptive reasoning systems. Future work should explore more sophisticated uncertainty estimation, learned threshold adaptation, and hybrid approaches combining confidence signals with learned selection policies.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

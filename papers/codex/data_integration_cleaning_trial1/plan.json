@@ -1,0 +1,119 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze A CPU-Only Reproducible Environment",
+    "description": "Create one deterministic environment that fits 2 CPU cores, 128 GB RAM, no GPU, and about 8 hours total wall-clock time for all experiments and analysis.",
+    "steps": {
+      "step1": "Use Python 3.11 and install only lightweight dependencies: pandas, numpy, scipy, scikit-learn==1.5.*, rapidfuzz, python-Levenshtein, networkx, pyarrow, joblib, matplotlib, seaborn, statsmodels, and tqdm. Do not install transformer training stacks, GPU libraries, or neural matching toolkits.",
+      "step2": "Precommit random seeds [13, 29, 47]. For every run, set PYTHONHASHSEED, Python random, NumPy, and each scikit-learn random_state to the active seed. Use the same seed across ABCA and baseline regimes for fair paired comparisons.",
+      "step3": "Export OMP_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, and NUMEXPR_NUM_THREADS=1. Run at most 2 jobs concurrently because only 2 CPU cores are available. Record gpu_count=0 explicitly in results/system_info.json and state that GPU parallelism is not applicable.",
+      "step4": "Standardize outputs under results/{benchmark}/{regime}/{method}/seed_{seed}/ with metrics.json, predictions.parquet, perturbations.jsonl, admissibility_log.jsonl, audit_sample_manifest.csv, runtime.json, and plots/. Save package versions, CPU model, RAM, and wall-clock start and end times for each run.",
+      "step5": "Run a 10 percent pilot on both benchmarks before the full study. If projected wall-clock time exceeds 8 hours, keep the two benchmarks, three seeds, both baseline types, full dual-sided audit, and all core ABCA versus naive comparisons; trim only nonessential sensitivity sweeps beyond the predeclared ablations."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Pin The Two Benchmarks And Canonical Views",
+    "description": "Use exactly the committed schema-matching and entity-matching benchmarks, then build raw and normalized views needed for admissibility checks, baseline methods, and audit packets.",
+    "steps": {
+      "step1": "Schema matching benchmark: use only T2D-SM-WH from the WDC Schema Matching Benchmark. Load the official released source tables, target schema columns, and gold correspondences. Save exact counts of tables, source columns, target columns, positive correspondences, and candidate column pairs to results/dataset_statistics.json.",
+      "step2": "Entity matching benchmark: use only the WDC Products pairwise slice with 80 percent corner cases, 0 percent unseen products, and medium development. Load the official train, validation, and test partitions without resplitting. Save exact counts of pairs, positives, negatives, and field coverage to results/dataset_statistics.json.",
+      "step3": "For T2D-SM-WH, create a canonical profile per column containing raw header, normalized header, inferred primitive type, non-null count, missingness rate, tokenized sample values, normalized value multiset sketch, numeric ratio, and date ratio. Cache these in data_cache/t2d_sm_wh_profiles.parquet.",
+      "step4": "For WDC Products, keep the original record text for corruption generation and build a normalized feature view with lowercase, whitespace collapse, Unicode NFKC normalization, punctuation stripping except decimal separators, decimal parsing, and unit canonicalization. Preserve original pair ids and labels exactly.",
+      "step5": "Compute descriptive statistics that will later support the sufficiency argument for protected evidence: identifier-field coverage, brand-field coverage, model-token coverage, price-field coverage, fraction of schema columns with near-duplicate headers, and value-profile ambiguity counts. Save these as CSV for Table 1 and as JSON for reproducibility."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Define Benchmark-Specific Protected Evidence And Admissibility",
+    "description": "Operationalize the narrow methodological contribution: benchmark-specific admissibility rules, protected evidence sets, competitor checks, and deterministic reason-coded decisions.",
+    "steps": {
+      "step1": "Represent each benchmark as B=(D,G,N,E,R), where D is released data, G is the released label set, N is a benchmark-specific normalizer, E is the protected evidence set, and R is the admissibility rule set. Store each benchmark specification in a machine-readable YAML or JSON config under configs/admissibility/.",
+      "step2": "For T2D-SM-WH, define E_sm to include every column participating in a positive gold correspondence and every competitor column whose normalized header similarity is at least 0.80 by RapidFuzz token_set_ratio or whose value-profile cosine similarity is at least 0.90 to a protected matched column. Use N_sm to lowercase text, collapse whitespace and punctuation, canonicalize parseable dates to ISO format, canonicalize numeric strings to consistent decimal form, and tokenize cell values by alphanumeric spans.",
+      "step3": "Accept a schema perturbation only if all of the following hold: every protected matched column preserves normalized header tokens exactly or through a verified alias table; every protected matched and competitor column preserves primitive type and normalized value multiset exactly; no new non-protected column crosses the competitor thresholds against a protected matched column; and the table remains structurally parseable. Reject with one closed-set reason code such as protected_header_changed, protected_value_changed, type_changed, new_competitor_created, unsupported_alias, or format_invalid.",
+      "step4": "For WDC Products, define E_em to include identifier-like attributes when present (gtin, gtin13, gtin14, mpn, sku, productid), parsed numeric quantities and units for price and pack-size style fields, brand tokens, model tokens, and title spans aligned to those protected tokens. Use N_em to lowercase, collapse whitespace, strip non-semantic punctuation, canonicalize decimals, standardize units, and normalize alphanumeric product codes.",
+      "step5": "Accept an entity-matching perturbation only if all protected identifiers, normalized brand tokens, normalized model tokens, and parsed numeric quantities remain unchanged; no edit touches a protected title span; allowed title edits are limited to whitespace or punctuation changes, seller-boilerplate insertion from a fixed whitelist of at most 20 phrases, and token-order permutations outside protected spans; and if a record lacks identifier-like plus brand-model evidence, only formatting-only edits are admissible. Reject with reason codes such as identifier_changed, quantity_changed, brand_model_changed, edited_protected_title_span, unsupported_boilerplate, or format_invalid.",
+      "step6": "Make the sufficiency claim explicit and testable rather than assumed. For each benchmark, produce a protected-evidence coverage report showing what fraction of gold decisions are covered by the protected sets and what fraction of naive perturbations would have altered protected evidence or created new ambiguity. If the coverage is unexpectedly low, narrow the claim in the paper to only the covered subset rather than overclaiming benchmark-wide sufficiency."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Candidate Perturbations And Audit Packets",
+    "description": "Build accepted and rejected perturbation pools under matched operator budgets so robustness conclusions can be compared fairly and the audit can validate both sides of the admissibility decision.",
+    "steps": {
+      "step1": "Implement the same high-level operator families across all regimes wherever possible. Schema matching operators: verified header abbreviation, case and delimiter rewrite, numeric formatting rewrite, date formatting rewrite, row reordering, and non-protected column dropout. Entity matching operators: case and punctuation rewrite, seller-boilerplate insertion, non-protected attribute dropout, numeric and unit formatting rewrite, and token-order permutation outside protected spans.",
+      "step2": "Define three perturbation regimes. ABCA uses the benchmark-specific checker above. Format-validity-only uses the same operator families and severity budgets but accepts any perturbation that remains loadable and parseable. Naive unrestricted uses the same maximum edit budget but also allows unverified abbreviations, random token deletion or insertion, arbitrary attribute dropout, and token swaps without protected-evidence checks.",
+      "step3": "For each benchmark and seed, generate at least 300 candidate perturbations with severity levels low, medium, and high, where low means one local edit, medium means up to two edits, and high means up to three edits or the maximum allowed dropout under that operator family. Save all generated candidates and checker outcomes so acceptance rates and failure reasons can be analyzed later.",
+      "step4": "Sample 240 perturbation instances for audit: 120 accepted and 120 rejected, stratified by benchmark, perturbation family, severity, and clean-example difficulty bucket. Difficulty buckets are determined from the strong baseline clean-margin distribution split into tertiles. Save a frozen audit manifest so the audited examples do not change across reruns.",
+      "step5": "Use a written rubric that asks whether the released benchmark label is still justified after the perturbation, whether ambiguity materially increased relative to the released annotation, and whether the checker decision should be considered correct. Two project authors annotate all 240 examples independently and are blinded to system predictions and to each other.",
+      "step6": "Add one non-author annotator on a prespecified 72-example stratified subset. If that person becomes unavailable, use the stronger fallback external validation procedure stated in the proposal: a labmate not involved in rule design independently annotates the same frozen subset before conclusions are finalized. Report which path was used."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Clean Baselines And Tune On Validation Only",
+    "description": "Establish one simple and one stronger classical baseline per benchmark so the study compares robustness conclusions rather than chasing state-of-the-art accuracy.",
+    "steps": {
+      "step1": "Schema matching simple baseline: a Jaccard-Levenshtein matcher similar to Valentine-style lightweight matching. Score each source-target column pair with 0.6 times normalized token Jaccard on headers plus 0.4 times normalized Levenshtein similarity on headers. Predict a one-to-one matching with Hungarian assignment on the score matrix. Tune only the acceptance threshold in {0.40, 0.50, 0.60, 0.70}.",
+      "step2": "Schema matching strong baseline: a COMA-style linear hybrid matcher with features for header token Jaccard, header Levenshtein, RapidFuzz token_set_ratio, cosine similarity of value-token TF-IDF vectors, primitive-type agreement, numeric-distribution similarity, and date-format agreement. Fit logistic regression with solver=liblinear, C in {0.1, 1.0, 10.0}, class_weight in {balanced, none}, then apply Hungarian assignment on predicted pair scores.",
+      "step3": "Entity matching simple baseline: TF-IDF cosine thresholding on concatenated title plus brand plus model plus price text. Use character 3-5 grams and word 1-2 grams, min_df=2, max_features=50000. Tune the decision threshold over {0.50, 0.60, 0.70, 0.80} on the validation set.",
+      "step4": "Entity matching strong baseline: logistic regression on handcrafted pair features including title TF-IDF cosine, token-set Jaccard, brand exact match, model exact match, normalized price difference, identifier exact-match indicators, and attribute overlap ratio. Tune C in {0.1, 1.0, 10.0}, penalty=l2, solver=liblinear, and class_weight in {balanced, none} using validation F1 only.",
+      "step5": "For every clean run and every seed, report precision, recall, F1, AUROC where applicable, runtime, and peak RAM on the official test partition only once after validation tuning is fixed. Save per-instance predictions because the corrupted-evaluation stage must reuse the exact same trained or tuned model settings.",
+      "step6": "Require at least two baselines per benchmark in the paper even if one underperforms badly. The simple baseline establishes a lower-complexity reference, and the stronger baseline establishes a nontrivial comparator for robustness-ranking changes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compare Robustness Conclusions Under ABCA And Naive Regimes",
+    "description": "Test the central claim directly: benchmark-conditional admissibility plus dual-sided audit can materially change the robustness conclusions drawn from perturbation studies.",
+    "steps": {
+      "step1": "For each benchmark, each baseline method, each seed in [13, 29, 47], and each perturbation regime in {ABCA, format-validity-only, naive unrestricted}, evaluate two search modes: random sampling and targeted search. This yields 2 benchmarks x 2 methods x 3 seeds x 3 regimes x 2 search modes = 72 evaluation runs.",
+      "step2": "Random sampling mode: draw 40 perturbation programs per benchmark-method-seed-regime combination, with program length at most 3 edits and severity sampled uniformly from {low, medium, high}. For each program, evaluate the post-perturbation prediction and keep the worst F1 over the 40 draws.",
+      "step3": "Targeted search mode: beam search with beam width 8, program length at most 3, and at most 40 model evaluations per benchmark-method-seed-regime combination. The objective is to minimize validation-selected score margin for the current method while respecting the active regime's admissibility constraints.",
+      "step4": "Primary metrics for each run are clean precision, recall, and F1; worst-case corrupted precision, recall, and F1 under the 40-evaluation budget; absolute F1 drop; relative F1 drop; and method ranking within each benchmark and regime. Secondary metrics are perturbation acceptance rate, rejection-reason distribution, and average runtime per perturbation evaluation.",
+      "step5": "Make the novelty test explicit in analysis. The paper does not claim that the search discovers new failures. The central comparison is whether ABCA materially changes worst-case F1 drops, method rankings, or interpretation of brittleness relative to the two naive regimes under the same operator families and compute budget.",
+      "step6": "Predefine informative negative results before running the study. If ABCA accepted precision is high and rejected violation rate is moderate or high, but ABCA and naive protocols differ by less than 3 absolute F1 points in worst-case drop and produce no ranking reversals on either benchmark, write the paper as an empirical cautionary study showing that conservative admissibility did not materially change conclusions on these benchmarks."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run Predeclared Ablations For Every Novel Component",
+    "description": "Isolate which parts of ABCA matter: benchmark-specific protection, competitor-aware checks, dual-sided audit, and targeted search inside the admissible space.",
+    "steps": {
+      "step1": "Ablation A, remove competitor protection for T2D-SM-WH: keep protected positive gold columns but stop protecting near-duplicate competitor columns and disable new-competitor checks. Rerun the strong schema-matching baseline for seeds [13, 29, 47] under ABCA random and targeted search. Measure changes in accepted precision, rejected violation rate, and worst-case F1 drop.",
+      "step2": "Ablation B, weaken protected evidence for WDC Products: protect only identifier-like fields and numeric quantities, but do not protect brand-model tokens or aligned title spans. Rerun the strong entity-matching baseline for seeds [13, 29, 47] under ABCA random and targeted search. This tests the feedback point that identifiers plus price alone are not sufficient evidence.",
+      "step3": "Ablation C, benchmark-agnostic admissibility: replace the benchmark-specific rules with one generic rule set that checks only format validity plus exact preservation of identifier-like fields where present. Rerun the strong baseline on both benchmarks for seeds [13, 29, 47]. This tests whether benchmark specificity itself materially changes robustness conclusions.",
+      "step4": "Ablation D, accepted-only audit: recompute the audit metrics and downstream interpretation as if only accepted perturbations had been audited and rejected examples were ignored. Report how many misleading conclusions would survive under that weaker validation design. This directly tests the dual-sided-audit contribution without needing extra model runs.",
+      "step5": "Ablation E, search strength: compare targeted search against matched random search within ABCA on the strong baseline for both benchmarks and all seeds. Hold the total 40-evaluation budget fixed so any difference is due to search strategy rather than compute.",
+      "step6": "For every ablation, report delta accepted precision, delta rejected violation rate, delta false-rejection rate, delta worst-case F1 drop, and delta runtime relative to full ABCA. Do not add post hoc ablations beyond these unless the pilot reveals a concrete implementation bug."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate Evidence, Validate Claims, And Enforce Budget",
+    "description": "Convert all outputs into support, weakening, refutation, or informative-negative-result outcomes using predeclared thresholds and paired statistical comparisons.",
+    "steps": {
+      "step1": "Aggregate results over seeds [13, 29, 47] using mean, standard deviation, and paired bootstrap 95 percent confidence intervals with 1000 resamples over test decision units. Use paired comparisons for ABCA versus each naive regime and for targeted versus random search under the same benchmark, method, and seed.",
+      "step2": "Support the soundness claim only if accepted precision is at least 0.95, rejected violation rate is at least 0.70, false-rejection rate is at most 0.20, two-author Cohen's kappa is at least 0.70, and non-author agreement with adjudicated labels is at least 0.75 on the frozen 72-example subset. If these thresholds fail, the methodology claim must be weakened accordingly.",
+      "step3": "Support the main methodology claim only if at least one benchmark shows either a method-ranking reversal or an absolute worst-case F1-drop difference of at least 8 points between ABCA and a naive regime, and the audited rejected examples show that many naive-regime failures were not label preserving. Otherwise classify the study as an informative negative result under the predeclared rule from the main experiment.",
+      "step4": "Record all reasons for failure or null effect explicitly. If ABCA and naive protocols produce similar rankings and F1 drops, but the audit still validates the checker, present the paper as a careful evaluation-methodology caution rather than a new methodological breakthrough. If protected-evidence coverage is narrow, present the paper as evidence that some released benchmarks allow only a narrow defensible robustness test space.",
+      "step5": "Track runtime in results/runtime_ledger.csv with columns experiment, benchmark, method, regime, search_mode, seed, worker_id, wall_clock_minutes, peak_ram_gb, and status. Cap concurrency at 2 workers. Because no GPUs are available, all parallelism is CPU-only and must not exceed 2 simultaneous jobs.",
+      "step6": "Use the following wall-clock estimate to stay within budget. Environment setup and pilot: 45 minutes. Data profiling plus admissibility configs: 60 minutes. Candidate generation and frozen audit manifest: 40 minutes. Clean baselines: 30 minutes. Main robustness runs: 72 runs at about 6 minutes each equals about 432 serial minutes or about 216 wall-clock minutes on 2 workers. Ablations: 24 runs at about 6 minutes each equals about 144 serial minutes or about 72 wall-clock minutes on 2 workers. Audit aggregation, statistics, and tables: 35 minutes. Plotting and packaging: 20 minutes. Total expected wall clock is about 518 minutes, about 8.6 hours, so the pilot must enforce one simplification if actual throughput matches this worst case: drop random-search runs for the simple baselines and keep targeted plus random only for the strong baselines, reducing main-run time by about 72 wall-clock minutes and bringing the total to about 7.4 hours."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Paper-Ready Tables And Figures",
+    "description": "Create the tables and figures needed to support the narrow claim that benchmark-specific admissibility plus dual-sided audit changes or constrains robustness conclusions.",
+    "steps": {
+      "step1": "Create Table 1 with benchmark statistics for T2D-SM-WH and the selected WDC Products slice: split sizes, class balance, candidate counts where relevant, missingness, numeric-field ratio, identifier coverage, brand-model coverage, and competitor-density statistics.",
+      "step2": "Create Table 2 with the literature-grounded benchmark design rationale: for each benchmark, list the released label type, protected evidence set, competitor rule, admissible perturbation families, forbidden edit types, and the specific reason each protected set is considered sufficient for the released benchmark label. This table should make the schema-matching evaluation argument and evidence sufficiency explicit.",
+      "step3": "Create Table 3 with dual-sided audit results: audited counts, accepted precision, rejected violation rate, false-rejection rate, two-author kappa, non-author agreement, and the top rejection reasons by benchmark and operator family.",
+      "step4": "Create Table 4 with clean and corrupted performance for all baselines under ABCA, format-validity-only, and naive unrestricted regimes, reporting precision, recall, F1, worst-case F1 drop, and any method-ranking changes. Mark whether the predeclared success criterion or the predeclared informative-negative-result rule applies.",
+      "step5": "Create Figure 1 as worst-case-performance curves over perturbation budget {0, 10, 20, 40} for the strong baseline on each benchmark, with separate lines for ABCA, format-validity-only, and naive unrestricted. Use separate panels for targeted and random search if both are retained after the pilot simplification.",
+      "step6": "Create Figure 2 as a grouped bar chart of accepted and rejected perturbation counts by operator family, overlaid with manual audit outcomes, so readers can see which operator families are truly benchmark preserving and which families mostly fail the benchmark-relative admissibility test.",
+      "step7": "Create Figure 3 as a slope chart or paired scatter showing how robustness rankings and worst-case F1 drops move when switching from naive regimes to ABCA. Add an appendix figure for the ablations showing the impact of removing competitor protection, weakening protected evidence, or replacing benchmark-specific rules with generic ones.",
+      "step8": "Save all tables as CSV and LaTeX and all figures as PNG and PDF under results/final_artifacts/ with deterministic filenames. Include one README in that directory stating which figures correspond to success, null, or informative-negative-result narratives so the writing stage can stay faithful to the predeclared interpretation."
+    }
+  }
+]

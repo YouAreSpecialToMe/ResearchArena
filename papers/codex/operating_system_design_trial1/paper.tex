@@ -1,0 +1,356 @@
+\documentclass{article}
+
+\usepackage{neurips_2026}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{xurl}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{url}
+
+\setlength{\emergencystretch}{2em}
+\urlstyle{same}
+
+\title{Replay-Scoped Evidence for Bias-Corrected Counterfactual Policy Ranking in One Shared Linux Page Cache}
+\author{Anonymous Author(s)}
+
+\newcommand{\duel}{\textsc{DuelCache}}
+\newcommand{\rawm}{\hat{M}}
+\newcommand{\corrm}{\tilde{M}}
+\newcommand{\portfolio}{\mathcal{P}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Programmable Linux memory-management systems such as \texttt{cache\_ext}, FetchBPF, and PageFlex make page-cache policy selection an online systems problem rather than a fixed kernel decision. This paper is explicitly replay-scoped: we ask whether, when only one eviction policy is active in a shared page cache, the counterfactual shadows of inactive policies are biased enough that they must be calibrated before being ranked. We instantiate this question in \duel, a replay controller that tracks sampled inactive shadows for \mbox{LRU}, \mbox{MRU}, \mbox{LFU-aging}, and LHD, then applies a sentinel-based residual correction before policy selection. Across 24 primary replay runs and 18 exact windows, \duel\ improves exact-window ranking quality: mean MAPE falls from $3.834$ for RecentWindow and NoCalibration to $1.680$, and mean Kendall tau rises from $-0.139$ to $0.028$. The stronger controller claim is not supported in this workspace. \duel\ lowers mean weighted miss cost by $4.309\%$ relative to RecentWindow, but remains $3.498\%$ worse than LeaderSetDuel, $14.979\%$ worse than ARC, and $10.450\%$ worse than the better of ARC and LRU on the StationaryZipf negative control. Real programmable-substrate validation was skipped because \texttt{exp/06\_substrate/results.json} records that no suitable local substrate existed in the workspace. The resulting claim is therefore narrow: shared-cache counterfactual bias is measurable and partially correctable in replay, but this correction did not yield the strongest online controller and was not validated on a real programmable Linux substrate.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Recent systems including Cache is King, \texttt{cache\_ext}, FetchBPF, P2Cache, and PageFlex show that Linux paging and page-cache behavior are becoming programmable rather than fixed kernel policy \citep{zussman2025cache,zussman2025cacheext,cao2024fetchbpf,lee2023p2cache,yelam2025pageflex}. Once several eviction policies are implementable on one machine, the operating system needs an online signal for policies that are not currently active. The evidence in this paper is deliberately narrower than a full systems claim: it is replay-only, and the skipped substrate step makes that limitation impossible to ignore.
+
+Adaptive cache selection is not new. ACME and SOPA already study online selection among multiple policies \citep{ari2002acme,wang2010sopa}, and set dueling established that small monitored regions can guide policy choice cheaply \citep{qureshi2008set}. Our claim is narrower: in a programmable Linux page cache, inactive policies are observed only through a trace filtered by the currently active shared cache. That observation model suppresses misses, entangles tenants, and truncates shadow state. The resulting ranking problem is therefore counterfactual before it is adaptive.
+
+This paper asks whether a small sentinel region can calibrate those distorted shadows well enough to improve whole-cache ranking. The answer from the workspace evidence is mixed. Calibration improves ranking metrics on exact replay windows, but the confirmatory replay claim and the planned systems claim are not supported by the end-to-end results. The strongest statement we can defend is therefore replay-scoped: shared-cache counterfactual bias is measurable and partially correctable in this simulator, not that a Linux implementation would presently win in deployment.
+
+Our contributions are:
+\begin{itemize}
+\item We formulate policy ranking under one shared Linux page cache as a counterfactual estimation problem in which inactive-policy shadows are observed through one live active cache rather than through unbiased traces.
+\item We implement \duel, a sentinel-calibrated controller with sampled shadows, variance-aware residual transfer, and a simple hysteretic switching rule over a four-policy portfolio.
+\item We evaluate the design on 24 primary replay runs and 18 exact windows. Calibration materially improves ranking quality, but direct sentinel dueling and ARC outperform \duel\ in mean weighted miss cost, so the scientific claim must be narrowed.
+\item We make the submission package auditable by mirroring the 144 run-level primary outputs in \texttt{exp/03\_primary/results.json} and by adding an appendix that maps each quantitative table and figure to its exact source artifact path.
+\end{itemize}
+
+Section~\ref{sec:related} reviews adaptive caching and programmable memory-management systems. Section~\ref{sec:method} defines the estimator and controller. Section~\ref{sec:experiments} presents the replay evaluation, exact-window analysis, ablations, and artifact audit trail. Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Adaptive cache selection.}
+\citet{ari2002acme} introduced the multiple-expert framing, and \citet{wang2010sopa} showed that an online selector can choose among storage-cache policies from recent monitored outcomes. Those papers already cover adaptive inter-policy selection, which is why our claim is not about selection alone. Our setting differs in the observation model: only one candidate policy controls a live shared page cache, while the others are inferred from filtered shadows. The resulting bias question does not appear explicitly in ACME or SOPA.
+
+\paragraph{Monitored subsets and set dueling.}
+Set dueling showed that a reserved monitored subset can guide policy choice with low overhead \citep{qureshi2008set}. That work is the closest conceptual baseline for our sentinel region and motivates the strong LeaderSetDuel baseline in our experiments. The distinction is narrow but important: set dueling uses the monitored subset as the control signal, whereas \duel\ uses the subset to estimate a residual between shadowed and realized behavior and then transfers that residual back to the whole-cache estimate.
+
+\paragraph{Programmable page-cache and paging systems.}
+Cache is King and \texttt{cache\_ext} show that page-cache eviction can be customized with eBPF and that policy choice can matter substantially \citep{zussman2025cache,zussman2025cacheext}. FetchBPF extends that idea to prefetching \citep{cao2024fetchbpf}. P2Cache exposes application-directed control over the page cache \citep{lee2023p2cache}, while PageFlex delegates Linux paging policy to user space with low overhead \citep{yelam2025pageflex}. These systems motivate our substrate assumptions, but they mainly supply mechanism. Our paper asks what ranking signal remains trustworthy after such programmability exists.
+
+\paragraph{Adaptive replacement and value models.}
+ARC adapts between recency and frequency within one replacement algorithm \citep{megiddo2003arc}. LHD provides a value model based on hit density rather than pure recency or frequency \citep{beckmann2018lhd}. AdaptSize studies online cache adaptation with explicit optimization in CDN object caches \citep{berger2017adaptsize}. We use ARC as a strong adaptive fixed-policy baseline and LHD as one portfolio expert. Unlike these systems, \duel\ does not propose a new resident-page scoring rule. It adds an estimator layer above existing policies, and the negative end-to-end result in this workspace is therefore informative rather than incidental.
+
+\paragraph{Counterfactual evaluation perspective.}
+More broadly, our ranking problem resembles counterfactual or off-policy evaluation: the system must reason about policies from observations collected under another policy. We mention that connection only to position the problem conceptually. This paper does not import statistical off-policy estimators or claim results beyond replayed page-cache traces, because the missing programmable-substrate validation already limits external validity.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem setup}
+
+Let $x_t$ be the page referenced at time $t$, and let epoch $e$ contain $100{,}000$ references. The controller maintains one active expert $a_e \in \portfolio$, where
+\[
+\portfolio = \{\mathrm{LRU}, \mathrm{MRU}, \mathrm{LFU\mbox{-}aging}, \mathrm{LHD}\}.
+\]
+For each expert $p \in \portfolio$, let $M_e(p)$ denote the exact epoch miss cost that would be incurred if $p$ controlled the full cache during epoch $e$.
+
+Only $a_e$ runs on the full trace. For every inactive expert $p \neq a_e$, \duel\ maintains a sampled shadow cache with capacity $C_{\mathrm{shadow}}=\max(16,\lfloor 0.01 C \rfloor)$, where $C$ is the active-cache capacity. Shadow $p$ receives a reference only when the active cache misses and a deterministic hash test on $(p,x_t,\mathrm{seed})$ falls below the shadow rate $0.01$. If shadow $p$ observes $o_e(p)$ sampled references and incurs $m_e(p)$ sampled misses in epoch $e$, the replay engine rescales that rate to the full epoch length $n_e$:
+\[
+\rawm_e(p)=
+\begin{cases}
+\dfrac{m_e(p)}{o_e(p)}n_e, & o_e(p) > 0,\\[4pt]
+\rawm_{e-1}(p), & o_e(p)=0.
+\end{cases}
+\]
+For the active expert, the estimate is the realized miss count. Because the active cache suppresses many references that inactive experts would have seen, $\rawm_e(p)$ is not assumed to be unbiased.
+
+\subsection{Sentinel-based residual correction}
+
+\duel\ reserves a sentinel region with default fraction $\sigma=0.02$ of cache capacity and default placement \texttt{uniform-hash}. For each expert $p$, the simulator maintains two sentinel views:
+\begin{itemize}
+\item $S_e(p)$: the shadowed sentinel cost, updated only when the active cache misses.
+\item $R_e(p)$: the mirrored sentinel cost, updated on every sentinel reference.
+\end{itemize}
+Their difference
+\[
+\delta_e(p)=R_e(p)-S_e(p)
+\]
+is the epoch residual used for calibration.
+
+The controller applies a variance-aware transfer weight
+\[
+w_e(p)=\frac{c_e(p)}{c_e(p)+\nu_e(p)},
+\]
+where $c_e(p)$ is sentinel coverage within the epoch and $\nu_e(p)$ is the normalized standard deviation of recent residuals over the last three epochs. In the implementation,
+\[
+c_e(p)=\frac{\text{sentinel\_real\_obs}_e(p)}{n_e},
+\qquad
+\nu_e(p)=\frac{\sqrt{\mathrm{Var}(\delta_{e-2:e}(p))}}{\max(1,|\rawm_e(p)|,|R_e(p)|)}.
+\]
+The corrected whole-cache estimate is
+\[
+\corrm_e(p)=\rawm_e(p)+w_e(p)\delta_e(p).
+\]
+If sentinel observations are sparse or unstable, the residual is automatically down-weighted. The NoSentinelScaling ablation sets $w_e(p)=1$, while NoCalibration uses $\rawm_e(p)$ with no residual term.
+
+\subsection{Experts and controller}
+
+The portfolio contains LRU, MRU, LFU-aging, and LHD. LFU-aging uses 8-bit counters and halves them every four epochs. LHD stores each resident page's last-access time and hit counter, samples 32 candidate victims uniformly from the resident set, and evicts the page with minimum
+\[
+\mathrm{density}(x)=\frac{\mathrm{hits}(x)}{(\mathrm{age\_bucket}(x)+1)(\mathrm{size\_bucket}(x)+1)}.
+\]
+In our replay implementation the size bucket is always zero, so density reduces to hit count divided by an age bucket derived from 16 slices of the epoch. This is a simplified sampled instantiation of the hit-density intuition in \citet{beckmann2018lhd}, not a full RankCache reimplementation.
+
+Given a ranking signal $Q_e(p)$, the controller chooses the minimum-cost expert and switches only if the predicted gain exceeds a hysteresis margin of $0.02$ and the current expert has remained active for at least two epochs. We evaluate four ranking signals:
+\begin{itemize}
+\item \textbf{RecentWindow}: the mean of the last two raw shadow estimates.
+\item \textbf{LeaderSetDuel}: the direct sentinel winner using $R_e(p)$ only.
+\item \textbf{NoCalibration}: the raw shadow estimate $\rawm_e(p)$.
+\item \textbf{\duel}: the corrected estimate $\corrm_e(p)$.
+\end{itemize}
+
+When a switch occurs, the controller snapshots the active policy's resident-page set and loads those same resident pages into a fresh instance of the new expert; policy-private metadata such as recency position or frequency counters are reinitialized by the new expert's load routine. The switch penalty is workload-specific and equals $5\%$ of the mean per-expert epoch misses for that workload, seed, and cache-ratio tuple. For example, it is $2004.490278$ on TwoTenantMix at cache ratio $0.5$ and seed $11$.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Workloads.}
+All experiments are replay-only. Each primary trace contains $1{,}800{,}000$ references and uses seeds $\{11,17,23\}$.
+\begin{itemize}
+\item \textbf{PhaseLoop}: six $300{,}000$-reference phases alternating scan, loop, and hotspot behavior, repeated twice.
+\item \textbf{TwoTenantMix}: a $70/30$ two-tenant mixture in which tenant B alternates scan and loop behavior every $300{,}000$ references.
+\item \textbf{SkewShift}: four phases with Zipf exponents $0.8$, $1.3$, $0.9$, and $1.4$.
+\item \textbf{StationaryZipf}: a negative-control Zipf workload with exponent $1.1$ and no intended phase change.
+\end{itemize}
+Capacities are $0.5\times$ and $0.8\times$ the first-window working-set estimate, yielding 24 primary workload instances.
+
+\paragraph{Metrics and implementation.}
+Our main metric is weighted miss cost, defined in the simulator as total misses plus modeled switch penalties. We also report miss ratio, regret to the offline best fixed expert in the four-policy portfolio, switch count, exact-window Kendall tau, exact-window Spearman rho, and exact-window MAPE. The simulator ran on Linux kernel $6.8.0$ with Python $3.12.3$ and two workers. Default controller settings are epoch length $100{,}000$, shadow rate $0.01$, sentinel fraction $0.02$, uniform-hash sentinel placement, hysteresis $0.02$, and minimum dwell $2$ \citep{zussman2025cache,zussman2025cacheext,cao2024fetchbpf,lee2023p2cache,yelam2025pageflex}.
+These setup facts are recorded directly in \texttt{exp/01\_env/results.json} (\texttt{environment} and \texttt{global\_settings}), and the workload manifests cited above come from \texttt{exp/02\_data/results.json} (\texttt{manifests}).
+
+\subsection{Primary replay study}
+
+Table~\ref{tab:main} summarizes the 24 primary runs. The strongest fixed baseline is ARC with mean weighted miss cost $381737.375 \pm 209555.381$ and mean miss ratio $0.212 \pm 0.116$. \duel\ reaches $466836.672 \pm 314601.351$, improving over RecentWindow's $506180.458 \pm 364016.961$ but not over LeaderSetDuel's $456708.887 \pm 325870.729$.
+
+The paired analysis in \texttt{exp/07\_analysis/results.json} sharpens the result. Relative to RecentWindow, \duel\ reduces weighted miss cost by $4.309\%$ on average, with a $95\%$ bootstrap interval of $[1.447\%, 7.433\%]$ and Wilcoxon $p=0.050612$. Relative to LeaderSetDuel, \duel\ is $3.498\%$ worse on average, with interval $[-7.079\%, -0.376\%]$ and $p=0.086476$. Relative to ARC, \duel\ is $14.979\%$ worse, with interval $[-22.248\%, -8.367\%]$ and $p=0.000228$. The end-to-end claim that bias correction yields the strongest controller is therefore not supported.
+
+\begin{table*}[t]
+\caption{Primary replay results over 24 workload instances. Lower is better in every column. Best mean in each column is in bold. Here and in all tables, $\pm$ denotes sample standard deviation. All numbers come from \texttt{exp/03\_primary/results.json}, using the \texttt{paper\_main\_table} summary that mirrors the 144 run-level outputs under \texttt{artifacts/runs/03\_primary\_\_*.json}.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Method & Weighted miss cost $\downarrow$ & Regret $\downarrow$ & Miss ratio $\downarrow$ & Switches $\downarrow$ & CPU ms $\downarrow$ & Metadata bytes $\downarrow$ \\
+\midrule
+ARC & \textbf{381737.375 $\pm$ 209555.381} & \textbf{31355.083 $\pm$ 34173.215} & \textbf{0.212 $\pm$ 0.116} & \textbf{0.000 $\pm$ 0.000} & \textbf{0.0 $\pm$ 0.0} & 2198751.667 $\pm$ 1453625.075 \\
+LRU & 399319.375 $\pm$ 219085.809 & 48937.083 $\pm$ 45749.321 & 0.222 $\pm$ 0.122 & \textbf{0.000 $\pm$ 0.000} & \textbf{0.0 $\pm$ 0.0} & \textbf{1099375.833 $\pm$ 726812.538} \\
+LeaderSetDuel & 456708.887 $\pm$ 325870.729 & 106326.595 $\pm$ 162584.225 & 0.251 $\pm$ 0.179 & 2.792 $\pm$ 1.587 & 4503.6 $\pm$ 0.0 & 1396087.833 $\pm$ 923113.103 \\
+\duel & 466836.672 $\pm$ 314601.351 & 116454.381 $\pm$ 142097.677 & 0.258 $\pm$ 0.173 & 1.125 $\pm$ 1.849 & 4503.6 $\pm$ 0.0 & 1396087.833 $\pm$ 923113.103 \\
+NoCalibration & 475207.057 $\pm$ 316104.437 & 124824.765 $\pm$ 142716.881 & 0.263 $\pm$ 0.174 & 1.250 $\pm$ 1.751 & 4503.6 $\pm$ 0.0 & 1396087.833 $\pm$ 923113.103 \\
+RecentWindow & 506180.458 $\pm$ 364016.961 & 155798.166 $\pm$ 198855.948 & 0.280 $\pm$ 0.200 & 1.292 $\pm$ 1.829 & 4503.6 $\pm$ 0.0 & 1396087.833 $\pm$ 923113.103 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Table~\ref{tab:family} shows where the pooled result comes from. \duel\ improves over RecentWindow on PhaseLoop by $11.463\%$ and on TwoTenantMix by $6.304\%$, matches it exactly on SkewShift and StationaryZipf, and improves over LeaderSetDuel only on PhaseLoop by $2.994\%$ and on SkewShift by $1.868\%$. The negative-control criterion also fails: on StationaryZipf, \duel's mean weighted miss cost is $228958.500$, whereas the better of ARC and LRU is ARC at $207296.000$. That leaves \duel\ $10.450\%$ worse rather than within the planned $2\%$ band.
+
+\begin{table}[t]
+\caption{Per-family mean weighted miss cost. Lower is better. Here $\pm$ would denote sample standard deviation, but this table reports means only. The table is computed from the \texttt{family\_method\_table} entries in \texttt{exp/03\_primary/results.json}.}
+\label{tab:family}
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Family & ARC & LRU & LeaderSetDuel & \duel & NoCalibration & RecentWindow \\
+\midrule
+PhaseLoop & \textbf{654778.333} & 685689.167 & 965242.246 & 936345.064 & 936011.281 & 1057575.217 \\
+TwoTenantMix & 497450.833 & 517807.333 & \textbf{478345.069} & 537220.626 & 571035.947 & 573365.614 \\
+SkewShift & 167424.333 & \textbf{164822.500} & 167960.716 & \textbf{164822.500} & \textbf{164822.500} & \textbf{164822.500} \\
+StationaryZipf & \textbf{207296.000} & 228958.500 & 215287.516 & 228958.500 & 228958.500 & 228958.500 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\subsection{Exact-window ranking analysis}
+
+The ranking story is different from the online-control story. We ran exact replay on 18 shortened windows from TwoTenantMix and SkewShift. Table~\ref{tab:exact} and Figure~\ref{fig:exact-ranking} show that calibration materially improves the ranking signal.
+
+Compared with NoCalibration, \duel\ improves mean Kendall tau by $0.166667$ absolute and reduces MAPE by $2.154123$ absolute, a $50.762\%$ relative reduction. Against LeaderSetDuel, the MAPE reduction is $51.501\%$. The mean corrected Kendall tau becomes positive at $0.027778$, while the uncorrected methods remain negative. This supports the narrower claim that shared-cache counterfactual bias exists and that the sentinel residual helps correct it.
+
+The family-level picture is also split. On TwoTenantMix, all methods have mean Kendall tau $0.000000$ and Spearman rho $0.000000$, but \duel\ lowers MAPE from $1.379272$ to $0.660919$. On SkewShift, \duel\ raises mean Kendall tau from $-0.277778$ to $0.055556$, raises mean Spearman rho from $-0.377778$ to $0.144444$, and lowers MAPE from $6.288501$ to $2.698607$. The narrower ranking claim is therefore driven mainly by SkewShift ordering improvements and lower cost-estimation error on both exact-window families.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/exact_window_ranking.pdf}
+\caption{Exact-window ranking quality over 18 windows. The x-axis enumerates the four ranking methods; the y-axis reports agreement with exact replay as mean Kendall tau and mean Spearman rho with $95\%$ bootstrap intervals. Higher is better for both curves. \duel\ is the only method with a positive mean for both rank-correlation metrics. The plot aggregates the \texttt{kendall\_tau} and \texttt{spearman\_rho} fields in \texttt{results.json:exact\_window\_results} grouped by \texttt{method}.}
+\label{fig:exact-ranking}
+\end{figure}
+
+\begin{table}[t]
+\caption{Exact-window ranking metrics over 18 windows. Higher is better for Kendall tau and Spearman rho; lower is better for MAPE. Best means are in bold. Here and in all tables, $\pm$ denotes sample standard deviation. The numbers come from \texttt{exp/04\_exact\_windows/results.json}.}
+\label{tab:exact}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Kendall tau $\uparrow$ & Spearman rho $\uparrow$ & MAPE $\downarrow$ \\
+\midrule
+\duel & \textbf{0.027778 $\pm$ 0.085749} & \textbf{0.072222 $\pm$ 0.136363} & \textbf{1.679763 $\pm$ 2.065862} \\
+LeaderSetDuel & -0.101852 $\pm$ 0.182026 & -0.133333 $\pm$ 0.237635 & 3.856845 $\pm$ 5.230156 \\
+NoCalibration & -0.138889 $\pm$ 0.215798 & -0.188889 $\pm$ 0.288788 & 3.833887 $\pm$ 5.239558 \\
+RecentWindow & -0.138889 $\pm$ 0.215798 & -0.188889 $\pm$ 0.288788 & 3.833887 $\pm$ 5.239558 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablations and failure regimes}
+
+Table~\ref{tab:ablation} summarizes 12 ablation runs over TwoTenantMix and SkewShift. Removing calibration entirely produces the weakest ablation result. Adding the residual without variance-aware scaling improves mean weighted miss cost from $367929.224$ to $341314.917$. The strongest ablation baseline is direct sentinel-only selection at $323152.892$, again indicating that the monitored region carries useful signal but that our transfer rule is not the strongest way to exploit it online.
+
+\begin{table}[t]
+\caption{Ablation summary over 12 runs. Lower is better. Here $\pm$ would denote sample standard deviation, but this table reports means only. The table is derived from \texttt{exp/05\_ablations/results.json}.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Weighted miss cost $\downarrow$ & Regret $\downarrow$ & Switches $\downarrow$ \\
+\midrule
+DirectSentinelOnly & \textbf{323152.892} & \textbf{19091.142} & 2.250 \\
+NoSentinelScaling & 341314.917 & 37253.167 & \textbf{0.000} \\
+NoCalibration & 367929.224 & 63867.474 & 0.500 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The stress study exposes when residual transfer weakens. Across all 432 controller epochs in the main study, the correction changed the selected expert relative to NoCalibration in only $2.546\%$ of epochs, and \duel\ selected the same expert as NoCalibration in $96.528\%$ of epochs. Figures~\ref{fig:transfer} and \ref{fig:failure} visualize the stress-study transfer behavior, while Figures~\ref{fig:timeline-mix} and \ref{fig:timeline-skew} summarize the family-level weighted miss cost comparison among RecentWindow, NoCalibration, and \duel.
+
+The clearest failure case is TwoTenantMix with tenant-local placement and sentinel fraction $0.005$, where residual/full-error correlation is $-0.093833$, the ranking-improvement rate is $0.0$, and weighted miss cost is $557345.0$, identical to NoCalibration. That run is recorded explicitly in \texttt{exp/07\_analysis/results.json}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/transfer_correlation.pdf}
+\caption{Calibration-transfer correlation from the stress study. The x-axis is sentinel fraction ($0.5\%$, $1\%$, $2\%$, $5\%$); the y-axis is the per-run correlation between the sentinel residual $\delta_e(p)$ and full-cache shadow error $\rawm_e(p)-M_e(p)$. Uniform-hash and contiguous-reserved placement retain stronger correlation than tenant-local placement, especially on TwoTenantMix. The plot uses \texttt{results.json:stress\_results}, specifically \texttt{sentinel\_fraction}, \texttt{sentinel\_placement}, and \texttt{residual\_full\_error\_corr} for \texttt{method=DuelCache}.}
+\label{fig:transfer}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/failure_heatmap.pdf}
+\caption{Stress-study heatmap of ranking-improvement rate for \duel. Rows are sentinel placements, columns are sentinel fractions, and color encodes the fraction of epochs in which the corrected ranking had higher Kendall tau than the raw shadow ranking. Improvement is weakest for the smallest tenant-local sentinel and collapses completely for TwoTenantMix at tenant-local fraction $0.005$. The heatmap uses \texttt{results.json:stress\_results}, specifically \texttt{sentinel\_placement}, \texttt{sentinel\_fraction}, and \texttt{ranking\_improvement\_rate} for \texttt{method=DuelCache}.}
+\label{fig:failure}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/TwoTenantMix_timeline.pdf}
+\caption{Family-level controller comparison on TwoTenantMix. The bars report mean \texttt{weighted\_miss\_cost} over the TwoTenantMix runs for RecentWindow, NoCalibration, and \duel, aggregated from \texttt{results.json:primary\_runs}. Lower is better. \duel\ improves over the two shadow-only baselines on this family but still does not establish a stronger overall controller claim. The filename is historical; the plotted values are family means, not a per-epoch timeline.}
+\label{fig:timeline-mix}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/SkewShift_timeline.pdf}
+\caption{Family-level controller comparison on SkewShift. The bars report mean \texttt{weighted\_miss\_cost} over the SkewShift runs for RecentWindow, NoCalibration, and \duel, aggregated from \texttt{results.json:primary\_runs}. Lower is better. All three methods collapse to the same family mean in this workspace, which is consistent with the weak end-to-end separation despite stronger exact-window ranking improvements. The filename is historical; the plotted values are family means, not a per-epoch timeline.}
+\label{fig:timeline-skew}
+\end{figure}
+
+\subsection{Reproducibility and audit trail}
+
+All quantitative results in the paper are backed by stored artifacts in the workspace. The primary replay paper tables are reconstructed from \texttt{exp/03\_primary/results.json}, which now mirrors the 144 run-level outputs from \texttt{artifacts/primary\_runs.json} and preserves each run's exact \texttt{run\_json} and \texttt{epoch\_jsonl} path. Exact-window metrics come from \texttt{exp/04\_exact\_windows/results.json}, ablations come from \texttt{exp/05\_ablations/results.json}, stress runs and figure aggregates come from the root \texttt{results.json}, and paired tests plus the canonical failure regime come from \texttt{exp/07\_analysis/results.json}. The setup and workload-construction facts cited in Section~\ref{sec:experiments} are backed explicitly by \texttt{exp/01\_env/results.json} and \texttt{exp/02\_data/results.json}. Appendix~\ref{sec:appendix-artifacts} maps each quantitative table and figure to its exact source artifact path.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The most important outcome is that the replay evidence separates ranking quality from control quality. Exact-window analysis confirms measurable counterfactual bias and shows that sentinel residuals improve rank estimates. Yet the online controller benefits only weakly because corrected rankings rarely flip the selected expert: only $2.546\%$ of main-study epochs differ from NoCalibration.
+
+Several limitations materially narrow the claim.
+\begin{itemize}
+\item The study is replay-only. Real programmable-substrate validation was skipped because no local \texttt{cache\_ext}, PageFlex, or equivalent substrate was available in the workspace.
+\item The planned confirmatory replay claim is not met. \duel\ does not beat both RecentWindow and LeaderSetDuel on two non-stationary families, and the StationaryZipf negative control misses its within-$2\%$ target by a wide margin.
+\item The workloads are synthetic, though reproducible. We evaluate four workload families rather than production traces.
+\item Selector CPU time is a simulator accounting quantity, not a kernel measurement.
+\item The expert portfolio is intentionally small: LRU, MRU, LFU-aging, and LHD.
+\item The strongest online baseline in this workspace is LeaderSetDuel or ARC, not \duel.
+\end{itemize}
+
+These limitations narrow the contribution but do not erase the positive finding: shared-cache counterfactual estimates are biased enough to distort rankings, and a calibrated sentinel can improve counterfactual ranking quality even when the resulting controller is not best overall.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper studied policy ranking for a programmable shared Linux page cache under one active policy at a time. \duel\ uses sampled inactive shadows plus a sentinel-derived residual correction to estimate what alternative experts would have cost.
+
+The evidence supports a narrow claim and rejects a stronger one. On 18 exact windows, \duel\ reduces mean MAPE from $3.833887$ to $1.679763$ and improves mean Kendall tau from $-0.138889$ to $0.027778$, showing that counterfactual ranking bias is real and partially correctable. But on 24 end-to-end replay runs, \duel\ improves over RecentWindow by $4.309\%$ mean weighted miss cost while remaining worse than LeaderSetDuel by $3.498\%$, worse than ARC by $14.979\%$, and worse than ARC on the StationaryZipf negative control by $10.450\%$. In this workspace, explicit calibration improved the estimator more than the controller.
+
+The broader implication is that programmable page-cache systems need a tighter link between calibrated counterfactual estimates and switching decisions. Future work should validate the idea on a real programmable Linux substrate, study richer expert portfolios, and explore controllers that combine residual correction with the strong direct signal available from monitored regions instead of treating them as competing alternatives.
+
+\appendix
+
+\section{Artifact Map}
+\label{sec:appendix-artifacts}
+
+Table~\ref{tab:artifact-map} maps each quantitative table and figure in the paper to the exact source artifact path used to generate it. All paths are relative to the workspace root \texttt{idea\_01}.
+
+\begin{table*}[t]
+\caption{Artifact map for every quantitative table and figure in the paper.}
+\label{tab:artifact-map}
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}p{4.0cm}>{\raggedright\arraybackslash}X@{}}
+\toprule
+Paper item & Source artifact path & Notes \\
+\midrule
+Setup environment paragraph & \path{exp/01_env/results.json} & Uses \path{environment} for kernel, Python, compiler, and machine details and \path{global_settings} for epoch length, shadow rate, sentinel fraction, seeds, hysteresis, and dwell time. \\
+Setup workload paragraph & \path{exp/02_data/results.json} & Uses \path{manifests} for per-family \path{trace_length}, \path{unique_pages}, \path{working_set_estimate_first_window}, \path{cache_capacities}, \path{phase_boundaries}, and \path{tenant_mix}. \\
+Table~\ref{tab:main} & \path{exp/03_primary/results.json} & Mirrors all 144 primary runs from \path{artifacts/primary_runs.json}; each row stores exact \path{run_json} and \path{epoch_jsonl} paths under \path{artifacts/runs/03_primary__*.json}. \\
+Table~\ref{tab:family} & \path{exp/03_primary/results.json} & Computed from the same mirrored run-level primary outputs; the per-family means correspond to entries in \path{family_method_table}. \\
+Table~\ref{tab:exact} & \path{exp/04_exact_windows/results.json} & Contains all 72 exact-window rows, covering 18 windows and four ranking methods. \\
+Table~\ref{tab:ablation} & \path{exp/05_ablations/results.json} & Derived from the 12 \path{05_ablations} runs in \path{ablation_runs}. \\
+Figure~\ref{fig:exact-ranking} & \path{results.json} and \path{figures/exact_window_ranking.pdf} & Uses \path{exact_window_results} fields \path{method}, \path{kendall_tau}, and \path{spearman_rho}. \\
+Figure~\ref{fig:transfer} & \path{results.json} and \path{figures/transfer_correlation.pdf} & Uses \path{stress_results} fields \path{method}, \path{sentinel_placement}, \path{sentinel_fraction}, and \path{residual_full_error_corr}. \\
+Figure~\ref{fig:failure} & \path{results.json} and \path{figures/failure_heatmap.pdf} & Uses \path{stress_results} fields \path{method}, \path{sentinel_placement}, \path{sentinel_fraction}, and \path{ranking_improvement_rate}. \\
+Figure~\ref{fig:timeline-mix} & \path{results.json} and \path{figures/TwoTenantMix_timeline.pdf} & Uses \path{primary_runs} fields \path{workload_family}, \path{method}, and \path{weighted_miss_cost}, grouped by \path{method} for \path{workload_family=TwoTenantMix}. \\
+Figure~\ref{fig:timeline-skew} & \path{results.json} and \path{figures/SkewShift_timeline.pdf} & Uses \path{primary_runs} fields \path{workload_family}, \path{method}, and \path{weighted_miss_cost}, grouped by \path{method} for \path{workload_family=SkewShift}. \\
+Paired tests in text & \path{exp/07_analysis/results.json} & Includes \path{paired_tests}, \path{exact_window_paired_tests}, and the failure-regime record cited in Section~\ref{sec:experiments}. \\
+Replay-only limitation & \path{exp/06_substrate/results.json} & Records \path{status=skipped}, \path{claims_narrowed_to_replay_only=true}, and the reason no programmable-substrate validation was run. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

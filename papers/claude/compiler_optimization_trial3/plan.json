@@ -1,0 +1,181 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and configure LLVM/CompilerGym environment",
+    "description": "Set up the Python environment with all required libraries. CompilerGym provides a convenient interface to LLVM's opt tool and benchmark programs. If CompilerGym is unavailable or broken, fall back to direct LLVM opt invocation with manually compiled benchmarks.",
+    "steps": {
+      "step1": "Create a Python virtual environment: python3 -m venv venv && source venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy pandas matplotlib seaborn shapiq networkx scikit-learn",
+      "step3": "Attempt to install CompilerGym: pip install compiler_gym. Test with: python -c \"import compiler_gym; env = compiler_gym.make('llvm-v0'); env.reset(); print('CompilerGym OK')\"",
+      "step4": "If CompilerGym fails, install LLVM tools: sudo apt-get install llvm-14 clang-14 (or available version). Verify: opt --version",
+      "step5": "If using direct LLVM: download cBench source files from CompilerGym's dataset or a public mirror. Compile each to LLVM IR (.bc files) using clang -O0 -emit-llvm -c",
+      "step6": "Create a project directory structure: mkdir -p results/{data,figures,tables,logs} src/",
+      "step7": "Verify setup by running a simple test: apply a single pass to a benchmark and measure IR instruction count change"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Select benchmark programs and candidate passes",
+    "description": "Identify the benchmark programs and LLVM optimization passes to use. Select a diverse subset of cBench programs covering different domains. Screen passes by individual marginal contribution to identify the top-K most impactful ones.",
+    "steps": {
+      "step1": "Load the cBench benchmark suite via CompilerGym (or from compiled .bc files). Target 10-15 programs covering: signal processing (e.g., adpcm, gsm, jpeg), cryptography (e.g., blowfish, sha, rijndael), text processing (e.g., bzip2, ispell), numerical (e.g., susan, qsort, bitcount, stringsearch). Record baseline IR instruction counts (unoptimized).",
+      "step2": "Enumerate candidate LLVM optimization passes. Start with the ~60 passes included in LLVM -O3. Key passes to consider: mem2reg, instcombine, simplifycfg, gvn, licm, loop-unroll, loop-rotate, loop-simplify, indvars, sroa, sccp, dce, adce, reassociate, inline, jump-threading, correlated-propagation, early-cse, loop-vectorize, slp-vectorizer, tailcallelim, mergereturn, globalopt, constmerge, deadargelim, argpromotion, ipsccp.",
+      "step3": "Screen each pass individually: for each benchmark, apply each pass alone and record IR instruction count reduction. Rank passes by average marginal contribution across benchmarks.",
+      "step4": "Select top K=20 passes based on screening. If some passes have near-zero individual effect but are known to be enabling (e.g., mem2reg, loop-simplify), include them anyway as they may show strong interaction effects.",
+      "step5": "Save the selected pass list and per-benchmark screening results to results/data/pass_screening.json. Record the unoptimized baseline instruction counts for all benchmarks.",
+      "step6": "Compute and record the -O1, -O2, -O3, -Os, -Oz instruction counts for all benchmarks as reference baselines."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Define the value function and sampling infrastructure",
+    "description": "Implement the cooperative game value function v(S) that maps a subset of passes to a performance metric. Build the sampling infrastructure needed by shapiq for Shapley interaction computation.",
+    "steps": {
+      "step1": "Implement value_function(benchmark, pass_subset) -> float that: (a) takes a benchmark identifier and a subset of passes, (b) applies the passes in a fixed canonical order (matching LLVM -O3 pipeline order) to the benchmark's unoptimized IR, (c) returns the IR instruction count reduction as a fraction: (baseline_count - optimized_count) / baseline_count. Use a fixed pass ordering to isolate the effect of pass selection from pass ordering.",
+      "step2": "Implement a wrapper class compatible with shapiq's game interface. The shapiq library expects a callable that takes a binary vector x in {0,1}^K (indicating which passes are on/off) and returns the value. Implement this as: game(x) = value_function(benchmark, passes_where_x_is_1).",
+      "step3": "Test the value function on 5 random subsets for 3 benchmarks. Verify that: (a) empty set gives 0 reduction, (b) full set gives reduction close to -O3, (c) values are deterministic (same subset gives same result).",
+      "step4": "Measure the average time per value function evaluation. Target: <0.5 seconds per evaluation. If slower, consider caching or reducing benchmark size.",
+      "step5": "Save the game wrapper code to src/game.py and test results to results/data/value_function_validation.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute Shapley Interaction Indices (orders 1-3)",
+    "description": "Use the shapiq library to compute Shapley values (order 1), pairwise Shapley interaction indices (order 2), and third-order interaction indices (order 3) for each benchmark program. This is the core computation of the paper. Use 3 random seeds for the sampling-based approximation to assess convergence.",
+    "steps": {
+      "step1": "For each of the 10-15 benchmark programs and each of 3 random seeds (42, 123, 456): instantiate a shapiq approximator (KernelSHAP-IQ or PermutationSamplingSII) with max_order=3 and budget=3000 game evaluations per benchmark.",
+      "step2": "Compute the Shapley interaction indices. shapiq returns InteractionValues objects containing phi values at each order. Extract: (a) order-1 Shapley values phi_i for each pass i, (b) order-2 indices phi_{i,j} for each pass pair, (c) order-3 indices phi_{i,j,k} for each pass triple.",
+      "step3": "Store all interaction values per benchmark per seed in results/data/interactions/. Save as JSON with structure: {benchmark, seed, order_1: {pass: value}, order_2: {(pass_i, pass_j): value}, order_3: {(pass_i, pass_j, pass_k): value}}.",
+      "step4": "Compute convergence diagnostics: for each benchmark, compare interaction values across the 3 seeds. Report mean and standard deviation. Flag any interactions where std/|mean| > 0.5 as poorly converged.",
+      "step5": "Estimated runtime: 10-15 benchmarks × 3 seeds × 3000 evaluations × ~0.3s/eval = ~27,000-40,500 seconds = 7.5-11.25 hours on 1 core. With 2 cores running benchmarks in parallel: ~4-6 hours. If too slow, reduce budget to 2000 evaluations or reduce to 8 benchmarks.",
+      "step6": "Implement parallel execution: use Python multiprocessing (2 workers) to process benchmarks in parallel. Each worker handles a different benchmark."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Variance decomposition analysis",
+    "description": "Decompose the performance variance into contributions from individual effects (order 1), pairwise interactions (order 2), and higher-order interactions (order 3+). This directly tests the core hypothesis.",
+    "steps": {
+      "step1": "For each benchmark, compute the sum of squared Shapley values at each order: SS_k = sum of phi_S^2 for all interactions S of size k. This gives the variance explained by each interaction order.",
+      "step2": "Compute the fraction of total interaction variance at each order: frac_k = SS_k / (SS_1 + SS_2 + SS_3). Report for each benchmark and averaged across benchmarks.",
+      "step3": "Additionally, compute the R-squared of predicting v(S) from a linear model using only order-1 terms, then order-1+2, then order-1+2+3. This gives a complementary variance decomposition. Sample 500 random subsets per benchmark and fit the models.",
+      "step4": "Test the hypothesis: is the additional variance explained by order-3 interactions >= 10%? Compute a one-sample t-test across benchmarks with H0: additional_variance_order3 <= 5% (the refutation threshold).",
+      "step5": "Save results to results/data/variance_decomposition.json and results/tables/variance_decomposition.csv."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Interaction structure analysis",
+    "description": "Analyze the discovered interaction patterns: identify top synergistic and redundant pass groups, assess cross-program stability of interactions.",
+    "steps": {
+      "step1": "For each benchmark, rank all order-2 interactions by magnitude. Identify the top-10 most synergistic (largest positive phi_{i,j}) and top-10 most redundant (largest negative phi_{i,j}) pass pairs.",
+      "step2": "For each benchmark, rank all order-3 interactions by magnitude. Identify the top-10 most synergistic and top-10 most redundant pass triples.",
+      "step3": "Cross-program stability: for each pass pair (i,j), compute the correlation of phi_{i,j} across benchmarks. Identify 'universal' interactions (consistent sign and rank across >80% of benchmarks) vs. 'program-specific' interactions (sign changes across programs).",
+      "step4": "Repeat cross-program stability analysis for order-3 interactions. Focus on triples that appear in the top-10 for multiple benchmarks.",
+      "step5": "Categorize the discovered interactions by pass type: (a) loop optimizations (loop-unroll, loop-rotate, licm, indvars, loop-simplify), (b) scalar optimizations (instcombine, gvn, sccp, early-cse, reassociate), (c) cleanup passes (dce, adce, simplifycfg), (d) interprocedural (inline, globalopt, ipsccp, deadargelim). Analyze whether interactions cluster within or across categories.",
+      "step6": "Save results to results/data/interaction_structure.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Interaction-guided pass selection algorithm",
+    "description": "Implement the proposed interaction-guided greedy pass selection algorithm and its variants. This algorithm uses the computed Shapley interaction indices to select a near-optimal subset of passes.",
+    "steps": {
+      "step1": "Implement greedy_individual_selection(phi_order1, budget_k): greedily select top-k passes by individual Shapley value. This is the simplest baseline.",
+      "step2": "Implement greedy_pairwise_selection(phi_order1, phi_order2, budget_k): start with the highest-value pass, then at each step add the pass maximizing: phi_i + sum_{j in selected} phi_{i,j}. This uses pairwise interactions.",
+      "step3": "Implement greedy_interaction_selection(phi_order1, phi_order2, phi_order3, budget_k): same as pairwise but also add the three-way interaction terms: phi_i + sum_{j in S} phi_{i,j} + sum_{j,k in S} phi_{i,j,k}. This is the proposed method.",
+      "step4": "Implement synergy_seeded_selection(phi_order1, phi_order2, phi_order3, budget_k): identify the top-3 highest-synergy triples, seed the selection with the best triple, then greedily add remaining passes using the full interaction scoring.",
+      "step5": "Implement redundancy_pruning(selected_passes, phi_order2, phi_order3, threshold): post-processing step that removes passes from the selected set if their total negative interaction with the rest exceeds a threshold. Apply after each greedy method.",
+      "step6": "For each benchmark: run all selection methods with budget k = 5, 8, 10, 12, 15 passes. Evaluate selected subsets using the value function. Record IR instruction count reduction for each method and budget.",
+      "step7": "Save all algorithms to src/selection.py and results to results/data/selection_results.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline comparisons",
+    "description": "Run baseline methods for fair comparison: LLVM default optimization levels, random search, and genetic algorithm with equivalent computational budget.",
+    "steps": {
+      "step1": "Record LLVM default optimization levels: -O1, -O2, -O3, -Os, -Oz instruction counts for all benchmarks (already computed in Data Preparation step 6).",
+      "step2": "Implement random search baseline: for each benchmark, sample 1000 random pass subsets of sizes 5, 8, 10, 12, 15. Record the best IR reduction found. Use 3 random seeds (42, 123, 456).",
+      "step3": "Implement genetic algorithm baseline: population=50, generations=20, crossover_rate=0.7, mutation_rate=0.1, tournament_size=3. Binary encoding (each gene = pass on/off). Run for budgets of 1000 evaluations per benchmark. Use 3 random seeds.",
+      "step4": "Ensure fair comparison: all methods are evaluated using the same value function with the same fixed pass ordering. Record wall-clock time for each method.",
+      "step5": "Save baseline results to results/data/baseline_results.json.",
+      "step6": "Estimated runtime: random search = 10 benchmarks × 3 seeds × 5 budgets × 1000 evals × 0.3s = 45,000s on 1 core. With 2 cores: ~6.25 hours. OPTIMIZATION: reuse the 3000 evaluations from Shapley computation as the random sample (they are random subsets). This reduces additional baseline computation to just the GA: 10 × 3 × 1000 × 0.3s = 9000s ≈ 2.5 hours on 1 core, 1.25 hours on 2 cores."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: interaction order",
+    "description": "Systematically ablate the interaction order used in the selection algorithm to quantify the value of each order of interaction. This directly tests whether higher-order interactions improve pass selection.",
+    "steps": {
+      "step1": "For each benchmark and each budget k in {5, 8, 10, 12, 15}: run greedy selection using (a) order-1 only, (b) order-1+2, (c) order-1+2+3. Record IR reduction for each.",
+      "step2": "Compute paired differences: (order-1+2+3 vs order-1+2) and (order-1+2 vs order-1) for each benchmark. Report mean improvement and standard error across benchmarks.",
+      "step3": "Statistical test: paired t-test for each pair of methods across benchmarks. Report p-values and effect sizes (Cohen's d).",
+      "step4": "Save results to results/data/ablation_order.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: number of candidate passes (K)",
+    "description": "Vary the number of candidate passes K to understand its impact on interaction quality and selection effectiveness.",
+    "steps": {
+      "step1": "Run the full pipeline (Shapley computation + interaction-guided selection) for K = 10, 15, 20 passes on 5 representative benchmarks.",
+      "step2": "For each K, measure: (a) time for Shapley computation, (b) variance decomposition fractions, (c) selection performance at budget k=10.",
+      "step3": "Analyze the tradeoff: more passes means richer interaction structure but noisier estimates (fixed evaluation budget spread over more interactions).",
+      "step4": "Save results to results/data/ablation_num_passes.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: evaluation budget for Shapley estimation",
+    "description": "Vary the number of game evaluations used for Shapley interaction approximation to understand convergence behavior.",
+    "steps": {
+      "step1": "For 5 representative benchmarks: compute Shapley interactions with budgets of 500, 1000, 2000, 3000, 5000 evaluations (3 seeds each).",
+      "step2": "For each budget, measure: (a) mean absolute difference in interaction values compared to the highest budget (5000), (b) selection performance using the estimated interactions, (c) wall-clock time.",
+      "step3": "Identify the minimum budget that achieves within 95% of the best selection performance. This informs practical deployment.",
+      "step4": "Save results to results/data/ablation_budget.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Transferability analysis",
+    "description": "Test whether interaction patterns computed on one program can improve pass selection for similar programs, enabling amortization of the Shapley computation cost.",
+    "steps": {
+      "step1": "Compute pairwise cosine similarity between benchmarks using their Shapley interaction vectors (concatenation of order-1, order-2, order-3 values, flattened). Cluster benchmarks using hierarchical clustering.",
+      "step2": "Leave-one-out transfer: for each benchmark B, use the interaction indices averaged over all OTHER benchmarks in the same cluster to perform interaction-guided selection for B. Compare to using B's own interactions (oracle) and to using interactions from a random other benchmark (control).",
+      "step3": "Report transfer success rate: fraction of benchmarks where transferred interactions achieve >= 90% of oracle selection performance.",
+      "step4": "Save results to results/data/transferability.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical evaluation of results against success criteria",
+    "description": "Compile all experimental results and evaluate against the pre-defined success criteria from the hypothesis.",
+    "steps": {
+      "step1": "Criterion 1 — Significant higher-order interactions: count the fraction of order-3 interactions with |phi_{i,j,k}| > 2 * std_across_seeds. Report whether >= 30% of pass triples have significant third-order interactions.",
+      "step2": "Criterion 2 — Variance explained: report the average additional variance explained by order-3 interactions beyond pairwise. Evaluate whether >= 10%.",
+      "step3": "Criterion 3 — Selection performance: for each benchmark at budget k=10, count whether interaction-guided (order-1+2+3) outperforms pairwise-only (order-1+2). Report the win rate across benchmarks. Evaluate whether >= 60%.",
+      "step4": "Compute overall comparison table: for each method (LLVM-O1, -O2, -O3, -Os, -Oz, random search, GA, individual greedy, pairwise greedy, full interaction greedy, synergy-seeded) and each benchmark, report IR reduction. Compute mean ± std across benchmarks.",
+      "step5": "Run Wilcoxon signed-rank tests for pairwise method comparisons (non-parametric, appropriate for small N). Report p-values with Bonferroni correction.",
+      "step6": "Save comprehensive results to results/tables/main_results.csv and results/data/statistical_tests.json."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate figures and tables for the paper",
+    "description": "Create publication-quality figures and tables summarizing all experimental results.",
+    "steps": {
+      "step1": "Figure 1 — Variance decomposition bar chart: stacked bar chart showing fraction of variance at order 1, 2, 3 for each benchmark. Use consistent color scheme (blue=order1, orange=order2, red=order3).",
+      "step2": "Figure 2 — Interaction heatmap: for 2-3 representative benchmarks, plot a heatmap of pairwise Shapley interaction indices (passes × passes). Annotate the top-5 strongest interactions.",
+      "step3": "Figure 3 — Top higher-order interactions: horizontal bar chart showing the top-10 strongest order-3 interactions across all benchmarks, with error bars across seeds.",
+      "step4": "Figure 4 — Selection performance comparison: grouped bar chart comparing all methods (LLVM levels, baselines, ablated versions, proposed method) across benchmarks. Use consistent colors. Also create a line plot showing performance vs. pass budget k.",
+      "step5": "Figure 5 — Interaction network: for 1-2 representative benchmarks, visualize passes as nodes and interactions as edges (width proportional to |phi|, color for sign). Use networkx spring layout.",
+      "step6": "Figure 6 — Transferability: heatmap of cosine similarity between benchmarks' interaction vectors. Overlay cluster boundaries.",
+      "step7": "Figure 7 — Convergence: line plot of selection performance vs. evaluation budget (from ablation study).",
+      "step8": "Table 1 — Main comparison table: rows = benchmarks, columns = methods, cells = IR reduction %. Bold the best, underline second-best. Include mean ± std row.",
+      "step9": "Table 2 — Top synergistic and redundant pass groups: list top-5 order-2 and top-5 order-3 interactions with their values and interpretations.",
+      "step10": "Save all figures to results/figures/ as PDF and PNG (300 DPI). Use matplotlib with seaborn styling. Font size >= 10pt for readability.",
+      "step11": "Use consistent styling across all figures: matplotlib rcParams with font.size=12, axes.labelsize=14, figure.dpi=300, savefig.bbox='tight'."
+    }
+  }
+]

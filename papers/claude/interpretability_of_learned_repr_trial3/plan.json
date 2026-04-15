@@ -1,0 +1,220 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up all required packages for SAE training, feature matching, and evaluation. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: pip install sae-lens==4.0.0 transformer-lens torch torchvision numpy scipy scikit-learn matplotlib seaborn pandas tqdm",
+      "step2": "Install additional packages: pip install einops jaxtyping fancy_einsum datasets huggingface_hub",
+      "step3": "Verify CUDA is available and GPU has 48GB VRAM: run torch.cuda.is_available(), torch.cuda.get_device_properties(0)",
+      "step4": "Download and cache Pythia-160M model using TransformerLens: HookedTransformer.from_pretrained('EleutherAI/pythia-160m'). Verify the model loads, has 12 layers, hidden dim 768.",
+      "step5": "Create directory structure: exp/sae_training/, exp/feature_matching/, exp/evaluation/, exp/ablation_studies/, exp/visualization/, exp/results/, exp/figures/",
+      "step6": "Create a shared config file exp/shared/config.py with all hyperparameters: model_name='EleutherAI/pythia-160m', layers=[2, 6, 10], n_seeds_primary=8, n_seeds_secondary=5, dict_size=16384, topk_k=50, n_training_tokens=100_000_000, eval_n_sequences=10000, matching_threshold=0.7, consensus_high=0.75, consensus_low=0.25, random_seeds=[42, 137, 256, 512, 1024, 2048, 4096, 8192]"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare training and evaluation datasets",
+    "description": "Download and preprocess tokens from The Pile for SAE training and a held-out evaluation set for causal importance measurement. The same training data must be used across all SAE seeds for fair comparison.",
+    "steps": {
+      "step1": "Load The Pile dataset via HuggingFace datasets: load_dataset('monology/pile-uncopyrighted', split='train', streaming=True). Tokenize with Pythia tokenizer (context length 128 tokens per sequence).",
+      "step2": "Create training dataset: collect 100M tokens (approximately 781,250 sequences of length 128). Save as a memory-mapped file or use SAELens' built-in data loading with dataset_path='monology/pile-uncopyrighted'.",
+      "step3": "Create evaluation dataset: collect 10K held-out sequences (1.28M tokens) from a different shard of The Pile. Ensure no overlap with training data. Save as exp/data/eval_tokens.pt.",
+      "step4": "Create probing datasets: prepare labeled data for 3 linguistic probing tasks using standard datasets: (a) Part-of-speech tagging: use Penn Treebank tags from NLTK or a pre-tagged subset, (b) Named entity recognition: use CoNLL-2003 or extract entities from evaluation data using spaCy, (c) Sentiment: use SST-2 dataset (positive/negative). For each, create 5K train / 1K test splits. Save to exp/data/probing/.",
+      "step5": "Log dataset statistics: number of tokens, vocabulary coverage, sequence length distribution. Save to exp/results/data_stats.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train multi-seed TopK sparse autoencoders",
+    "description": "Train 8 independent TopK SAEs at each of 3 Pythia-160M layers (2, 6, 10) with different random seeds. This is the core of the multi-seed consensus approach. Total: 24 SAEs, estimated ~3.2 hours sequentially on 1 GPU.",
+    "steps": {
+      "step1": "For each layer in [2, 6, 10] and each seed in [42, 137, 256, 512, 1024, 2048, 4096, 8192], configure SAELens training: SAE architecture=TopK, k=50, dictionary_size=16384, context_size=128, training_tokens=100_000_000, lr=3e-4, batch_size=4096, hook_point=f'blocks.{layer}.hook_resid_post'. Use SAELens LanguageModelSAERunnerConfig.",
+      "step2": "Train each SAE and save the model checkpoint to exp/sae_training/topk/layer_{layer}/seed_{seed}/. Log training loss curves (reconstruction loss + sparsity) and final metrics (L0 norm, explained variance, dead neuron fraction).",
+      "step3": "After each SAE trains, extract and save the decoder weight matrix W_dec (shape: dict_size × hidden_dim = 16384 × 768) as a .pt file for efficient loading during matching.",
+      "step4": "Log per-SAE training summary: final reconstruction loss, mean L0 (active features per token), fraction of dead features (never activate), explained variance ratio. Save to exp/results/sae_training_summary.json.",
+      "step5": "Validate: check that all 24 SAEs have comparable reconstruction quality (within 10% of each other). Flag any outliers that may indicate training failures."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Cross-seed feature matching and consensus scoring",
+    "description": "Match features across all 8 SAE runs at each layer using decoder weight cosine similarity and the Hungarian algorithm. Compute consensus scores for each feature identity. Estimated ~1 hour.",
+    "steps": {
+      "step1": "For each layer, load the 8 decoder weight matrices (each 16384 × 768). Normalize each decoder vector to unit norm.",
+      "step2": "For each pair of SAE runs (i, j) at the same layer (28 pairs per layer), compute the pairwise cosine similarity matrix between all decoder vectors (16384 × 16384 matrix). Use batched matrix multiplication for efficiency: sim = W_dec_i @ W_dec_j.T.",
+      "step3": "Apply the Hungarian algorithm (scipy.optimize.linear_sum_assignment) to find the optimal bijective matching that maximizes total cosine similarity. Note: for 16384 features, the full Hungarian algorithm may be slow. Optimization: first filter to only consider pairs with cosine similarity > 0.5 (use sparse representation), then apply matching on the filtered set. Alternatively, use a greedy matching with similarity threshold 0.7.",
+      "step4": "Build a feature-identity graph: for each layer, create a graph where nodes are (seed, feature_index) pairs and edges connect matched feature pairs (cosine sim > 0.7). Find connected components — each component is a 'feature identity'. A feature identity's consensus score = (number of seeds in its component) / 8.",
+      "step5": "Partition features into 3 tiers: Consensus (score >= 0.75, i.e., found in >=6 of 8 runs), Partial (0.25 < score < 0.75), Singleton (score <= 0.25, i.e., found in <=2 runs).",
+      "step6": "Save matching results: for each layer, save (a) the full matching graph, (b) the consensus score for each feature identity, (c) the tier assignment, (d) summary statistics (number of features per tier, mean/median/std consensus scores). Save to exp/feature_matching/layer_{layer}/.",
+      "step7": "Generate a consensus score histogram for each layer. Save to exp/results/consensus_distribution.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal importance via feature ablation",
+    "description": "Primary evaluation: measure the causal importance of features at different consensus levels by zeroing their activations and measuring KL divergence in model output. This directly tests the core hypothesis.",
+    "steps": {
+      "step1": "Select a reference SAE run (seed=42) at each layer. For each feature in this SAE, look up its consensus score from the matching results.",
+      "step2": "Run the evaluation set (10K sequences) through Pythia-160M and the reference SAE. Record the SAE activations and the model's original output logits (next-token probability distribution) at each position.",
+      "step3": "For each feature f (iterating in batches of 256 features for efficiency): (a) zero out feature f's activation across all evaluation tokens, (b) reconstruct the modified hidden state using the SAE decoder, (c) run the modified hidden state through the remaining model layers to get modified output logits, (d) compute the mean KL divergence D_KL(p_original || p_modified) across all tokens where f was active (activation > 0).",
+      "step4": "Compute causal importance score for each feature = mean KL divergence when ablated, restricted to tokens where the feature fires (to avoid diluting the signal with tokens where the feature is inactive).",
+      "step5": "Group features by consensus tier (consensus/partial/singleton) and compute: (a) mean causal importance per tier, (b) median causal importance per tier, (c) distribution of causal importance within each tier. Run Mann-Whitney U test and compute Cohen's d between consensus and singleton tiers.",
+      "step6": "Compute Spearman correlation between consensus score and causal importance. Save all results to exp/results/causal_importance.json.",
+      "step7": "Control analysis: also compute correlation between firing frequency and causal importance, and partial correlation of consensus score with causal importance controlling for firing frequency. This ensures the consensus effect is not just a proxy for frequency."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Sparse probing with consensus-tiered features",
+    "description": "Train sparse linear probes using features from each consensus tier to predict linguistic properties. Tests whether consensus features encode more useful information per feature.",
+    "steps": {
+      "step1": "Using the reference SAE (seed=42) at layer 6 (middle layer, where linguistic features are most prominent), run the probing datasets through the model and SAE. Collect SAE activation vectors for each token.",
+      "step2": "For each probing task (POS tagging, NER, sentiment): (a) Select the top-100 features by activation variance from each tier (consensus, partial, singleton). (b) Train L1-regularized logistic regression probes using only features from each tier. Use sklearn LogisticRegression with C values [0.01, 0.1, 1.0, 10.0], select by validation accuracy.",
+      "step3": "Also train k-sparse probes (selecting exactly k features) for k in [5, 10, 20, 50]: (a) For each tier, use mutual information to rank features, then train a linear probe on the top-k features. (b) This measures per-feature information content.",
+      "step4": "Baseline: train probes using k random features (averaged over 10 random selections) to establish chance-level performance.",
+      "step5": "Report accuracy per tier per task per k. Compute relative improvement of consensus over singleton tier. Save to exp/results/sparse_probing.json.",
+      "step6": "Statistical test: paired t-test (across tasks and k values) comparing consensus vs singleton probing accuracy."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Feature steering effectiveness",
+    "description": "Test whether consensus features produce more coherent behavioral changes when amplified. Measures practical utility for model control.",
+    "steps": {
+      "step1": "From the reference SAE at layer 6, select 50 consensus features and 50 singleton features, matched by firing frequency (within 10% of each other) to control for this confound.",
+      "step2": "For each selected feature, prepare 200 evaluation prompts where the feature activates (activation > mean activation of that feature).",
+      "step3": "For each feature: (a) Run prompts through the model normally, recording output logit distribution. (b) Run prompts with the feature's activation multiplied by 3×, recording modified output distribution. (c) Compute steering effect = mean KL divergence between original and steered output distributions.",
+      "step4": "Additionally measure steering consistency: compute the variance of per-prompt KL divergences. Lower variance = more consistent steering effect.",
+      "step5": "Compare consensus vs singleton features on: (a) mean steering effect size, (b) steering consistency (inverse variance), (c) fraction of features producing statistically significant steering (KL > threshold). Use Mann-Whitney U test.",
+      "step6": "Save results to exp/results/steering_effectiveness.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Random feature selection",
+    "description": "Simple baseline: evaluate randomly selected features on all metrics. This establishes that any signal from consensus scoring is non-trivial.",
+    "steps": {
+      "step1": "From the reference SAE at each layer, randomly select features (same number as in the consensus tier) using 3 different random seeds.",
+      "step2": "Evaluate these randomly selected features on: (a) mean causal importance (KL divergence under ablation), (b) sparse probing accuracy, (c) steering effectiveness.",
+      "step3": "Report mean and standard error across the 3 random selections. This establishes the 'chance' level for each metric.",
+      "step4": "Save results to exp/results/baseline_random.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Frequency-based feature selection",
+    "description": "Strong baseline: select features by firing frequency (the most active features). Since consensus features tend to fire more frequently (Paulo & Belrose 2025), this tests whether consensus score provides signal beyond frequency.",
+    "steps": {
+      "step1": "From the reference SAE at each layer, compute the firing frequency of each feature across the evaluation set (fraction of tokens where activation > 0).",
+      "step2": "Select the top-N features by firing frequency (where N matches the number of consensus features) as the 'frequency-selected' set.",
+      "step3": "Evaluate frequency-selected features on: (a) mean causal importance, (b) sparse probing accuracy, (c) steering effectiveness.",
+      "step4": "Compare frequency-selected vs consensus features. If consensus features outperform frequency-selected features, this demonstrates that multi-seed agreement provides information beyond simple frequency.",
+      "step5": "Also compute: the overlap between frequency-selected and consensus features (Jaccard index). High overlap would suggest the signals are correlated but not identical.",
+      "step6": "Save results to exp/results/baseline_frequency.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Number of seeds needed",
+    "description": "Test how many SAE training seeds are needed for reliable consensus scoring. This determines the practical cost of the method.",
+    "steps": {
+      "step1": "Using layer 6 (middle layer) as the test case, subsample from the 8 available seeds to create subsets of size N = 3, 4, 5, 6, 7, 8.",
+      "step2": "For each N, use 5 random subsets of that size (to account for which seeds are chosen). Recompute feature matching and consensus scores using only the subsampled seeds.",
+      "step3": "For each N, measure: (a) Spearman correlation between consensus score (computed with N seeds) and causal importance, (b) stability of the consensus tier assignment vs the full 8-seed assignment (Jaccard similarity), (c) the separation between consensus and singleton causal importance distributions (Cohen's d).",
+      "step4": "Plot: x-axis = number of seeds, y-axis = each metric. Identify the 'knee' where adding more seeds provides diminishing returns.",
+      "step5": "Save results to exp/results/ablation_n_seeds.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Dictionary size sensitivity",
+    "description": "Test whether consensus scoring works across different SAE dictionary sizes. Larger dictionaries may have more singletons due to finer-grained feature splitting.",
+    "steps": {
+      "step1": "Train 4 additional TopK SAEs at layer 6 with dictionary sizes 4096 and 32768, using seeds [42, 137, 256, 512] (4 seeds each to save time, ~40 min total).",
+      "step2": "Run feature matching and consensus scoring for these SAEs.",
+      "step3": "Compare across dictionary sizes [4096, 16384, 32768]: (a) fraction of features in each consensus tier, (b) Spearman correlation of consensus score with causal importance, (c) mean causal importance gap between consensus and singleton tiers.",
+      "step4": "Test the prediction from Lecomte et al. (2025): larger dictionaries should have more singleton features (more manifold tiling).",
+      "step5": "Save results to exp/results/ablation_dict_size.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: SAE architecture comparison (TopK vs ReLU+L1)",
+    "description": "Train ReLU+L1 SAEs to test whether consensus scoring generalizes across SAE architectures. Paulo & Belrose (2025) found ReLU SAEs are more seed-stable.",
+    "steps": {
+      "step1": "Train 5 ReLU+L1 SAEs at layer 6 with dictionary size 16384, using seeds [42, 137, 256, 512, 1024]. Use L1 coefficient=3e-3 (tuned to achieve similar L0 to TopK k=50). Estimated ~30 min total.",
+      "step2": "Run feature matching and consensus scoring for the ReLU+L1 SAEs.",
+      "step3": "Compare TopK vs ReLU+L1: (a) consensus score distribution (ReLU expected to be more stable), (b) correlation between consensus score and causal importance in both architectures, (c) number of consensus vs singleton features.",
+      "step4": "Test whether the causal importance gap between consensus and singleton features is present in both architectures.",
+      "step5": "Save results to exp/results/ablation_architecture.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Consensus threshold sensitivity",
+    "description": "Test robustness of results to the specific consensus threshold used to define the tiers.",
+    "steps": {
+      "step1": "Using the full 8-seed TopK results at layer 6, vary the consensus threshold for the 'high consensus' tier: thresholds = [0.5, 0.625, 0.75, 0.875, 1.0] (corresponding to >=4, >=5, >=6, >=7, 8 out of 8 seeds).",
+      "step2": "For each threshold: (a) compute the number of consensus features, (b) compute mean causal importance of the consensus set, (c) compute Spearman correlation of consensus score (continuous) with causal importance — this should be threshold-independent.",
+      "step3": "Verify that the consensus-singleton causal importance gap is robust across thresholds (not driven by a specific threshold choice).",
+      "step4": "Save results to exp/results/ablation_threshold.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Singleton analysis: Manifold tiling signatures",
+    "description": "Investigate whether singleton features show signatures of manifold tiling — arbitrary discretizations of continuous feature manifolds. This connects feature instability to geometric structure.",
+    "steps": {
+      "step1": "For each layer, compute the pairwise cosine similarity between all decoder vectors within the reference SAE. Group features by consensus tier.",
+      "step2": "Measure local density: for each feature, count the number of other features within cosine similarity > 0.5 (its 'neighborhood size'). Compare neighborhood sizes across tiers. Hypothesis: singletons have denser local neighborhoods (they tile manifolds, so many similar features exist nearby).",
+      "step3": "Measure activation correlation: for each pair of features with cosine similarity > 0.5, compute the Pearson correlation of their activation patterns across the evaluation set. Compare pairwise activation correlations for singleton-singleton pairs vs consensus-consensus pairs. Hypothesis: singleton pairs have higher activation correlation (they activate on similar inputs because they tile the same manifold).",
+      "step4": "Cluster analysis: apply DBSCAN clustering to the decoder weight vectors with eps=0.4 (cosine distance). Measure: (a) fraction of singletons vs consensus features assigned to a cluster, (b) mean cluster size for singleton-dominated vs consensus-dominated clusters.",
+      "step5": "Visualization: create a 2D UMAP projection of decoder vectors, colored by consensus score. Check whether singletons cluster in dense regions while consensus features are more spread out.",
+      "step6": "Save results to exp/results/manifold_analysis.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Consensus dictionary construction and evaluation",
+    "description": "Build a curated 'consensus dictionary' by retaining only high-consensus features and evaluate whether it provides better per-feature utility than individual SAE dictionaries.",
+    "steps": {
+      "step1": "For each layer, construct the consensus dictionary: for each consensus feature identity (score >= 0.75), compute the centroid of its matched decoder vectors across runs. Normalize to unit norm. The resulting dictionary contains only consensus features.",
+      "step2": "For comparison, also construct: (a) a 'singleton dictionary' containing only singleton features from the reference SAE, (b) the full reference SAE dictionary (all features), (c) a 'random-subsampled dictionary' with the same number of features as the consensus dictionary, randomly selected from the reference SAE.",
+      "step3": "Evaluate all dictionaries on reconstruction quality: compute mean squared error and explained variance on the evaluation set. Note: the consensus dictionary will have fewer features, so normalize metrics per-feature (MSE per feature, or compute how many features are needed to reach a given reconstruction threshold).",
+      "step4": "Evaluate on sparse probing: using the consensus dictionary vs the full dictionary vs singleton dictionary, train probes for POS/NER/sentiment. Compare accuracy and accuracy-per-feature.",
+      "step5": "Evaluate reconstruction fidelity: for each dictionary, encode the evaluation set and decode. Measure: (a) cosine similarity between original and reconstructed hidden states, (b) KL divergence between model output with original vs reconstructed hidden states (measures functional fidelity).",
+      "step6": "Save results to exp/results/consensus_dictionary_eval.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical tests and success criteria evaluation",
+    "description": "Run formal statistical tests to evaluate each success criterion. Report p-values, effect sizes, and confidence intervals.",
+    "steps": {
+      "step1": "Primary criterion 1 — Consensus predicts causal importance: (a) Spearman rank correlation between consensus score and KL divergence under ablation. Report ρ, p-value, and 95% CI via bootstrap (1000 resamples). (b) Mann-Whitney U test comparing causal importance of consensus vs singleton features. Report U statistic, p-value, and Cohen's d. Target: p < 0.01, d > 0.5.",
+      "step2": "Primary criterion 2 — Sparse probing superiority: for each task and k value, compare probing accuracy of consensus vs singleton features. Use paired t-test across tasks. Report mean improvement and 95% CI.",
+      "step3": "Secondary criterion 3 — Consensus dictionary quality: compare consensus dictionary vs full single-run dictionary on reconstruction fidelity and probing accuracy per feature. Use paired tests.",
+      "step4": "Secondary criterion 4 — Manifold tiling: compare neighborhood density and activation correlation for singleton vs consensus features. Use Mann-Whitney U test.",
+      "step5": "Secondary criterion 5 — Architecture generalization: report whether the consensus-causal importance correlation is significant (p < 0.05) for both TopK and ReLU+L1.",
+      "step6": "Aggregate all results into a summary table. For each criterion, report: metric value, p-value, effect size, pass/fail. Save to exp/results/statistical_summary.json.",
+      "step7": "Run results across 3 layers independently. Report consistency: does the consensus-causal importance relationship hold at all 3 layers? Use a meta-analytic approach (Fisher's method) to combine p-values across layers."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for all key results. Use consistent styling (matplotlib with seaborn, font size 12, dpi 300).",
+    "steps": {
+      "step1": "Figure 1 — Consensus score distribution: 3-panel histogram (one per layer) showing the distribution of consensus scores. Highlight the bimodal structure with consensus and singleton peaks. Include vertical lines at tier boundaries. Save as exp/figures/figure1_consensus_distribution.pdf.",
+      "step2": "Figure 2 — Consensus predicts causal importance (main result): (a) Scatter plot of consensus score vs mean KL divergence under ablation, with regression line and confidence band, for each layer. (b) Box plot comparing causal importance across the 3 tiers (consensus/partial/singleton). Include significance stars. Save as exp/figures/figure2_causal_importance.pdf.",
+      "step3": "Figure 3 — Sparse probing results: grouped bar chart showing probing accuracy for consensus/partial/singleton/random features across tasks and k values. Save as exp/figures/figure3_sparse_probing.pdf.",
+      "step4": "Figure 4 — Ablation studies: 2×2 panel: (a) effect of number of seeds, (b) effect of dictionary size, (c) TopK vs ReLU+L1 comparison, (d) consensus threshold sensitivity. Save as exp/figures/figure4_ablations.pdf.",
+      "step5": "Figure 5 — Manifold tiling analysis: (a) UMAP projection of decoder vectors colored by consensus score, (b) neighborhood density comparison, (c) activation correlation comparison. Save as exp/figures/figure5_manifold_analysis.pdf.",
+      "step6": "Figure 6 — Consensus dictionary evaluation: bar chart comparing reconstruction quality and probing accuracy per feature for consensus/full/singleton/random dictionaries. Save as exp/figures/figure6_dictionary_eval.pdf.",
+      "step7": "Table 1 — Main results summary: for each layer, report mean causal importance (± SE) for each tier, Spearman ρ, p-value, Cohen's d. Save as exp/figures/table1_main_results.tex (LaTeX formatted).",
+      "step8": "Table 2 — Ablation summary: compile key metrics across all ablation conditions. Save as exp/figures/table2_ablations.tex.",
+      "step9": "All figures use consistent color scheme: consensus=blue (#2196F3), partial=orange (#FF9800), singleton=red (#F44336), random baseline=gray (#9E9E9E). Font: Times New Roman or similar serif for paper submission."
+    }
+  }
+]

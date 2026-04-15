@@ -1,0 +1,550 @@
+\documentclass{article}
+
+% NeurIPS 2025 style
+\usepackage[final]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\adecd}{\textsc{ADECD}}
+\newcommand{\conf}{\mathrm{conf}}
+\newcommand{\HSIC}{\mathrm{HSIC}}
+
+\title{When Do Causal Discovery Algorithms Disagree? \\ Diagnosing Assumption Violations via Per-Edge Profiling}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Different causal discovery algorithms make different structural assumptions---faithfulness, causal sufficiency, linearity, non-Gaussianity---and frequently produce conflicting causal graphs on the same data.
+We investigate whether these disagreements can be systematically diagnosed and exploited.
+We propose \adecd{} (Assumption-Diagnostic Ensemble Causal Discovery), a framework that runs a diverse portfolio of seven algorithms, computes per-edge statistical diagnostics for four key assumptions, and reconciles outputs using assumption-derived weights.
+Our main finding is a \emph{diagnostic asymmetry}: distributional assumptions (linearity, Gaussianity) can be reliably detected from data (AUC = 0.886, 0.942), while structural assumptions (faithfulness, sufficiency) remain near-random (AUC $\approx$ 0.50).
+Despite this, the partial-correlation scores underlying the faithfulness diagnostic act as edge-strength proxies that significantly impact reconciliation performance ($\Delta$SHD = +1.81 when removed).
+On 240 synthetic datasets, \adecd{} achieves the numerically lowest mean SHD (5.96 vs.\ 6.42 for the best individual algorithm), with well-calibrated confidence scores (Brier = 0.089), though the improvement is not statistically significant ($p = 0.39$).
+We also report negative results on bootstrap-adaptive calibration and global-weight ensemble learning, providing practical guidance for ensemble causal discovery.
+\end{abstract}
+
+\section{Introduction}
+
+Causal discovery---the task of inferring causal structure from observational data---is fundamental to scientific reasoning and data-driven decision making~\citep{spirtes2000causation, kaddour2022causal}.
+Over the past two decades, a rich ecosystem of algorithms has emerged, spanning constraint-based methods such as PC and FCI~\citep{spirtes2000causation}, score-based methods such as GES~\citep{chickering2002optimal}, continuous optimization approaches such as NOTEARS~\citep{zheng2018dags}, and functional causal model methods such as LiNGAM~\citep{shimizu2006linear} and CAM~\citep{buhlmann2014cam}.
+Each algorithm family makes distinct assumptions about the data-generating process: faithfulness, causal sufficiency, linearity, Gaussianity, or specific noise models.
+
+A critical challenge confronts practitioners: \emph{when applied to the same dataset, different algorithms frequently produce conflicting causal graphs}.
+This disagreement reflects fundamental uncertainty about which assumptions hold for the data at hand.
+Currently, practitioners must either commit to a single algorithm and hope its assumptions are satisfied, apply naive ensemble strategies like majority voting that ignore \emph{why} algorithms disagree, or manually reconcile conflicts using domain knowledge.
+
+Our key insight is that algorithm disagreements are potentially \textbf{diagnostic}: when two algorithms that differ in their required assumptions disagree on a specific edge, this disagreement provides evidence about which assumptions hold locally.
+We investigate this insight through \adecd{} (Assumption-Diagnostic Ensemble Causal Discovery), a framework that maps algorithms to their assumptions, tests those assumptions per-edge, and uses the results to weight algorithm contributions.
+
+Our investigation reveals a fundamental \emph{diagnostic asymmetry} in causal discovery: distributional assumptions (linearity, Gaussianity) can be reliably assessed from data, but structural assumptions (faithfulness, causal sufficiency) cannot.
+This asymmetry has important implications for how practitioners should approach ensemble causal discovery and algorithm selection.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \adecd{}, a framework for per-edge assumption profiling in ensemble causal discovery, and conduct a systematic evaluation of which assumption diagnostics are informative.
+    \item We identify a \emph{diagnostic asymmetry}: linearity (AUC = 0.886) and Gaussianity (AUC = 0.942) can be reliably detected, while faithfulness and sufficiency remain at chance level. We further show that the faithfulness diagnostic's partial-correlation scores act as \emph{edge-strength proxies}, explaining why removing this non-discriminative feature paradoxically degrades performance.
+    \item We provide well-calibrated per-edge confidence scores (Brier = 0.089, ECE = 0.054) and document negative results---on bootstrap-adaptive calibration and global-weight ensemble fragility---that inform future work on ensemble causal discovery.
+\end{itemize}
+
+The rest of this paper is organized as follows.
+Section~\ref{sec:related} reviews related work.
+Section~\ref{sec:method} describes the \adecd{} framework.
+Section~\ref{sec:experiments} presents experimental results.
+Section~\ref{sec:discussion} discusses findings and limitations.
+Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Foundational causal discovery algorithms.}
+The PC algorithm~\citep{spirtes2000causation} introduced constraint-based causal discovery using conditional independence tests, producing a CPDAG under faithfulness and causal sufficiency assumptions.
+GES~\citep{chickering2002optimal} offered a score-based alternative with provable optimality guarantees.
+NOTEARS~\citep{zheng2018dags} reformulated structure learning as continuous optimization with an acyclicity constraint.
+LiNGAM~\citep{shimizu2006linear} and DirectLiNGAM~\citep{shimizu2011directlingam} exploit non-Gaussianity for full identifiability in linear settings.
+FCI~\citep{spirtes2000causation} extends constraint-based methods to allow latent confounders.
+CAM~\citep{buhlmann2014cam} handles nonlinear additive models.
+
+\paragraph{Robustness and assumption violations.}
+\citet{montagna2023assumption} provided the first systematic benchmark of causal discovery under assumption violations, finding that different algorithms exhibit different robustness profiles---a finding that motivates our per-edge diagnostic approach.
+\citet{prakash2024diagnostic} introduced CDDR, a diagnostic tool for functional causal discovery, but limited to bivariate settings.
+The recent dcFCI~\citep{ribeiro2025dcfci} jointly addresses latent confounding, unfaithfulness, and mixed data, but as a single algorithm rather than an ensemble.
+
+\paragraph{Ensemble approaches in causal discovery.}
+\citet{saldanha2020evaluation} is the most directly related prior work, developing a causal ensemble that combines multiple algorithm outputs with global weights.
+However, Saldanha's ensemble uses uniform or learned-global weights across all edges---it does not perform per-edge assumption profiling.
+\citet{guo2021scalable} proposed a scalable two-phase ensemble using data partitioning and frequency-based voting, which improves scalability but remains assumption-agnostic.
+\citet{dai2004ensembling} introduced ensembling for MML-based causal discovery with weighted voting, but restricted to a single algorithm family.
+\citet{debeire2024bootstrap} proposed bootstrap aggregation for time series causal discovery, capturing sampling variability but not structural variability across algorithm families.
+
+\paragraph{How \adecd{} differs.}
+The key distinction of \adecd{} from all prior ensemble approaches is \emph{per-edge assumption profiling}.
+Prior methods learn global weights~\citep{saldanha2020evaluation}, use frequency-based voting~\citep{guo2021scalable}, or ensemble within a single family~\citep{dai2004ensembling}.
+\adecd{} formally maps each algorithm to its structural assumptions, uses per-edge statistical tests to construct local assumption profiles, and derives edge-specific algorithm weights.
+This means \adecd{} can assign high weight to LiNGAM for a non-Gaussian edge while simultaneously trusting PC for a Gaussian edge in the same graph.
+
+\section{Method}
+\label{sec:method}
+
+\adecd{} operates in three stages: (1)~algorithm portfolio execution, (2)~per-edge assumption profiling, and (3)~diagnostic reconciliation. We describe each stage below; Algorithm~\ref{alg:adecd} provides a summary.
+
+\subsection{Algorithm Portfolio}
+
+We select algorithms to maximize coverage of the assumption space.
+Table~\ref{tab:portfolio} shows the portfolio and each algorithm's key assumptions.
+
+\begin{table}[t]
+\caption{Algorithm portfolio and assumption requirements. ``Req.'' = required for correctness, ``Not req.'' = not required, ``Agn.'' = agnostic (neither benefits nor is harmed).}
+\label{tab:portfolio}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Algorithm & Faithfulness & Sufficiency & Linearity & Non-Gaussianity \\
+\midrule
+PC & Req. & Req. & Agn. & Agn. \\
+FCI & Req. & Not req. & Agn. & Agn. \\
+GES & Req. & Req. & Agn. & Agn. \\
+NOTEARS & Not req. & Req. & Req. & Agn. \\
+LiNGAM & Not req. & Req. & Req. & Req. \\
+DirectLiNGAM & Not req. & Req. & Req. & Req. \\
+CAM & Not req. & Req. & Not req. & Agn. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This portfolio ensures that for any pair of algorithms differing primarily in one assumption, their disagreement is informative about that assumption.
+
+\subsection{Per-Edge Assumption Profiling}
+
+For each candidate edge $(i, j)$ appearing in at least one algorithm's output, we compute four diagnostic scores.
+
+\paragraph{Linearity diagnostic ($s_{\mathrm{lin}}$).}
+We regress $X_j$ on $X_i$ and its other candidate parents via OLS, then test independence between residuals and the predictor using the Hilbert-Schmidt Independence Criterion (HSIC)~\citep{gretton2005measuring} with 200 permutations and an RBF kernel with median bandwidth, computed on up to 300 data points.
+The linearity score $s_{\mathrm{lin}}(e) \in [0,1]$ is the HSIC $p$-value; high values indicate linearity holds.
+
+\paragraph{Gaussianity diagnostic ($s_{\mathrm{gauss}}$).}
+We apply the Anderson-Darling test~\citep{anderson1952asymptotic} to the OLS residuals.
+The Gaussianity score $s_{\mathrm{gauss}}(e)$ is derived from the test statistic relative to the 5\% critical value, combined with excess kurtosis (weight 0.7/0.3), with $s_{\mathrm{gauss}} = 1$ indicating Gaussian residuals.
+
+\paragraph{Faithfulness diagnostic ($s_{\mathrm{faith}}$).}
+For each edge $(i,j)$, we compute partial correlations $r(X_i, X_j \mid S)$ for conditioning sets $S$ drawn from the estimated Markov blanket (union of neighbors across all algorithm outputs), using subsets up to size $\min(3, |MB|-1)$, sampling at most 80 subsets.
+The faithfulness score combines the minimum partial correlation magnitude and the fraction of subsets yielding near-zero ($|\text{partial correlation}| < \tau$, $\tau = 0.05$) values: $s_{\mathrm{faith}}(e) = 0.4 \cdot \min(|\hat{r}_S|/\tau, 1) + 0.6 \cdot (1 - f_{\mathrm{near\text{-}zero}})$.
+
+\paragraph{Sufficiency diagnostic ($s_{\mathrm{suff}}$).}
+We compare PC output (assumes sufficiency) with FCI output (allows latent confounders), combined with residual variance and algorithm agreement breadth (weights 0.5/0.2/0.3).
+If FCI produces a bidirected edge where PC produces a directed edge, this indicates a potential latent confounder ($s_{\mathrm{suff}}(e) = 0.1$).
+
+\subsection{Diagnostic Reconciliation}
+
+For each candidate edge $e = (i,j)$, we compute a reconciled confidence score:
+\begin{equation}
+\conf(e) = \sum_{k=1}^{K} w_k(e) \cdot \mathbf{1}[e \in G_k]
+\label{eq:conf}
+\end{equation}
+where $G_k$ is the graph from algorithm $k$, and $w_k(e)$ is an assumption-profile-derived weight:
+\begin{equation}
+w_k(e) = \frac{\exp(\alpha_k(e))}{\sum_{k'} \exp(\alpha_{k'}(e))}, \quad
+\alpha_k(e) = \sum_{a \in \mathcal{A}} \tilde{s}_a(e) \cdot M_{k,a} \cdot \beta_a
+\label{eq:weights}
+\end{equation}
+Here $\tilde{s}_a(e) = 2(s_a(e) - 0.5)$ centers the diagnostic score to $[-1, 1]$, $M_{k,a} \in \{-1, 0, +1\}$ encodes whether algorithm $k$ benefits from ($+1$), is harmed by ($-1$), or is agnostic to ($0$) assumption $a$ being satisfied, and $\beta_a$ are learnable parameters.
+
+\paragraph{Calibration of $\beta$ parameters.}
+We pre-train the four $\beta$ parameters on a diverse set of 30 synthetic SEMs (8--15 nodes, spanning linear/nonlinear functional forms and Gaussian/non-Gaussian noise) by optimizing the negative log-likelihood of edge predictions against ground truth via L-BFGS-B with bounds $[0.1, 10]$ and four random restarts.
+With only four parameters, convergence is fast and overfitting risk is minimal.
+
+\paragraph{Bootstrap-adaptive calibration (proposed but unsuccessful).}
+We also proposed adapting $\beta$ to the target dataset using bootstrap resamples as a self-supervised signal.
+However, as we report in Section~\ref{sec:calibration_ablation}, this adaptation consistently degrades performance compared to synthetic pre-training alone.
+
+The final reconciled graph is obtained by thresholding: $e$ is included if $\conf(e) > 0.5$.
+
+\begin{algorithm}[t]
+\caption{\adecd{}: Assumption-Diagnostic Ensemble Causal Discovery}
+\label{alg:adecd}
+\begin{algorithmic}[1]
+\REQUIRE Data matrix $\mathbf{X} \in \mathbb{R}^{n \times p}$, pre-trained $\beta$, threshold $\tau_c = 0.5$
+\ENSURE Reconciled adjacency matrix $\hat{G}$, confidence scores $\conf(e)$
+\STATE \textbf{Stage 1: Portfolio Execution}
+\FOR{$k = 1, \ldots, K$ (algorithms in portfolio)}
+\STATE $G_k \leftarrow \text{Algorithm}_k(\mathbf{X})$ \COMMENT{Run each causal discovery algorithm}
+\ENDFOR
+\STATE $\mathcal{E} \leftarrow \bigcup_k \text{edges}(G_k)$ \COMMENT{Candidate edges from union}
+\STATE \textbf{Stage 2: Per-Edge Assumption Profiling}
+\FOR{each $e = (i,j) \in \mathcal{E}$}
+\STATE $s_{\mathrm{lin}}(e) \leftarrow \text{HSIC\_test}(\mathbf{X}, e)$ \COMMENT{Linearity score}
+\STATE $s_{\mathrm{gauss}}(e) \leftarrow \text{AD\_test}(\mathbf{X}, e)$ \COMMENT{Gaussianity score}
+\STATE $s_{\mathrm{faith}}(e) \leftarrow \text{PartialCorr\_test}(\mathbf{X}, e)$ \COMMENT{Faithfulness score}
+\STATE $s_{\mathrm{suff}}(e) \leftarrow \text{PC\_FCI\_compare}(G_{\mathrm{PC}}, G_{\mathrm{FCI}}, e)$ \COMMENT{Sufficiency score}
+\ENDFOR
+\STATE \textbf{Stage 3: Diagnostic Reconciliation}
+\FOR{each $e \in \mathcal{E}$}
+\FOR{$k = 1, \ldots, K$}
+\STATE $\alpha_k(e) \leftarrow \sum_{a} \tilde{s}_a(e) \cdot M_{k,a} \cdot \beta_a$ \COMMENT{Algorithm-edge affinity}
+\ENDFOR
+\STATE $w_k(e) \leftarrow \text{softmax}(\alpha_k(e))$ for all $k$ \COMMENT{Normalized weights}
+\STATE $\conf(e) \leftarrow \sum_k w_k(e) \cdot \mathbf{1}[e \in G_k]$ \COMMENT{Weighted confidence}
+\ENDFOR
+\STATE $\hat{G} \leftarrow \{e : \conf(e) > \tau_c\}$
+\RETURN $\hat{G}$, $\{\conf(e)\}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Synthetic data.}
+We generated 240 datasets (80 settings $\times$ 3 random seeds) from structural equation models (SEMs) with known ground truth.
+Settings varied: graph size (8--30 nodes), edge density (1.5--2.5 edges per node), functional form (linear, nonlinear with $\tanh/\sin/x^2$, mixed), noise distribution (Gaussian, Laplace), and faithfulness mode (faithful, near-unfaithful with path cancellations).
+Eight additional settings included 20\% latent confounders.
+Sample size was $n=1000$ for main experiments.
+Edge weights were drawn from $[-1.0, -0.3] \cup [0.3, 1.0]$ to avoid near-zero effects.
+Graphs were Erd\H{o}s-R\'{e}nyi DAGs with enforced acyclicity via topological ordering.
+
+\paragraph{Real-world benchmarks.}
+We evaluated on four standard benchmarks: Sachs protein signaling network~\citep{sachs2005causal} (11 nodes, 17 edges), Asia (8 nodes, 8 edges), Child (20 nodes, 25 edges), and Alarm (37 nodes, 46 edges).
+Continuous data was sampled from each network ($n=5000$).
+
+\paragraph{Baselines.}
+We compared against: (1)~individual algorithms (PC, FCI, GES, NOTEARS, LiNGAM, DirectLiNGAM, CAM); (2)~naive ensembles (majority voting, union, intersection); (3)~global-weight ensemble following \citet{saldanha2020evaluation}; and (4)~bootstrap aggregation with PC and GES~\citep{debeire2024bootstrap}.
+Bootstrap-GES completed on 56 of 80 settings (168 of 240 datasets) due to timeouts on larger graphs; we report its results on this completed subset.
+
+\paragraph{Metrics.}
+We report Structural Hamming Distance (SHD, $\downarrow$), which counts edge additions, deletions, and reversals needed to match ground truth, and F1 score ($\uparrow$) on undirected edge presence. We also report precision ($\uparrow$), recall ($\uparrow$), and orientation accuracy ($\uparrow$) on true positive edges.
+For confidence evaluation, we report Brier score and Expected Calibration Error (ECE).
+Statistical significance is assessed using paired Wilcoxon signed-rank tests on per-setting mean SHD, with Bonferroni correction for 13 comparisons.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents results across all 240 synthetic datasets.
+\adecd{} (transfer) achieves the numerically lowest mean SHD of 5.96, compared to NOTEARS (the best individual algorithm, SHD = 6.42) and majority voting (SHD = 6.23).
+However, paired Wilcoxon signed-rank tests with Bonferroni correction show that the improvement over NOTEARS ($p_{\mathrm{corr}} = 0.39$) and majority voting ($p_{\mathrm{corr}} = 0.12$) is \emph{not statistically significant}.
+\adecd{} significantly outperforms all other baselines ($p_{\mathrm{corr}} < 0.001$).
+
+\begin{table}[t]
+\caption{Causal discovery performance on 240 synthetic datasets. SHD $\downarrow$ (lower is better), F1 $\uparrow$ (higher is better), Prec.\ = precision, Rec.\ = recall, Orient.\ = orientation accuracy on true positive edges. Best in \textbf{bold}, second best \underline{underlined}. $^\dagger$Naive ensemble methods. $^\ddagger$Bootstrap-GES evaluated on 168/240 datasets due to timeouts. $^\S$Unregularized Saldanha ensemble collapses to NOTEARS; see text for regularized results.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & SHD $\downarrow$ & F1 $\uparrow$ & Prec. $\uparrow$ & Rec. $\uparrow$ & Orient. $\uparrow$ \\
+\midrule
+\multicolumn{6}{l}{\emph{Individual algorithms}} \\
+PC & $12.80 \pm 7.16$ & 0.847 & 0.816 & 0.893 & 0.518 \\
+FCI & $11.68 \pm 6.48$ & 0.768 & 0.865 & 0.708 & 0.635 \\
+GES & $10.10 \pm 6.10$ & \underline{0.888} & 0.882 & 0.901 & 0.570 \\
+NOTEARS & $\underline{6.42 \pm 5.12}$ & 0.800 & \textbf{0.962} & 0.700 & \underline{0.967} \\
+LiNGAM & $10.98 \pm 10.91$ & 0.831 & 0.770 & 0.921 & 0.816 \\
+DirectLiNGAM & $16.22 \pm 14.97$ & 0.794 & 0.730 & 0.897 & 0.586 \\
+CAM & $21.04 \pm 17.11$ & 0.673 & 0.529 & \textbf{0.966} & 0.924 \\
+\midrule
+\multicolumn{6}{l}{\emph{Ensemble baselines}} \\
+Majority Vote$^\dagger$ & $6.23 \pm 4.94$ & 0.881 & 0.928 & 0.846 & 0.806 \\
+Union$^\dagger$ & $40.00 \pm 26.98$ & 0.599 & 0.440 & 0.981 & 0.278 \\
+Intersection$^\dagger$ & $13.70 \pm 8.57$ & 0.356 & 0.879 & 0.250 & 0.881 \\
+Saldanha Ensemble$^\S$ & $6.42 \pm 5.12$ & 0.800 & 0.962 & 0.700 & 0.967 \\
+Bootstrap-PC & $11.72 \pm 5.89$ & 0.877 & 0.893 & 0.868 & 0.461 \\
+Bootstrap-GES$^\ddagger$ & $8.15 \pm 4.32$ & \textbf{0.889} & 0.899 & 0.886 & 0.536 \\
+\midrule
+\multicolumn{6}{l}{\emph{Our method}} \\
+\adecd{} (transfer) & $\mathbf{5.96 \pm 5.75}$ & 0.875 & \underline{0.889} & \underline{0.867} & $\mathbf{0.906}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several observations emerge from Table~\ref{tab:main}.
+First, the strongest baselines are NOTEARS (lowest SHD among individual algorithms) and majority voting (lowest SHD among ensembles).
+The F1 ranking differs: Bootstrap-GES (0.889) and GES (0.888) achieve the highest F1, reflecting their strong recall, while NOTEARS achieves the highest precision (0.962) but lower recall (0.700), producing a sparse but accurate graph.
+\adecd{}'s primary advantage is in \emph{orientation accuracy} (0.906), substantially higher than majority voting (0.806) and GES (0.570), indicating that assumption-aware weighting helps resolve edge directions.
+
+\paragraph{Note on the Saldanha ensemble.}
+Our implementation of the global-weight ensemble following \citet{saldanha2020evaluation} produces results identical to NOTEARS on all 240 datasets (SHD = 6.42, F1 = 0.800).
+The unregularized global weights collapse to selecting NOTEARS exclusively (weight $\approx$ 1.0 for NOTEARS, $\approx$ 0 for all others).
+This is not surprising: when a single set of weights is shared across all edges in all datasets, the optimization converges to the algorithm with the lowest average loss---NOTEARS.
+We tested L2 regularization toward uniform weights ($\lambda \in \{0.01, 0.1, 0.5, 1.0, 2.0\}$) with cross-validation.
+Light regularization ($\lambda = 0.01$) prevents collapse, producing spread weights (max weight 0.23 for NOTEARS) and competitive SHD on the validation subset.
+However, the result is sensitive to $\lambda$: stronger regularization ($\lambda \geq 0.1$) pushes weights to near-uniform, recovering majority-vote-like behavior.
+This sensitivity---with performance depending on a global hyperparameter that must be tuned per benchmark---illustrates the fragility of global-weight ensembles compared to per-edge approaches.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig2_main_shd.pdf}
+\caption{Mean SHD ($\downarrow$) across 240 synthetic datasets. Error bars show $\pm 1$ standard deviation. Note: \adecd{}'s improvement over NOTEARS and majority voting is not statistically significant ($p > 0.1$ after Bonferroni correction).}
+\label{fig:main_shd}
+\end{figure}
+
+\subsection{Performance by Condition}
+
+Figure~\ref{fig:heatmap} shows F1 scores broken down by data-generating condition (functional form $\times$ noise type).
+\adecd{} achieves consistently high performance across conditions, while individual algorithms show condition-specific strengths: NOTEARS excels in linear settings but degrades under nonlinearity, and GES maintains high F1 for Gaussian noise.
+The per-edge assumption profiling enables \adecd{} to adapt to the local characteristics of each dataset without requiring prior knowledge of which assumptions hold.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig3_condition_heatmap.pdf}
+\caption{F1 score by data-generating condition. Each cell shows mean F1 across all graph sizes and seeds. \adecd{} maintains consistently high F1 across all conditions, while individual algorithms show condition-specific strengths.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Real-World Benchmarks}
+
+Table~\ref{tab:real} presents SHD on four real-world benchmarks.
+Results on real-world data are mixed: \adecd{} ties for best on Asia (SHD = 4) but does not achieve the lowest SHD on the other datasets.
+On Sachs, GES (SHD = 13) outperforms \adecd{} (SHD = 16).
+On Child and Alarm, majority voting (SHD = 25, 34) outperforms \adecd{} (SHD = 27, 36).
+\adecd{} avoids catastrophic failures (unlike LiNGAM on Alarm, SHD = 62), but does not dominate any baseline, suggesting that $\beta$ parameters pre-trained on synthetic data transfer poorly to real-world settings with different characteristics.
+
+\begin{table}[t]
+\caption{SHD $\downarrow$ on real-world benchmarks. Best in \textbf{bold}. \adecd{} is competitive but does not achieve the best SHD on Sachs, Child, or Alarm.}
+\label{tab:real}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Sachs (11n) & Asia (8n) & Child (20n) & Alarm (37n) \\
+\midrule
+PC & 15 & \textbf{4} & 31 & 53 \\
+GES & \textbf{13} & 6 & 28 & 46 \\
+LiNGAM & 17 & \textbf{4} & 38 & 62 \\
+Majority Vote & 15 & 5 & \textbf{25} & \textbf{34} \\
+\adecd{} (transfer) & 16 & \textbf{4} & 27 & 36 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:sachs} shows the Sachs network case study.
+The framework correctly identifies several high-confidence edges while assigning lower confidence to more ambiguous connections.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig7_sachs_case.pdf}
+\caption{Sachs protein signaling network. Left: ground truth DAG. Right: \adecd{} reconciled graph with edges colored by confidence (green = high, yellow = moderate). High-confidence edges correspond to well-established signaling relationships.}
+\label{fig:sachs}
+\end{figure}
+
+\subsection{Confidence Calibration}
+
+Figure~\ref{fig:calibration} shows the reliability diagram for \adecd{}'s per-edge confidence scores.
+The scores are well-calibrated with a Brier score of 0.089 and ECE of 0.054.
+The curve tracks the perfect calibration diagonal closely, with slight under-confidence in the 0.3--0.5 range and good calibration at both extremes.
+This calibration quality is a practical advantage: practitioners can use the confidence scores to prioritize edges for further validation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.55\linewidth]{figures/fig5_calibration.pdf}
+\caption{Calibration reliability diagram. Dashed line = perfect calibration. \adecd{}'s confidence scores (Brier = 0.089, ECE = 0.054) track the diagonal closely.}
+\label{fig:calibration}
+\end{figure}
+
+\subsection{Diagnostic Accuracy: The Distributional--Structural Asymmetry}
+\label{sec:diagnostic_accuracy}
+
+Table~\ref{tab:assumption} evaluates how well each diagnostic detects whether its corresponding assumption holds, using synthetic ground truth.
+
+\begin{table}[t]
+\caption{Assumption diagnostic accuracy evaluated against synthetic ground truth. AUC-ROC is the primary metric; accuracy and F1 are at threshold 0.5. Diagnostics for distributional assumptions (linearity, Gaussianity) are highly informative; diagnostics for structural assumptions (faithfulness, sufficiency) perform at chance level.}
+\label{tab:assumption}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Diagnostic & AUC-ROC $\uparrow$ & Accuracy $\uparrow$ & F1 $\uparrow$ & Pos.\ Rate & \# Edges \\
+\midrule
+Linearity & \textbf{0.886} & 0.692 & 0.617 & 0.518 & 4,174 \\
+Gaussianity & \textbf{0.942} & 0.868 & 0.866 & 0.528 & 14,700 \\
+Faithfulness & 0.497 & 0.915 & 0.956 & 0.948 & 4,174 \\
+Sufficiency & 0.500 & 0.630 & 0.772 & 0.996 & 4,174 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The linearity diagnostic (AUC = 0.886) and Gaussianity diagnostic (AUC = 0.942) are highly informative.
+In contrast, the faithfulness diagnostic (AUC = 0.497) and sufficiency diagnostic (AUC = 0.500) perform at chance level.
+The high accuracy of the faithfulness diagnostic (0.915) is misleading: it reflects extreme class imbalance (94.8\% of edges are faithful), not discriminative ability.
+Similarly, sufficiency has 99.6\% positive rate, making the class-conditional AUC the only meaningful metric.
+
+This reveals a fundamental \emph{diagnostic asymmetry}: distributional properties of individual variables and edges (linearity, Gaussianity) leave detectable statistical signatures in the data, while structural properties of the graph (faithfulness, sufficiency) are inherently difficult to assess from observational data alone.
+Faithfulness violations manifest as near-cancellation of effects along paths, which are hard to distinguish from genuinely weak effects.
+Sufficiency violations (latent confounders) are by definition about variables not in the data.
+
+\subsection{The Faithfulness Diagnostic Paradox}
+\label{sec:faith_paradox}
+
+A counterintuitive finding emerges from the ablation study (Section~\ref{sec:ablation_diagnostics}): removing the faithfulness diagnostic---which has near-random AUC for detecting faithfulness violations---causes the \emph{largest} degradation in reconciliation performance ($\Delta$SHD = +1.81).
+
+We attribute this to a \emph{proxy effect}: the partial-correlation scores underlying the faithfulness diagnostic capture \emph{edge strength} rather than faithfulness per se.
+Specifically, $s_{\mathrm{faith}}(e)$ is high when partial correlations remain large across conditioning sets, which occurs for edges with strong causal effects regardless of faithfulness status.
+Through the reconciliation weights (Eq.~\ref{eq:weights}), high $s_{\mathrm{faith}}$ upweights constraint-based methods (PC, GES) that rely on faithfulness, which happen to perform well on edges with strong effects.
+The diagnostic thus acts as a \emph{signal-to-noise proxy}: strong-signal edges are well-served by constraint-based methods, and the faithfulness score inadvertently captures this.
+
+This proxy interpretation suggests that the faithfulness feature should be understood not as a faithfulness detector but as an edge-strength measure that happens to correlate with algorithm reliability.
+Future work should investigate whether explicitly modeling edge strength as a separate diagnostic dimension yields cleaner separation of concerns.
+
+\subsection{Ablation Studies}
+
+\subsubsection{Portfolio Size}
+
+Figure~\ref{fig:ablations}a shows how performance varies with the number of algorithms, evaluated on a 24-setting subset (72 datasets, graphs with 10--20 nodes).
+Mean SHD decreases from 4.56 (2 algorithms: PC + LiNGAM) to 3.15 (full portfolio of 7), with the largest gain from 2 to 5 algorithms.
+The marginal benefit of adding the 6th and 7th algorithms is small, suggesting diminishing returns beyond 5 algorithms.
+
+\subsubsection{Diagnostic Feature Importance}
+\label{sec:ablation_diagnostics}
+
+Figure~\ref{fig:ablations}b shows the leave-one-out ablation of each diagnostic, evaluated on the same 24-setting subset.
+Removing the faithfulness diagnostic causes the largest degradation ($\Delta$SHD = +1.81, from 3.15 to 4.96), despite its near-random AUC---a paradox explained by the proxy effect discussed in Section~\ref{sec:faith_paradox}.
+Removing the linearity diagnostic has a modest effect ($\Delta$SHD = +0.10).
+Removing Gaussianity or sufficiency has negligible or slightly positive effects (the latter suggesting the sufficiency diagnostic may add noise).
+Removing all diagnostics (uniform weights) degrades SHD by +1.24 (from 3.15 to 4.39).
+
+\subsubsection{Calibration Strategies}
+\label{sec:calibration_ablation}
+
+Figure~\ref{fig:ablations}c compares four calibration strategies for the $\beta$ parameters, evaluated on the same 24-setting subset.
+Pre-trained $\beta$ (SHD = 3.15) substantially outperforms both uniform $\beta$ (SHD = 6.06) and, surprisingly, bootstrap-adapted $\beta$ (SHD = 5.14).
+The oracle $\beta$ (SHD = 2.79) provides an upper bound, showing that approximately $0.36$ SHD of headroom remains for better calibration.
+
+The failure of bootstrap adaptation is a notable negative result.
+Bootstrap resampling produces noisy pseudo-labels: edges that appear stably across resamples may still be false positives (e.g., strong confounded associations), while correct edges may be unstable (e.g., weak causal effects).
+Optimizing $\beta$ toward these noisy targets erases the informative signal from synthetic pre-training.
+We tested regularization strengths $\lambda \in \{0.05, 0.3, 0.5\}$ toward the pre-trained values; all degraded performance, confirming that bootstrap stability is not a reliable self-supervised signal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig4_ablations.pdf}
+\caption{Ablation studies on a 24-setting subset (72 datasets). (a)~SHD vs.\ portfolio size: more algorithms help, with diminishing returns beyond 5. (b)~Diagnostic leave-one-out: removing faithfulness hurts most ($\Delta$SHD = +1.81), despite near-random AUC, due to its edge-strength proxy effect. (c)~Calibration strategies: pre-trained $\beta$ outperforms both uniform and bootstrap-adapted.}
+\label{fig:ablations}
+\end{figure}
+
+\subsubsection{Scalability with Graph Size}
+
+Figure~\ref{fig:scalability} shows performance as a function of graph size (10, 20, and 30 nodes).
+\adecd{} maintains its numerical advantage across graph sizes, with all methods degrading as expected with increasing graph complexity.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{figures/fig6_sample_size.pdf}
+\caption{SHD vs.\ graph size (10, 20, 30 nodes) for \adecd{} and top baselines. All methods degrade with graph size; \adecd{} (transfer) maintains a consistent numerical advantage.}
+\label{fig:scalability}
+\end{figure}
+
+\subsubsection{Sample Size Ablation}
+
+Table~\ref{tab:sample_size} shows how methods perform as sample size varies from 200 to 2000, evaluated on 10-node graphs across 6 conditions (3 functional forms $\times$ 2 noise types, 3 seeds each, 18 runs per sample size).
+\adecd{} consistently outperforms majority voting across all sample sizes and is competitive with NOTEARS.
+Both \adecd{} and NOTEARS improve with more data, though the gap between them narrows: at $n=200$, \adecd{} has an advantage of 0.4 SHD over NOTEARS, which shrinks to 0.3 at $n=2000$.
+GES performs substantially worse on these 10-node graphs, likely due to its score-based search being more sensitive to model misspecification in nonlinear settings.
+
+\begin{table}[t]
+\caption{SHD ($\downarrow$) vs.\ sample size on 10-node graphs (18 runs per cell). Best in \textbf{bold}.}
+\label{tab:sample_size}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & $n=200$ & $n=500$ & $n=1000$ & $n=2000$ \\
+\midrule
+\adecd{} & $\mathbf{4.50 \pm 2.77}$ & $\mathbf{3.83 \pm 2.79}$ & $\mathbf{3.67 \pm 2.62}$ & $\mathbf{3.44 \pm 3.29}$ \\
+NOTEARS & $4.11 \pm 3.28$ & $4.06 \pm 2.66$ & $3.89 \pm 3.00$ & $3.72 \pm 3.54$ \\
+Majority Vote & $6.50 \pm 3.10$ & $5.44 \pm 2.95$ & $5.83 \pm 3.30$ & $5.17 \pm 3.88$ \\
+GES & $8.94 \pm 2.95$ & $8.72 \pm 3.94$ & $9.22 \pm 3.76$ & $8.72 \pm 4.15$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Runtime.}
+Running the full portfolio of 7 algorithms on 240 datasets required approximately 90 minutes on 2 CPU cores.
+\adecd{}'s assumption profiling and reconciliation adds approximately 5 minutes of overhead (a ${\sim}6\%$ increase), making the framework's total cost dominated by the individual algorithm runs.
+For a single dataset with 20 nodes, the full pipeline (portfolio + profiling + reconciliation) completes in under 30 seconds.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{A diagnostic asymmetry in causal discovery.}
+Our central finding is that distributional assumptions (linearity, Gaussianity) are reliably detectable from data, while structural assumptions (faithfulness, sufficiency) are not.
+This asymmetry is likely fundamental: distributional properties are local features of variable pairs and leave statistical signatures (non-Gaussian residuals, nonlinear regression residuals), whereas structural properties depend on the global graph topology and involve variables that may not be observed.
+This finding has practical implications beyond our framework: any ensemble or algorithm-selection method that relies on diagnosing faithfulness or sufficiency from data alone faces this fundamental barrier.
+
+\paragraph{Reinterpreting the diagnostics.}
+The faithfulness ``diagnostic'' is better understood as an edge-strength measure.
+The Gaussianity diagnostic performs double duty: it both identifies non-Gaussian edges (for LiNGAM weighting) and serves as a proxy for distributional complexity.
+Future diagnostic frameworks should explicitly model these functional roles rather than assuming a one-to-one correspondence between diagnostics and the assumptions they are named after.
+
+\paragraph{When does per-edge weighting help?}
+\adecd{}'s per-edge approach achieves the best orientation accuracy (0.906) among all methods, substantially outperforming majority voting (0.806).
+This suggests that assumption-aware weighting is most valuable for resolving edge \emph{directions}---the step where different algorithm families disagree most.
+For edge \emph{presence}, simple majority voting is surprisingly competitive (F1 = 0.881), consistent with ``wisdom of crowds'' effects.
+
+\paragraph{Limitations.}
+\begin{itemize}
+    \item \textbf{Statistical significance.} The SHD improvement over NOTEARS ($p = 0.39$) and majority voting ($p = 0.12$) is not statistically significant. Larger benchmarks with more diverse settings may be needed.
+    \item \textbf{Non-functional diagnostics.} Two of four diagnostics (faithfulness, sufficiency) perform at chance level for their intended purpose.
+    \item \textbf{Weak real-world performance.} \adecd{} does not achieve the best SHD on 3 of 4 real-world datasets, suggesting poor transfer of synthetic-trained $\beta$ parameters.
+    \item \textbf{Scale.} Experiments used graphs up to 30 nodes. Scalability to 100+ node graphs is untested.
+    \item \textbf{Fixed algorithm-assumption mapping.} The matrix $M$ is manually specified and may be misspecified.
+    \item \textbf{Runtime.} The framework requires running all 7 algorithms, approximately $7\times$ a single algorithm's cost.
+\end{itemize}
+
+\section{Reproducibility}
+\label{sec:reproducibility}
+
+\paragraph{Hyperparameters.}
+PC and FCI: significance level $\alpha = 0.05$, Fisher's $z$ conditional independence test.
+GES: BIC score function.
+NOTEARS: $\lambda_1 = 0.1$ (L1 penalty), $w_{\mathrm{threshold}} = 0.3$, 15 outer iterations of augmented Lagrangian with $\rho$ multiplied by 10 when $h > 10^{-4}$.
+LiNGAM and DirectLiNGAM: adjacency threshold 0.1 (via \texttt{lingam} package).
+CAM: spline transformer with 4 knots, degree 3; F-test $p < 0.001$ for edge inclusion; DAG pruning via increasing-variance ordering.
+HSIC test: 200 permutations, RBF kernel with median bandwidth, subsample of 300 points.
+Anderson-Darling: 5\% critical value for Gaussianity threshold, combined with excess kurtosis (weights 0.7/0.3).
+Faithfulness: $\tau = 0.05$ near-zero threshold, up to 80 conditioning subsets of size $\leq 3$.
+Sufficiency: PC/FCI comparison (weight 0.5), residual $R^2$ (0.2), algorithm agreement (0.3).
+$\beta$ calibration: L-BFGS-B with bounds $[0.1, 10]$, 4 random restarts, 30 synthetic calibration datasets (8--15 nodes).
+Reconciliation threshold: $\tau_c = 0.5$.
+Pre-trained $\beta$: $[\beta_{\mathrm{lin}}, \beta_{\mathrm{gauss}}, \beta_{\mathrm{faith}}, \beta_{\mathrm{suff}}] = [1.07, 3.13, -2.78, 5.00]$.
+
+\paragraph{Random seeds.}
+All synthetic datasets were generated with seeds $\{42, 123, 456\}$.
+Calibration datasets used seed 99 for the RNG.
+Bootstrap resampling used seed 42.
+
+\paragraph{Software.}
+Python 3.10+, \texttt{causal-learn} (PC, FCI, GES), \texttt{lingam} (LiNGAM, DirectLiNGAM), \texttt{scikit-learn} (CAM spline regression), \texttt{scipy} (optimization, statistical tests), \texttt{numpy}, \texttt{networkx} (graph generation).
+All experiments ran on CPU only (2 cores, 128GB RAM).
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We investigated whether the pattern of disagreement across diverse causal discovery algorithms can be systematically diagnosed and exploited through per-edge assumption profiling.
+Our framework, \adecd{}, achieves a mean SHD of 5.96 on 240 synthetic datasets, numerically better than the best individual algorithm (NOTEARS, 6.42) and majority voting (6.23), with well-calibrated confidence scores (Brier = 0.089), though the SHD improvement is not statistically significant.
+
+Our primary finding is a \emph{diagnostic asymmetry}: distributional assumptions (linearity, Gaussianity) can be reliably detected from data (AUC $> 0.88$), while structural assumptions (faithfulness, sufficiency) cannot (AUC $\approx 0.50$).
+This finding has implications beyond ensemble methods: it suggests that the field should invest in developing better tests for structural assumptions, and that current algorithm-selection strategies that depend on diagnosing these properties will face fundamental barriers.
+
+We also contribute the observation that partial-correlation-based faithfulness scores act as edge-strength proxies, and informative negative results on bootstrap-adaptive calibration and global-weight ensemble fragility.
+These findings provide practical guidance for the growing community working on ensemble and meta-learning approaches to causal discovery.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\end{document}

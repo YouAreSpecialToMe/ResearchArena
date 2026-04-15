@@ -1,0 +1,159 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Deterministic CPU-only execution setup",
+    "description": "Create a reproducible environment for a CPU-only systems study of budgeted rewrite-vs-match scheduling. The execution plan must explicitly assume 0 GPUs, 2 CPU cores, 128GB RAM, and keep the total wall-clock budget comfortably below 8 hours.",
+    "steps": {
+      "step1": "Use Python 3.11 with CPU-only packages: numpy, pandas, scipy, scikit-learn, rapidfuzz, pyarrow, matplotlib, seaborn, psutil, and the repository's existing sparse lexical retrieval stack. Do not install PyTorch, TensorFlow, JAX, CUDA, or any GPU-dependent library.",
+      "step2": "Pin all numeric libraries to one thread per process with `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1`. Run at most 2 experiment processes concurrently, which matches the available 2 CPU cores.",
+      "step3": "Create `runs/`, `artifacts/`, `figures/`, `tables/`, and `logs/`. Every run must emit `config.json`, `metrics.json`, `trace.csv`, `actions.csv`, `timings.csv`, `system.json`, and `stdout.log` under `runs/<setting>/<method>/<seed>/`.",
+      "step4": "Use fixed random seeds `13`, `29`, and `47` for every method. The seeds govern corruption sampling, tie-breaking, canopy subsampling, micro-simulation sampling, negative-candidate sampling for validation diagnostics, and any permutation-test shuffles.",
+      "step5": "Record machine metadata once at startup and log per-run wall-clock time, CPU process time, and peak RSS. Sample peak RSS every 5 seconds with `psutil` and write the maximum plus stage-wise timing breakdown into `system.json`.",
+      "step6": "State explicitly in the experiment manifest that there are `0` GPUs. Replace any template text about GPU batches with `2 single-core CPU workers`, so the runtime accounting matches the actual hardware and does not imply unavailable parallelism."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Five benchmark settings and frozen evaluation splits",
+    "description": "Prepare a five-setting benchmark suite that matches the proposal's scope, stresses both natural and controlled dirty integration, and leaves runtime headroom for analysis.",
+    "steps": {
+      "step1": "Use exactly 5 dataset-settings in the main comparison: Abt-Buy, Amazon-Google Products, DBLP-ACM, Amazon-Google corrupted, and DBLP-ACM corrupted. Do not add extra datasets unless pilot runtimes are far below estimate.",
+      "step2": "For product datasets use `title/name` as the primary field and `brand/manufacturer`, `price`, and `description` as secondary fields when present. For bibliographic datasets use `title` as primary and `authors`, `venue`, and `year` as secondary fields.",
+      "step3": "Freeze one evaluation split per seed before any corruption or rule induction. Sample 20% of labeled positive pairs and an equal number of negative candidate pairs from the raw blocker as a validation diagnostic set; reserve all remaining labeled pairs for final evaluation only.",
+      "step4": "For the two corrupted settings, corrupt 30% of records after the validation split is frozen. Use equal-probability sampling among predefined corruption families: abbreviation drift, punctuation and whitespace drift, unit and numeric formatting drift, token-order drift, venue abbreviation drift, author shortening, and year-format drift as appropriate to the domain.",
+      "step5": "Make corruption deterministic per seed and write the exact record ids, fields, and applied operations to `artifacts/corruption_manifest_<setting>_<seed>.json`. The corruption manifest is used only for reproducibility and later failure analysis, never for online scheduling.",
+      "step6": "Export `dataset_summary.csv` with records per table, number of positives, blocker vocabulary size, candidate-graph size before cleaning, mean primary-field token length, attribute missingness, and corruption counts per operator family."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Deterministic cleaning operators and rule induction",
+    "description": "Materialize the local canonicalization library and make the most review-sensitive components fully reproducible: abbreviation expansion and canopy-local typo consolidation.",
+    "steps": {
+      "step1": "Implement six deterministic operator families: case folding with Unicode NFKC normalization, punctuation and whitespace normalization, token sorting for title-like fields, numeric/date/unit normalization, abbreviation expansion, and canopy-local typo consolidation.",
+      "step2": "Build abbreviation dictionaries in two stages for each dataset-setting and seed. Stage A uses a fixed domain-agnostic seed list for months, units, corporate suffixes, venue terms, and common bibliographic abbreviations stored in `artifacts/abbr_seed_rules.txt`.",
+      "step3": "Stage B mines unlabeled raw records from that same dataset-setting using four explicit pattern templates: `long form (abbr)`, `abbr = long form`, token-initial alignment, and ordered-subsequence matching. Keep a mapping only if it appears at least twice, has unique majority expansion confidence at least `0.90`, has length ratio in `[1.5, 6.0]`, and does not create an attribute-local one-to-many conflict.",
+      "step4": "Write all retained abbreviation mappings with counts, confidence, and attribute domain to `artifacts/abbr_dict_<setting>_<seed>.csv`. Prohibit any use of labels, ground-truth pairs, or evaluation split information in dictionary induction.",
+      "step5": "Generate typo-consolidation candidates only inside a canopy. Require edit distance exactly `1`, identical first character, token-count difference at most `1`, and maximum character-length difference `2`. Choose the canonical form as the most frequent variant in that canopy with lexicographic tie-breaks.",
+      "step6": "Release the final rule files and an induction log summarizing accepted and rejected rules per operator family so the operator coverage can be reproduced exactly."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Shared blocker, matcher, and fixed-graph baselines",
+    "description": "Use one common blocker and one deterministic matcher across all methods, then compare CanopyER against both simple and strong fixed-representation schedulers and a global-cleaning control.",
+    "steps": {
+      "step1": "Use the same blocker for all methods: tokenize the primary field into lowercase word tokens plus character 3-grams, build sparse TF-IDF vectors, retrieve top-25 neighbors per record by cosine similarity, and form the candidate graph as the union of directional top-25 lists.",
+      "step2": "Use the same matcher for all methods: `0.50 * primary_tfidf_cosine + 0.20 * token_jaccard + 0.15 * rapidfuzz_ratio + 0.10 * secondary_attribute_agreement + 0.05 * numeric_or_year_agreement`. Select one global match threshold from `{0.78, 0.80, 0.82, 0.84}` by leave-one-setting-out validation on source settings only, then freeze it for all methods.",
+      "step3": "Baseline 1, simple, `RawPEM`: rank all candidate pairs once by shared matcher score and evaluate them in descending-score batches of 250 pairs until the wall-clock budget expires. No cleaning and no blocker mutation are allowed.",
+      "step4": "Baseline 2, strong, `HybridStatic`: pre-register one exact implementation recipe rather than a loose approximation. Maintain a fixed candidate graph, compute pair priority as the shared matcher score, compute node priority as the maximum unevaluated pair score touching each record, normalize both to `[0,1]`, and score each candidate pair as `0.7 * pair_priority + 0.3 * mean(endpoint_node_priority)`. Rebuild the frontier every 5,000 evaluated pairs, execute the top-scoring unevaluated pairs in batches of 250, and count all scheduling overhead against the same wall-clock budget.",
+      "step5": "Baseline 3, additional strong static control, `FullClean+PEM`: apply the full deterministic operator library globally once, rebuild the blocker once, then run the same pair-ranking policy as `RawPEM`. Count dictionary loading, global canonicalization, and full reblocking inside the same online budget.",
+      "step6": "Force `RawPEM`, `HybridStatic`, and `FullClean+PEM` to use the same shared matcher and the same threshold. The only differences are schedule policy and whether cleaning occurs globally before matching."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Mutable-action sanity baselines",
+    "description": "Add explicit sanity checks for the mutable-action setting so the proposed estimator is not compared only against favorable local-cleaning heuristics.",
+    "steps": {
+      "step1": "Baseline 4, local-cleaning heuristic, `LocalHeuristic`: use the same canopy definition, operator library, and incremental blocker mutation as CanopyER, but score a clean action only as `near_miss_count / estimated_update_cost`, where `near_miss_count` counts local pairs with matcher score in `[0.70, threshold)`.",
+      "step2": "Baseline 5, trivial mutable-action scheduler, `MutableGreedy`: at each decision point compute the current best clean action with the same `LocalHeuristic` score and compare it against the next match batch score estimated as mean top-batch matcher score divided by measured batch cost. Execute whichever raw heuristic score is larger. No learned gain or risk model is used.",
+      "step3": "Baseline 6, trivial random sanity check, `MutableRandom`: at each decision point choose between `match` and `clean` with probability 0.5, then choose uniformly among the top 6 available canopies and the enabled operator families for clean actions. Keep the same locality constraints and wall-clock budget.",
+      "step4": "Use the same batch size, same canopy cap, same operator eligibility rules, and same incremental-update implementation for `LocalHeuristic`, `MutableGreedy`, `MutableRandom`, and CanopyER. This isolates scheduling quality from engineering differences.",
+      "step5": "Fail the mutable-action novelty claim if CanopyER does not clearly beat both `MutableGreedy` and `MutableRandom`, because that would imply the estimator adds little beyond exposing a new action type."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CanopyER action space and budgeted scheduler",
+    "description": "Evaluate the proposed method only on its narrow contribution claim: a budgeted integration of progressive scheduling, blocker-local canonicalization, and incremental blocker maintenance over `match` and `clean` actions.",
+    "steps": {
+      "step1": "Represent state as `(canonicalized_values, postings_index, mutable_candidate_graph, frontier_queue, canopy_stats, evaluated_pairs, action_history)`. Define a canopy as an `(attribute, blocker-neighborhood)` locality centered on one blocker token and its top neighboring tokens by cosine similarity, capped at 80 records.",
+      "step2": "Define only two action types. `match(batch)` evaluates the next batch of 250 candidate pairs from the current frontier. `clean(canopy, operator)` rewrites records in one canopy with one deterministic operator, removes only touched records from postings, reinserts updated signatures, and refreshes candidate pairs only for touched and neighboring blocks.",
+      "step3": "At each decision point, generate at most 24 candidate clean actions by taking the top 6 canopies by near-miss density and crossing them with up to 4 operator families that are valid for the dataset domain. Reject any clean action estimated to touch more than 80 records or 1,500 postings updates so every action remains blocker-local and budget-competitive.",
+      "step4": "Score a match action as `S_match = predicted_batch_yield / measured_batch_cost`. Score a clean action as `S_clean = (predicted_gain - lambda * predicted_risk) / predicted_or_measured_cost` with `lambda = 0.5` frozen from source-setting validation. Execute the highest-scoring action until the wall-clock budget expires.",
+      "step5": "Run each method for one strict 6-minute wall-clock budget with checkpoints at 1, 3, and 6 minutes. Save progressive traces every 15 seconds with duplicates found, recall, precision, F1, pairs evaluated, clean actions executed, cumulative matching time, cumulative cleaning time, cumulative scoring time, cumulative blocker-update time, and current frontier size.",
+      "step6": "Count all estimator work, micro-simulation, scheduler maintenance, and incremental blocker updates inside the same 6-minute online budget. The proposal's claim is unsupported if the method wins only by ignoring overhead."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Leakage-free gain and risk estimator fitting",
+    "description": "Specify exactly how the gain-risk estimator is fit and constrained so the analysis does not over-claim portability or use any target-setting labels.",
+    "steps": {
+      "step1": "For each target setting `T`, fit the estimator only on action logs from the other 4 settings. Treat each `setting x seed` pair as one training environment. Do not use any labels, action outcomes, or calibration statistics from `T` during fitting.",
+      "step2": "Collect the source-setting training logs with `MutableGreedy`, not CanopyER itself, using a short 2-minute budget on each source setting and seed. This generates diverse clean and match actions without self-confirming policy bias.",
+      "step3": "For each logged clean action, compute realized outcomes offline on source settings only: number of newly created candidate pairs, number of newly revealed true matches, change in local precision after executing the rewrite, and rewrite plus update latency. These define the `gain`, `risk`, and `cost` targets.",
+      "step4": "Fit `predicted_gain` with a non-negative linear regressor on near-miss density, token-entropy reduction, fraction of records in candidate-starved blocks, estimated cross-block candidate expansion, and a micro-simulation signal from sampling 20 canopy records. Fit `predicted_risk` with a non-negative linear regressor on value-collision increase, weak-agreement fraction among newly formed pairs, and score-margin shrinkage among top local candidates.",
+      "step5": "Apply isotonic regression only to calibrate `predicted_gain`, using source-setting training logs only. Freeze the gain weights, risk weights, isotonic map, and `lambda` before evaluating the target setting. Store the frozen parameters in `artifacts/estimator_<target_setting>.json`.",
+      "step6": "Interpret the estimator modestly: its role is to rank local rewrites better than trivial mutable-action policies in this specific setting. Treat poor ranking correlation or unstable precision as evidence against the estimator story, not as a tuning problem to hide."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablations for each novel component",
+    "description": "Test each proposed component once on a reduced representative suite so the ablations are informative but do not consume the full runtime budget.",
+    "steps": {
+      "step1": "Run all ablations on exactly 2 representative settings: Amazon-Google corrupted and DBLP-ACM natural. This covers one heavily dirty setting and one natural setting while limiting runtime.",
+      "step2": "Ablation `NoMicroSim`: remove the micro-simulation feature from `predicted_gain` while keeping the same action space, estimator family, and incremental mutation.",
+      "step3": "Ablation `NoRisk`: set `lambda = 0` so clean actions are scheduled by predicted gain only. This isolates whether the conservative risk term is necessary for precision stability.",
+      "step4": "Ablation `FormatOnly`: restrict the operator library to case folding, Unicode normalization, and punctuation plus whitespace normalization. This tests whether the broad operator library matters beyond the safest low-risk rewrites.",
+      "step5": "Ablation `FullReblock`: replay the exact clean-action sequence chosen by full CanopyER, but rebuild the entire blocker and candidate graph after each clean action instead of using incremental updates. This isolates the systems value of incremental blocker maintenance from differences in action choice.",
+      "step6": "Run all four ablations with the same 3 seeds and the same 6-minute budget as the main experiments. Report delta normalized AUC, delta recall@3min, final precision and F1 change, mean clean-action latency, and blocker-maintenance cost ratio relative to full CanopyER."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Failure analysis for harmful or wasteful cleaning actions",
+    "description": "Pre-register one explicit failure analysis showing when cleaning hurts precision or wastes budget, which is required to avoid over-interpreting the estimator results.",
+    "steps": {
+      "step1": "For every executed clean action in CanopyER, log predicted gain, predicted risk, predicted net score, realized new candidate pairs, realized new true matches, precision immediately before and after the action, records touched, postings updated, and operator family.",
+      "step2": "Define a clean action as `harmful` if local precision drops by more than `0.05` within the next 500 evaluated pairs or if global precision at the next trace checkpoint drops by more than `0.03`. Define a clean action as `wasteful` if it consumes more than 10 seconds of cumulative runtime and reveals zero new true matches within the next 1,000 evaluated pairs.",
+      "step3": "Aggregate harmful and wasteful actions by setting, seed, operator family, canopy size bucket, and corruption family. Report rates and counts so the analysis can identify concrete failure modes instead of anecdotal examples.",
+      "step4": "Produce at least 5 manually inspectable case studies, selected as the worst harmful or wasteful actions by realized net utility. For each case, save the pre-clean and post-clean values, affected records, newly formed candidate pairs, and why the action appeared attractive to the estimator.",
+      "step5": "Treat repeated harmful actions from one operator family or one canopy-size regime as a negative result. If more than 20% of actions from one operator family are harmful or wasteful on average, flag that operator family as unsafe for the discussion section rather than smoothing it away."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Metrics, tests, and success criteria",
+    "description": "Evaluate both effectiveness and systems behavior against the modest contribution claim rather than against a broad new-ER-paradigm story.",
+    "steps": {
+      "step1": "Primary metric: normalized area under the duplicate-yield-versus-time curve over the 6-minute run. Secondary effectiveness metrics: recall at 1, 3, and 6 minutes, plus final precision, recall, and F1 at 6 minutes.",
+      "step2": "Systems metrics: cumulative time in pair evaluation, estimator scoring, canonicalization, and blocker maintenance; number of clean actions executed; mean records touched per clean action; mean postings updated per clean action; number of new candidate pairs unlocked; and number of new true matches unlocked.",
+      "step3": "Aggregate metrics over the 3 seeds as mean and standard deviation. Use paired permutation tests over per-setting seed-averaged AUC deltas for `CanopyER` versus `RawPEM`, `HybridStatic`, `LocalHeuristic`, and `MutableGreedy`. Report effect sizes with p-values.",
+      "step4": "Primary success criteria: CanopyER beats `RawPEM` on normalized AUC in at least 4 of 5 settings, beats `LocalHeuristic` in at least 4 of 5 settings, and beats both `MutableGreedy` and `MutableRandom` on mean normalized AUC across the 2 corrupted settings and across all 5 settings overall.",
+      "step5": "Strong-baseline success criterion: CanopyER matches or exceeds `HybridStatic` on mean normalized AUC across the 2 corrupted settings. If it loses clearly to `HybridStatic`, the claim must be reduced to a mutable-action feasibility result rather than a stronger performance claim.",
+      "step6": "Systems success criteria: incremental mutation is at least 2x cheaper than `FullReblock` for the same clean-action sequence, and estimator plus scheduler overhead stays below 20% of total runtime on average.",
+      "step7": "Estimator success criteria: predicted clean-action gain has positive Spearman correlation with realized unlocked true matches, top-decile predicted clean actions outperform median-decile actions in realized unlocked true matches, and mean precision drop per clean action remains above the guardrail of `-0.03`.",
+      "step8": "Treat the hypothesis as unsupported if CanopyER fails to beat `RawPEM` on most settings, loses to `LocalHeuristic` or `MutableGreedy` on mean AUC, shows no advantage on corrupted settings against `HybridStatic`, or incurs harmful and wasteful cleaning at rates that make the budget tradeoff unattractive."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Paper-ready tables and figures",
+    "description": "Produce outputs that support the narrowed novelty claim, the main empirical comparison, the ablations, and the required failure analysis.",
+    "steps": {
+      "step1": "Create the main results table with rows for the 5 dataset-settings and columns for normalized AUC, recall@3min, final F1, and runtime breakdown for `RawPEM`, `HybridStatic`, `FullClean+PEM`, `LocalHeuristic`, `MutableGreedy`, `MutableRandom`, and `CanopyER`.",
+      "step2": "Create a duplicate-yield plot panel for Abt-Buy, Amazon-Google natural, DBLP-ACM natural, and Amazon-Google corrupted showing mean traces over seeds for `RawPEM`, `HybridStatic`, `LocalHeuristic`, `MutableGreedy`, and `CanopyER`. Keep `MutableRandom` in the table but omit it from crowded line plots unless it materially changes interpretation.",
+      "step3": "Create a systems stacked-bar figure for Amazon-Google corrupted and DBLP-ACM natural comparing time spent in matching, scoring, cleaning, and blocker maintenance for `CanopyER`, `FullClean+PEM`, and `FullReblock`.",
+      "step4": "Create an ablation table for the 2 representative settings with delta normalized AUC, delta recall@3min, final precision and F1 change, and blocker-maintenance cost ratio for `NoMicroSim`, `NoRisk`, `FormatOnly`, and `FullReblock`.",
+      "step5": "Create failure-analysis figures: a harmful-action rate bar chart by operator family, a wasteful-action rate bar chart by canopy-size bucket, and 2 detailed case-study tables with before-versus-after values and realized net utility.",
+      "step6": "Create a novelty-positioning table with columns `system`, `primary objective`, `action granularity`, `why the candidate graph changes`, `candidate graph mutable during run?`, and `stopping regime`, and rows for Detective Gadget, Iterative Blocking, Progressive Entity Resolution over Incremental Data, Incremental Entity Blocking over Heterogeneous Streaming Data, ProgressER, the 2025 progressive design-space paper, and CanopyER."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime budget and execution order",
+    "description": "Pre-compute the runtime budget under 2 CPU workers, leave explicit slack for debugging or reruns, and define the order in which experiments should execute.",
+    "steps": {
+      "step1": "Run a pilot on Amazon-Google natural, seed `13`, for `RawPEM`, `HybridStatic`, `MutableGreedy`, and `CanopyER` at the full 6-minute budget. Verify candidate-graph size, mean batch latency, estimator overhead, and blocker-update cost before launching the full matrix.",
+      "step2": "Estimator-log collection runtime: 5 target settings each require logs from the other 4 settings, but reuse per-setting `MutableGreedy` source logs across target fits. Total source-log runtime is `5 settings x 3 seeds x 2 minutes = 30 run-minutes`, or about `15 wall-minutes` on 2 CPU workers.",
+      "step3": "Main comparison runtime: `5 settings x 7 methods x 3 seeds x 6 minutes = 630 run-minutes`, or about `5.25 wall-hours` on 2 single-core CPU workers.",
+      "step4": "Ablation runtime: `2 settings x 4 ablations x 3 seeds x 6 minutes = 144 run-minutes`, or about `1.2 wall-hours` on 2 workers.",
+      "step5": "Pilot plus aggregation plus plotting plus permutation tests are budgeted at `0.6 wall-hours`. Planned total is `0.25 + 5.25 + 1.2 + 0.6 = 7.3 wall-hours`, leaving about `0.7 hours` of slack under the 8-hour cap for reruns or debugging.",
+      "step6": "Execute in this order: pilot, shared source-log collection, main comparison, `FullReblock` and `NoRisk` ablations first, remaining ablations second, then plotting and statistical aggregation. Never trim the 3 seeds, the `HybridStatic` baseline, or the mutable-action sanity baselines.",
+      "step7": "If the pilot shows slower-than-expected blocker maintenance, reduce only analysis runtime by shortening `NoMicroSim` and `FormatOnly` ablation budgets from 6 minutes to 4 minutes. Keep the main comparison unchanged at 6 minutes so the core claim remains evaluable."
+    }
+  }
+]

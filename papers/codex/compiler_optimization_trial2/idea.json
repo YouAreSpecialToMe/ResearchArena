@@ -1,0 +1,80 @@
+{
+  "title": "Typed Invariant Evidence for Incremental LLVM Cleanup Scheduling",
+  "description": "This project studies an incremental extension of LLVM's 2024 `LastRunTrackingAnalysis`, not a new optimization framework. A small set of producer passes emits conservative typed evidence about cleanup-relevant invariants and where possible damage is localized, allowing the new pass manager to choose among skip, function-local rerun, and global fallback; loop-local repair is evaluated only as a gated extension.",
+  "motivation": "LLVM already showed in October-November 2024 that many cleanup reruns are redundant, so the open question is narrower: can better evidence beat coarse temporal tracking and coarse locality heuristics on a realistic bounded slice? `LastRunTrackingAnalysis` is temporal and dirty-function rerun is spatial; neither captures which cleanup-facing invariants still hold, so both can miss profitable skips or trigger unnecessary reruns.",
+  "proposed_approach": "Implement a conservative scheduler extension over a tiny producer subset: `SROA`, `GVN`, `LICM`, and `LoopRotate`. Each producer emits a typed certificate over invariants such as `CFGCanonical`, `LoopSimplifyForm`, `LCSSAForm`, `InstCombineOpportunity`, `DomTreeFresh`, and `LoopInfoFresh`, with values `preserved`, `dirty(function-set)`, `dirty(loop-set)`, `global_dirty`, or `unknown`; cleanup consumers `InstCombine` and `SimplifyCFG` then choose between skip, function-local rerun, or global fallback, while `LoopSimplify` and `LCSSA` remain an optional gated extension. If `unknown` rates are too high or local wrappers are too costly, the study explicitly narrows to the best-covered producer subset or to typed skip-vs-global scheduling only.",
+  "related_work": [
+    {
+      "title": "Waddle - Always-Canonical Intermediate Representation",
+      "authors": [
+        "Eric Fritz"
+      ],
+      "how_it_differs": "Waddle is the closest conceptual precursor because it argues for always-canonical IR maintained through local repair. The proposed work is intentionally weaker and more incremental: it keeps LLVM's existing pass contracts and asks whether scheduler-facing typed evidence can recover some of that benefit without redesigning the optimizer around always-canonical maintenance."
+    },
+    {
+      "title": "Maintaining Canonical Form After Edge Deletion",
+      "authors": [
+        "Eric Fritz"
+      ],
+      "how_it_differs": "This paper provides a concrete local canonical-form maintenance algorithm, which sharpens the novelty boundary. The present proposal does not claim new local repair algorithms; it studies whether a lighter-weight LLVM scheduling extension can exploit typed evidence to avoid or localize later cleanup."
+    },
+    {
+      "title": "Efficient compiler optimization by modeling passes dependence",
+      "authors": [
+        "Jianfeng Liu",
+        "Jianbin Fang",
+        "Ting Wang",
+        "Jing Xie",
+        "Chun Huang",
+        "Zheng Wang"
+      ],
+      "how_it_differs": "Liu et al. optimize pass subsequences offline. This project keeps the pass sequence fixed and only refines when and where cleanup passes rerun, making the scope much narrower and feasible under a CPU-only budget."
+    },
+    {
+      "title": "Taking a Closer Look: An Outlier-Driven Approach to Compilation-Time Optimization",
+      "authors": [
+        "Florian Huemer",
+        "David Leopoldseder",
+        "Aleksandar Prokopec",
+        "Raphael Mosaner",
+        "Hanspeter Moessenboeck"
+      ],
+      "how_it_differs": "Huemer et al. contribute methodology rather than the same mechanism. This project adopts their fine-grained compile-time attribution mindset to evaluate whether typed evidence improves cleanup scheduling and where overhead or fallback erodes gains."
+    }
+  ],
+  "engineering_context": [
+    {
+      "title": "[RFC][Pipeline] Avoid running transform passes that have just been run / LLVM PR #112092",
+      "authors": [
+        "Yingwei Zheng"
+      ],
+      "role": "Direct LLVM baseline and implementation context",
+      "how_it_differs": "The proposal is explicitly an extension study on top of `LastRunTrackingAnalysis`. LLVM's current mechanism tracks rerun history and intervening compatible IR changes; the proposed work adds invariant type and locality-aware scheduling decisions."
+    },
+    {
+      "title": "Using the New Pass Manager",
+      "authors": [
+        "LLVM Project"
+      ],
+      "role": "Pass-manager invalidation and analysis-maintenance context",
+      "how_it_differs": "LLVM's documentation explains `PreservedAnalyses`, manual analysis updating, and loop-pass access to shared analyses. The proposal does not replace those semantics; it uses adjacent information to make cleanup scheduling decisions."
+    }
+  ],
+  "hypothesis": "On a bounded LLVM middle-end slice, typed cleanup-facing evidence layered on top of `LastRunTrackingAnalysis` will outperform both `LastRunTrackingAnalysis` alone and a coarse dirty-function heuristic because it preserves profitable skip opportunities after innocuous intervening edits and avoids unnecessary local reruns on touched functions that did not actually invalidate the relevant invariant. The function-local result should remain publishable even if loop-local repair fails its explicit gate or the study narrows to typed skip-vs-global scheduling.",
+  "success_criteria": {
+    "confirm": [
+      "At least 4% reduction in optimizer wall time on the bounded pipeline slice relative to stock scheduling.",
+      "A statistically clear win over `LastRunTrackingAnalysis` alone on cleanup-pass time or end-to-end optimizer time.",
+      "A clear win over the dirty-function heuristic on unnecessary local reruns, fallback waste, or optimizer time.",
+      "Certificate coverage above 60% on the retained producer subset, with `unknown` and fallback rates reported as first-class metrics.",
+      "No unresolved LLVM verifier failures, differential mismatches, or regression-test failures under certificate-controlled scheduling."
+    ],
+    "refute": [
+      "Certificate bookkeeping or wrapper overhead erases the benefit.",
+      "Coverage is too low and `unknown` dominates, collapsing behavior back to the baseline.",
+      "The dirty-function heuristic matches the gains closely, showing typed certificates are not pulling their weight.",
+      "`LastRunTrackingAnalysis` already captures nearly all profitable opportunities on this slice.",
+      "Loop-local scheduling escalates too often or costs too much, in which case it is dropped from the main claim rather than used to rescue it."
+    ]
+  }
+}

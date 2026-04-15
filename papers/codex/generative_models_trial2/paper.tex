@@ -1,0 +1,343 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\title{Decomposed Early Ranking Targets Under a Local Surrogate Evaluator for Compositional Text-to-Image Generation}
+
+\author{Anonymous Authors}
+
+\newcommand{\budget}{B40}
+\newcommand{\tauprefix}{\tau}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper studies a narrow design question for fixed-budget compositional text-to-image generation under a local surrogate evaluator: when only an early diffusion prefix is available, should candidate continuations be ranked by decomposed atomic constraints or by one scalar success target? We keep the generator, features, prefix length, and budget fixed, and compare matched probes on deterministic GenEval-style prompts. The implementation uses Stable Diffusion v1.5 with 20 DDIM steps, a 4-step prefix, and a \budget{} schedule that evaluates six prefixes and continues one. The decomposed probe predicts success for count, attribute-binding, and relation constraints; the scalar probe is used only as a matched baseline. Our primary reported statistic is prompt-level overall success (\texttt{all\_correct}) under a local OWLv2-plus-CLIP heuristic evaluator. On the held-out 80-prompt test split, the decomposed target scores 0.1625, compared with 0.1500 for the matched scalar target and 0.1917 for a best-of-2 full-completion baseline. The prompt-level 95\% bootstrap interval for decomposed minus scalar is $[-0.0167, 0.0417]$, and the paired permutation test on prompt-level overall score gives $p=0.6033$. The result is therefore negative for this implementation. Official held-out GenEval and planned human-label sensitivity checks were not executed, so the evidence supports only this local surrogate evaluation setting.
+\end{abstract}
+
+\section{Introduction}
+Compositional text-to-image prompts are fragile because an image can look globally plausible while violating one localized requirement such as an object count, an attribute binding, or a spatial relation. Recent work on diffusion models shows that partial trajectories already contain useful information about eventual sample quality \citep{guo2026earlyqualityassessmenttexttoimage,cui2026diffusionprobegeneratedimage}. Separately, compositional generation methods often work better when they reason about structured conditions rather than a single undifferentiated score \citep{liu2022compositionalvisual,feng2022trainingfreestructureddiffusionguidance,chefer2023attendexcite,wang2024divideconquerlanguagemodels,izadi2025finegrainedalignmentnoiserefinement,jaiswal2026iterativerefinementimprovescompositional}.
+
+This paper connects those ideas conservatively. We do not introduce a new generator, guidance rule, or verifier. Instead, we ask one controlled question: under a fixed prune-continue budget and a local surrogate evaluator, should early ranking targets be decomposed into benchmark-aligned atomic constraints or collapsed into one scalar target?
+
+We instantiate the comparison with a frozen Stable Diffusion v1.5 generator \citep{rombach2022highresolutionimagesynthesislatent}, deterministic GenEval-style prompt templates \citep{ghosh2023genevalobjectfocusedframeworkevaluating}, and a compute-matched \budget{} schedule: six seeds are run for four denoising steps and only one is continued for the remaining sixteen. The decomposed and scalar rankers use the same prefix feature vector and closely matched multilayer perceptrons, so the intended experimental difference is target structure rather than model capacity.
+
+The main result is negative and narrowly scoped. Under the implemented local OWLv2-plus-CLIP heuristic evaluator, the decomposed target slightly improves the held-out prompt-level \texttt{all\_correct} score over the matched scalar target (0.1625 vs.\ 0.1500), but the prompt-level 95\% bootstrap confidence interval includes zero, the paired permutation test gives $p=0.6033$, and a best-of-2 full-completion baseline remains stronger at 0.1917. The correct interpretation is therefore not that decomposition helps, but that this implementation does not provide reliable evidence that it helps.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate a controlled fixed-budget comparison between decomposed and scalar early ranking targets for compositional text-to-image continuation.
+  \item We build a reproducible GenEval-centered pipeline with deterministic prompt parsing, a 30-prompt parser audit with 30/30 exact matches, matched probe training on frozen prefix features, and saved artifacts for all reported tables and figures.
+  \item We show that, under a local OWLv2-plus-CLIP heuristic evaluator rather than official GenEval, decomposing the early target does not yield a statistically reliable improvement over a matched scalar target and does not match a best-of-2 full-completion baseline.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the implemented pipeline, Section~\ref{sec:experiments} presents results, Section~\ref{sec:discussion} discusses limitations, and Appendix~\ref{app:evaluator} documents the evaluator and artifact provenance in detail.
+
+\section{Related Work}
+\label{sec:related}
+Compositional text-to-image evaluation predates the present study. \citet{park2021benchmarkcompositional} introduced an early benchmark for compositional text-to-image synthesis in the NeurIPS Datasets and Benchmarks Track, while GenEval \citep{ghosh2023genevalobjectfocusedframeworkevaluating} and T2I-CompBench \citep{huang2023t2icompbenchcomprehensivebenchmark} made object counts, attribute bindings, and relations explicit enough to support atomic analysis. Here the archival items are \citet{park2021benchmarkcompositional} and \citet{huang2023t2icompbenchcomprehensivebenchmark}, whereas GenEval is cited as an arXiv preprint. Our work is benchmark-specialized in exactly that sense: it depends on prompts that admit deterministic decomposition into these benchmark-aligned constraint types.
+
+Compositional generation methods often improve performance by injecting structure into guidance or search. Among them, composable diffusion \citep{liu2022compositionalvisual} and Attend-and-Excite \citep{chefer2023attendexcite} are archival venue papers, while StructureDiffusion \citep{feng2022trainingfreestructureddiffusionguidance}, planning-based self-correction \citep{wang2024divideconquerlanguagemodels}, fine-grained verifier-guided refinement \citep{izadi2025finegrainedalignmentnoiserefinement}, lift-score ranking \citep{yu2025improvingcompositionalgenerationdiffusion}, and iterative refinement \citep{jaiswal2026iterativerefinementimprovescompositional} are cited as arXiv preprints. Unlike those methods, we keep the generator fixed and change only the \emph{target} used to rank early prefixes.
+
+The closest methodological neighbors are early-assessment methods for diffusion trajectories. \citet{guo2026earlyqualityassessmenttexttoimage}, \citet{cui2026diffusionprobegeneratedimage}, and \citet{ma2025inferencetimescalingdiffusionmodels} are all cited here as arXiv preprints and show that partially denoised states can predict later outcomes or support broader inference-time scaling. Our question is narrower: with the same budget, same features, and same continuation rule, does decomposed supervision beat scalar supervision for compositional prompts?
+
+This positioning matters for the claim boundary. Prior work already covers structured compositional guidance, benchmark design, and early outcome prediction. The contribution here is only a controlled negative comparison at their intersection, and only under the local surrogate evaluator documented in Appendix~\ref{app:evaluator}.
+
+\section{Method}
+\label{sec:method}
+\subsection{Problem setup}
+Let $p$ be a prompt with atomic constraints $\mathcal{C}(p)=\{c_1,\dots,c_m\}$. We sample six latent seeds, denoise each for $\tauprefix=4$ DDIM steps, compute a feature vector $x_i$ for each partial trajectory, rank the candidates, and continue only the top-ranked candidate for the remaining sixteen of twenty total denoising steps. The total budget is therefore
+\[
+6 \times 4 + 1 \times 16 = 40
+\]
+UNet evaluations, denoted \budget{}.
+
+The generator is frozen Stable Diffusion v1.5 \citep{rombach2022highresolutionimagesynthesislatent} at $512 \times 512$ resolution with guidance scale 7.5. The study compares ranking targets only; it does not finetune or modify the generator.
+
+\subsection{Deterministic prompt decomposition}
+We use deterministic GenEval prompt families: counting, position, and color-attribute prompts. Each prompt is mapped into one or more atomic constraints:
+\begin{itemize}
+  \item counting $\rightarrow$ one \texttt{count} constraint,
+  \item position $\rightarrow$ one \texttt{relation} constraint,
+  \item color\_attr $\rightarrow$ one or more \texttt{attribute\_binding} constraints.
+\end{itemize}
+The parser is benchmark-aligned rather than open-ended. A manual audit over 30 prompts yielded 30 exact matches.
+
+\subsection{Shared prefix features}
+Both ranking methods use exactly the same feature vector extracted after four denoising steps. The implemented vector contains:
+\begin{itemize}
+  \item latent mean, standard deviation, and absolute-activation mean at each prefix step,
+  \item conditional-versus-unconditional denoiser disagreement at each prefix step,
+  \item prefix latent norm, variance, mean, and maximum absolute value,
+  \item tokenizer-derived entropy, token coverage, and Gini-style heuristics,
+  \item the first 10 dimensions of a frozen CLIP ViT-L/14 preview embedding from a $256 \times 256$ decoded preview.
+\end{itemize}
+The original proposal mentioned cross-attention statistics, but those features were not implemented in the saved code. The final claim is therefore limited to the feature set above.
+
+\subsection{Matched ranking probes}
+The decomposed and scalar probes are intentionally lightweight and closely matched. The decomposed probe receives a pair $(x_i,c_j)$ and predicts the success probability of atomic constraint $c_j$. It uses a shared two-layer MLP trunk with widths $[256,128]$, GELU activations, dropout 0.1, and family-specific output heads for count, attribute-binding, and relation constraints. Constraint metadata are provided as three numeric fields: attribute id, count target, and relation index.
+
+Its ranking score is the mean calibrated atomic probability,
+\[
+s_{\mathrm{dec}}(x_i,p)=\frac{1}{m}\sum_{j=1}^{m} q_\theta(x_i,c_j).
+\]
+
+The scalar probe uses the same optimization setup and nearly the same capacity, but predicts one scalar target from $x_i$ alone:
+\[
+s_{\mathrm{sca}}(x_i)=r_\phi(x_i).
+\]
+The scalar target is mean atomic success under the same evaluator used to label completed images. We report this target only as an auxiliary diagnostic; the paper's primary end-to-end statistic is prompt-level overall success (\texttt{all\_correct}) on the held-out test prompts.
+
+Both models are trained with AdamW, learning rate $10^{-3}$, weight decay $10^{-4}$, batch size 256, maximum 30 epochs, and early stopping patience 5. Calibration is chosen on the validation set by comparing temperature scaling with isotonic regression and keeping the lower validation error.
+
+\subsection{Evaluation protocol}
+The original plan was to report official GenEval. That did not happen for the headline method comparison. All reported test-set scores in this paper come from a local heuristic evaluator implemented in the workspace and detailed in Appendix~\ref{app:evaluator}. In short, it uses OWLv2 zero-shot detection for object presence and relative position, plus CLIP-based crop classification for color attributes. We therefore describe the reported metric as a \emph{local heuristic GenEval-style score}, not as official GenEval, and we do not claim held-out benchmark progress beyond this surrogate.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+We use one fixed split of deterministic GenEval prompts: 120 train, 40 validation, and 80 test. By family, the split counts are counting $(40,13,27)$, position $(40,14,26)$, and color\_attr $(40,13,27)$ for train, validation, and test.
+
+Supervision is collected from four completed trajectories per train prompt and four per validation prompt using seeds \{101, 202, 303, 404\}, yielding 480 training images and 160 validation images. Test-time continuation uses seeds \{11, 17, 23\}, yielding 240 prompt-seed trials per method. The candidate pool is shared across ranking methods for each prompt-seed pair.
+
+We compare five budget-matched methods and one ablation:
+\begin{itemize}
+  \item \textbf{Random prune-continue}: the \budget{} schedule with a random continuation choice.
+  \item \textbf{Best-of-2 full completion}: two full 20-step samples reranked by CLIP ViT-L/14 prompt-image similarity.
+  \item \textbf{Scalar early target}: one scalar probe trained on mean atomic success.
+  \item \textbf{Decomposed early target}: the constraint-level probe.
+  \item \textbf{Shared-head decomposition}: decomposed supervision with one shared output head.
+  \item \textbf{No-preview features}: decomposed supervision without the 10-dimensional CLIP preview embedding.
+\end{itemize}
+
+Runtime calibration on 20 prompts measured mean prefix denoising time 0.1647\,s and mean full denoising time 0.7109\,s. The projected GPU load of the mandatory package was 0.4111 hours. Official held-out GenEval and the planned human-label sensitivity experiment were part of the original plan but were not executed in this workspace; all reported quantitative results therefore come from the saved local-evaluator artifacts only.
+
+\subsection{Main results}
+Table~\ref{tab:main-results} reports the main comparison. The table's primary metric is prompt-level overall success (\texttt{all\_correct}); the decomposed target is slightly better than the matched scalar target in that score (0.1625 vs.\ 0.1500) and in count prompts (0.3704 vs.\ 0.3580), but the gain is small, not uniform across families, and still below the best-of-2 full-completion baseline at 0.1917.
+
+\begin{table}[t]
+\caption{Main results on the 80-prompt held-out test split, averaged over seeds \{11, 17, 23\}, under the local OWLv2-plus-CLIP heuristic evaluator. The `Overall' column is prompt-level \texttt{all\_correct}; the family columns are the same prompt-level statistic restricted to prompts from that family. Best values in each metric column are in \textbf{bold}. Higher is better for all scores; lower is better for mean seconds per prompt. Overall and family scores come directly from \texttt{exp/main\_experiment/trials.jsonl}; runtime values come from the per-method \texttt{results.json} files.}
+\label{tab:main-results}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Method & Overall $\uparrow$ & Count $\uparrow$ & Attr.\ $\uparrow$ & Rel.\ $\uparrow$ & Sec./prompt $\downarrow$ & UNet \\
+\midrule
+Random prune-continue & 0.1375 & 0.2963 & 0.0741 & 0.0385 & 2.4372 & 40 \\
+Best-of-2 full completion & \textbf{0.1917} & \textbf{0.4074} & \textbf{0.1111} & \textbf{0.0513} & \textbf{1.6941} & 40 \\
+Scalar early target & 0.1500 & 0.3580 & 0.0370 & \textbf{0.0513} & 2.4378 & 40 \\
+Decomposed early target & 0.1625 & 0.3704 & 0.0617 & \textbf{0.0513} & 2.4327 & 40 \\
+Shared-head decomposition & 0.1542 & 0.3333 & 0.0864 & 0.0385 & 2.4302 & 40 \\
+No-preview features & 0.1417 & 0.3333 & 0.0494 & 0.0385 & 2.4289 & 40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The main statistical comparison is unfavorable to the original hypothesis. For the primary prompt-level \texttt{all\_correct} metric, the decomposed-minus-scalar mean difference is 0.0125, but the 95\% bootstrap confidence interval is $[-0.0167, 0.0417]$ and the paired permutation test gives $p=0.6033$. Figure~\ref{fig:bootstrap} shows that the interval against best-of-2 full completion is entirely non-positive up to numerical precision, with 95\% interval $[-0.0583, 0.0000]$. As an auxiliary analysis, prompt-level mean atomic success differs by only 0.0021 with 95\% bootstrap interval $[-0.0271, 0.0333]$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/bootstrap_intervals.pdf}
+\caption{Prompt-level 95\% bootstrap intervals for the difference in overall local heuristic score on the 80 test prompts after averaging across seeds \{11, 17, 23\}. The decomposed-minus-scalar interval crosses zero, while the decomposed-minus-best-of-2 interval is non-positive.}
+\label{fig:bootstrap}
+\end{figure}
+
+\subsection{Ablations}
+Table~\ref{tab:ablations} reports ablations as deltas relative to the full decomposed method using the same prompt-level \texttt{all\_correct} estimand as the statistical tests. Replacing the decomposed target with a scalar target reduces overall score by 0.0125. Replacing family-specific heads with a shared head reduces overall score by 0.0083. Removing the preview embedding causes the largest overall drop, 0.0208, suggesting that preview features matter more than target decomposition in this implementation.
+
+\begin{table}[t]
+\caption{Ablation deltas relative to the full decomposed early target. Positive score deltas mean the ablated system is worse than the full method. Runtime deltas are in seconds per prompt. Manual-label sensitivity is omitted because no genuine human relabeling experiment was completed.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Ablation & Overall & Count & Attr. & Rel. & Runtime \\
+\midrule
+Scalar target & 0.0125 & 0.0123 & 0.0247 & 0.0000 & -0.0050 \\
+Shared-head decomposition & 0.0083 & 0.0370 & -0.0247 & 0.0128 & 0.0026 \\
+No-preview features & 0.0208 & 0.0370 & 0.0123 & 0.0128 & 0.0039 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Probe quality and analysis}
+The decomposed probe is somewhat better than the shared-head baseline on validation ranking quality. Its best validation ROC-AUC is 0.6968 versus 0.6274 for the shared-head variant. After isotonic calibration, the decomposed probe's aggregate validation metrics are Brier score 0.1730, expected calibration error $2.29\times 10^{-8}$, ROC-AUC 0.7380, and average precision 0.4473. Family-wise ROC-AUC values are 0.6728 for count, 0.6438 for attribute-binding, and 0.6604 for relation constraints.
+
+Figure~\ref{fig:calibration} plots validation calibration curves by family. Figure~\ref{fig:margins} compares the step-4 decomposed-minus-scalar score margin with the final score gain. The scatter is diffuse rather than strongly monotone, which is consistent with the weak aggregate advantage.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/calibration_curves.pdf}
+\caption{Validation calibration curves for the decomposed probe on held-out supervision images, shown separately for count, attribute-binding, and relation constraints. Reasonable validation calibration does not translate into a reliable downstream continuation gain in Table~\ref{tab:main-results}.}
+\label{fig:calibration}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/score_margin_scatter.pdf}
+\caption{Relationship between the step-4 decomposed-minus-scalar ranking margin and the final local heuristic score gain. Each point is one prompt-seed trial from the 80-prompt test split and seeds \{11, 17, 23\}.}
+\label{fig:margins}
+\end{figure}
+
+A single-seed continuation hit-rate diagnostic on seed 11 suggests that decomposition can sometimes improve candidate identification: the decomposed ranker selected the oracle-best continuation for 65.0\% of prompts, compared with 57.5\% for the scalar ranker. However, this diagnostic did not translate into a decisive end-to-end gain across the full three-seed evaluation.
+
+Figure~\ref{fig:qualitative} shows representative qualitative disagreements between decomposed and scalar ranking. These examples are diagnostic only; the paper's claims are based on the aggregate statistics above.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/qualitative_cases.pdf}
+\caption{Representative qualitative diagnostics for prompts where decomposed and scalar ranking disagree. Each panel shows six decoded step-4 previews for one prompt. The paper's claims rely on aggregate quantitative results, not on these selected cases.}
+\label{fig:qualitative}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The conclusion is narrow. For the implemented feature vector and \budget{} continuation schedule, decomposing early supervision into atomic constraints did not yield a statistically reliable improvement over a matched scalar target. The point estimate favors decomposition on the primary \texttt{all\_correct} statistic, but the uncertainty interval is wide, the auxiliary mean-atomic-success analysis is even closer to zero, and the simpler best-of-2 baseline remains stronger.
+
+The largest limitation is evaluation credibility. The paper does \emph{not} report official GenEval for the held-out method comparison. All headline numbers use a local OWLv2-plus-CLIP heuristic evaluator. Appendix~\ref{app:evaluator} makes that evaluator explicit and shows why the distinction matters: on the 640 train-plus-validation supervision images, local labels and the saved official-revision labels agree on only 78.8\% of prompts and 83.8\% of atomic labels overall, with especially weak prompt-level agreement on counting prompts (65.1\%). The paper should therefore be read as evidence about a surrogate metric, not as a benchmark-faithful statement about GenEval.
+
+Other limitations are also important. The implemented feature set excludes the cross-attention statistics described in the original proposal. The manual-label sensitivity experiment was not completed because no genuine human annotations were collected. The study covers one generator, one budget, and one deterministic subset of compositional prompts. The result should therefore not be generalized to broader prompt distributions, larger search budgets, or stronger inference-time search methods.
+
+One practical lesson from the ablations is that the preview embedding mattered more than head decomposition in this implementation. Another is that best-of-2 full completion remained competitive despite its simplicity. Under a small fixed budget, better features or stronger reranking may matter more than whether the early target is decomposed.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We studied a narrow question: whether early ranking targets should be decomposed for fixed-budget continuation on compositional text-to-image prompts under a local surrogate evaluator. Using a frozen Stable Diffusion v1.5 generator, deterministic GenEval-style prompt decomposition, and matched lightweight probes, we found that the decomposed target improved held-out prompt-level \texttt{all\_correct} under the \emph{local OWLv2-plus-CLIP heuristic evaluator} from 0.1500 to 0.1625 relative to a matched scalar target, but the 95\% bootstrap interval $[-0.0167, 0.0417]$ crossed zero, the paired permutation test gave $p=0.6033$, and a best-of-2 full-completion baseline remained stronger at 0.1917.
+
+The result is therefore negative for this implementation. More importantly, it is negative only at the level we actually measured: a local heuristic surrogate rather than official GenEval. Future work should revisit the question with official held-out evaluation, genuine human sensitivity checks, and richer early features before making stronger claims about compositional benchmark performance.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+
+\section{Local Evaluator Details}
+\label{app:evaluator}
+\subsection{Implemented components}
+All headline results use the evaluator implemented in \texttt{exp/shared/core.py}. Its fixed model identifiers and thresholds are:
+\begin{itemize}
+  \item object detector: \texttt{google/owlv2-base-patch16-ensemble},
+  \item image-text model: \texttt{openai/clip-vit-large-patch14},
+  \item counting detection threshold: 0.9,
+  \item non-count detection threshold: 0.3,
+  \item relative-position tolerance constant: 0.1,
+  \item maximum retained detections per queried class: 16.
+\end{itemize}
+
+Color classification uses CLIP on the crop from the top-scoring detection and predicts the argmax over 10 colors:
+\{\texttt{red}, \texttt{orange}, \texttt{yellow}, \texttt{green}, \texttt{blue}, \texttt{purple}, \texttt{pink}, \texttt{brown}, \texttt{black}, \texttt{white}\}.
+For each color, the classifier averages logits over three text templates:
+\texttt{a photo of a \{c\} \{classname\}},
+\texttt{a photo of a \{c\}-colored \{classname\}},
+and \texttt{a photo of a \{c\} object}.
+
+\subsection{Prompt-to-constraint mapping rules}
+The deterministic parser in \texttt{exp/shared/core.py} maps benchmark metadata into atomic constraints as follows:
+\begin{itemize}
+  \item \textbf{counting}: one \texttt{count} constraint with fields \texttt{\{object\_a, count\_target\}},
+  \item \textbf{position}: one \texttt{relation} constraint with fields \texttt{\{object\_a, object\_b, relation\_label\}},
+  \item \textbf{color\_attr}: one \texttt{attribute\_binding} constraint per included object with fields \texttt{\{object\_a, attribute, attribute\_id\}}.
+\end{itemize}
+Object aliases are normalized only for a small fixed set (\texttt{computer keyboard}$\rightarrow$\texttt{keyboard}, \texttt{computer mouse}$\rightarrow$\texttt{mouse}, \texttt{tv}$\rightarrow$\texttt{tv}).
+
+\subsection{Local decision rules}
+The local evaluator converts detections and CLIP classifications into binary labels with the following rules.
+\begin{itemize}
+  \item \textbf{Counting}: success requires exact equality between the detected count and the target count.
+  \item \textbf{Relation}: success requires at least one detected subject-anchor pair whose box geometry satisfies the target relation after the tolerance adjustment in \texttt{relative\_position}.
+  \item \textbf{Attribute binding}: success requires at least one detection for the target object and a correct CLIP color prediction on the crop from the highest-scoring detection.
+\end{itemize}
+Prompt-level success is summarized as mean atomic success and \texttt{all\_correct}.
+
+\subsection{Known failure modes}
+The code and saved artifacts make several failure modes explicit.
+\begin{itemize}
+  \item Counting is sensitive to detector recall because exact equality is required; missing one instance flips the label to zero.
+  \item Attribute binding depends on the single top-scoring crop for each object, so a correct secondary detection does not help if the top crop is wrong or poorly localized.
+  \item Relation evaluation is box-geometry based and ignores object masks, so borderline overlaps can change the relation outcome.
+  \item The local evaluator is not benchmark-faithful to official GenEval, especially for counting prompts.
+\end{itemize}
+
+Table~\ref{tab:agreement} quantifies the last point using saved train-plus-validation side artifacts. We compare \texttt{exp/supervision\_generation/results.jsonl} (local heuristic labels) with \texttt{exp/official\_geneval\_supervision/results.jsonl} (official-revision supervision labels) on the same 640 completed supervision images. Prompt-level agreement is only 78.8\% overall and 65.1\% on counting prompts. A concrete example appears already in the first rows of both files: for \texttt{counting\_000} with seed 101, the local evaluator marks the image incorrect while the official-revision artifact marks it correct.
+
+\begin{table}[t]
+\caption{Agreement between local heuristic labels and saved official-revision supervision labels on the same 640 train-plus-validation supervision images. This is an auxiliary appendix analysis of the side artifacts under \texttt{exp/}; it is included to document evaluator mismatch, not to introduce a new benchmark result.}
+\label{tab:agreement}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Family & Images & Prompt agr. / Atomic agr. & Mean atomic success: local / official \\
+\midrule
+Overall & 640 & 0.7875 / 0.8380 & 0.1203 / 0.2500 \\
+Counting & 212 & 0.6509 / 0.6509 & 0.0000 / 0.3491 \\
+Color attribute & 212 & 0.7453 / 0.8679 & 0.3208 / 0.3538 \\
+Position & 216 & 0.9630 / 0.9630 & 0.0417 / 0.0509 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Artifact Map and Folder Provenance}
+\label{app:artifacts}
+Table~\ref{tab:artifact-map} maps the paper's main tables and claims to exact saved artifacts under \texttt{exp/}. Figure files live under \texttt{figures/}, but each figure is generated from the corresponding \texttt{exp/} artifact listed here. Because the corrected headline metric is prompt-level \texttt{all\_correct}, the main table now draws its score columns from \texttt{exp/main\_experiment/trials.jsonl} rather than the older family-macro summary table.
+
+\begin{table}[t]
+\caption{Claim-to-artifact map for the main paper. Paths are relative to the workspace root.}
+\label{tab:artifact-map}
+\centering
+\small
+\begin{tabular}{p{0.39\linewidth}p{0.54\linewidth}}
+\toprule
+Paper claim or table & Exact artifact path in \texttt{exp/} \\
+\midrule
+Main comparison table (corrected prompt-level \texttt{all\_correct}) & \texttt{exp/main\_experiment/trials.jsonl} plus per-method \texttt{results.json} runtime fields \\
+Per-method aggregate metrics & \texttt{exp/decomposed\_early\_target/results.json}, \texttt{exp/scalar\_early\_target/results.json}, \texttt{exp/best\_of\_2\_full\_completion/results.json}, \texttt{exp/random\_prune\_continue/results.json}, \texttt{exp/shared\_head\_decomposition/results.json}, \texttt{exp/no\_preview\_features/results.json} \\
+A legacy family-macro summary table (not used for headline \texttt{all\_correct} claims) & \texttt{exp/main\_results\_table.csv} \\
+Ablation table & \texttt{exp/ablation\_table.csv} \\
+Prompt-level bootstrap and paired comparison source rows & \texttt{exp/main\_experiment/trials.jsonl} \\
+Probe ROC-AUC, Brier, ECE, AP, calibration choice & \texttt{exp/probe\_training/results.json} \\
+Runtime numbers & \texttt{exp/runtime\_calibration/results.json} \\
+Parser audit and split construction & \texttt{exp/data\_preparation/results.json}, \texttt{exp/data\_preparation/parser\_manual\_audit.json} \\
+Manual sensitivity omission & \texttt{exp/manual\_label\_sensitivity/results.json}, \texttt{exp/manual\_label\_sensitivity/SKIPPED.md} \\
+Reproducibility bundle & \texttt{exp/reproducibility/manifest.json}, \texttt{exp/reproducibility/environment\_freeze.txt}, \texttt{exp/reproducibility/README.md} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two side folders deserve explicit explanation because they are easy to misread.
+\begin{itemize}
+  \item \texttt{exp/supervision\_generation/}: the 640 train-plus-validation rows actually used for the reported paper. These rows contain local heuristic labels, saved feature vectors, prefix artifacts, and timing information.
+  \item \texttt{exp/official\_geneval\_supervision/}: a side artifact from the alternate \texttt{run\_official\_revision.py} path. It contains 640 relabeled supervision rows, 1{,}064 raw official records, and 1{,}064 manifest rows for atomic and full-prompt evaluation specs. It was \emph{not} used to produce the headline held-out test table in this paper.
+\end{itemize}
+
+\section{Reproducibility Checklist}
+\label{app:repro}
+The saved workspace includes the following reproducibility details.
+\begin{itemize}
+  \item Data split: fixed 120/40/80 train-validation-test split saved in \texttt{prompts/} and summarized in \texttt{exp/reproducibility/manifest.json}.
+  \item Parser: deterministic rules for counting, position, and color-attribute prompts, plus a 30-prompt exact-match audit.
+  \item Generator setup: Stable Diffusion v1.5, DDIM, 20 steps, guidance 7.5, $512\times512$ final decode, $256\times256$ preview decode.
+  \item Feature set: latent summary statistics, denoiser disagreement, tokenizer heuristics, and the first 10 dimensions of a CLIP preview embedding.
+  \item Probe hyperparameters: shared trunk widths $[256,128]$, GELU, dropout 0.1, AdamW, learning rate $10^{-3}$, weight decay $10^{-4}$, batch size 256, max 30 epochs, patience 5.
+  \item Seeds: supervision seeds \{101, 202, 303, 404\}; experiment seeds \{11, 17, 23\}.
+  \item Hardware: one NVIDIA RTX A6000 GPU and four CPU cores, recorded in \texttt{exp/reproducibility/manifest.json}.
+  \item Software environment: Python executable, package freeze, and platform snapshot saved in \texttt{exp/reproducibility/environment\_freeze.txt} and \texttt{exp/reproducibility/manifest.json}.
+  \item Saved outputs: per-method JSON summaries, trial logs, candidate previews, figure PDFs/PNGs, and the root \texttt{results.json}.
+  \item Not reproduced from the original plan: official held-out GenEval, cross-attention features, and a completed human-label sensitivity analysis.
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,404 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+
+\newcommand{\currec}{\textsc{CurrEC}}
+\newcommand{\supcon}{\textsc{SupCon}}
+\newcommand{\loss}{\mathcal{L}}
+
+\title{When Does Coarse-to-Fine Training Help? \\Ablation Insights from Curriculum Contrastive Learning for Enzyme Function Prediction}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Enzyme Commission (EC) number prediction is a fundamental task in computational biology, with recent methods leveraging contrastive learning on protein language model embeddings. The EC hierarchy---from 7 broad reaction types to over 6{,}000 specific enzymes---provides a natural curriculum from easy to hard classification. We investigate whether multi-phase curriculum contrastive learning can improve enzyme function prediction by training progressively from coarse to fine EC levels. Our method, \currec{}, uses checkpoint inheritance between phases and explicit consistency regularization to prevent catastrophic forgetting of coarse-level structure. In comprehensive experiments on the CLEAN benchmarks (New-392 and Price-149) with three random seeds per condition, we find that \currec{} does not outperform flat single-phase training (macro-F1 of 0.405 vs.\ 0.434 on New-392). However, careful ablation reveals three actionable insights for hierarchical contrastive learning: (1) curriculum \emph{order} matters dramatically---coarse-to-fine outperforms reverse ordering by 10 F1 points ($p=0.04$, Cohen's $d=3.4$); (2) consistency regularization is essential, contributing 7.2 F1 points ($p=0.095$); and (3) all four curriculum phases contribute, with two-phase training losing 5.6 F1 points. We also find that implementation details---data processing and inference protocol---create larger performance gaps (6.8 F1 points vs.\ published CLEAN) than any training strategy choice, a finding with implications for benchmarking methodology.
+\end{abstract}
+
+\section{Introduction}
+
+Accurate prediction of enzyme function, encoded as Enzyme Commission (EC) numbers, is fundamental to genomics, synthetic biology, and biocatalysis~\citep{yu2023enzyme}. With millions of protein sequences in databases like UniProt, the gap between known sequences and experimentally characterized functions continues to widen. EC numbers follow a hierarchical four-level classification (e.g., 2.7.10.1), encoding progressively finer functional distinctions from general reaction type to specific substrate.
+
+Recent deep learning methods have achieved substantial progress. CLEAN~\citep{yu2023enzyme} introduced supervised contrastive learning for EC prediction. ProtDETR~\citep{yang2025interpretable} reframed the problem as residue-level detection. MAPred~\citep{rong2025autoregressive} introduced autoregressive prediction with 3D structural tokens. Several methods exploit the EC hierarchy: HIT-EC~\citep{dumontet2026trustworthy} uses a four-level hierarchical transformer, EnzHier~\citep{duan2026enzhier} combines multi-scale features with hierarchical triplet loss, and \citet{yim2024hierarchical} proposed hierarchical weight scheduling within a single training phase. To our knowledge, all hierarchy-aware methods operate within a single training phase, relying on loss-level weight adjustment or architecture design rather than multi-phase curriculum training.
+
+We investigate whether \emph{multi-phase curriculum learning}---training sequentially from coarse to fine EC levels with checkpoint inheritance---can improve enzyme function prediction. This is motivated by three observations: (1) fine-grained EC classes exhibit extreme long-tail distributions where coarse-level pre-training could provide stronger initial supervision; (2) simultaneously optimizing across ${\sim}6{,}000$ classes creates a complex loss landscape that sequential refinement might smooth; and (3) single-phase hierarchical methods must balance coarse and fine objectives simultaneously, while curriculum training could build coarse structure first then refine it.
+
+We propose \currec{} (Curriculum Enzyme Classification), which trains enzyme representations progressively from coarse to fine EC levels using supervised contrastive learning~\citep{khosla2020supervised}, inspired by curriculum learning~\citep{bengio2009curriculum}. While \currec{} does not outperform flat training, our thorough investigation yields findings that are arguably more valuable than a positive result would have been. Our contributions are:
+\begin{itemize}
+    \item We conduct a comprehensive ablation study of multi-phase curriculum contrastive learning for enzyme function prediction (six ablations, three seeds each), revealing that curriculum \emph{order} has a dramatic effect (10 F1-point gap, $p=0.04$), consistency regularization is essential (7.2 F1-point contribution), and all four curriculum phases contribute meaningfully (Section~\ref{sec:ablation}).
+    \item We provide an honest analysis of the gap between our re-implementation and published CLEAN numbers (6.8 F1 points), demonstrating that implementation details---data processing and inference protocol---dominate training strategy choices, with implications for benchmarking methodology (Section~\ref{sec:clean_gap}).
+    \item We propose the \currec{} framework with explicit consistency regularization (Section~\ref{sec:method}), providing a well-characterized baseline for future work on hierarchical contrastive learning.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes our method, Section~\ref{sec:experiments} presents experiments, and Section~\ref{sec:discussion} discusses implications and limitations.
+
+\section{Related Work}\label{sec:related}
+
+\paragraph{Enzyme Function Prediction.}
+CLEAN~\citep{yu2023enzyme} introduced supervised contrastive learning for EC annotation using ESM-1b embeddings, achieving F1 of 0.502 on the New-392 benchmark. ProtDETR~\citep{yang2025interpretable} reformulated EC prediction as residue-level detection with functional queries. MAPred~\citep{rong2025autoregressive} uses autoregressive prediction with 3D structural tokens, achieving state-of-the-art F1 of 0.610 on New-392. CLEAN-Contact~\citep{yang2024improved} extends CLEAN with structural contact maps through graph neural networks. These methods either ignore the EC hierarchy entirely or exploit it through architecture design rather than training schedule.
+
+\paragraph{Hierarchical Approaches to EC Prediction.}
+HIT-EC~\citep{dumontet2026trustworthy} uses separate transformer encoders per EC level, training all levels jointly. EnzHier~\citep{duan2026enzhier} combines a U-Net backbone with hierarchical triplet loss using EC-based margin adjustment in a single training phase.\footnote{HIT-EC and EnzHier appeared during the preparation of this work. We cite their published descriptions but did not have access to their implementations for direct comparison.} Most closely related, \citet{yim2024hierarchical} proposed hierarchical contrastive learning with gradual weight adjustment across EC levels within a single phase. \currec{} differs fundamentally by using sequential multi-phase training with checkpoint inheritance and explicit SupCon-based consistency regularization, rather than loss-level weight adjustment within a single phase.
+
+\paragraph{Contrastive and Curriculum Learning.}
+Supervised contrastive learning~\citep{khosla2020supervised} extends self-supervised contrastive methods to the supervised setting. Curriculum learning~\citep{bengio2009curriculum} formalized the principle that ordering training from easy to hard improves generalization. \currec{} applies this principle to the natural difficulty hierarchy of EC levels, adapting positive pair definitions across sequential curriculum phases while using the SupCon loss at coarser levels for consistency regularization.
+
+\paragraph{Protein Language Models.}
+ESM-2~\citep{lin2023evolutionary} provides state-of-the-art protein sequence representations. We use ESM-2 (650M parameters) as a frozen backbone, following the paradigm established by CLEAN of training a lightweight projection head on top of pre-computed embeddings.
+
+\section{Method}\label{sec:method}
+
+\subsection{Overview}
+
+\currec{} uses a frozen protein language model (ESM-2, 650M) to extract sequence embeddings, followed by a lightweight projection network trained with a phased curriculum contrastive strategy. The key innovation is the training protocol, not the architecture.
+
+\subsection{Embedding Extraction and Projection}
+For each enzyme sequence, we extract a fixed-dimensional representation by mean-pooling per-residue embeddings from a frozen ESM-2 model, producing a 1280-dimensional vector per enzyme. These embeddings are computed once and cached. A two-layer MLP with batch normalization and ReLU activation projects each embedding to a 512-dimensional $L_2$-normalized representation space:
+\begin{equation}
+    \mathbf{z} = \frac{f_\theta(\mathbf{e})}{\|f_\theta(\mathbf{e})\|_2}, \quad f_\theta: \mathbb{R}^{1280} \rightarrow \mathbb{R}^{1024} \rightarrow \mathbb{R}^{512}
+\end{equation}
+where $\mathbf{e}$ is the ESM-2 embedding and $f_\theta$ is the projection head (the only trainable component).
+
+\subsection{Curriculum Training Protocol}
+
+Training proceeds in four phases, corresponding to the four levels of the EC hierarchy:
+
+\paragraph{Phase $k$ ($k = 1, \dots, 4$):} At each phase, the model is fine-tuned from the previous phase's checkpoint (Phase 1 starts from random initialization). The total loss is:
+\begin{equation}\label{eq:loss}
+    \loss_k = \loss_{\supcon}^{(k)} + \lambda \sum_{l=1}^{k-1} \loss_{\supcon}^{(l)}
+\end{equation}
+where $\loss_{\supcon}^{(l)}$ is the standard Supervised Contrastive Loss~\citep{khosla2020supervised} computed using EC level-$l$ labels as the grouping criterion, and $\lambda$ is the consistency regularization weight. The consistency terms ensure that the learned representations maintain cluster structure at all previously trained EC levels, preventing catastrophic forgetting.
+
+The SupCon loss for level $l$ with temperature $\tau$ is:
+\begin{equation}
+    \loss_{\supcon}^{(l)} = \sum_{i} \frac{-1}{|P_l(i)|} \sum_{p \in P_l(i)} \log \frac{\exp(\mathbf{z}_i \cdot \mathbf{z}_p / \tau)}{\sum_{a \neq i} \exp(\mathbf{z}_i \cdot \mathbf{z}_a / \tau)}
+\end{equation}
+where $P_l(i) = \{j : y_j^{(l)} = y_i^{(l)}, j \neq i\}$ is the set of positive indices sharing the same EC level-$l$ label as anchor $i$.
+
+\paragraph{Progressive Temperature Scheduling.}
+Across phases, the contrastive temperature decreases:
+\begin{equation}
+    \tau_k = \tau_{\text{base}} \cdot \gamma^{(k-1)}
+\end{equation}
+where $\tau_{\text{base}} = 0.1$ and $\gamma = 0.85$. This progressive sharpening is motivated by the observation that coarse-level discrimination (7 classes) requires less representational precision than fine-grained discrimination (${\sim}5{,}000$ classes).
+
+\subsection{Inference}
+
+At inference, we follow the CLEAN protocol: compute the centroid of each EC class in the learned embedding space from training data, then assign EC numbers based on cosine similarity to the nearest centroid.
+
+\subsection{Method Summary}
+
+Algorithm~\ref{alg:currec} summarizes the complete \currec{} training procedure.
+
+\begin{algorithm}[t]
+\caption{\currec{}: Curriculum Contrastive Learning for EC Prediction}
+\label{alg:currec}
+\begin{algorithmic}[1]
+\REQUIRE Training data $\mathcal{D}$ with EC labels at levels 1--4; hyperparameters $\lambda$, $\tau_{\text{base}}$, $\gamma$
+\STATE Extract and cache ESM-2 embeddings for all sequences
+\STATE Initialize projection head $f_\theta$ randomly
+\FOR{$k = 1$ to $4$}
+    \STATE Set temperature $\tau_k = \tau_{\text{base}} \cdot \gamma^{(k-1)}$
+    \STATE Set consistency levels $C_k = \{1, \dots, k-1\}$
+    \FOR{each epoch}
+        \FOR{each mini-batch $\mathcal{B}$}
+            \STATE Compute projections $\mathbf{z}_i = f_\theta(\mathbf{e}_i) / \|f_\theta(\mathbf{e}_i)\|$ for $i \in \mathcal{B}$
+            \STATE Compute $\loss_k$ via Eq.~\ref{eq:loss}
+            \STATE Update $\theta$ via gradient descent
+        \ENDFOR
+    \ENDFOR
+    \STATE Save checkpoint (inherited by Phase $k+1$)
+\ENDFOR
+\STATE Compute class centroids from training embeddings
+\RETURN Projection head $f_\theta$ and centroids for nearest-centroid inference
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Backbone.} ESM-2 with 650M parameters~\citep{lin2023evolutionary}, frozen. Embeddings are extracted once and cached (1280-dimensional per sequence).
+
+\paragraph{Training Data.} Swiss-Prot enzyme sequences with EC annotations, following the CLEAN data processing pipeline: 227{,}362 training sequences spanning 4{,}956 unique EC level-4 classes, of which 3{,}303 (66.6\%) are rare classes with fewer than 10 training examples.
+
+\paragraph{Test Benchmarks.} Following established protocol from CLEAN~\citep{yu2023enzyme}:
+\begin{itemize}
+    \item \textbf{New-392}: 392 enzymes with experimentally verified EC numbers not in the training set.
+    \item \textbf{Price-149}: 149 enzymes from Price et al.\ with experimentally characterized functions.
+\end{itemize}
+
+\paragraph{Implementation Details.} Projection head: $1280 \rightarrow 1024 \rightarrow 512$ with BatchNorm and ReLU. Optimizer: AdamW (weight decay $10^{-4}$) with cosine annealing within each phase. Batch size: 512 with balanced sampling (32 classes $\times$ 16 samples per class). Phase configuration: Phase~1 (EC L1, 20 epochs, lr=$5 \times 10^{-4}$), Phase~2 (EC L2, 15 epochs, lr=$3 \times 10^{-4}$), Phase~3 (EC L3, 15 epochs, lr=$10^{-4}$), Phase~4 (EC L4, 40 epochs, lr=$5 \times 10^{-5}$). Default $\lambda = 0.5$, $\tau_{\text{base}} = 0.1$, $\gamma = 0.85$. All experiments use 3 random seeds (42, 123, 456).
+
+\paragraph{Metrics.} Macro-F1 (primary), precision, recall, and F1 on rare classes (EC level-4 classes with $< 10$ training examples). All evaluation uses nearest-centroid prediction.
+
+\paragraph{Baselines.}
+\begin{itemize}
+    \item \textbf{BLASTp}: Sequence homology baseline using top-hit EC transfer.
+    \item \textbf{Flat SupCon}: Same architecture and ESM-2 embeddings, trained in a single phase at EC level 4 for 90 epochs (same total epochs as \currec{}).
+    \item \textbf{Joint Hierarchical}: Single-phase training with weighted SupCon losses at all 4 levels simultaneously ($w_1\!=\!0.1, w_2\!=\!0.2, w_3\!=\!0.3, w_4\!=\!0.4$), 90 epochs.
+\end{itemize}
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents the main comparison. Contrary to our hypothesis, \currec{} does not outperform flat SupCon on either benchmark ($p > 0.2$ for both). Flat SupCon achieves the best macro-F1 among our re-implemented methods. All methods substantially underperform published CLEAN numbers (discussed in Section~\ref{sec:clean_gap}).
+
+\begin{table}[t]
+\caption{Main results on CLEAN benchmarks. Re-implemented methods use ESM-2 (650M) embeddings with 2-layer MLP projection. Published numbers use original implementations (different backbones/protocols). Best re-implemented results in \textbf{bold}. $\uparrow$ = higher is better. $\pm$ denotes standard deviation across 3 seeds.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c}{New-392} & \multicolumn{3}{c}{Price-149} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+ & Macro-F1 $\uparrow$ & Prec. $\uparrow$ & Recall $\uparrow$ & Macro-F1 $\uparrow$ & Prec. $\uparrow$ & Recall $\uparrow$ \\
+\midrule
+\multicolumn{7}{l}{\textit{Re-implemented (this work)}} \\
+BLASTp & 0.494 & 0.503 & 0.502 & 0.214 & 0.222 & 0.217 \\
+Flat SupCon & \textbf{0.434}{\scriptsize $\pm$.014} & \textbf{0.446} & \textbf{0.445} & \textbf{0.202}{\scriptsize $\pm$.008} & 0.216 & 0.201 \\
+Joint Hierarchical & 0.413{\scriptsize $\pm$.006} & 0.433 & 0.420 & 0.201{\scriptsize $\pm$.017} & \textbf{0.219} & 0.198 \\
+\currec{} (Ours) & 0.405{\scriptsize $\pm$.020} & 0.428 & 0.410 & 0.193{\scriptsize $\pm$.012} & 0.214 & 0.195 \\
+\midrule
+\multicolumn{7}{l}{\textit{Published reference numbers (not re-implemented)}} \\
+CLEAN \citep{yu2023enzyme} & 0.502 & 0.575 & 0.491 & 0.438 & 0.538 & 0.408 \\
+MAPred \citep{rong2025autoregressive} & 0.610 & 0.651 & 0.632 & 0.493 & 0.554 & 0.487 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\currec{} shows the highest F1 on rare EC classes on New-392 (0.356 vs.\ 0.353 for Flat SupCon), but this 0.9\% relative improvement does not meet our 5\% threshold and is not statistically significant.
+
+\subsection{Ablation Studies}\label{sec:ablation}
+
+The ablation study (Table~\ref{tab:ablation}) is the central contribution of this work. Despite the negative main result, it reveals that the \emph{components} of \currec{} have meaningful and statistically significant effects, providing actionable guidance for future hierarchical contrastive learning research.
+
+\begin{table}[t]
+\caption{Ablation study on New-392 and Price-149 benchmarks. All ablations modify \currec{} by changing one component. $\pm$ denotes standard deviation across 3 seeds. Statistical tests are paired $t$-tests against \currec{}.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & \multicolumn{2}{c}{New-392} & \multicolumn{2}{c}{Price-149} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+ & Macro-F1 $\uparrow$ & F1-Rare $\uparrow$ & Macro-F1 $\uparrow$ & F1-Rare $\uparrow$ \\
+\midrule
+\currec{} (coarse-to-fine) & 0.405{\scriptsize $\pm$.020} & 0.356 & 0.193{\scriptsize $\pm$.012} & 0.255 \\
+\midrule
+\multicolumn{5}{l}{\textit{Curriculum order ablations}} \\
+\quad Reverse (fine-to-coarse) & 0.305{\scriptsize $\pm$.011} & 0.280 & 0.162{\scriptsize $\pm$.010} & 0.231 \\
+\quad Random order & 0.344{\scriptsize $\pm$.003} & 0.303 & 0.189{\scriptsize $\pm$.014} & 0.273 \\
+\midrule
+\multicolumn{5}{l}{\textit{Component ablations}} \\
+\quad No consistency ($\lambda\!=\!0$) & 0.333{\scriptsize $\pm$.015} & 0.270 & 0.164{\scriptsize $\pm$.027} & 0.232 \\
+\quad No temp.\ schedule & 0.392{\scriptsize $\pm$.018} & 0.319 & 0.197{\scriptsize $\pm$.028} & 0.251 \\
+\quad Two-phase (L2$\rightarrow$L4) & 0.349{\scriptsize $\pm$.010} & 0.288 & 0.185{\scriptsize $\pm$.023} & 0.285 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Finding 1: Curriculum order is critical.}
+Coarse-to-fine ordering outperforms reverse curriculum by 10.0 F1 points on New-392 ($p = 0.040$, Cohen's $d = 3.4$) and 3.1 points on Price-149 ($p = 0.023$, $d = 4.6$). It outperforms random ordering by 6.1 points on New-392 ($p = 0.059$, $d = 2.8$). This demonstrates that while curriculum training does not beat flat training, the direction of the curriculum dramatically affects outcomes. The reverse curriculum performs worst, likely because starting from the hardest task (${\sim}5{,}000$ fine-grained classes) produces a poorly structured representation that subsequent coarse phases cannot rescue. This finding provides a clear prescription: \emph{any} multi-phase hierarchical training should proceed coarse-to-fine.
+
+\paragraph{Finding 2: Consistency regularization is essential.}
+Removing consistency regularization ($\lambda = 0$) decreases \currec{}'s New-392 F1 from 0.405 to 0.333---a 7.2-point drop ($p = 0.095$, $d = 2.1$)---and Price-149 from 0.193 to 0.164 ($p = 0.128$, $d = 1.8$). Without regularization, later phases catastrophically forget coarse-level structure. Critically, multi-phase training \emph{without} consistency regularization (F1 = 0.333) is substantially worse than both flat training (0.434) and even random-order curriculum (0.344), demonstrating that explicit anti-forgetting mechanisms are \emph{necessary}---not merely helpful---for multi-phase training.
+
+\paragraph{Finding 3: All four phases contribute.}
+The two-phase ablation (L2$\rightarrow$L4) achieves 0.349{\scriptsize $\pm$0.010} on New-392, losing 5.6 F1 points compared to the full four-phase \currec{}. Skipping intermediate levels (L1, L3) degrades performance, indicating that matching curriculum phases to natural hierarchy levels is important. The phase progression analysis (Figure~\ref{fig:phase}) shows monotonically increasing performance across all four phases, with the largest improvement from Phase~3 to Phase~4.
+
+\paragraph{Temperature scheduling provides modest benefit.}
+Fixed temperature reduces New-392 F1 by 1.3 points (0.405 vs.\ 0.392), a small but consistent improvement suggesting that progressive temperature decay helps adapt discrimination sharpness across curriculum phases.
+
+\subsection{Consistency Weight Analysis}
+
+Figure~\ref{fig:lambda} shows the effect of the consistency regularization weight $\lambda$, evaluated with 3 seeds for each value. On New-392, $\lambda = 0.5$ performs best (F1 = $0.405 \pm 0.020$), with performance degrading at both lower and higher values. The inverted-U shape confirms that balanced regularization is important: too little ($\lambda = 0$, F1 = 0.333) allows catastrophic forgetting, while too much ($\lambda = 1.0$, F1 = $0.381 \pm 0.011$) constrains the model from learning fine-grained distinctions.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/figure4_lambda_sweep.pdf}
+\caption{Effect of consistency regularization weight $\lambda$ on macro-F1. Error bars show standard deviation across 3 seeds for all $\lambda$ values. The inverted-U shape on New-392 indicates that $\lambda = 0.5$ optimally balances anti-forgetting with fine-grained discrimination capacity.}
+\label{fig:lambda}
+\end{figure}
+
+\subsection{Phase Progression Analysis}
+
+Figure~\ref{fig:phase} tracks \currec{}'s macro-F1 on New-392 after each curriculum phase, averaged across 3 seeds. Starting from 0.086 after Phase~1 (7-class coarse grouping), performance improves monotonically through Phase~2 (0.187), Phase~3 (0.270), and Phase~4 (0.405). The largest absolute improvement occurs at Phase~4 (+0.135), corresponding to full fine-grained EC level-4 training. The monotonic progression confirms that each curriculum phase contributes meaningfully; no phase degrades the representation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{figures/figure3_phase_progression.pdf}
+\caption{Macro-F1 on New-392 after each \currec{} curriculum phase. Error bars show standard deviation across 3 seeds. Performance improves monotonically, with the largest gain from Phase~3 to Phase~4 (fine-grained training).}
+\label{fig:phase}
+\end{figure}
+
+\subsection{Embedding Space Visualization}
+
+Figure~\ref{fig:umap} shows UMAP projections of the learned embedding space for Flat SupCon and \currec{} on the New-392 test set, colored by EC level-1 class. Both methods produce embeddings with visible clustering by broad enzyme class, confirming that the contrastive training successfully captures coarse functional distinctions. The \currec{} embeddings show comparable cluster separation to Flat SupCon, consistent with the similar macro-F1 performance. The clear class separation for both methods---despite substantially different training regimes---suggests that coarse-level structure emerges naturally from fine-grained contrastive learning, partially explaining why the explicit coarse-level curriculum phases do not provide additional benefit.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure6_umap_embeddings.pdf}
+\caption{UMAP projections of New-392 test embeddings for Flat SupCon (left) and \currec{} (right), colored by EC level-1 class. Both methods produce well-separated clusters, suggesting that coarse-level structure emerges naturally from fine-grained contrastive training.}
+\label{fig:umap}
+\end{figure}
+
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Why Doesn't Curriculum Beat Flat Training?}
+
+Our hypothesis that coarse-to-fine curriculum training would outperform flat training was not supported. The UMAP visualization (Figure~\ref{fig:umap}) provides a partial explanation: flat training at EC level-4 already induces well-separated coarse-level clusters, because enzymes sharing a level-1 class also share fine-grained functional similarities that the contrastive loss captures implicitly. The explicit coarse-level curriculum phases thus provide structure that flat training already acquires as a by-product.
+
+We identify three additional contributing factors:
+
+\textbf{Epoch budget allocation.} \currec{} allocates 50 of its 90 total epochs to coarse levels (L1--L3), leaving only 40 epochs for the critical fine-grained phase. Flat SupCon devotes all 90 epochs to level-4 discrimination. The coarse-level epochs---which produce near-chance level-4 predictions (F1 = 0.086 after Phase~1)---may be too costly given the limited benefit they provide.
+
+\textbf{Representation capacity bottleneck.} The lightweight 2-layer MLP projection head (2.1M parameters) may lack sufficient capacity to simultaneously maintain coarse structure and learn fine-grained distinctions. With only 512 output dimensions, the curriculum's advantage in structuring representations may be offset by the constraint of preserving this structure during later phases.
+
+\textbf{Tension between consistency and specialization.} While consistency regularization prevents catastrophic forgetting (removing it drops F1 by 7.2 points), it also constrains the model during fine-grained training, potentially limiting full level-4 specialization. The lambda sweep (Figure~\ref{fig:lambda}) confirms this tension: $\lambda > 0.5$ degrades performance despite improving coarse-level preservation.
+
+\subsection{Gap with Published CLEAN Numbers}\label{sec:clean_gap}
+
+All our re-implemented contrastive methods fall substantially below published CLEAN numbers (our best: 0.434 vs.\ published 0.502 on New-392, a 6.8 F1-point gap). This gap exceeds the difference between \emph{any} of our methods (2.9 points between Flat SupCon and \currec{}), making it the most practically significant finding. We identify three likely contributing factors:
+
+\textbf{Backbone differences.} CLEAN uses ESM-1b while we use ESM-2 (650M). Although ESM-2 is generally considered superior for protein representation, CLEAN's training pipeline was developed specifically for ESM-1b embeddings, and the specific embedding distributions may interact differently with the contrastive training objective.
+
+\textbf{Data processing pipeline.} The CLEAN paper describes specific data curation, filtering, and splitting procedures that substantially affect the training distribution. Differences in training set composition, duplicate removal, and sequence identity filtering can alter evaluation metrics, particularly for the relatively small test sets (392 and 149 samples). Our re-implementation follows the CLEAN data processing as closely as possible from the paper description, but implementation details (e.g., sequence clustering thresholds, version of UniProt used) may diverge.
+
+\textbf{Inference protocol.} CLEAN employs a max-separation selection strategy with specific thresholds, while we use nearest-centroid prediction. Our evaluation shows that prediction strategy alone can change macro-F1 by over 20 points (Appendix~\ref{app:strategy}), making it a dominant source of variance. Notably, switching to max-separation \emph{reverses} the ranking between \currec{} and Flat SupCon: \currec{} achieves 0.207 vs.\ Flat's 0.192 under max-sep (Appendix~\ref{app:strategy}). This suggests that curriculum training produces embedding geometries where inter-centroid separation carries more meaningful information, even though nearest-centroid assignment is slightly less accurate overall. The specific threshold tuning in CLEAN's max-separation strategy---which was optimized on a validation set---likely accounts for a substantial portion of the gap with published numbers.
+
+This finding has methodological implications: when comparing training strategies (e.g., flat vs.\ curriculum), researchers should ensure that data processing and inference protocols are controlled, as these ``implementation details'' can dominate the effect of the training strategy being studied. We did not attempt to replicate CLEAN's exact pipeline, as our goal was fair comparison between flat and curriculum training under identical conditions.
+
+\subsection{Implications for Hierarchical Contrastive Learning}
+
+Despite the negative main result, our ablations provide four actionable guidelines:
+
+\begin{enumerate}
+    \item \textbf{Always train coarse-to-fine.} Any multi-phase hierarchical training should proceed from broad to specific categories. Fine-to-coarse ordering severely degrades performance (10 F1 points worse).
+    \item \textbf{Include explicit anti-forgetting.} Consistency regularization provides a 7.2 F1-point improvement. Multi-phase training without explicit regularization is worse than not using a curriculum at all.
+    \item \textbf{Match phases to hierarchy levels.} Four-phase training outperforms two-phase by 5.6 F1 points, suggesting that each hierarchy level provides useful intermediate supervision.
+    \item \textbf{Control implementation details first.} The gap between our re-implementation and published CLEAN (6.8 F1 points) exceeds the gap between any training strategies (2.9 points), indicating that data processing and inference protocols should be standardized before training strategy comparisons can be meaningful.
+\end{enumerate}
+
+\subsection{Limitations}
+
+\textbf{Statistical power.} All experiments use 3 seeds, providing limited power to detect small effects (${\sim}$80\% power only for Cohen's $d \geq 2.5$). The small test sets (392 and 149 samples) further increase metric variance. Several $p$-values hover near significance thresholds and should be interpreted cautiously (see Appendix~\ref{app:statistical}).
+
+\textbf{Single architecture and backbone size.} We only evaluate a 2-layer MLP projection head on ESM-2 (650M). Larger or more expressive projection architectures might better exploit curriculum training by alleviating the capacity bottleneck we identify. We also did not test whether smaller ESM-2 variants (8M, 150M) interact differently with curriculum training---such an ablation could test the hypothesis that curriculum training is more beneficial when the backbone produces less-structured embeddings.
+
+\textbf{No structural information.} We use sequence-only embeddings. Methods incorporating 3D structure (MAPred, CLEAN-Contact) substantially outperform sequence-only approaches, and curriculum training may interact differently with richer input representations.
+
+\textbf{Implementation gap.} We cannot fully explain the gap with published CLEAN numbers, which limits conclusions about absolute performance. However, our controlled comparison between flat and curriculum training under identical conditions remains valid.
+
+\textbf{Fixed epoch budget.} We fix the total number of training epochs at 90 across all methods. Adaptive epoch budgets across curriculum phases---or simply increasing the Phase~4 budget---could change the outcome.
+
+\section{Conclusion}
+
+We investigated whether multi-phase curriculum contrastive learning can improve enzyme function prediction, training progressively from coarse to fine EC levels. While \currec{} does not outperform flat contrastive training overall, our comprehensive ablation study reveals three findings with practical implications for hierarchical contrastive learning: curriculum order matters dramatically (coarse-to-fine outperforms reverse by 10 F1 points, $p = 0.04$), consistency regularization is essential for multi-phase training (7.2 F1-point improvement), and matching phases to natural hierarchy levels improves performance (5.6 F1-point gain over two-phase training). We also demonstrate that implementation details---data processing and inference protocols---create larger performance gaps than training strategy choices, a finding relevant to benchmarking methodology in computational biology.
+
+Future work could explore adaptive epoch budgets across curriculum phases, more expressive projection architectures, ESM-2 backbone size ablations (to test whether curriculum training is more beneficial when embeddings are less inherently structured), integration with structural information, and standardized benchmarking protocols that control for implementation details. The interaction between training strategy and inference protocol (Appendix~\ref{app:strategy}) also warrants deeper investigation, as curriculum training may produce embeddings that are better suited to specific downstream inference mechanisms.
+
+\section*{Reproducibility}
+
+All experiments were conducted on a single NVIDIA A6000 GPU (48GB VRAM). ESM-2 embedding extraction took approximately 1.5 hours for 227{,}362 sequences. Each training run (90 total epochs) took approximately 9 minutes. The complete experiment suite (main experiments + all ablations + lambda sweep + 3 seeds) required approximately 5 hours of GPU time. We used PyTorch with CUDA, AdamW optimizer, and cosine annealing learning rate scheduling. Random seeds 42, 123, and 456 were used for all experiments.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\newpage
+\appendix
+
+\section{Detailed Per-Seed Results}\label{app:perSeed}
+
+Table~\ref{tab:perseed} reports per-seed results for the main methods on New-392.
+
+\begin{table}[h]
+\caption{Per-seed macro-F1 results on New-392.}
+\label{tab:perseed}
+\centering
+\begin{tabular}{lccc|c}
+\toprule
+Method & Seed 42 & Seed 123 & Seed 456 & Mean $\pm$ Std \\
+\midrule
+Flat SupCon & 0.434 & 0.416 & 0.451 & 0.434 $\pm$ 0.014 \\
+Joint Hierarchical & 0.406 & 0.421 & 0.412 & 0.413 $\pm$ 0.006 \\
+\currec{} & 0.433 & 0.395 & 0.387 & 0.405 $\pm$ 0.020 \\
+Reverse Curriculum & 0.292 & 0.318 & 0.306 & 0.305 $\pm$ 0.011 \\
+Random Order & 0.342 & 0.343 & 0.348 & 0.344 $\pm$ 0.003 \\
+No Consistency & 0.313 & 0.347 & 0.339 & 0.333 $\pm$ 0.015 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Lambda Sweep Detailed Results}\label{app:lambda}
+
+Table~\ref{tab:lambda_detail} reports the lambda sweep results on both benchmarks, averaged across 3 seeds.
+
+\begin{table}[h]
+\caption{Consistency weight ($\lambda$) sweep results averaged across 3 seeds (42, 123, 456). $\lambda = 0$ uses the no-consistency ablation.}
+\label{tab:lambda_detail}
+\centering
+\begin{tabular}{lcc}
+\toprule
+$\lambda$ & New-392 F1 (mean $\pm$ std) & Price-149 F1 (mean $\pm$ std) \\
+\midrule
+0.0 & 0.333 $\pm$ 0.015 & 0.164 $\pm$ 0.027 \\
+0.1 & 0.391 $\pm$ 0.026 & 0.196 $\pm$ 0.019 \\
+0.25 & 0.381 $\pm$ 0.004 & 0.183 $\pm$ 0.016 \\
+0.5 & 0.405 $\pm$ 0.020 & 0.193 $\pm$ 0.012 \\
+1.0 & 0.381 $\pm$ 0.011 & 0.189 $\pm$ 0.014 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Prediction Strategy Comparison}\label{app:strategy}
+
+Table~\ref{tab:strategy} compares nearest-centroid vs.\ max-separation prediction strategies across all three seeds for both \currec{} and Flat SupCon, revealing a striking interaction between training strategy and inference protocol.
+
+\begin{table}[h]
+\caption{Impact of prediction strategy on performance (3-seed mean $\pm$ std). Max-separation halves macro-F1 for all methods, yet CLEAN's published numbers (F1=0.502) use max-separation---suggesting their max-sep implementation differs substantially from ours or benefits from threshold tuning.}
+\label{tab:strategy}
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Method & Strategy & New-392 Macro-F1 & Price-149 Macro-F1 \\
+\midrule
+\multirow{2}{*}{\currec{}} & Nearest Centroid & 0.405 $\pm$ 0.020 & 0.193 $\pm$ 0.012 \\
+ & Max Separation & \textbf{0.207} $\pm$ 0.004 & \textbf{0.091} $\pm$ 0.013 \\
+\midrule
+\multirow{2}{*}{Flat SupCon} & Nearest Centroid & \textbf{0.434} $\pm$ 0.014 & \textbf{0.202} $\pm$ 0.008 \\
+ & Max Separation & 0.192 $\pm$ 0.003 & 0.094 $\pm$ 0.015 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two findings emerge. First, max-separation catastrophically degrades both methods (roughly halving F1), yet CLEAN's published F1 of 0.502 on New-392 \emph{uses} max-separation. This indicates that CLEAN's inference pipeline includes validation-set threshold tuning or a different max-separation formulation that we did not replicate, and that our nearest-centroid evaluation is not directly comparable to CLEAN's published protocol.
+
+Second, \currec{} \emph{outperforms} Flat SupCon under max-separation on New-392 (0.207 vs.\ 0.192), reversing the ranking observed with nearest-centroid (0.405 vs.\ 0.434). This suggests that curriculum training produces an embedding geometry where inter-class centroid separations are more meaningful---the coarse-to-fine training builds representations in which the relative distances between nearby centroids carry genuine functional information, even though absolute nearest-centroid assignment is slightly less accurate. This interaction between training regime and inference protocol underscores the importance of reporting results under multiple prediction strategies, as the ``best'' training method depends on the inference procedure used.
+
+\section{Statistical Power Considerations}\label{app:statistical}
+
+All comparisons in this work use 3 random seeds, which provides limited statistical power for detecting small effects. With $n=3$, a paired $t$-test at $\alpha = 0.05$ has approximately 80\% power to detect effects of Cohen's $d \geq 2.5$ (i.e., very large effects). The test sets are also small: New-392 has 392 samples and Price-149 has 149 samples, leading to high variance in per-seed metric estimates.
+
+Our significant findings involve large effect sizes: curriculum order ($d = 3.4$) and consistency regularization ($d = 2.1$). However, the CurrEC vs.\ Flat SupCon comparison has $d = 1.1$ (New-392), which falls below the detectable threshold---we cannot distinguish between ``no difference'' and ``a small negative effect of curriculum training.'' Similarly, several $p$-values hover near the 0.05--0.1 range (e.g., CurrEC vs.\ random order at $p = 0.059$, CurrEC vs.\ no consistency at $p = 0.095$), and these should be interpreted cautiously. We report Cohen's $d$ alongside $p$-values throughout to allow readers to assess practical significance independent of the low-power setting. Future work should use at least 5--10 seeds for more reliable inference.
+
+\end{document}

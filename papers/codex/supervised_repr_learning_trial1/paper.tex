@@ -1,0 +1,227 @@
+\documentclass{article}
+
+\usepackage{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{multirow}
+
+\title{STRIDE: Reliability-Gated Class-Relation Smoothing for Self-Supervised Transfer}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\method}{STRIDE\xspace}
+\newcommand{\dense}{DenseRel\xspace}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Low-shot transfer with self-supervised vision encoders benefits from strong frozen features, but plain fine-tuning still trains against one-hot targets that ignore class relations already present in the pretrained representation. We study whether those relations become more useful when filtered by a bootstrap reliability test. Our method, \method, computes class prototypes from frozen DINOv2 features, retains only class edges whose top-$k$ neighbor relation is stable under resampling, and uses the retained graph to build class-dependent soft labels for lightweight fine-tuning. We evaluate on Oxford-IIIT Pet and CIFAR-100 with 10-shot and 30-shot splits, using a shared DINOv2 ViT-S/14 backbone with a linear head plus last-block LoRA adapters. The main result is negative on accuracy but informative mechanistically: \method builds much sparser and more stable class graphs than ungated relation smoothing, increasing mean retained-edge stability from 0.03--0.12 to 0.79--0.94 while reducing graph density from 0.70--0.99 to 0.03--0.08. However, this does not translate into consistent accuracy gains. Averaged over four settings, \method changes top-1 accuracy by only +0.02 points relative to matched dense relation smoothing and trails cross-entropy by 0.49 points. These results suggest that bootstrap-stable class relations are measurable and interpretable, but this lightweight label-space intervention alone is insufficient to outperform strong low-shot fine-tuning baselines in the tested regime.
+\end{abstract}
+
+\section{Introduction}
+
+Self-supervised vision backbones such as DINOv2 provide strong transferable features even with few labeled target examples \citep{oquab2024dinov2}. In that regime, simple fine-tuning with cross-entropy remains a strong baseline, but it also imposes a very sharp supervision signal: every non-ground-truth class is pushed toward zero probability, including classes that may remain close in the frozen representation. This is especially relevant in low-shot transfer, where the target set is too small to relearn all class relations from scratch.
+
+Prior work offers two broad responses. Relation-transfer methods such as Co-Tuning inject class-relation information into target training, but depend on a supervised source classifier \citep{you2020cotuning}. Safe-transfer and geometry-preserving methods instead regularize feature dynamics during fine-tuning \citep{chen2019bss,Zhou_2023_ICCV,yamaguchi2024adarand,huang2025proxy,chen2025preserve,zu2025exploring}. Those methods are broader in scope and often heavier than the narrow question we study here: if a self-supervised backbone already induces target-class relations, can we obtain a useful low-cost regularizer by smoothing labels only toward relations that are stable under resampling?
+
+We investigate this question with \method, a target-only relation-smoothing method for self-supervised transfer. \method caches frozen target features, estimates class affinities from frozen prototypes, measures edge reliability through bootstrap resampling, and smooths labels only across retained stable neighbors. The core mechanism baseline is \dense, which uses the same frozen affinities but removes the reliability gate.
+
+The experiments lead to a narrower conclusion than our original hypothesis. \method clearly changes the induced graph statistics: it produces much sparser graphs with far higher retained-edge stability than \dense. Yet across four low-shot settings on Oxford-IIIT Pet and CIFAR-100, these graph improvements do not yield a consistent top-1 improvement over cross-entropy, Batch Spectral Shrinkage (BSS), or Proxy-FDA-lite. The evidence therefore supports \method as a useful probe of target-class relation stability rather than a new state-of-the-art transfer recipe.
+
+Our contributions are:
+\begin{itemize}
+  \item We propose \method, a target-only reliability-gated class-relation smoothing method for self-supervised transfer that requires no source classifier and no online feature-alignment loss.
+  \item We show that reliability gating drastically sparsifies the class graph and raises mean retained-edge stability from 0.03--0.12 to 0.79--0.94 relative to matched dense relation smoothing, while keeping runtime in the same 0.55--0.70 minute range per run.
+  \item We provide a controlled negative result: despite positive stability-gain correlations (Pearson $r=0.57$, Spearman $\rho=0.61$ for \method minus \dense over the four dataset-shot settings), the accuracy gains are negligible on average and do not beat strong baseline fine-tuning in this experimental budget.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes \method, Section~\ref{sec:experiments} presents the empirical study, and Section~\ref{sec:discussion} discusses what the results imply and where the method falls short.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Relation transfer.}
+Co-Tuning is the closest conceptual precursor: it transfers source-target category relations into the fine-tuning targets \citep{you2020cotuning}. Our setting differs in one key respect. With a self-supervised backbone such as DINOv2, there is no supervised source head to translate into target soft labels. \method therefore derives relations directly from frozen target features rather than from source predictions.
+
+\paragraph{Safe and structure-preserving fine-tuning.}
+Several methods aim to protect pretrained representations during adaptation. BSS suppresses weakly transferable directions \citep{chen2019bss}. Learning without Forgetting, less-forgetting learning, and elastic weight consolidation preserve earlier knowledge through output or parameter regularization \citep{li2016learning,jung2016less,kirkpatrick2017overcoming}. More recent vision fine-tuning methods regularize feature distributions or local structure during training, including DR-Tune, AdaRand, Proxy-FDA, Preserve-and-Sculpt, and RIFT \citep{Zhou_2023_ICCV,yamaguchi2024adarand,huang2025proxy,chen2025preserve,zu2025exploring}. Unlike these methods, \method is intentionally narrow: it regularizes only label targets using a class-level graph computed once from frozen target features.
+
+\paragraph{Self-supervised transfer backbones.}
+DINOv2 motivates the experimental regime because it yields strong frozen features and competitive lightweight adaptation without the source-label machinery assumed by supervised transfer approaches \citep{oquab2024dinov2}. Our method should therefore be read as a low-overhead target-only add-on for self-supervised transfer rather than a general alternative to full geometry-preserving fine-tuning.
+
+\section{Method}
+\label{sec:method}
+
+\paragraph{Setup.}
+We assume a pretrained encoder $f_0$, a target training set $\mathcal{D}=\{(x_i,y_i)\}_{i=1}^n$ with labels in $\{1,\dots,C\}$, and a lightweight adaptation module trained on top of $f_0$. In the experiments, $f_0$ is DINOv2 ViT-S/14 and the trainable module is a linear classifier head plus LoRA adapters on the final transformer block.
+
+\subsection{Frozen Class Graph}
+
+Let $z_i=f_0(x_i)\in\mathbb{R}^d$ denote the frozen feature of image $x_i$. For class $a$, define the frozen prototype
+\begin{equation}
+ p_a=\frac{1}{|\mathcal{D}_a|}\sum_{i:y_i=a} z_i.
+\end{equation}
+We then define a class-affinity matrix using cosine similarity:
+\begin{equation}
+ S_{ab}=\cos(p_a,p_b), \qquad a\neq b.
+\end{equation}
+This prototype-only affinity is the default variant used in the main results.
+
+\subsection{Bootstrap Reliability Gate}
+
+The central question is not whether soft class relations exist, but whether they are trustworthy when the target set is very small. For each class, \method resamples the class examples with replacement for $B=20$ bootstrap draws, recomputes prototypes, and obtains bootstrap affinities $S_{ab}^{(b)}$.
+
+For each ordered pair $(a,b)$, we record the top-$k$ neighbor retention rate
+\begin{equation}
+ R_{ab}=\frac{1}{B}\sum_{b'=1}^{B}\mathbf{1}\!\left[b\in \mathrm{TopK}_a^{(b')}\right],
+\end{equation}
+with $k=3$ in the experiments. Given a threshold $\rho$, the retained neighborhood of class $a$ is
+\begin{equation}
+ G(a)=\{b\neq a: R_{ab}\ge \rho \text{ and } \bar{S}_{ab}>0\},
+\end{equation}
+where $\bar{S}_{ab}$ is the bootstrap mean affinity. The retained graph is sparse by construction.
+
+\subsection{Reliability-Gated Soft Labels}
+
+For each class $a$, define a gated relation distribution
+\begin{equation}
+ q_a(b)=\frac{\mathbf{1}[b\in G(a)]\exp(\bar{S}_{ab}/\tau_r)}{\sum_{c\in G(a)}\exp(\bar{S}_{ac}/\tau_r)}.
+\end{equation}
+The per-class smoothing mass is reliability-aware:
+\begin{equation}
+ m_a=\min\!\left(m_{\max}, \beta \sum_{b\in G(a)} R_{ab}\max(\bar{S}_{ab},0)\right).
+\end{equation}
+For an example from class $a$, the final target is
+\begin{equation}
+ \tilde{y}_x=(1-m_a)e_a + m_a q_a.
+\end{equation}
+Classes with unstable or empty neighborhoods remain close to one-hot labels; classes with stable neighbors receive more smoothing mass.
+
+\paragraph{Mechanism baseline.}
+\dense uses the same frozen affinities and the same training pipeline, but removes the bootstrap gate and uses dense relation smoothing with a fixed global mass. Comparing \method against \dense isolates whether reliability gating adds value beyond generic soft-label smoothing.
+
+\subsection{Training Objective}
+
+The prediction model $p_\theta(\cdot\mid x)$ is trained with a mixture of hard-label cross-entropy and KL supervision:
+\begin{equation}
+ \mathcal{L}=(1-\lambda)\mathcal{L}_{\mathrm{CE}}(p_\theta,e_a)+\lambda \tau^2 \mathrm{KL}\!\left(\tilde{y}_x \,\|\, p_\theta(\cdot\mid x)\right).
+\end{equation}
+Importantly, \method changes only the supervision targets. It does not introduce an online teacher, pairwise feature matching, or manifold alignment losses.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+We evaluate on Oxford-IIIT Pet and CIFAR-100 under 10-shot and 30-shot class-balanced target splits. For Pet, the saved manifests contain 370 training and 736 validation examples in the 10-shot regime and 1110 training and 736 validation examples in the 30-shot regime. For CIFAR-100, the manifests contain 1000 training and 500 validation examples in the 10-shot regime and 3000 training and 500 validation examples in the 30-shot regime. All settings use the official test split for evaluation and three matched seeds $\{11,22,33\}$.
+
+Every method uses the same DINOv2 ViT-S/14 backbone, input size 224, batch size 128, head learning rate $10^{-3}$, LoRA learning rate $5\times 10^{-4}$, weight decay 0.01, at most 10 epochs, and early stopping patience 2. The trainable parameter count is 63{,}397 on Pet and 87{,}652 on CIFAR-100. Mean runtime per run ranges from 0.55 to 0.70 minutes and mean peak GPU memory is approximately 1.24 GB across all methods. We report top-1 accuracy as the primary metric, with macro-F1, NLL, and ECE as secondary metrics.
+
+The baselines are CE, fixed label smoothing (LS), \dense, BSS \citep{chen2019bss}, and Proxy-FDA-lite, an adapted local-structure preservation baseline run under the same backbone and adaptation budget. Hyperparameters were tuned independently per method and dataset-shot setting using the corresponding validation split.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} shows the main comparison. The strongest baselines are standard CE, BSS, and Proxy-FDA-lite. \method never achieves the best top-1 score in any of the four settings. On Pet, it slightly improves over \dense by 0.13 points at 10-shot and 0.18 points at 30-shot, but still trails CE and BSS. On CIFAR-100, it falls below both \dense and CE.
+
+Across all four settings, the average top-1 difference of \method relative to \dense is only +0.02 points, whereas the average difference relative to CE is -0.49 points. The same pattern appears in macro-F1 and calibration: \method does not recover the accuracy or NLL of the strongest baselines despite its more selective graph construction.
+
+\begin{table*}[t]
+\caption{Top-1 accuracy (\%, mean $\pm$ std over three seeds). Best value in each column is in \textbf{bold}.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Pet 10-shot $\uparrow$ & Pet 30-shot $\uparrow$ & CIFAR-100 10-shot $\uparrow$ & CIFAR-100 30-shot $\uparrow$ \\
+\midrule
+CE & 82.89 $\pm$ 0.63 & 91.23 $\pm$ 0.19 & 65.09 $\pm$ 0.94 & 75.45 $\pm$ 0.88 \\
+LS & 82.58 $\pm$ 0.63 & 90.72 $\pm$ 0.29 & 64.50 $\pm$ 1.20 & 75.31 $\pm$ 0.85 \\
+\dense & 82.43 $\pm$ 0.57 & 90.82 $\pm$ 0.42 & 64.26 $\pm$ 1.23 & 75.09 $\pm$ 0.19 \\
+BSS & \textbf{82.90 $\pm$ 0.56} & \textbf{91.32 $\pm$ 0.20} & 64.91 $\pm$ 1.39 & \textbf{75.67 $\pm$ 0.68} \\
+Proxy-FDA-lite & 82.86 $\pm$ 0.56 & 91.24 $\pm$ 0.15 & \textbf{65.10 $\pm$ 0.93} & 75.46 $\pm$ 0.89 \\
+\method & 82.56 $\pm$ 0.64 & 91.01 $\pm$ 0.22 & 64.12 $\pm$ 1.59 & 75.02 $\pm$ 0.11 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/main_comparison.pdf}
+  \caption{Main comparison across the four dataset-shot settings. The figure mirrors Table~\ref{tab:main}: \method is competitive with \dense on Pet but does not surpass the strongest baselines overall.}
+  \label{fig:main}
+\end{figure}
+
+\subsection{Mechanism Analysis}
+
+The most interesting result is not the final top-1 score, but how strongly the reliability gate reshapes the class graph. Table~\ref{tab:mechanism} compares \dense, a fixed-mass gated variant, and the full \method. The gate reduces graph density from 0.70--0.99 to 0.03--0.08 while increasing mean retained-edge stability from 0.03--0.12 to 0.79--0.94. This is a large and consistent structural change.
+
+However, the accuracy effect remains small. On Pet, adaptive mass offers a minor gain over fixed-mass gating, but on CIFAR-100 the fixed-mass and adaptive variants remain essentially tied and both underperform CE. Figure~\ref{fig:correlation} shows that more stable graphs do correlate with larger \method gains (Pearson $r=0.57$ and Spearman $\rho=0.61$ for \method minus \dense; Pearson $r=0.54$ and Spearman $\rho=0.76$ for \method minus CE), but the sample size is only four dataset-shot settings and the gains themselves are tiny.
+
+\begin{table*}[t]
+\caption{Mechanism study. Top-1 accuracy is reported in \%. Gating makes the graph far sparser and more stable, but only weakly changes accuracy.}
+\label{tab:mechanism}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Setting & DenseRel top-1 $\uparrow$ & Fixed-mass gated $\uparrow$ & STRIDE $\uparrow$ & DenseRel density & STRIDE density & STRIDE stability \\
+\midrule
+Pet 10-shot & 82.43 & 82.50 & 82.56 & 0.723 & 0.080 & 0.890 \\
+Pet 30-shot & 90.82 & 90.97 & 91.01 & 0.703 & 0.077 & 0.939 \\
+CIFAR-100 10-shot & 64.26 & 64.19 & 64.12 & 0.990 & 0.026 & 0.794 \\
+CIFAR-100 30-shot & 75.09 & 74.92 & 75.02 & 0.990 & 0.028 & 0.858 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/stability_correlation.pdf}
+  \caption{Relationship between graph stability and \method gains. The trend is positive, but the absolute gains remain small and the analysis is based on four dataset-shot settings.}
+  \label{fig:correlation}
+\end{figure}
+
+\subsection{Ablations}
+
+We ran two additional ablations. First, replacing the adaptive smoothing mass with a fixed mass produces nearly identical behavior, which suggests that edge selection matters more than the adaptive mass formula itself. Second, augmenting the affinity with a neighborhood-overlap term hurts accuracy in both tested 10-shot settings: on Pet it drops top-1 from 82.56 to 81.35, and on CIFAR-100 it drops from 64.12 to 62.03. In this budget, the simplest prototype-only affinity works better.
+
+We also sweep the retention threshold $\rho$ on Pet 10-shot. Figure~\ref{fig:rho} shows that the best result among $\rho\in\{0.5,0.7,0.9\}$ is $\rho=0.5$ at 81.58\%, with performance decreasing to 81.17\% at $\rho=0.7$ and 81.04\% at $\rho=0.9$. Higher thresholds therefore increase conservatism without improving accuracy in this setting.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{figures/pet10_rho_sweep.pdf}
+  \caption{Retention-threshold sweep on Oxford-IIIT Pet 10-shot. The most permissive tested gate, $\rho=0.5$, gives the highest mean top-1 accuracy in this ablation.}
+  \label{fig:rho}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The experiments support a clear but modest claim: bootstrap stability is a meaningful diagnostic for target-class relations in frozen self-supervised features. The retained graphs are much sparser and far more stable than the dense relation graph, and the positive stability-gain correlation suggests the gating signal is not arbitrary. What fails is the stronger claim that this signal, by itself, is enough to improve low-shot transfer accuracy against strong baselines. Under the predefined success criteria saved with the experiment summary, the outcome is therefore mixed: the correlation criteria are satisfied, but the accuracy criteria are not.
+
+There are several plausible reasons. First, class-level label smoothing may simply be too weak a control mechanism once the backbone is already strong and adaptation is lightweight. Second, the retained graph is computed once from frozen features; it never updates as the classifier changes. Third, the study covers only four dataset-shot settings and three seeds, so it is best interpreted as preliminary evidence rather than a definitive verdict on reliability-gated supervision.
+
+This paper also has important implementation-scope limitations. Proxy-FDA-lite is an adapted baseline rather than a paper-faithful reproduction of full Proxy-FDA. We did not test larger backbones, larger shot counts, source-supervised relation transfer, or online graph updates. The positive correlations should therefore not be over-interpreted. They show that graph stability tracks relative performance weakly, not that it guarantees an accuracy gain.
+
+\section{Conclusion}
+
+We studied whether bootstrap-reliable target-class relations can improve low-shot transfer with a self-supervised vision backbone. \method implements this idea with a frozen class graph, a bootstrap reliability gate, and reliability-aware soft labels for lightweight DINOv2 fine-tuning.
+
+The resulting evidence is mixed. \method substantially improves the \emph{quality} of the class graph: retained-edge stability rises from 0.03--0.12 for dense relation smoothing to 0.79--0.94, and graph density falls from 0.70--0.99 to 0.03--0.08. But these cleaner graphs do not convert into better final accuracy. Averaged over Oxford-IIIT Pet and CIFAR-100 at 10-shot and 30-shot, \method is essentially tied with matched dense relation smoothing and remains below CE, BSS, and Proxy-FDA-lite.
+
+The broader implication is that target-class relation reliability is measurable and interpretable, but class-level label smoothing alone is not enough to deliver a robust transfer gain in this regime. A stronger next step is to combine reliability gating with online feature-space preservation or dynamic graph updates rather than treating the frozen graph as the full adaptation signal.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

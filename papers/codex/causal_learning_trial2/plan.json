@@ -1,0 +1,94 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "CPU-only benchmark setup",
+    "description": "Configure a deterministic CPU-only environment for an empirical study of stopping-certificate calibration in active causal discovery, explicitly scoped to 2 CPU cores, 128 GB RAM, 0 GPUs, and about 8 hours total wall-clock time.",
+    "steps": {
+      "step1": "Use Python 3.11 with CPU-safe dependencies only: numpy, scipy, pandas, networkx, scikit-learn, statsmodels, matplotlib, seaborn, joblib, tqdm, pyyaml, and one Gaussian causal-discovery package that provides GES or FGES. Do not install PyTorch, JAX, TensorFlow, CUDA packages, or any neural causal-discovery library.",
+      "step2": "Pin each numerical backend to a single thread by exporting OMP_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, and NUMEXPR_NUM_THREADS=1. Schedule exactly 2 CPU workers in parallel and 0 GPU workers, since no GPUs are available.",
+      "step3": "Fix benchmark seeds to [11, 22, 33] and auxiliary calibration seeds to [101, 202, 303]. Reuse the same per-instance seed across PACER-Cert, PACER-no-D, random active, GIT, and AOED-lite for SCM generation, observational data, intervention replay, bootstrap resampling, and any randomized policy steps.",
+      "step4": "Create artifact directories for configs, SCM definitions, rollout logs, saved decision states, calibration tuples, edge-level certificate tables, aggregate summaries, runtime logs, and figures. Every record must include method, graph family, node count, weight regime, seed, cumulative samples, stop flag, unused budget, runtime_seconds, SHD, directed precision, directed recall, directed F1, and all calibration metrics.",
+      "step5": "Reserve the wall-clock budget as follows: 30 minutes for environment setup and smoke tests, 45 minutes for pilot profiling and threshold tuning, about 4.5 hours for the 24-instance core benchmark, about 1.5 hours for calibration and direct-lookahead diagnostics, and about 45 minutes for aggregation and visualization. If the pilot exceeds budget, prune optional robustness checks before reducing any mandatory baseline or seed."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Shared synthetic benchmark grid",
+    "description": "Construct one consistent synthetic benchmark matching the proposal's narrow claim: linear-Gaussian SEMs, perfect single-node interventions, small observational warm start, and limited interventional budgets.",
+    "steps": {
+      "step1": "Generate synthetic DAGs with node count p in {10, 15} and graph family in {Erdos-Renyi, scale-free}. For Erdos-Renyi, use expected degree 2 under a random topological order. For scale-free, sample a preferential-attachment skeleton and orient edges according to a random topological order.",
+      "step2": "Use two edge-strength regimes. Weak regime: absolute edge weights sampled uniformly from [0.10, 0.25]. Mixed regime: sample each edge from [0.10, 0.25] with probability 0.5 and from [0.40, 0.80] otherwise. Assign edge signs uniformly from {-1, +1} and sample noise variances independently from Uniform[0.5, 1.5].",
+      "step3": "For each combination of p, graph family, weight regime, and seed in [11, 22, 33], draw one SCM and sample n_obs=200 observational examples. This yields exactly 2 x 2 x 2 x 3 = 24 benchmark instances. Use this same 24-instance grid for all mandatory methods and ablations.",
+      "step4": "Restrict interventions to perfect single-node interventions. Allow batch sizes m in {25, 50, 100} and total interventional budget B=300 samples. Pre-generate intervention replay streams for every node, batch size, and seed so all methods consume matched data for matched actions and sample counts.",
+      "step5": "Standardize variables using observational mean and standard deviation only, then reuse that transform for all interventional batches. Store the true DAG, weighted adjacency matrix, topological order, observational dataset, and node-wise intervention simulator for each instance.",
+      "step6": "Create an auxiliary calibration set with p=8, both graph families, both weight regimes, and seeds [101, 202, 303], giving 12 additional SCMs. Use these only for saved-state calibration, stopping-label estimation, and direct-lookahead diagnostics, not for headline discovery comparisons."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Mandatory comparison methods",
+    "description": "Compare PACER-Cert against one simple floor, one simple active baseline, one strong lightweight baseline, and one mandatory stopping baseline that preserves the proposal's positioning against prior work on active discovery with termination.",
+    "steps": {
+      "step1": "Method 1, FGES-only: run FGES once on the observational warm start with no interventions and evaluate the resulting CPDAG after standard orientation propagation. This is the non-adaptive floor.",
+      "step2": "Method 2, random active: choose the intervention target uniformly at random each round, use fixed batch size m=50, and spend the full budget B=300 with no early stopping. Refit the same Gaussian discovery backend after each batch. This is the simple active baseline.",
+      "step3": "Method 3, GIT: implement or adapt the gradient-based intervention targeting heuristic for the linear-Gaussian single-node setting, using the same action menu, observational warm start, and budget as PACER-Cert. Use this as the strong lightweight non-stopping baseline.",
+      "step4": "Method 4, AOED-lite: implement a CPU-feasible approximation of AOED that preserves its essential design axes. Use the same capped particle set as PACER-Cert for uncertainty representation, score actions by Bayesian expected posterior entropy reduction over graph particles, and stop when either posterior graph confidence exceeds tau_stop in {0.80, 0.90} or the expected gain per sample drops below eta_stop in {0.002, 0.005}. Tune tau_stop and eta_stop on four auxiliary pilot instances, then freeze them. AOED-lite is mandatory because the paper is about stopping behavior and must contrast PACER-Cert directly against an adaptive online design method with termination.",
+      "step5": "Method 5, PACER-no-D: keep PACER-Cert's particle construction, ambiguity accounting, and stopping scaffold, but set D(e | I,m)=1 for every edge and action. This is the primary internal ablation baseline for testing whether detectability matters.",
+      "step6": "Run all five mandatory methods on the same 24-instance benchmark with identical observational samples, intervention replay streams, batch-size menu, budget, checkpoint schedule, and seeds. Treat Sample Efficient Bayesian Learning and Bayesian Intervention Optimization as conceptual novelty blockers that are addressed in the written positioning, not as required implementations under the 8-hour CPU budget."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "PACER-Cert as a calibration study target",
+    "description": "Evaluate PACER-Cert explicitly as a lightweight heuristic whose value is judged by stopping-certificate calibration, decision usefulness, and trustworthy behavior under strict CPU constraints rather than by a broad new-method claim.",
+    "steps": {
+      "step1": "Initialize PACER-Cert from observational data by drawing B_boot=24 bootstrap resamples, running FGES on each resample, sampling up to R=3 DAG extensions per CPDAG, deduplicating the result, and retaining at most M=24 DAG particles after BIC-style scoring on accumulated observational and interventional data.",
+      "step2": "Fit each particle's linear-Gaussian SEM parameters by ordinary least squares under mutilated-graph intervention semantics. Normalize particle weights after each update. If effective sample size drops below 4, rejuvenate once using local edge add, delete, or reverse proposals around top-weight particles and recap the set at M=24.",
+      "step3": "For each unordered pair e={u,v}, compute edge-state probabilities p_fwd, p_rev, and p_0, then define ambiguity A(e)=H(p_fwd,p_rev,p_0)/log(3) and eliminable mass R(e)=1-(p_fwd^2+p_rev^2+p_0^2). Restrict detailed surrogate computation to pairs with A(e) >= 0.15.",
+      "step4": "For each candidate action (I,m), compute D(e | I,m) by constructing a local rival graph for each ambiguous edge, restricting to endpoints plus their non-intervened Markov blanket neighborhood, estimating the local interventional Gaussian KL divergence, forming lambda=2m*KL, and mapping lambda to chi-square test power at alpha=0.05. Average power across unresolved particles using renormalized edge-conditional weights.",
+      "step5": "Use Score(I,m)=(1/m) times the sum over ambiguous edges of A(e)R(e)D(e | I,m) to select the next action. Checkpoint metrics at cumulative interventional samples 0, 50, 100, 150, 200, 250, and 300.",
+      "step6": "Compute q_e(B_rem)=max over allowed remaining actions of D(e | I,m) and C(B_rem)=sum over ambiguous edges of A(e)R(e)q_e(B_rem). Stop when C(B_rem) < epsilon_stop, with epsilon_stop tuned over {0.20, 0.30, 0.40} on four auxiliary pilot instances and then frozen.",
+      "step7": "At every checkpoint and stop point, save an edge-level certificate table containing p_fwd, p_rev, p_0, A(e), R(e), q_e(B_rem), the best candidate remaining action, a low-trust flag when effective sample size is below 4 or local neighborhood size exceeds 6, and an unlikely-to-resolve-under-budget flag when q_e(B_rem) < 0.35. This table is a required artifact because the paper's core claim is about certificate calibration and interpretability."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Calibration, trust diagnostics, and falsification",
+    "description": "Probe whether the local KL-to-power surrogate is informative enough to justify stopping, identify when it should not be trusted, and include one explicit falsification test against direct Monte Carlo lookahead on a tiny subset.",
+    "steps": {
+      "step1": "Calibration study: on the 12 auxiliary p=8 SCMs, collect 48 saved decision states total, stratified across early, middle, and late budget phases, from random active, GIT, AOED-lite, PACER-no-D, and PACER-Cert. From each state evaluate at most 2 ambiguous edges and at most 3 candidate actions, yielding about 220 to 260 (state, edge, action) tuples.",
+      "step2": "For each calibration tuple, estimate empirical resolvability using 40 continuation simulations from the true SCM. Apply the candidate intervention once, update the particle set once, and record the fraction of continuations for which the correct edge state becomes the top-probability edge state after the update. Compare this frequency directly to D(e | I,m).",
+      "step3": "Stopping-certificate study: for each saved PACER-Cert state, define oracle edge label y*_e(B_rem)=1 if at least one allowed remaining action resolves the correct edge state with empirical probability at least 0.8 under 40 continuation simulations. Compare q_e(B_rem) to y*_e(B_rem) edge by edge.",
+      "step4": "Trust diagnostic: stratify calibration errors by particle effective sample size, local neighborhood size, graph family, and edge-strength regime. Predeclare the surrogate as locally trustworthy only if within a stratum it has positive Spearman rank correlation with empirical resolvability, mean absolute error at most 0.15, and no concentration of overconfident errors above 0.25 among low-ESS states. If any criterion fails, report that stratum as a certificate failure regime rather than smoothing it away.",
+      "step5": "Direct-lookahead falsification ablation: on 6 auxiliary saved states sampled from weak p=8 instances, replace D(e | I,m) with direct Monte Carlo lookahead over the same candidate actions using 40 continuations per action and compare action rankings and stop-versus-continue decisions against the surrogate. This subset is intentionally tiny and exists only to test whether the certificate is informative rather than merely correlated with ambiguity.",
+      "step6": "Run three mandatory benchmark ablations on the 24-instance core grid: Ablation A is PACER-no-D, which removes detectability from action scoring; Ablation B fixes batch size to m=50 while keeping detectability-aware target choice and stopping, testing whether adaptive batch size matters; Ablation C disables early stopping and forces PACER-Cert to spend the full budget, testing whether stopping saves budget without hidden regret."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Metrics and success criteria",
+    "description": "Measure discovery quality, stopping efficiency, calibration, trustworthiness, and runtime with success criteria aligned to the benchmark-and-analysis framing rather than a claim of a fundamentally new method.",
+    "steps": {
+      "step1": "Report structural metrics at each checkpoint and at stop time: SHD, directed precision, directed recall, directed F1, number of correctly oriented true edges, number of unresolved true adjacencies, and area under directed-F1-versus-samples. Treat undirected predicted adjacencies as unresolved rather than wrongly oriented.",
+      "step2": "Report stopping and budget metrics: stop rate before B=300, unused budget at stop, directed F1 at 200 samples, final directed F1 at stop, and post-stop regret defined as the difference between PACER-Cert stopped performance and the same rollout forced to continue to the full budget.",
+      "step3": "Report calibration metrics for D(e | I,m) and q_e(B_rem): AUROC, AUPRC, Brier score, expected calibration error with 10 bins, mean absolute calibration error, and Spearman rank correlation against empirical resolvability or oracle edge-resolvability labels. Also report the same calibration metrics for PACER-no-D using its induced q_e baseline to test whether detectability improves actual certificate quality.",
+      "step4": "Report trust-diagnostic outputs: calibration metrics stratified by effective sample size bucket, local neighborhood size bucket, weak versus mixed regime, and graph family. Count the fraction of states flagged as low-trust and the false-positive rate among those flags.",
+      "step5": "Report compute metrics: runtime_seconds per rollout, median and 90th percentile runtime by method, and peak resident memory if available. The CPU-feasibility claim is supported only if median PACER-Cert runtime on p=15 stays below 120 seconds, median AOED-lite runtime on p=15 stays below 150 seconds, and the full study completes within about 8 wall-clock hours using 2 CPU workers.",
+      "step6": "Use paired per-instance comparisons across the 24 benchmark instances for PACER-Cert versus random active, GIT, AOED-lite, and PACER-no-D. Report mean paired difference, median paired difference, 95 percent bootstrap confidence intervals with 2000 resamples, and Wilcoxon signed-rank p-values for directed-F1 area under curve, final directed F1, SHD, unused budget, post-stop regret, and runtime.",
+      "step7": "Treat the weak-edge regime across both graph families and both node counts as the primary claim-testing slice. Support the main benchmark claim only if all of the following hold: PACER-Cert beats PACER-no-D on Brier score and AUROC for q_e(B_rem), D(e | I,m) has positive rank correlation and mean absolute error at most 0.15 against empirical resolvability, the direct-lookahead ablation agrees with the surrogate on a majority of action rankings or stop decisions, and on weak-edge settings PACER-Cert stops earlier than AOED-lite or GIT while losing at most 0.02 absolute directed F1 relative to the corresponding forced-full-budget PACER-Cert run. If these conditions fail, score the outcome as a negative or purely descriptive benchmark result rather than a validated stopping heuristic."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Figures, tables, and run order",
+    "description": "Produce paper-ready outputs centered on calibration and stopping behavior, and define an execution order that respects the 2-core, no-GPU budget.",
+    "steps": {
+      "step1": "Run a pilot on one p=15 weak Erdos-Renyi instance for PACER-Cert, PACER-no-D, GIT, and AOED-lite. If PACER-Cert exceeds 120 seconds or AOED-lite exceeds 150 seconds, reduce both PACER-Cert and AOED-lite to the same candidate-target shortlist of at most 4 nodes per round, chosen by highest current endpoint ambiguity mass, and retime before launching the full study.",
+      "step2": "After the pilot, tune epsilon_stop for PACER-Cert and tau_stop or eta_stop for AOED-lite on four auxiliary pilot instances only, then freeze all thresholds before the 24-instance benchmark. Do not tune on the main benchmark instances.",
+      "step3": "Launch the core schedule next: 24 instances x 5 mandatory methods = 120 rollouts, plus 24 forced-full-budget PACER-Cert runs for post-stop regret, plus 24 fixed-batch PACER-Cert runs for Ablation B. Run these with 2 CPU workers. Then launch the auxiliary calibration suite with 48 saved states, 40 continuations per tuple, and the 6-state direct-lookahead ablation.",
+      "step4": "If runtime pressure remains after the pilot, prune only in this order: drop any optional qualitative extras, reduce saved calibration states from 48 to 36, then reduce the direct-lookahead subset from 6 states to 4 states. Do not reduce the 24-instance benchmark, the 3 seeds, the 40-continuation calibration standard, or the mandatory AOED-lite baseline.",
+      "step5": "Produce Figure 1 as directed F1 versus interventional samples for PACER-Cert, PACER-no-D, AOED-lite, GIT, random active, and FGES-only on the weak regime. Produce Figure 2 as reliability diagrams and scatter plots of D(e | I,m) versus empirical resolvability. Produce Figure 3 as unused budget versus post-stop regret, annotated by method. Produce Figure 4 as calibration broken out by trust strata such as ESS bucket and neighborhood size. Produce Table 1 with aggregate benchmark metrics and Table 2 with runtime and calibration summary statistics.",
+      "step6": "Export aggregate tables as both CSV and Markdown, export figures as PNG and PDF, and save one appendix artifact showing an edge-level PACER-Cert certificate table at a stop decision together with the corresponding empirical 40-continuation oracle labels for that same state."
+    }
+  }
+]

@@ -1,0 +1,219 @@
+{
+  "title": "UniSched: Proactive Cross-NUMA Scheduling for CXL Memory via sched_ext",
+  "description": "A deployable, kernel-modification-free CPU scheduling framework for CXL memory systems using Linux's sched_ext. Unlike Tiresias (ACM TURC 2024) which requires kernel modifications for PTSR and uses reactive page-fault-driven migration, UniSched uses proactive PMU-based profiling and BPF-based scheduling decisions that can be deployed without kernel patches on any Linux 6.12+ system.",
+  "motivation": "Tiresias (ACM TURC 2024) recently demonstrated the value of CXL-aware CPU scheduling but requires kernel modifications for page-table self-replication (PTSR) and uses reactive page-fault-based thread migration. Meanwhile, Linux 6.12 merged sched_ext, enabling custom schedulers as BPF programs. This creates an opportunity to achieve comparable CXL-aware scheduling benefits without kernel modifications, using proactive PMU-based profiling instead of reactive page faults. AutoNUMA, the current production NUMA scheduler, predates CXL and lacks explicit CXL topology awareness. Deployability is critical for cloud environments where kernel modifications are impractical.",
+  "proposed_approach": "Build UniSched on three components: (1) Topology discovery enumerating memory tiers (DRAM vs CXL-local vs CXL-remote) and characterizing latency/bandwidth; (2) Proactive per-task memory profiling using Intel PEBS/AMD IBS at ~1% sampling frequency to classify tasks by access patterns, with mandatory pre-experiment overhead validation (must be <3%); (3) BPF-based scheduling algorithm in sched_ext that scores CPU candidates based on compute load + memory efficiency + migration cost. Due to kernel version constraint (6.8.0 available vs 6.12+ required), experiments use discrete-event simulation calibrated with real hardware PMU measurements. Unlike Tiresias's kernel-modified PTSR approach, UniSched uses standard sched_ext hooks and coordinates memory placement via userspace move_pages().",
+  "hypothesis": "A proactive, PMU-driven cross-NUMA scheduler built on sched_ext can achieve comparable or better performance than kernel-modification-based approaches (e.g., Tiresias) and AutoNUMA, while being deployable without kernel patches and introducing less than 3% scheduling overhead.",
+  "success_criteria": {
+    "confirming": [
+      "PMU profiling overhead ≤ 3% validated on real hardware",
+      "≥5% throughput improvement on 3+ benchmark applications compared to EEVDF+AutoNUMA baseline",
+      "≥10% improvement in CXL memory bandwidth utilization through better load balancing",
+      "Fairness index (Jain's) remains above 0.85 under competitive workloads",
+      "Deployable without kernel modifications on stock Linux 6.12+"
+    ],
+    "refuting": [
+      "PMU overhead exceeds 5% on real hardware",
+      "Performance improvement <3% across all benchmarks",
+      "Severe fairness degradation (Jain's index <0.7)",
+      "Simulation results diverge significantly from expected hardware behavior"
+    ]
+  },
+  "related_work": [
+    {
+      "title": "Tiresias: Optimizing NUMA Performance with CXL Memory and Locality-Aware Process Scheduling",
+      "authors": "Wenda Tang, Tianxiang Ai, Jie Wu",
+      "venue": "ACM TURC",
+      "year": 2024,
+      "differentiation": "Tiresias uses reactive page-fault-driven migration with kernel-modified PTSR (page-table self-replication). UniSched uses proactive PMU-based profiling with sched_ext BPF (no kernel modifications required). Tiresias requires kernel patches; UniSched is deployable on stock Linux 6.12+. Both address cross-NUMA scheduling but with different mechanisms."
+    },
+    {
+      "title": "CXLAimPod: CXL Memory is all you need in AI era",
+      "authors": "Yiwei Yang, Yusheng Zheng, et al.",
+      "venue": "arXiv",
+      "year": 2025,
+      "differentiation": "CXLAimPod focuses on intra-node duplex optimization for read-write balancing within a single NUMA node. UniSched addresses inter-node cross-NUMA placement. These are complementary approaches at different levels: UniSched decides which NUMA node, CXLAimPod optimizes within that node."
+    },
+    {
+      "title": "ghOSt: Fast & Flexible User-Space Delegation of Linux Scheduling",
+      "authors": "Jack Tigar Humphries, Neel Natu, et al.",
+      "venue": "SOSP",
+      "year": 2021,
+      "differentiation": "ghOSt delegates scheduling to user-space agents for flexibility but introduces higher overhead. UniSched stays in-kernel via BPF for lower overhead and focuses specifically on memory topology awareness."
+    },
+    {
+      "title": "sched_ext: BPF extensible scheduler class",
+      "authors": "Tejun Heo, David Vernet, et al.",
+      "venue": "Linux kernel 6.12",
+      "year": 2024,
+      "differentiation": "sched_ext is the foundation for our work. Existing sched_ext schedulers (scx_lavd, scx_bpfland) focus on latency/interactivity heuristics but don't address memory topology. UniSched extends sched_ext with CXL-aware memory topology optimization."
+    },
+    {
+      "title": "Pond: CXL-Based Memory Pooling Systems for Cloud Platforms",
+      "authors": "Huaicheng Li, Daniel S. Berger, et al.",
+      "venue": "ASPLOS",
+      "year": 2023,
+      "differentiation": "Pond addresses CXL memory allocation and VM placement at the cloud level. UniSched addresses CPU scheduling within a single machine, complementing Pond's memory allocation decisions."
+    },
+    {
+      "title": "TPP: Transparent Page Placement for CXL-Enabled Tiered-Memory",
+      "authors": "Hasan Al Maruf, Hao Wang, et al.",
+      "venue": "ASPLOS",
+      "year": 2023,
+      "differentiation": "TPP focuses on OS-level page migration between DRAM and CXL. UniSched coordinates CPU scheduling with page placement and can drive TPP's migration decisions via hints."
+    },
+    {
+      "title": "NOMAD: Non-Exclusive Memory Tiering via Transactional Page Migration",
+      "authors": "Lingfeng Xiang, Zhenlin Liu, et al.",
+      "venue": "OSDI",
+      "year": 2024,
+      "differentiation": "NOMAD is a page placement/migration system. UniSched addresses the CPU scheduling side, which runs concurrently with page placement decisions."
+    },
+    {
+      "title": "Tiered Memory Management: Access Latency is the Key!",
+      "authors": "Midhul Vuppalapati, Rachit Agarwal",
+      "venue": "SOSP",
+      "year": 2024,
+      "differentiation": "This work introduces Colloid, balancing access latencies across tiers. UniSched's memory scoring function applies similar latency-balancing principles to CPU placement decisions."
+    },
+    {
+      "title": "AutoNUMA: Automatic NUMA balancing",
+      "authors": "Andrea Arcangeli, et al.",
+      "venue": "Linux kernel",
+      "year": 2012,
+      "differentiation": "AutoNUMA is the production Linux NUMA scheduler. It uses reactive page access sampling and migration. UniSched uses proactive PMU-based profiling and explicit CXL topology awareness. AutoNUMA predates CXL and lacks CXL-specific optimizations."
+    }
+  ],
+  "experiments": {
+    "setup": {
+      "hardware": "x86_64 server with 2 sockets, 32+ cores, 256+ GB DRAM. Linux kernel 6.8.0 (sched_ext requires 6.12+).",
+      "software": "Discrete-event simulation (Python-based) calibrated with real hardware PMU measurements. eBPF prototypes for validation.",
+      "approach": "Simulation-based due to kernel version constraint (6.8.0 vs 6.12+). Simulator calibrated with real hardware PMU overhead measurements."
+    },
+    "pre_experiment_validation": {
+      "pmu_overhead_gate": "CRITICAL: Measure PEBS/IBS overhead on real hardware before simulation. If overhead > 3%, approach may not be viable.",
+      "validation_steps": [
+        "Run STREAM benchmark without PMU profiling → baseline",
+        "Run with PEBS sampling at 0.5%, 1%, 2% frequencies",
+        "Calculate overhead percentage",
+        "Gate: Proceed only if overhead ≤ 3%"
+      ]
+    },
+    "benchmarks": [
+      "STREAM - memory bandwidth with varying read/write ratios",
+      "Random Access - pointer-chasing for latency sensitivity",
+      "Redis/YCSB - key-value store with memory-intensive patterns",
+      "GAPBS (PageRank, BFS) - graph analytics exceeding local DRAM",
+      "Memcached - latency-sensitive in-memory cache",
+      "SPEC CPU2017 - general compute with varying memory footprints"
+    ],
+    "baselines": [
+      "Linux EEVDF (default scheduler)",
+      "EEVDF + AutoNUMA (CRITICAL BASELINE - production NUMA scheduler)",
+      "Tiresias-like reactive page-fault scheduler (simulated)",
+      "scx_bpfland - sched_ext scheduler optimized for throughput (simulated)",
+      "scx_lavd - sched_ext scheduler optimized for latency (simulated)",
+      "UniSched variants: topology-only, profiling-only, full system"
+    ],
+    "metrics": [
+      "Application throughput (ops/sec)",
+      "Tail latency (p50, p95, p99)",
+      "Memory bandwidth utilization per tier",
+      "Scheduling overhead (cycles per schedule)",
+      "Task migration frequency and latency",
+      "Fairness (Jain's index)",
+      "Deployability: kernel code modified (target: 0 lines)",
+      "PMU profiling overhead (validated on real hardware)"
+    ],
+    "ablation_studies": [
+      "Baseline (no topology awareness) - standard EEVDF",
+      "EEVDF + AutoNUMA (production baseline)",
+      "Topology awareness only (no per-task profiling, uses aggregate stats)",
+      "Profiling only (standard load balancing)",
+      "Full UniSched (topology + profiling)",
+      "Without memory coordination"
+    ],
+    "simulation_limitations_explicitly_acknowledged": [
+      "CXL protocol-level overheads not captured (simulation uses parameterized latency/bandwidth)",
+      "Real contention behavior at link level is approximated via queuing models",
+      "sched_ext BPF verifier limitations not captured in simulation",
+      "Cache warmth and TLB effects are modeled heuristically"
+    ]
+  },
+  "novelty_claim": "UniSched is the first deployable, kernel-modification-free cross-NUMA scheduler for CXL memory using sched_ext. While Tiresias (ACM TURC 2024) requires kernel modifications for PTSR and uses reactive page-fault-driven migration, UniSched achieves CXL-aware scheduling through proactive PMU-based profiling and BPF programs that can be loaded on any Linux 6.12+ system without patches. Unlike CXLAimPod (which focuses on intra-node duplex optimization), UniSched addresses inter-node cross-NUMA placement. The technical contribution is demonstrating that comparable CXL-aware scheduling benefits can be achieved through modern kernel extensibility mechanisms rather than kernel modifications, and that proactive PMU-based profiling can outperform reactive approaches like AutoNUMA.",
+  "tiresias_comparison": {
+    "tiresias_approach": "Kernel-modified PTSR with reactive page-fault-driven thread migration",
+    "unisched_approach": "sched_ext BPF with proactive PMU-based profiling and scheduling",
+    "key_distinctions": [
+      "Deployment: Tiresias requires kernel modifications; UniSched deployable on stock Linux 6.12+",
+      "Migration trigger: Tiresias is reactive (page faults); UniSched is proactive (PMU sampling)",
+      "Mechanism: Tiresias uses PTSR; UniSched uses standard sched_ext hooks",
+      "Memory coordination: Tiresias uses kernel-internal migration; UniSched uses userspace move_pages()",
+      "Scope: Both address cross-NUMA scheduling but with fundamentally different mechanisms"
+    ],
+    "trade_off": "Tiresias's deep kernel integration may achieve lower overhead for some operations; UniSched offers deployability and faster iteration without kernel patches"
+  },
+  "cxlaimpod_distinction": {
+    "cxlaimpod_focus": "Intra-node duplex channel exploitation for read-write balancing within a single NUMA node",
+    "unisched_focus": "Cross-NUMA topology-aware placement based on memory tier characteristics",
+    "relationship": "Complementary - CXLAimPod optimizes within a node (after NUMA placement decision), UniSched optimizes across nodes (deciding which NUMA node)",
+    "explicit_difference": "CXLAimPod: 'Which tasks to co-schedule on the same CPUs to balance read/write traffic?' UniSched: 'Which NUMA node should this task run on given its memory access pattern?'"
+  },
+  "autonuma_comparison": {
+    "autonuma_approach": "Reactive page access sampling with CPU-follows-memory / memory-follows-CPU migration",
+    "unisched_approach": "Proactive PMU-based profiling with unified scoring for CPU placement",
+    "key_distinctions": [
+      "Information source: AutoNUMA uses software page sampling; UniSched uses hardware PMU (PEBS/IBS)",
+      "Timing: AutoNUMA is reactive (periodic scans); UniSched is proactive (continuous PMU sampling)",
+      "CXL awareness: AutoNUMA predates CXL; UniSched explicitly models CXL latency/bandwidth",
+      "Production status: AutoNUMA is production Linux; UniSched targets sched_ext for deployability"
+    ]
+  },
+  "feasibility": "The project is feasible within the 8-hour experimental budget: (1) Pre-experiment PMU overhead validation (1 hour) is a critical gate; (2) Discrete-event simulation allows controlled experiments without requiring kernel 6.12+; (3) Simulator is calibrated with real hardware measurements; (4) All experiments run on CPU without GPU requirements; (5) Explicit acknowledgment of simulation limitations maintains scientific integrity.",
+  "hardware_validation": {
+    "required_features": [
+      "PMU Support: Intel PEBS (Sandy Bridge+) or AMD IBS (Family 10h+)",
+      "Root Access: Required for perf_event_open() with PEBS/IBS",
+      "Kernel: Linux 6.8.0 available (sched_ext requires 6.12+)"
+    ],
+    "validation_steps": [
+      "CRITICAL FIRST STEP: Measure PMU profiling overhead on real hardware",
+      "Check PMU availability: grep -E 'pebs|ibs' /proc/cpuinfo",
+      "Test PMU access: perf record -e mem-loads as root",
+      "Validate overhead budget: Must be <3% to proceed",
+      "Calibrate simulator using real memory latency/bandwidth measurements"
+    ],
+    "cxl_hardware_statement": "Experiments use discrete-event simulation calibrated with real hardware PMU measurements. CXL characteristics are simulated via parameterized latency/bandwidth models. This limitation is explicitly acknowledged in all results."
+  },
+  "simulation_approach": {
+    "justification": "Kernel 6.8.0 available; sched_ext requires 6.12+. Given 8-hour budget, kernel upgrade and real sched_ext implementation is not feasible.",
+    "methodology": "Discrete-event simulation (Python/SimPy) modeling task scheduling events, memory access patterns, and NUMA topology",
+    "calibration": "Simulator parameters (latency, bandwidth, overhead) calibrated using real hardware PMU measurements",
+    "limitations_explicitly_acknowledged": [
+      "Cannot capture actual CXL protocol handshaking delays",
+      "Real contention behavior approximated via queuing models",
+      "BPF verifier constraints not captured",
+      "Cache warmth/TLB effects modeled heuristically"
+    ]
+  },
+  "timeline": {
+    "budget": "8 hours total",
+    "phases": [
+      "Phase 1 (1h): CRITICAL - PMU overhead validation on real hardware. Gate: overhead must be <3%",
+      "Phase 2 (1.5h): Topology discovery, memory characterization, simulator framework",
+      "Phase 3 (2h): Baseline schedulers (EEVDF, AutoNUMA, Tiresias-like) in simulator",
+      "Phase 4 (2h): UniSched implementation, benchmark evaluation",
+      "Phase 5 (1.5h): Ablation studies, results analysis, limitation documentation"
+    ]
+  },
+  "time_budget": "8 hours",
+  "autonuma_coordination": {
+    "limitations": [
+      "Kernel does NOT expose stable API for external schedulers to directly influence AutoNUMA migration decisions",
+      "AutoNUMA's task_numa_work() and migration logic are internal to kernel",
+      "sched_ext BPF programs cannot directly inject hints into AutoNUMA's decision-making"
+    ],
+    "feasible_approach": "Indirect coordination via userspace: BPF scheduler exports stats to userspace via BPF maps, userspace daemon issues move_pages() syscalls for proactive migration. This adds latency but is the only viable approach without kernel patches.",
+    "alternative": "Bypass AutoNUMA entirely and use move_pages() directly for high-value migrations (higher overhead but more control)"
+  }
+}

@@ -1,0 +1,255 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify environment",
+    "description": "Set up the Python environment with all required packages for causal discovery, diagnostics, evaluation, and real-world benchmark loading. Verify that key algorithms run on CPU.",
+    "steps": {
+      "step1": "Install core packages: pip install causal-learn numpy scipy scikit-learn pandas matplotlib seaborn statsmodels networkx pgmpy",
+      "step2": "Install py-tetrad for BOSS: pip install JPype1 py-tetrad (requires Java 17+; verify with java -version). If Java is unavailable, install openjdk-17-jre. If py-tetrad still fails, fall back to causal-learn's GRaSP as the permutation-based method.",
+      "step3": "Install bnlearn or pgmpy for loading standard Bayesian network benchmarks (Sachs, Child, Alarm): pip install bnlearn. Verify by loading the Sachs network structure.",
+      "step4": "Create project directory structure: mkdir -p src data/{tuning,test,real_world,validation} results/{baselines,aacd,tuning,ablations,figures,tables} logs",
+      "step5": "Write and run a smoke test: generate a 5-variable linear-Gaussian DAG (n=500), run PC, GES, DirectLiNGAM from causal-learn and BOSS/GRaSP. Verify each returns a valid adjacency matrix. Fix any import or dependency issues.",
+      "step6": "Create src/config.py with: RANDOM_SEEDS = list(range(10)), TUNING_SEEDS = list(range(10000, 10030)), DATA_TYPES = ['HLG', 'HLNG', 'HNL', 'HM', 'SH', 'NU'], P_VALUES_FULL = [10, 20], P_VALUES_TARGETED = [50], EXPECTED_DEGREE = 3, SAMPLE_SIZES = [500, 1000, 5000], ALGORITHM_TIMEOUT_SEC = 300, N_BOOTSTRAP = 10."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Implement synthetic data generator with 6 data types",
+    "description": "Build a configurable SEM-based data generator supporting 6 data types (HLG, HLNG, HNL, HM, SH, NU) with fixed expected degree=3. This addresses feedback to add semi-heterogeneous data and tighten the grid.",
+    "steps": {
+      "step1": "Create src/data_generator.py with function generate_dag(p, expected_degree, seed, model='random_dag') that creates random DAGs. For model='random_dag': sample a random permutation as topological order, include edge i->j with probability expected_degree/(p-1). For model='erdos_renyi' (tuning data only): same but with different random structure. Store as p x p binary adjacency matrix. Use numpy.random.RandomState(seed) for reproducibility.",
+      "step2": "Implement mechanism generators: (a) Linear-Gaussian: X_j = sum_i(w_ij * X_i) + N_j, w_ij ~ Uniform([-1,-0.5] union [0.5,1]), N_j ~ N(0,1). (b) Linear-NonGaussian: same linear form, N_j ~ Laplace(0,1) or Uniform(-sqrt(3),sqrt(3)), chosen randomly per edge. (c) Nonlinear-Gaussian: X_j = f(sum_i w_ij * X_i) + N_j where f randomly from {x+0.5*x^2, tanh(2*x), sin(x)+x}, N_j ~ N(0,0.5). (d) Nonlinear-NonGaussian: same nonlinear f with N_j ~ Laplace(0,0.5).",
+      "step3": "Implement 6 data types via generate_data(dag, n, data_type, seed): (1) HLG: all edges Linear-Gaussian. (2) HLNG: all edges Linear-NonGaussian. (3) HNL: all edges nonlinear (randomly Nonlinear-Gaussian or Nonlinear-NonGaussian per edge). (4) HM (heterogeneous-mixed): each edge independently assigned to one of 4 mechanism types with equal probability (25% each). (5) SH (semi-heterogeneous): 70% of edges follow a dominant mechanism type (default: linear-Gaussian), 30% assigned to one of the other 3 types randomly. Store per-edge mechanism labels. (6) NU (near-unfaithful): Linear-Gaussian base but for ~20% of variable pairs with a 2-hop path, set weights so indirect effect nearly cancels direct effect (ratio within 0.9-1.1).",
+      "step4": "After data generation, standardize each variable to zero mean and unit variance to prevent scale artifacts in diagnostics.",
+      "step5": "Unit tests: (a) verify DAGs are acyclic with approximately correct density, (b) Shapiro-Wilk rejects normality for non-Gaussian noise types, (c) polynomial fit improvement detects nonlinear mechanisms, (d) near-unfaithful data produces near-zero partial correlations for targeted pairs.",
+      "step6": "Generate 6 validation datasets (one per type, p=10, n=1000, seed=0) to data/validation/ for pipeline testing."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic tuning data (separate from test data)",
+    "description": "Generate 180 held-out tuning datasets using Erdos-Renyi graphs (different from test data's random DAGs) to mitigate circularity. Tuning data is used for sigmoid calibration and meta-learner training.",
+    "steps": {
+      "step1": "Generate tuning datasets: 6 data types x 30 datasets = 180 total. Use p=15, expected_degree=3, n=1000, Erdos-Renyi graph model. Seeds 10000-10029 per type. For SH tuning data, use linear-Gaussian as dominant type.",
+      "step2": "Save to data/tuning/{data_type}_{seed}.npz with keys: data (n x p array), dag (p x p binary), mechanism_labels (list of per-edge mechanism types).",
+      "step3": "Verify: check that tuning data uses different graph structures than test data will use (Erdos-Renyi vs random DAG). Print summary statistics."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic test datasets",
+    "description": "Generate the main experimental grid: 6 data types x p in {10,20} x n in {500,1000,5000} = 36 configs, plus 2 targeted p=50 configs (HM and SH at n=1000). Total: 38 configs x 10 seeds = 380 datasets. This addresses feedback to tighten the grid by fixing density=3 and limiting p=50.",
+    "steps": {
+      "step1": "Generate full-grid test datasets: for each combination of data_type in {HLG, HLNG, HNL, HM, SH, NU}, p in {10, 20}, n in {500, 1000, 5000}, seeds 0-9. Fixed expected_degree=3, random DAG model. Total: 6 x 2 x 3 x 10 = 360 datasets.",
+      "step2": "Generate targeted p=50 datasets: HM and SH data types only, p=50, n=1000, expected_degree=3, seeds 0-9. Total: 2 x 10 = 20 datasets.",
+      "step3": "Save all test datasets to data/test/{data_type}_p{p}_n{n}_seed{seed}.npz with keys: data, dag, mechanism_labels.",
+      "step4": "Print summary: number of datasets per configuration, mean number of edges, data dimensions. Verify 380 total datasets."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare real-world benchmark datasets",
+    "description": "Obtain 3 multivariate benchmarks (Sachs, Child, Alarm) with known ground-truth DAGs, plus Tuebingen cause-effect pairs for bivariate evaluation. This addresses the core feedback that evaluation must not be limited to synthetic data.",
+    "steps": {
+      "step1": "Sachs protein signaling network: download observational flow cytometry data (853 samples, 11 phosphoproteins: Raf, Mek, Plcg, PIP2, PIP3, Erk, Akt, PKA, PKC, P38, Jnk). Ground truth: 17 directed edges from Sachs et al. (Science 2005). Use bnlearn's sachs dataset or download from the bnlearn repository (https://www.bnlearn.com/bnrepository/). Save data as CSV, ground truth as adjacency matrix.",
+      "step2": "Child network (20 vars, 25 edges): load from bnlearn/pgmpy repository. Sample n=2000 continuous observations using the Bayesian network with Gaussian copula (continuous relaxation): for each discrete variable, sample from the conditional distribution and add small Gaussian noise to create continuous data. Save data and ground truth DAG.",
+      "step3": "Alarm network (37 vars, 46 edges): same protocol as Child. Sample n=2000 continuous observations. If 37 variables is too slow for some algorithms, prepare a 20-variable subgraph as fallback. Save data and ground truth DAG.",
+      "step4": "Tuebingen cause-effect pairs: download from the standard repository or use bundled version. Select 50 representative pairs with n >= 200. Save metadata with ground-truth causal direction.",
+      "step5": "Verify all datasets: check dimensions, missing values (impute median or drop), verify ground-truth DAGs are acyclic. Print summary for each dataset.",
+      "step6": "Save all real-world data to data/real_world/{dataset_name}/ with data.csv and ground_truth_dag.npy."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement assumption diagnostic module (Stage 1)",
+    "description": "Implement the 5 diagnostic tests (D1-D5) that characterize data properties per variable pair, plus sample-size-dependent confidence weights. These diagnostics are AACD's core novelty.",
+    "steps": {
+      "step1": "Create src/diagnostics.py with function compute_diagnostics(data, max_cond_set_size=2) returning a dict with: D1 (p x p linearity scores), D2 (p x p non-Gaussianity scores), D3 (p x p ANM asymmetry scores), D4 (p x p faithfulness proximity scores), D5 (p x p homoscedasticity scores), marginal_nongaussianity (p-vector), global_summary (dict of averages), confidence_weights (5-vector based on sample size).",
+      "step2": "D1 (Linearity Score): for each ordered pair (X_i, X_j), fit linear regression and degree-3 polynomial (sklearn PolynomialFeatures + LinearRegression). linearity_score = 1 - max(0, (R2_poly - R2_linear) / max(1 - R2_linear, 0.01)). Clip to [0,1]. Use subsample of min(n, 2000) for speed.",
+      "step3": "D2 (Non-Gaussianity Score): apply scipy.stats.shapiro on residuals from best-fit model (linear or polynomial based on D1). Score = 1 - p_value. Subsample to min(n, 5000) for Shapiro-Wilk. Also compute marginal non-Gaussianity via excess kurtosis and skewness: marginal_score = min(1, (|kurtosis|/3 + |skewness|/2) / 2).",
+      "step4": "D3 (ANM Score): for each ordered pair, fit X_j = f(X_i) + N via degree-3 polynomial on subsample of min(n, 500). Test independence of residuals from X_i using HSIC with RBF kernel and 200 permutations. Compute in both directions. ANM_score = |HSIC_p_forward - HSIC_p_reverse|. Higher = stronger directional signal. Use causal-learn's HSIC or implement with sklearn.metrics.pairwise.rbf_kernel.",
+      "step5": "D4 (Faithfulness Proximity Score): compute partial correlations conditioning on subsets up to size k=min(2, p-2). For p > 30, use k=1. For each pair (i,j), faithfulness_proximity = max over conditioning sets of I(|partial_corr| < 0.05). High scores = potential near-unfaithfulness. Use matrix inversion of conditional correlation for efficiency.",
+      "step6": "D5 (Homoscedasticity Score): fit OLS of X_j on X_i, apply Breusch-Pagan test (statsmodels.stats.diagnostic.het_breuschpagan). Score = 1 - p_value. High = heteroscedastic.",
+      "step7": "Diagnostic confidence weights: c_k(n) = min(1, n / n_k_star). Initial thresholds: n_1_star=300, n_2_star=200, n_3_star=500, n_4_star=500, n_5_star=300. Will be calibrated on tuning data.",
+      "step8": "Speed optimization: (a) share regression fits between D1, D2, D5; (b) subsample for HSIC (D3); (c) limit conditioning set size for D4; (d) use joblib Parallel(n_jobs=2) for pairwise computations. Target: <30s for p=20 n=1000, <2min for p=50 n=1000.",
+      "step9": "Unit test on validation data: verify D1 ~ 1.0 on HLG, D1 < 0.5 on HNL; D2 > 0.8 on HLNG, D2 < 0.3 on HLG; D3 recovers some correct directions on HNL; D4 detects near-unfaithful pairs on NU data."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement multi-algorithm discovery module (Stage 2)",
+    "description": "Wrap the 5 causal discovery algorithms with a unified interface. Each algorithm returns a standardized adjacency matrix representation.",
+    "steps": {
+      "step1": "Create src/algorithms.py with unified interface run_algorithm(data, method, seed=0, timeout=300) -> adjacency_matrix (p x p). For CPDAGs, represent undirected edges as 0.5 in both directions. For DAGs, directed edges as 1.0.",
+      "step2": "PC: causal-learn PC with Fisher-Z test, alpha=0.05, stable=True. Max conditioning set size = min(3, p-2) for p <= 20, min(2, p-2) for p > 20.",
+      "step3": "GES: causal-learn GES with BIC score (local_score_type='local_score_BIC').",
+      "step4": "BOSS/GRaSP: try py-tetrad BOSS first. If unavailable, use causal-learn GRaSP with BIC score.",
+      "step5": "DirectLiNGAM: causal-learn DirectLiNGAM. Returns fully oriented DAG.",
+      "step6": "ANM (pairwise): for each variable pair, fit degree-3 polynomial in both directions, test residual independence via HSIC (200 permutations, subsample min(n,500)). Orient edge if one direction has p > 0.05 and other has p < 0.05. Build partial DAG from oriented pairs, enforce acyclicity by adding edges greedily in order of confidence (skip if creates cycle). For p > 20, restrict to pairs in at least one other algorithm's skeleton to save time.",
+      "step7": "Timeout handling: use signal.alarm (Unix) or threading.Timer to enforce per-algorithm timeout. On timeout, return empty graph and log warning.",
+      "step8": "Validate on 6 validation datasets: run all 5 algorithms, print SHD against ground truth. Verify outputs are valid."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement AACD aggregation module (Stage 3)",
+    "description": "Implement assumption-adaptive weighted aggregation: sigmoid/learned weighting, edge-level aggregation, acyclicity enforcement (both Eades heuristic and greedy baseline), and threshold selection.",
+    "steps": {
+      "step1": "Create src/aggregation.py. Define per-algorithm assumption mappings: PC -> {low D4}; GES -> {low D4}; BOSS -> {low D4}; DirectLiNGAM -> {high D1, high D2}; ANM -> {high D3, low D1 (nonlinearity helps)}.",
+      "step2": "Implement sigmoid weighting: w_k = prod_{a in assumptions_k} sigmoid(sign_a * s * (d_a - t)) * c_a(n). Where sign_a is +1 if the algorithm benefits from high diagnostic score, -1 if low. Parameters t, s tuned on held-out data. Default t=0.5, s=5.",
+      "step3": "Implement edge-level aggregation: C(i->j) = sum_k w_k * G_k[i,j] / sum_k w_k. CPDAG edges (0.5) contribute 0.5 to both C(i->j) and C(j->i).",
+      "step4": "Implement acyclicity enforcement - Eades heuristic: (a) build weighted digraph from C matrix; (b) greedily assign nodes to start or end of ordering based on whether outgoing or incoming weights dominate; (c) remove edges violating the ordering. Return DAG.",
+      "step5": "Implement acyclicity enforcement - greedy baseline: iteratively find cycles via DFS, remove the lowest-confidence edge in the cycle. Repeat until acyclic.",
+      "step6": "Implement acyclicity enforcement - exact ILP (for p <= 20 only): formulate minimum-weight feedback arc set as integer program using scipy.optimize.linprog with integrality constraints or PuLP. Use as reference for comparing heuristics.",
+      "step7": "Implement threshold selection: sweep tau from 0.1 to 0.9 in steps of 0.05, select tau maximizing F1 on tuning data. Also support outputting the full confidence-ranked edge list.",
+      "step8": "Implement naive ensemble: w_k = 1 for all k, same aggregation pipeline.",
+      "step9": "Implement stability-weighted ensemble: bootstrap data 10 times, run each algorithm on each bootstrap. Edge stability = fraction of bootstraps containing the edge. Algorithm weight = mean stability across edges. Use same aggregation pipeline.",
+      "step10": "Create src/aacd.py wrapping the full pipeline: run_aacd(data, params) -> {dag, confidence_matrix, diagnostics, algorithm_weights, method_dags}."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Tune sigmoid parameters and train meta-learner",
+    "description": "Calibrate sigmoid weighting on 180 tuning datasets using 5-fold CV. Train logistic regression meta-learner. Report in-fold vs out-of-fold performance to detect overfitting. Addresses circularity concern.",
+    "steps": {
+      "step1": "Run all 5 algorithms on all 180 tuning datasets. Cache outputs. Estimated: ~30 min.",
+      "step2": "Run diagnostics on all 180 tuning datasets. Cache diagnostic profiles.",
+      "step3": "Sigmoid grid search: t in {0.3, 0.5, 0.7}, s in {5, 10}. For each of 6 grid points, run AACD aggregation on all 180 tuning datasets using cached algorithm outputs. Use 5-fold CV (split by seed): train sigmoid on 4 folds, evaluate SHD on held-out fold. Report in-fold and out-of-fold SHD to detect overfitting. Select (t*, s*) minimizing out-of-fold mean SHD.",
+      "step4": "Tune threshold tau: for each tau in {0.3, 0.4, 0.5, 0.6, 0.7}, evaluate F1 on tuning data with best sigmoid params. Select tau* maximizing out-of-fold F1.",
+      "step5": "Calibrate diagnostic confidence thresholds n_k_star: subsample tuning data to n in {200, 300, 500, 750, 1000}, compute diagnostic classification accuracy at each n. Set n_k_star to the smallest n where accuracy exceeds 80%.",
+      "step6": "Train meta-learner: feature vector = [mean_D1, mean_D2, mean_D3, mean_D4, mean_D5, std_D1, log(n), est_density] (8 features). Target: oracle weight vector (w_k proportional to 1/(SHD_k+1), normalized). Train logistic regression (sklearn, C in {0.01, 0.1, 1, 10}) via 5-fold CV. Save best model.",
+      "step7": "Save all tuned parameters to results/tuning/tuned_params.json. Save meta-learner to results/tuning/meta_learner.pkl. Report CV performance: AACD-sigmoid out-of-fold SHD, AACD-learned out-of-fold SHD, naive ensemble SHD, best individual algorithm SHD.",
+      "step8": "Estimated runtime: algorithm caching ~30 min, grid search ~10 min (reuses cached outputs), meta-learner ~5 min. Total: ~45 min."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run individual algorithms on all test data",
+    "description": "Run all 5 individual algorithms on 380 test datasets and 3 real-world benchmarks. Cache all outputs for reuse by ensemble methods.",
+    "steps": {
+      "step1": "Create src/evaluation.py with metrics: SHD(pred, true), F1_skeleton(pred, true) with precision and recall (ignoring edge direction), orientation_accuracy(pred, true) (among correctly identified edges, fraction with correct direction), expected_calibration_error(confidence_matrix, true_dag).",
+      "step2": "Create src/run_experiments.py that loads datasets, runs algorithms, caches outputs. Use sequential execution (2 cores used within algorithms where possible).",
+      "step3": "Run all 5 algorithms on 380 synthetic test datasets. Skip ANM for p=50 if it exceeds timeout (300s). Save adjacency matrices to results/baselines/algo_outputs/ as pickle. Estimated: ~2.5 hours (380 datasets, ~5 algorithms each, ~1-2 min per algo for p=10-20, ~5 min for p=50).",
+      "step4": "Run all 5 algorithms on Sachs, Child, and Alarm datasets. Save outputs separately to results/baselines/real_world/.",
+      "step5": "Compute SHD, F1, orientation accuracy for all individual algorithms on all datasets. Compute oracle selection: for each dataset, identify best individual algorithm by SHD.",
+      "step6": "Save results to results/baselines/baseline_results.csv with columns: dataset_id, data_type, p, n, seed, algorithm, SHD, F1, precision, recall, orientation_accuracy, runtime_sec."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run AACD and ensemble baselines on all test data (Experiment 1)",
+    "description": "Run AACD-sigmoid, AACD-learned, naive ensemble, and stability-weighted ensemble on all 380 synthetic test datasets. This is the main comparison experiment.",
+    "steps": {
+      "step1": "Run diagnostics on all 380 test datasets. Cache diagnostic profiles. Estimated: ~30 min (fast for p=10-20, ~2 min for p=50).",
+      "step2": "Run naive ensemble on all 380 datasets using cached algorithm outputs. Equal weights, Eades acyclicity enforcement, tuned tau. Estimated: <5 min.",
+      "step3": "Run AACD-sigmoid on all 380 datasets using tuned sigmoid params, cached algorithm outputs and diagnostics. Estimated: <5 min.",
+      "step4": "Run AACD-learned on all 380 datasets using trained meta-learner weights. Estimated: <5 min.",
+      "step5": "Run stability-weighted ensemble on representative subset: 6 data types x p=20 x n=1000 = 6 configs x 10 seeds = 60 datasets. 10 bootstraps x 5 algorithms = 3000 additional runs. Estimated: ~1.5 hours. For other configs, report only on this subset.",
+      "step6": "Compute all metrics (SHD, F1, orientation accuracy) for all ensemble methods. Compute AACD confidence calibration.",
+      "step7": "Save results to results/aacd/aacd_results.csv. Merge with baseline results for unified analysis.",
+      "step8": "Estimated total for this step: ~2 hours (dominated by stability ensemble bootstraps)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Real-world benchmark evaluation (Experiment 2)",
+    "description": "Apply all methods to Sachs, Child, Alarm, and Tuebingen pairs. This is the DEFINITIVE test of whether AACD's diagnostics provide genuine signal beyond synthetic data artifacts. Addresses the most critical feedback point.",
+    "steps": {
+      "step1": "Compute diagnostics on Sachs, Child, and Alarm. Print diagnostic profiles (e.g., 'Sachs: avg_linearity=0.65, avg_nongaussianity=0.82'). Save to results/aacd/real_world_diagnostics.json.",
+      "step2": "Run AACD-sigmoid and AACD-learned on each real-world dataset using cached algorithm outputs (from baseline step). Report algorithm weights assigned.",
+      "step3": "Run naive ensemble and stability-weighted ensemble (10 bootstraps) on each real-world dataset.",
+      "step4": "For Tuebingen pairs (50 selected): run diagnostics, compute D1/D2/D3 per pair, select best pairwise method (LiNGAM-based if high linearity + non-Gaussianity, ANM if high ANM score, random if diagnostics uninformative). Compare AACD-selected method vs always-ANM vs always-LiNGAM vs majority-vote. Report direction accuracy.",
+      "step5": "Sanity check: compare AACD's diagnostic profile against known dataset characteristics. Sachs data (flow cytometry) should show significant non-Gaussianity. Child/Alarm (sampled from known BNs) should show characteristics matching the generating model.",
+      "step6": "Report in a table: dataset, method, SHD, F1, orientation_accuracy. Test success criterion 3: AACD matches or beats best individual algorithm on at least 2 of 3 multivariate benchmarks.",
+      "step7": "Estimated runtime: ~30 min (algorithms already cached, just diagnostics + aggregation + stability bootstraps)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sample-size robustness of diagnostics (Experiment 3)",
+    "description": "Evaluate diagnostic accuracy and AACD performance as a function of sample size. Test whether confidence weighting prevents degradation at small n. Addresses feedback on diagnostic reliability.",
+    "steps": {
+      "step1": "Generate sample-size robustness datasets: fix p=20, degree=3, use HM data type. For each of 5 seeds, generate a FIXED DAG, then sample data at n in {200, 500, 1000, 2000, 5000}. Total: 5 sample sizes x 5 seeds = 25 datasets. Save to data/test/sample_size/.",
+      "step2": "Compute diagnostics at each sample size. Evaluate diagnostic classification accuracy: (a) D1: does it correctly classify linear vs nonlinear edges (using ground-truth mechanism labels from HM)? (b) D2: correctly classify Gaussian vs non-Gaussian residuals? Report accuracy, precision, recall for each diagnostic at each n.",
+      "step3": "Run all 5 algorithms and all ensemble methods at each sample size. Compare AACD with confidence weighting vs AACD without (c_a=1 for all) vs naive ensemble.",
+      "step4": "Key outputs: (a) diagnostic classification accuracy vs n plot, (b) SHD vs n for AACD (with/without confidence), naive ensemble, best individual, oracle. (c) Identify crossover point where AACD begins outperforming naive ensemble.",
+      "step5": "Test success criterion 7: AACD with confidence weighting never performs worse than naive ensemble even at n=500.",
+      "step6": "Estimated runtime: ~20 min (25 datasets, small p)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Semi-heterogeneous vs fully-heterogeneous comparison (Experiment 4)",
+    "description": "Compare AACD's advantage on SH (70/30 split) vs HM (25/25/25/25 split) to test whether the advantage is an artifact of uniform mixing or persists under more realistic heterogeneity. Addresses key feedback on unrealistic mixing.",
+    "steps": {
+      "step1": "Extract SH and HM results from Experiment 1 for p=20, n=1000 (most informative configuration). 10 seeds each.",
+      "step2": "Additionally test all 4 SH dominant-mechanism variants: SH-LG (70% linear-Gaussian), SH-LNG (70% linear-non-Gaussian), SH-NL (70% nonlinear), SH-NNG (70% nonlinear-non-Gaussian). Generate 4 x 10 = 40 additional datasets at p=20, n=1000. Run all methods. Estimated: ~20 min.",
+      "step3": "Compare: (a) AACD's SHD improvement over naive ensemble on HM vs SH, (b) AACD's improvement over best individual algorithm on HM vs SH, (c) which SH dominant type shows largest/smallest AACD advantage (expect largest advantage when dominant type is wrong for many algorithms).",
+      "step4": "Statistical test: Wilcoxon signed-rank test comparing AACD vs naive ensemble within each data type. Report effect sizes.",
+      "step5": "Test success criterion 4: AACD's advantage persists on SH data."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies",
+    "description": "Systematic ablations isolating the contribution of each novel component: individual diagnostics, number of algorithms, weighting method, confidence weighting, acyclicity enforcement.",
+    "steps": {
+      "step1": "Ablation 1 - Diagnostic importance: on HM test data (p=20, n=1000, 10 seeds), run AACD with each diagnostic removed one at a time (set its sigmoid output to 0.5 = neutral). 5 leave-one-out ablations. Report SHD increase from removing each diagnostic. Use cached algorithm outputs. Estimated: <5 min.",
+      "step2": "Ablation 2 - Number of algorithms: starting with 2 (PC + DirectLiNGAM), progressively add GES, BOSS, ANM. Run AACD-sigmoid at each ensemble size on HM data (p=20, n=1000, 10 seeds). Plot SHD vs number of algorithms. Estimated: <5 min.",
+      "step3": "Ablation 3 - Sigmoid vs learned weighting: compare AACD-sigmoid, AACD-learned, and naive ensemble on all 380 test datasets (already computed in Experiment 1). Report per-data-type SHD and count wins.",
+      "step4": "Ablation 4 - Diagnostic confidence weighting: compare AACD with c_a(n) vs AACD without (c_a=1). Focus on n=500 datasets across all data types (6 types x 2 sizes x 10 seeds = 120 datasets). Results partially overlap with Experiment 3.",
+      "step5": "Ablation 5 - Acyclicity enforcement: for p in {10, 20}, HM data, n=1000, 10 seeds, compare: (a) Eades heuristic, (b) greedy lowest-confidence removal, (c) exact ILP (p <= 20 only). Report SHD for each. Estimated: ~10 min.",
+      "step6": "Ablation 6 - Diagnostic computation cost: profile wall-clock time for diagnostics, each algorithm, and aggregation at p in {10, 20, 50}, n=1000. Report time breakdown as stacked bar chart.",
+      "step7": "Save all ablation results to results/ablations/ablation_results.csv."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Perform rigorous statistical tests and evaluate all 7 success criteria. Use Wilcoxon signed-rank tests with Bonferroni correction for multiple comparisons.",
+    "steps": {
+      "step1": "Aggregate results: for each method and configuration, compute mean SHD, F1, orientation accuracy across 10 seeds.",
+      "step2": "Success criterion 1: AACD achieves statistically significantly lower SHD than ALL individual algorithms on HM data. Wilcoxon signed-rank test pairing by configuration (6 HM configs for full grid). Also test on all data types combined (36 configs) for more power. Report p-values and effect sizes.",
+      "step3": "Success criterion 2: AACD achieves lower SHD than naive ensemble and stability-weighted ensemble on HM data. Wilcoxon signed-rank test.",
+      "step4": "Success criterion 3: on at least 2 of 3 real-world benchmarks (Sachs, Child, Alarm), AACD matches or outperforms best individual algorithm AND outperforms naive ensemble. Report SHD and F1.",
+      "step5": "Success criterion 4: AACD's advantage persists on SH data (from Experiment 4). Compare effect sizes on SH vs HM.",
+      "step6": "Success criterion 5: calibration. Bin AACD confidence scores into 5 bins, compute observed edge frequency per bin. Plot calibration curve. Compute ECE. Target: ECE < 0.15.",
+      "step7": "Success criterion 6: ablation confirms diagnostics drive improvement. From Ablation 1, verify removing any diagnostic increases SHD. One-sided Wilcoxon test for at least 2 of 5 diagnostics (p < 0.05).",
+      "step8": "Success criterion 7: AACD with confidence weighting never performs worse than naive ensemble at n=500. Check across all data types from Experiment 3.",
+      "step9": "Create summary table: criterion, result (pass/fail), evidence (test statistic, p-value). Save to results/tables/success_criteria.csv."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables for the research paper. Use matplotlib + seaborn with consistent styling.",
+    "steps": {
+      "step1": "Figure 1 (framework overview): schematic of AACD pipeline — Diagnose (D1-D5 icons) -> Discover (5 algorithm boxes) -> Aggregate (weighted combination). Use matplotlib patches.",
+      "step2": "Figure 2 (main results - SHD): grouped bar chart. X-axis: data types (HLG, HLNG, HNL, HM, SH, NU). Bars: PC, GES, BOSS, LiNGAM, ANM, Oracle, Naive Ensemble, AACD-sigmoid, AACD-learned. Y-axis: mean SHD. Error bars = standard error. Aggregate across p and n. Save as figures/main_results_shd.pdf.",
+      "step3": "Figure 3 (real-world benchmarks): bar chart for Sachs, Child, Alarm. Show SHD and F1 for all methods. Save as figures/real_world_results.pdf.",
+      "step4": "Figure 4 (sample-size robustness): two-panel plot. Left: diagnostic classification accuracy vs n (lines per diagnostic). Right: SHD vs n for AACD (with/without confidence weighting), naive ensemble, best individual. Save as figures/sample_size_robustness.pdf.",
+      "step5": "Figure 5 (SH vs HM comparison): grouped bars comparing AACD improvement (SHD reduction vs naive ensemble) on HM, SH, and 4 SH-variants. Save as figures/sh_vs_hm.pdf.",
+      "step6": "Figure 6 (ablation - diagnostic importance): bar chart of SHD for full AACD, each leave-one-out, and naive ensemble reference. Save as figures/ablation_diagnostics.pdf.",
+      "step7": "Figure 7 (calibration): reliability diagram — predicted confidence vs observed edge frequency, with diagonal reference line. Save as figures/calibration.pdf.",
+      "step8": "Figure 8 (algorithm weights): heatmap. Rows: algorithms, columns: data types, color: mean weight from AACD-sigmoid. Save as figures/algorithm_weights.pdf.",
+      "step9": "Figure 9 (diagnostic profiles for real-world data): radar chart showing D1-D5 averages for Sachs, Child, Alarm. Save as figures/real_world_diagnostics.pdf.",
+      "step10": "Table 1 (main results): LaTeX table with mean(std) SHD, F1, orientation accuracy for all methods x data types. Bold best method per column. Save as results/tables/main_results.tex.",
+      "step11": "Table 2 (real-world benchmarks): LaTeX table with results on Sachs, Child, Alarm, Tuebingen. Save as results/tables/real_world_results.tex.",
+      "step12": "Table 3 (success criteria): pass/fail summary with evidence. Save as results/tables/success_criteria.tex.",
+      "step13": "Table 4 (computational cost): time breakdown by component and graph size. Save as results/tables/computational_cost.tex.",
+      "step14": "Style: matplotlib + seaborn, style='whitegrid', font size 12, colorblind-friendly palette (tab10). Consistent color mapping: blue=AACD-sigmoid, orange=AACD-learned, green=naive ensemble, gray tones=individual algorithms, red=oracle."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime estimation and execution order",
+    "description": "Verify the full pipeline fits within the 8-hour budget on 2 CPU cores. Define execution order to maximize cache reuse.",
+    "steps": {
+      "step1": "Execution order: (1) Environment setup [5 min], (2) Data generation: synthetic tuning + test + real-world [20 min], (3) Algorithms on tuning data + sigmoid tuning + meta-learner [45 min], (4) Algorithms on 380 test datasets [2.5 hours], (5) Diagnostics on test datasets + AACD runs [40 min], (6) Stability ensemble on subset [1.5 hours], (7) Real-world benchmarks [30 min], (8) Experiment 3 sample-size [20 min], (9) Experiment 4 SH variants [20 min], (10) Ablations [15 min], (11) Statistical tests [5 min], (12) Visualization [15 min].",
+      "step2": "Total estimated: ~7 hours. Buffer: 1 hour for unexpected issues.",
+      "step3": "Fallback if behind schedule: (a) skip p=50 entirely (saves ~30 min), (b) reduce stability ensemble to HM only (saves ~45 min), (c) reduce seeds from 10 to 5 for ablations (saves ~15 min), (d) skip Alarm dataset if too slow.",
+      "step4": "Parallelization strategy: use 2 CPU cores within algorithm runs (causal-learn supports some parallelism). Run experiments sequentially to maximize per-experiment core usage. Use joblib for pairwise diagnostic computations.",
+      "step5": "All random seeds are deterministic: test seeds 0-9, tuning seeds 10000-10029, validation seed 0. Results are fully reproducible."
+    }
+  }
+]

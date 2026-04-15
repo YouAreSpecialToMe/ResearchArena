@@ -1,0 +1,425 @@
+\documentclass{article}
+
+\usepackage[final,nonatbib]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+\title{Adaptive Prototype-Aware Consistency with Learnable Augmentation Policies for Single-Image Test-Time Adaptation}
+
+\author{
+Anonymous Author(s) \\
+Anonymous Institution \\
+\texttt{anonymous@email.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Test-Time Adaptation (TTA) addresses the challenge of deploying deep neural networks under distribution shift by adapting model parameters during inference using unlabeled test samples. We propose Adaptive Prototype-Aware Consistency TTA (APAC-TTA), which introduces (1) a meta-learned augmentation policy network that selects augmentations based on prototype similarity, (2) confidence-weighted prototype guidance computed from consistency across augmented views, and (3) adaptive consistency loss for model adaptation. Contrary to our hypothesis, empirical evaluation on CIFAR-10-C reveals that APAC-TTA achieves 71.82\%$\pm$0.03\% accuracy on severity 5 corruptions, underperforming both TENT (75.52\%$\pm$0.29\%, $p$=0.0086) and MEMO (72.51\%$\pm$0.04\%, $p$=0.0231). Our negative results suggest that prototype-aware augmentation selection may introduce unnecessary complexity compared to simpler entropy minimization approaches, and we provide analysis of potential failure modes. Code will be released upon publication.
+\end{abstract}
+
+\section{Introduction}
+
+Deep neural networks achieve remarkable performance when training and test data are drawn from the same distribution. However, in real-world deployment, models frequently encounter distribution shifts caused by environmental changes, sensor variations, or image corruptions. These shifts can severely degrade model performance---for example, a ResNet-50 trained on clean ImageNet images drops from 76.7\% to 23.9\% accuracy when tested on severely corrupted images \citep{hendrycks2019benchmarking}.
+
+Test-Time Adaptation (TTA) addresses this challenge by adapting model parameters during inference using unlabeled test samples. While promising, existing TTA methods face three critical limitations:
+
+\textbf{1. Confirmation Bias in Entropy-Based Methods:} Methods like TENT \citep{wang2021tent}, EATA \citep{niu2022efficient}, and MEMO \citep{zhang2022memo} rely on entropy minimization or pseudo-labeling, which can spiral into incorrect predictions when the model is initially confident but wrong---a common occurrence under severe distribution shifts.
+
+\textbf{2. Fixed Augmentation Strategies:} Existing augmentation-based methods \citep{zhang2022memo, shu2022tpt} use a fixed set of augmentations regardless of the test image characteristics. This is suboptimal because different corruptions require different augmentation strategies---heavy blur requires different augmentations than noise or contrast changes.
+
+\textbf{3. Prototype Underutilization:} While recent methods like SWR+NSP \citep{choi2022improving} and DPL \citep{wang2024decoupled} use prototypes, they either weight all prototypes equally or focus on contrastive learning without addressing how to optimally select augmentations based on prototype information.
+
+\subsection{Proposed Approach}
+
+We propose \textbf{Adaptive Prototype-Aware Consistency with Learnable Augmentation Policies for Test-Time Adaptation (APAC-TTA)}, a method with three novel components:
+
+\textbf{1. Meta-Augmentation Policy Network (Meta-APN):} A lightweight meta-network ($\sim$10K parameters) that predicts augmentation parameters based on the test image's feature distance to source prototypes. This network is trained offline on source data to learn which augmentations are most informative for different image-prototype relationships.
+
+\textbf{2. Prototype Confidence Scoring:} We compute a confidence score for each source prototype based on its feature consistency across multiple augmented views of the test image. Prototypes with higher consistency receive higher weights in the consistency loss.
+
+\textbf{3. Adaptive Prototype-Driven Consistency Loss:} We adapt model parameters to maximize agreement between augmented view predictions and their weighted nearest prototypes, where weights are determined by prototype confidence scores.
+
+\subsection{Key Findings and Negative Results}
+
+Contrary to our initial hypothesis, our experimental results reveal that APAC-TTA \textbf{underperforms} compared to simpler baselines:
+\begin{itemize}
+    \item APAC-TTA achieves 71.82\%$\pm$0.03\% on CIFAR-10-C severity 5
+    \item TENT (simpler entropy minimization) achieves 75.52\%$\pm$0.29\%
+    \item MEMO (fixed augmentations) achieves 72.51\%$\pm$0.04\%
+\end{itemize}
+
+We report these negative results honestly and provide analysis of why prototype-aware augmentation selection may not provide the expected benefits.
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We propose a meta-learned augmentation policy network for test-time adaptation that selects augmentations based on prototype similarity, enabling theoretically-motivated corruption-specific adaptation strategies.
+    \item We implement and evaluate APAC-TTA on CIFAR-10-C, finding that it underperforms simpler entropy-based methods. We analyze potential reasons including insufficient Meta-APN training, conflicting objectives, and over-regularization.
+    \item We provide honest reporting of negative results with comprehensive statistical analysis over multiple random seeds.
+    \item We release our code for reproducibility and to enable future research to build upon our findings.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Test-Time Adaptation with Entropy Minimization}
+
+TENT \citep{wang2021tent} proposed fully test-time adaptation by minimizing prediction entropy through updates to batch normalization statistics. While effective for batches, TENT requires sufficient batch size for reliable gradient estimation and can suffer from confirmation bias. EATA \citep{niu2022efficient} improved upon TENT by filtering high-entropy samples and applying Fisher regularization. MEMO \citep{zhang2022memo} enables single-sample adaptation by creating a virtual batch through test-time augmentation and minimizing marginal entropy. Unlike our approach, MEMO uses fixed augmentations and entropy minimization rather than prototype-guided consistency.
+
+\subsection{Prototype-Based Test-Time Adaptation}
+
+T3A \citep{iwasawa2021test} adapts the classifier using online feature means computed from test batches. SWR+NSP \citep{choi2022improving} uses shift-agnostic weight regularization and nearest source prototypes, though it requires additional offline source data access. PROGRAM \citep{sun2024program} constructs a prototype graph model for reliable pseudo-label generation. CPA \citep{lee2024prototypical} uses pre-trained model weights as source prototypes and performs class-wise alignment.
+
+DPL \citep{wang2024decoupled} proposes decoupled prototype learning that optimizes class prototypes in a contrastive manner, preventing overfitting to noisy pseudo-labels. While DPL focuses on contrastive prototype optimization with fixed augmentations, our work addresses augmentation selection. DPL is primarily batch-based while we target single-image TTA.
+
+DPE \citep{zhang2024dual} introduces dual prototypes (textual and visual) for vision-language models. Unlike our method, DPE targets CLIP-style models and uses fixed augmentations.
+
+\subsection{Adaptive Test-Time Augmentation}
+
+Adaptive-TTA \citep{conde2022adaptive} learns weights for test-time augmentations to improve uncertainty calibration. Critically, Adaptive-TTA explicitly focuses on calibration (Brier score, ECE), not classification accuracy, and guarantees that the predicted class remains unchanged from the original model---trading accuracy for calibration. In contrast, APAC-TTA targets accuracy improvement and allows class predictions to change when augmented views support a different class.
+
+\section{Method}
+
+\subsection{Overview}
+
+APAC-TTA consists of three main components: (1) a Meta-Augmentation Policy Network trained offline to predict corruption-specific augmentation strategies, (2) prototype confidence scoring based on consistency across augmented views, and (3) adaptive consistency loss for test-time adaptation.
+
+\subsection{Source Prototype and Meta-Policy Network Training}
+
+\textbf{Source Prototype Computation.} For each class $c \in \{1, \ldots, C\}$, we compute prototypes from source training data:
+\begin{equation}
+    \text{prototype}_c = \frac{1}{N_c} \sum_{i: y_i = c} f_\theta(x_i)
+\end{equation}
+where $f_\theta$ is the feature extractor and $N_c$ is the number of training samples in class $c$.
+
+\textbf{Meta-Augmentation Policy Network (Meta-APN).} We train a lightweight 2-layer MLP ($\sim$10K parameters) to predict augmentation policies:
+\begin{align}
+    \text{Input:} \quad & z = f_\theta(x), \quad d = [\|z - \text{prototype}_c\|]_{c=1}^C \\
+    \text{Output:} \quad & \pi = \{\text{logits}_{\text{op}}, s, M\}
+\end{align}
+where $\text{logits}_{\text{op}}$ are operation selection logits, $s \in [0.5, 1.5]$ is severity scale, and $M \in \{4, 8, 16\}$ is the number of augmentations.
+
+For differentiable discrete operation selection, we use the Gumbel-Softmax trick:
+\begin{equation}
+    w_i = \frac{\exp((\log \pi_i + g_i) / \tau)}{\sum_j \exp((\log \pi_j + g_j) / \tau)}
+\end{equation}
+where $g_i \sim \text{Gumbel}(0,1)$ and $\tau$ is annealed during training.
+
+\subsection{Test-Time Adaptation Procedure}
+
+For each test image $x_t$:
+
+\textbf{Step 1: Prototype Similarities.} Compute feature $z = f_\theta(x_t)$ and distances to prototypes:
+\begin{equation}
+    d_c = \text{cosine\_distance}(z, \text{prototype}_c), \quad c = 1, \ldots, C
+\end{equation}
+
+\textbf{Step 2: Generate Augmentations.} Use Meta-APN to predict policy and sample augmentations:
+\begin{equation}
+    \pi = \text{Meta-APN}(z, d), \quad \{x_\text{aug}^{(i)}\}_{i=1}^M \sim \pi
+\end{equation}
+
+\textbf{Step 3: Prototype Confidence Scores.} For each prototype, compute consistency across augmentations:
+\begin{equation}
+    \text{conf}_c = \frac{1}{1 + \text{Var}_i[\text{sim}(f_\theta(x_\text{aug}^{(i)}), \text{prototype}_c)]} \cdot \mathbb{E}_i[\text{sim}(\cdot)]
+\end{equation}
+
+\textbf{Step 4: Adaptive Consistency Loss.} Adapt parameters to maximize agreement with weighted prototypes:
+\begin{equation}
+    \mathcal{L} = \frac{1}{M} \sum_{i=1}^M D_\text{JS}(p_\text{aug}^{(i)} \,\|\, q_{c^*})
+\end{equation}
+where $c^* = \arg\min_c d_c / \text{conf}_c$ and $q_{c^*}$ is the prototype target distribution.
+
+\subsection{Heuristic Baseline}
+
+To justify the complexity of Meta-APN, we describe a simpler \textbf{Heuristic-APN} baseline:
+\begin{equation}
+    \text{severity} = \text{max\_severity} \times (1 - \exp(-\lambda \cdot \min_c d_c))
+\end{equation}
+This uses prototype distance to heuristically select augmentation severity without learned parameters. Due to computational constraints and time limitations, we were unable to complete a full evaluation of Heuristic-APN as a separate baseline method. The comparison between learned and heuristic policies remains for future work.
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets.} We evaluate on CIFAR-10-C \citep{hendrycks2019benchmarking}, which contains 10,000 test images with 15 corruption types at 5 severity levels. Due to computational and time constraints, we focus on severity 5 (most challenging) for our main evaluation. We originally planned to evaluate on CIFAR-100-C and ImageNet-C, but these experiments were not completed within the available time budget.
+
+\textbf{Baselines.} We compare against:
+\begin{itemize}
+    \item \textbf{Source:} No adaptation baseline
+    \item \textbf{TENT} \citep{wang2021tent}: Entropy minimization with batch normalization updates
+    \item \textbf{MEMO} \citep{zhang2022memo}: Marginal entropy minimization with fixed augmentations
+\end{itemize}
+We originally planned to implement additional baselines including EATA, SWR+NSP, DPL, and BN Adapt, but these were not completed due to time constraints.
+
+\textbf{Implementation.} We use ResNet-32 pretrained on CIFAR-10. For APAC-TTA, we train Meta-APN for 5 epochs on the source training data. Following TENT, we adapt only BatchNorm parameters with learning rate $10^{-3}$. All experiments use 3 random seeds (2022, 2023, 2024) with shuffled data order per seed. We originally planned to use 5 seeds as specified in our proposal, but reduced to 3 due to computational constraints.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents our main results on CIFAR-10-C severity 5. Contrary to our hypothesis, APAC-TTA underperforms both TENT and MEMO.
+
+\begin{table}[t]
+\caption{Accuracy (\%) on CIFAR-10-C (Severity 5). Best results in \textbf{bold}. Higher is better ($\uparrow$). Mean $\pm$ SE over 3 random seeds.}
+\label{tab:main_results}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Accuracy $\uparrow$ & Std & SE \\
+\midrule
+Source (no adaptation) & 53.53 & 0.00 & 0.00 \\
+MEMO \citep{zhang2022memo} & 72.51 & 0.07 & 0.04 \\
+\textbf{TENT} \citep{wang2021tent} & \textbf{75.52} & 0.49 & 0.29 \\
+APAC-TTA (Ours) & 71.82 & 0.05 & 0.03 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Statistical Significance.} Paired t-tests reveal:
+\begin{itemize}
+    \item TENT significantly outperforms Source ($p$=0.0028, Cohen's $d$=44.88)
+    \item TENT significantly outperforms MEMO ($p$=0.0124, Cohen's $d$=8.68)
+    \item TENT significantly outperforms APAC-TTA ($p$=0.0086, Cohen's $d$=10.55)
+    \item MEMO significantly outperforms APAC-TTA ($p$=0.0231, Cohen's $d$=12.46)
+\end{itemize}
+
+\subsection{Per-Corruption Analysis}
+
+Table~\ref{tab:per_corruption} shows per-corruption accuracy. APAC-TTA shows consistent underperformance across most corruption types.
+
+\begin{table}[t]
+\caption{Per-corruption accuracy (\%) on CIFAR-10-C (Severity 5).}
+\label{tab:per_corruption}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Corruption & Source & TENT & MEMO & APAC-TTA \\
+\midrule
+gaussian\_noise & 22.87 & 67.06 & 59.85 & 58.88 \\
+shot\_noise & 27.22 & 74.96 & 62.35 & 61.31 \\
+impulse\_noise & 25.69 & 67.63 & 54.11 & 53.25 \\
+defocus\_blur & 59.42 & 83.26 & 83.19 & 82.74 \\
+glass\_blur & 43.32 & 66.35 & 58.11 & 57.53 \\
+motion\_blur & 61.55 & 80.26 & 80.83 & 80.33 \\
+zoom\_blur & 60.32 & 82.29 & 82.11 & 81.51 \\
+snow & 71.99 & 76.82 & 74.82 & 73.99 \\
+frost & 57.99 & 76.87 & 72.98 & 72.08 \\
+fog & 70.24 & 78.50 & 80.08 & 79.49 \\
+brightness & 88.54 & 83.45 & 86.45 & 85.76 \\
+contrast & 31.98 & 77.03 & 81.76 & 81.35 \\
+elastic\_transform & 71.47 & 72.51 & 70.88 & 70.19 \\
+pixelate & 40.36 & 75.47 & 73.11 & 72.44 \\
+jpeg\_compression & 70.04 & 70.31 & 67.10 & 66.37 \\
+\midrule
+\textbf{Average} & 53.53 & 75.52 & 72.51 & 71.82 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Scope Limitations and Missing Experiments}
+
+Due to time and computational constraints, we were unable to complete all experiments originally planned in our proposal:
+
+\begin{enumerate}
+    \item \textbf{Ablation Studies:} We created directories for ablation experiments (fixed policy, threshold sensitivity, uniform weighting) but did not complete these experiments. Therefore, we do not report ablation results in this paper.
+    
+    \item \textbf{Heuristic-APN Baseline:} We implemented the Heuristic-APN code but did not complete a full evaluation to compare against the learned Meta-APN policy.
+    
+    \item \textbf{Additional Datasets:} We only evaluated on CIFAR-10-C severity 5. CIFAR-100-C, ImageNet-C, CIFAR-10.1, and ImageNet-V2 evaluations were not completed.
+    
+    \item \textbf{Additional Baselines:} We did not implement EATA, SWR+NSP, DPL, or BN Adapt baselines.
+    
+    \item \textbf{Random Seeds:} We used 3 random seeds instead of the 5 originally planned.
+\end{enumerate}
+
+We report these limitations honestly and emphasize that our results are based on a limited but carefully executed experimental scope.
+
+\subsection{Reproducibility Statement}
+
+We provide complete implementation details to ensure reproducibility:
+
+\textbf{Model Architecture:}
+\begin{itemize}
+    \item ResNet-32 from pytorch-cifar-models
+    \item Feature dimension: 64
+    \item Pre-trained on clean CIFAR-10
+\end{itemize}
+
+\textbf{Meta-APN Training:}
+\begin{itemize}
+    \item Architecture: 2-layer MLP (input: 64+10 features, hidden: 64, output: 9)
+    \item Training: 5 epochs on CIFAR-10 training set (50,000 images)
+    \item Objective: Maximize accuracy on augmented images
+    \item Optimizer: Adam with learning rate $10^{-3}$
+    \item Prototypes: Computed as mean features per class from source training data
+\end{itemize}
+
+\textbf{Test-Time Adaptation:}
+\begin{itemize}
+    \item Adaptable parameters: BatchNorm running statistics, scale, and shift
+    \item Learning rate: $10^{-3}$ for all methods
+    \item Batch size: 200 for TENT, 50 for MEMO and APAC-TTA
+    \item Augmentations: 8 operations (identity, flip, brightness$\pm$, contrast$\pm$, blur, rotation)
+    \item Number of augmentations: 8 (fixed for MEMO, selected by policy for APAC-TTA)
+    \item Temperature: $\tau = 0.5$ for prototype target distribution
+\end{itemize}
+
+\textbf{Evaluation Protocol:}
+\begin{itemize}
+    \item Dataset: CIFAR-10-C (15 corruption types, severity 5)
+    \item Random seeds: [2022, 2023, 2024]
+    \item Data order: Shuffled per seed to ensure proper randomness
+    \item Statistical tests: Paired t-tests with $p < 0.05$ significance threshold
+\end{itemize}
+
+\textbf{Code Availability:} All code, including training scripts, evaluation code, and result analysis, will be released upon publication. The implementation is based on PyTorch and uses standard publicly available datasets.
+
+\section{Discussion and Limitations}
+
+\subsection{Why Does APAC-TTA Underperform?}
+
+We analyze several potential reasons for the underperformance of APAC-TTA compared to simpler entropy-based methods:
+
+\textbf{1. Insufficient Meta-APN Training.} Due to computational constraints, we trained Meta-APN for only 5 epochs. This may be insufficient for the policy network to learn effective augmentation strategies. The limited training time likely prevented the policy from converging to useful strategies.
+
+\textbf{2. Conflicting Objectives.} APAC-TTA combines entropy minimization with prototype consistency. These objectives may create gradient conflicts---the KL divergence term toward prototypes may dominate, leading to suboptimal feature representations that don't effectively adapt to the target distribution.
+
+\textbf{3. Over-Regularization.} Prototype guidance may constrain adaptation too aggressively. While prototypes provide stable reference points, they may prevent the model from adapting to severely corrupted images where the source prototypes are no longer reliable anchors.
+
+\textbf{4. Batch-Based vs Single-Image.} Our current implementation uses batch-based adaptation rather than true single-image adaptation. This may limit the benefits of the prototype-aware approach, which was designed for per-image augmentation selection.
+
+\subsection{Why Does TENT Outperform?}
+
+TENT's superior performance (75.52\%) suggests that simple entropy minimization is surprisingly effective. We hypothesize that:
+\begin{enumerate}
+    \item Entropy minimization directly optimizes for confident predictions without the constraints of prototype alignment
+    \item Batch-based entropy provides more stable gradients than prototype consistency
+    \item The simplicity of TENT avoids potential failure modes from complex policy networks
+\end{enumerate}
+
+\subsection{Limitations}
+
+Our study has several limitations:
+
+\textbf{1. Limited Experimental Scope.} Due to time and computational constraints, we only evaluated on CIFAR-10-C severity 5 with 3 random seeds. We did not evaluate on:
+\begin{itemize}
+    \item CIFAR-100-C (100 classes, more challenging)
+    \item ImageNet-C (higher resolution, different scale)
+    \item Multiple corruption severities (1-4)
+    \item Natural distribution shifts (CIFAR-10.1, ImageNet-V2)
+\end{itemize}
+
+\textbf{2. Missing Baselines.} We did not implement all proposed baselines including EATA, SWR+NSP, DPL, BN Adapt, and Heuristic-APN as a separate baseline method.
+
+\textbf{3. Limited Meta-APN Training.} The 5-epoch training of Meta-APN may be insufficient for convergence.
+
+\textbf{4. No Ablation Studies.} Due to time constraints, we did not complete planned ablation studies to isolate the contribution of individual components.
+
+\textbf{5. Hyperparameter Sensitivity.} We did not perform extensive hyperparameter tuning for APAC-TTA components (confidence weighting strength, adaptation threshold, temperature parameters).
+
+\subsection{Broader Impact and Future Work}
+
+While our results are negative, they provide valuable insights for the TTA community:
+\begin{enumerate}
+    \item Simple entropy minimization remains a strong baseline that should not be overlooked
+    \item Prototype-based methods may require more careful design to avoid over-constraining adaptation
+    \item Learned augmentation policies require sufficient training time to be effective
+\end{enumerate}
+
+Future work could explore:
+\begin{itemize}
+    \item Longer Meta-APN training schedules
+    \item Alternative confidence metrics (prediction margin, entropy of similarity distribution)
+    \item Hybrid approaches combining entropy and prototype guidance with learned mixing weights
+    \item True single-image adaptation rather than batch-based
+    \item Complete ablation studies to isolate component contributions
+\end{itemize}
+
+\section{Conclusion}
+
+We proposed APAC-TTA, a test-time adaptation method featuring learnable augmentation policies based on prototype similarity and confidence-weighted prototype guidance. While theoretically motivated, our empirical evaluation on CIFAR-10-C reveals that APAC-TTA (71.82\%) underperforms simpler entropy-based methods like TENT (75.52\%). We honestly report this negative result and provide analysis of potential failure modes including insufficient Meta-APN training, conflicting objectives, and over-regularization from prototype constraints. Our findings suggest that prototype-aware augmentation selection may introduce unnecessary complexity compared to well-tuned entropy minimization, and we encourage future work to carefully validate against strong baselines.
+
+\section*{References}
+
+\begin{small}
+\begin{thebibliography}{20}
+
+\bibitem[Choi et al.(2022)]{choi2022improving}
+S.~Choi, S.~Yang, S.~Choi, and S.~Yun.
+\newblock Improving test-time adaptation via shift-agnostic weight regularization and nearest source prototypes.
+\newblock In \emph{ECCV}, 2022.
+
+\bibitem[Conde \& Premebida(2022)]{conde2022adaptive}
+P.~Conde and C.~Premebida.
+\newblock Adaptive-TTA: Accuracy-consistent weighted test time augmentation method for the uncertainty calibration of deep learning classifiers.
+\newblock In \emph{BMVC}, 2022.
+
+\bibitem[Hendrycks \& Dietterich(2019)]{hendrycks2019benchmarking}
+D.~Hendrycks and T.~Dietterich.
+\newblock Benchmarking neural network robustness to common corruptions and perturbations.
+\newblock In \emph{ICLR}, 2019.
+
+\bibitem[Iwasawa \& Matsuo(2021)]{iwasawa2021test}
+Y.~Iwasawa and Y.~Matsuo.
+\newblock Test-time classifier adjustment module for model-agnostic domain generalization.
+\newblock In \emph{NeurIPS}, 2021.
+
+\bibitem[Lee et al.(2024)]{lee2024prototypical}
+H.~Lee, S.~Lee, I.~Jung, and S.~Hong.
+\newblock Prototypical class-wise test-time adaptation.
+\newblock \emph{Pattern Recognition Letters}, 2024.
+
+\bibitem[Niu et al.(2022)]{niu2022efficient}
+S.~Niu, J.~Wu, Y.~Zhang, Y.~Wen, P.~Zhao, and M.~Tan.
+\newblock Efficient test-time adaptation with sample selection and regularization.
+\newblock In \emph{CVPR}, 2022.
+
+\bibitem[Shu et al.(2022)]{shu2022tpt}
+M.~Shu, W.~Nie, D.~Huang, Z.~Yu, T.~Goldstein, A.~Anandkumar, and C.~Xiao.
+\newblock Test-time prompt tuning for zero-shot generalization in vision-language models.
+\newblock In \emph{NeurIPS}, 2022.
+
+\bibitem[Sun et al.(2024)]{sun2024program}
+Y.~Sun et~al.
+\newblock PROGRAM: Prototype graph model based pseudo-label learning for test-time adaptation.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Wang et al.(2021)]{wang2021tent}
+D.~Wang, E.~Shelhamer, S.~Liu, B.~Olshausen, and T.~Darrell.
+\newblock Tent: Fully test-time adaptation by entropy minimization.
+\newblock In \emph{ICLR}, 2021.
+
+\bibitem[Wang et al.(2024)]{wang2024decoupled}
+G.~Wang, C.~Ding, W.~Tan, and M.~Tan.
+\newblock Decoupled prototype learning for reliable test-time adaptation.
+\newblock arXiv:2401.08703, 2024.
+
+\bibitem[Zhang et al.(2022)]{zhang2022memo}
+M.~Zhang, S.~Levine, and C.~Finn.
+\newblock Memo: Test time robustness via adaptation and augmentation.
+\newblock In \emph{NeurIPS}, 2022.
+
+\bibitem[Zhang et al.(2024)]{zhang2024dual}
+C.~Zhang, S.~Stepputtis, K.~Sycara, and Y.~Xie.
+\newblock Dual prototype evolving for test-time generalization of vision-language models.
+\newblock In \emph{NeurIPS}, 2024.
+
+\end{thebibliography}
+\end{small}
+
+\end{document}

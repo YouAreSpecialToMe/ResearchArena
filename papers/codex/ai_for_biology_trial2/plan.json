@@ -1,0 +1,143 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up a bounded leakage-controlled benchmark",
+    "description": "Create a reproducible environment for a narrow empirical study of masked-child surrogate calibration, with all GPU work limited to one shared frozen-embedding pass and all later experiments run from cached features.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment with pinned packages: `torch==2.2.*`, `transformers==4.39.*`, `fair-esm` or an equivalent ESM loader, `scikit-learn==1.4.*`, `numpy`, `scipy`, `pandas`, `pyarrow`, `faiss-cpu==1.7.*`, `matplotlib`, `seaborn`, `statsmodels`, and `tqdm`.",
+      "step2": "Record reproducibility metadata in `exp/environment/metadata.json`: GPU `NVIDIA RTX A6000 48GB`, CPU core count `4`, RAM `60GB`, CUDA version, Python version, package versions, and all command-line arguments used by each stage.",
+      "step3": "Fix random seeds to `[13, 29, 47]`. Reuse the same seed-specific data splits, parent lists, masked-child selections, and validation subsets for the proposed method and every baseline.",
+      "step4": "Use the single GPU only for one shared ESM embedding pass. Use the 4 CPU cores for parent-local feature construction, logistic-regression fitting, conformal calibration, OpenMax fitting, evaluation, statistics, and plotting. Overlap CPU preprocessing with the tail end of the embedding pass whenever possible.",
+      "step5": "Create the directory structure `data/raw/`, `data/processed/`, `data/splits/`, `data/embeddings/`, `exp/<method>/seed_<seed>/`, `exp/summary/`, and `figures/source_data/`. Save all manifests so the benchmark can be rerun exactly."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build the temporal EC benchmark with training-only parent selection",
+    "description": "Construct the main evaluation split so the paper is about a decision-layer heuristic under realistic future-child events, not about retrospective parent cherry-picking.",
+    "steps": {
+      "step1": "Use Swiss-Prot proteins with exactly one complete EC-4 annotation and amino-acid length between 30 and 1024. Use release `2018_02` for training, calibration, and model selection, and release `2023_01` only for final temporal evaluation.",
+      "step2": "Deduplicate exact `(sequence, EC-4)` pairs, keep one accession per row, and keep only proteins whose EC lineage is fully specified from EC-1 to EC-4. Save cleaned tables as `data/processed/swissprot_ec_2018_02.parquet` and `data/processed/swissprot_ec_2023_01.parquet`.",
+      "step3": "Define the primary EC-3 parent set using `2018_02` only. Retain parents with at least 4 observed EC-4 children, at least 25 examples per retained child, and at least 140 total examples under the parent. If more than 12 parents qualify, keep the top 12 by `2018_02` support to stay within budget.",
+      "step4": "For each seed, split each retained EC-4 child in `2018_02` into `train_core` 70%, `cal_known` 15%, and `val_select` 15% using stratified sampling within each child. Save split manifests as `data/splits/seed_<seed>.json` and never change them during tuning.",
+      "step5": "Define the temporal evaluation set as all `2023_01` proteins whose EC-3 parent belongs to the retained parent set. Tag each example as `temporal_known_child=1` if its EC-4 child was present in `2018_02`, otherwise `temporal_future_child=1`. Also save the deepest correct prefix depth and the parent identifier for each sequence.",
+      "step6": "Compute frozen embeddings once for every unique protein used in `2018_02` and `2023_01` with `facebook/esm2_t30_150M_UR50D`, mean-pool non-padding tokens, use mixed precision, and batch size `8`. Store float16 embeddings and an accession-to-index map under `data/embeddings/`.",
+      "step7": "Save benchmark diagnostics in `exp/data_prep/`: counts by depth, retained parent list, child-support histograms, split sizes, number of temporal future-child sequences per parent, and the number of parents that actually exhibit future-child events in `2023_01`."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create the masked-child surrogate benchmark and leakage audits",
+    "description": "Construct the synthetic child-removal protocol that defines the paper's surrogate calibration task and explicitly verify that removed children do not leak through parent-local features.",
+    "steps": {
+      "step1": "For each retained parent and each seed, define eligible masked children as EC-4 children with at least 25 `train_core` examples and at least 10 total examples across `cal_known` plus `val_select`. Require at least 4 eligible children under the parent.",
+      "step2": "Select exactly one masked child per eligible parent per seed. Rotate deterministically across the eligible child list by seed so the three seeds cover different masked children without multiplying rebuild cost.",
+      "step3": "For each masked-child event, remove the selected child from the parent-local training vocabulary, rebuild the child prototypes from retained children only, rebuild the parent-local neighbor index from retained children only, recompute all margin, vote-share, density, and normalization features, and refit only that parent's logistic-regression child scorer.",
+      "step4": "For the default feature set, use only leakage-auditable parent-local features: child-prototype cosine similarities, top-10 retained-neighbor vote share per child, top-1 minus top-2 prototype margin, and local density equal to mean cosine similarity of the top-5 retained neighbors. Do not use MMseqs2 or any identity-lookup feature in the default plan.",
+      "step5": "Create a leakage audit table for every masked-child event with columns `feature_family`, `rebuilt_after_mask`, `uses_removed_support`, and `passed_audit`. A masked-child event is valid only if every feature family has `passed_audit=1`.",
+      "step6": "Create a strict no-retrieval surrogate variant that keeps only prototype similarities and margin features. Use it later as a leakage-sanity ablation rather than as the default method."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Fit the shared hierarchical scorer and simple baselines",
+    "description": "Train the common parent-local scorer used by all selective methods and include both a simple baseline and a strong non-hierarchical comparison so the gains cannot be attributed to unfair preprocessing.",
+    "steps": {
+      "step1": "For each seed, fit the shared hierarchical scorer on `train_core`. At each internal node, train a multinomial logistic regression with standardized parent-local features: cosine similarity to each child prototype, top-10 neighbor vote share per child, top-1 minus top-2 prototype margin, and top-5 local density. Use `solver='lbfgs'`, `C=1.0`, `class_weight='balanced'`, and `max_iter=500`.",
+      "step2": "Train the simple baseline `1-NN + threshold`: predict the nearest `train_core` EC-4 label by cosine similarity in embedding space and tune one similarity threshold on `val_select` to abstain upward to the deepest valid prefix.",
+      "step3": "Train the stronger flat baseline `flat multinomial logistic + abstention` on the same `train_core` examples over the retained EC-4 labels using the frozen embeddings directly, `solver='lbfgs'`, `C=1.0`, and `max_iter=500`. Tune the abstention threshold on `val_select` and map abstentions to the deepest prefix supported by the top-ranked labels.",
+      "step4": "Save all per-seed artifacts: node-local logistic weights, feature normalizers, parent-local prototype tables, neighbor caches, flat classifier weights, and raw validation predictions. Reuse these artifacts for every selective method so only the decision layer changes."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run meaningful hierarchical selective baselines",
+    "description": "Benchmark the proposed method against one weak rule and two strong generic selective alternatives that operate on the same hierarchical scorer.",
+    "steps": {
+      "step1": "Baseline A, forced hierarchical prediction: always descend along the highest-probability child at each internal node until EC-4. This is the no-abstention lower-safety reference.",
+      "step2": "Baseline B, max-probability stopping: at each node, descend only if the top child probability exceeds a threshold tuned on `val_select`; otherwise stop at the current prefix. Tune one threshold per depth and seed to hit coverage targets `{0.60, 0.80, 0.95}`.",
+      "step3": "Baseline C, HSC-style selective stopping: compute node confidence as top-child probability divided by the sum of probabilities on valid siblings, then choose the deepest ancestor satisfying the threshold tuned on `val_select` at the same coverage targets `{0.60, 0.80, 0.95}`.",
+      "step4": "Baseline D, Parent-OpenMax: for each retained parent and seed, fit Weibull tails to the distance-to-prototype distribution of `cal_known` examples from retained children, derive an unknown-child score from the top child and tail model, and stop when the unknown-child score exceeds a threshold tuned on `val_select`. Fit tails only for parents with at least 3 retained children and at least 15 calibration examples per child.",
+      "step5": "Report all baseline thresholds, realized coverage, and per-parent failure cases so the comparison stays transparent and coverage-matched."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate MCC-EC as a masked-child surrogate decision layer",
+    "description": "Test the narrow hypothesis that a leakage-controlled masked-child surrogate helps decide when a fixed hierarchical scorer should stop at an internal node instead of over-specializing.",
+    "steps": {
+      "step1": "Known-child gate: for each retained parent and seed, compute split-conformal nonconformity `A_v(x,y)=1-s_v(x,y)` on `cal_known`, choose the empirical quantile for target error `alpha=0.1`, and descend only if the predicted child passes this conformal acceptance test.",
+      "step2": "Masked-child gate: for each retained parent and seed, use the masked-child rebuild from the surrogate benchmark, score the held-out examples of the removed child against retained siblings, define `B_v(x)=max_c s_v(x,c)`, and set the parent-specific threshold `t_v` as the empirical `0.9` quantile of `B_v` on masked-child examples.",
+      "step3": "Combined inference rule: starting at the root, score children with the shared hierarchical scorer; descend only if both the known-child conformal gate and the parent-specific masked-child gate pass; otherwise return the current EC prefix and tag the decision as `open_child_under_parent` if the masked-child gate failed.",
+      "step4": "Run the full method on three evaluation settings: `2018_02` known-child validation examples, the masked-child surrogate benchmark, and the `2023_01` temporal benchmark split into temporal-known-child and temporal-future-child subsets.",
+      "step5": "Store per-example outputs in `exp/mcc_ec/seed_<seed>/predictions.parquet` with fields `accession`, `true_ec4`, `returned_prefix`, `returned_depth`, `top_child_score`, `conformal_pass`, `masked_child_pass`, `open_child_under_parent`, `parent_id`, and `eval_split`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Test transfer and parent-level diagnostics",
+    "description": "Make transfer the distinctive experiment: compare whether masked-child calibration predicts future-child behavior better than generic selective rules and identify when that transfer is reliable.",
+    "steps": {
+      "step1": "For each parent and seed, compute masked-child gains of MCC-EC relative to the strongest generic baseline among `{HSC-style, Parent-OpenMax}` on three metrics: catastrophic overspecialization reduction, correct-safe-prefix gain, and open-child AUROC gain.",
+      "step2": "For the same parent and seed, compute temporal future-child gains on the same metrics using only `2023_01` future-child examples. Include a parent in correlation analysis only if it has at least 8 future-child examples across all seeds combined.",
+      "step3": "Compute Pearson and Spearman correlations across parents between masked-child gains and temporal future-child gains for MCC-EC, and compute the same transfer statistic for the generic baseline selected using `val_select`. This directly tests whether masked-child calibration transfers better than generic hierarchical selective rules.",
+      "step4": "Compute parent-level transfer diagnostics from `2018_02` only: sibling-support entropy, prototype compactness, minimum inter-child cosine gap, and neighbor-overlap rate between each child and its nearest sibling. Fit a simple ridge regression on parent statistics to predict temporal future-child gain from masked-child gain plus these diagnostics.",
+      "step5": "If transfer is weak, inconsistent in sign, or worse than generic selective rules, mark the study as a leakage-controlled benchmark of surrogate calibration limits rather than a new practical solution."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate every novel component under the fixed budget",
+    "description": "Pre-register a small but complete ablation set covering each novel component without adding enough recomputation to violate the 8-hour budget.",
+    "steps": {
+      "step1": "Ablation A, no masked-child gate: keep only the known-child conformal gate. This isolates whether the surrogate calibration layer adds value.",
+      "step2": "Ablation B, no conformal gate: keep only the masked-child gate. This tests whether the surrogate layer alone is sufficient or whether both gates are required.",
+      "step3": "Ablation C, global masked-child threshold: replace parent-specific `t_v` with one pooled threshold per depth. This tests whether parent-local surrogate calibration is necessary.",
+      "step4": "Ablation D, strict no-retrieval surrogate: remove neighbor-vote and density features from the surrogate rebuild and scoring pipeline, using only prototype similarities and margin features. This checks whether the result depends on the hardest-to-sanitize feature family.",
+      "step5": "Run Ablations A through D on all three seeds and on both the masked-child benchmark and the temporal benchmark. Do not add extra masked-child selections, extra backbones, or extra parent subsets."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate with pre-registered metrics, outputs, and decision rules",
+    "description": "Use metrics aligned with safe prefix prediction, report them at matched coverage, and predefine what would support or disprove the narrow claim.",
+    "steps": {
+      "step1": "Primary metrics on temporal future-child examples are catastrophic overspecialization rate, correct-safe-prefix rate, hierarchical loss, and open-child AUROC. Secondary metrics are selective EC-4 F1, prefix accuracy at EC-1/2/3/4, mean returned depth, realized coverage, and inference time per protein.",
+      "step2": "Evaluate every selective method at coverage targets `{0.60, 0.80, 0.95}` using thresholds chosen only on `val_select`. Record realized coverage explicitly if the target is not hit exactly.",
+      "step3": "Aggregate over the three seeds as mean plus standard deviation. For the main comparison at target coverage `0.80`, compute paired bootstrap confidence intervals over proteins and paired permutation tests over seed-level differences.",
+      "step4": "Success criterion 1: at matched 0.80 coverage on temporal future-child examples, MCC-EC must reduce catastrophic overspecialization relative to forced hierarchical prediction and relative to the stronger of HSC-style stopping and Parent-OpenMax.",
+      "step5": "Success criterion 2: on the masked-child benchmark, MCC-EC must improve correct-safe-prefix rate over both max-probability stopping and Parent-OpenMax while keeping realized coverage within `+-0.03` of the matched target.",
+      "step6": "Success criterion 3: parent-level transfer correlation for MCC-EC must be positive and at least as large as the correlation obtained by the matched generic selective baseline.",
+      "step7": "Failure condition 1: if Ablation A matches the full method within one seed standard deviation on both masked-child correct-safe-prefix rate and temporal future-child overspecialization, then the masked-child component is not carrying the contribution.",
+      "step8": "Failure condition 2: if transfer is weak or worse than generic selective rules, the final paper claim must be downgraded to a careful benchmarked study of leakage-controlled surrogate calibration rather than a new practical heuristic."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready tables and figures",
+    "description": "Generate outputs that emphasize the narrow contribution, the transfer result, and the possibility of a negative finding.",
+    "steps": {
+      "step1": "Figure 1: schematic of the shared hierarchical scorer, conformal known-child gate, masked-child gate, and safe-prefix output for the failure mode `known EC-3 parent, missing EC-4 child`.",
+      "step2": "Figure 2: temporal future-child risk-coverage curves comparing forced hierarchical prediction, `1-NN + threshold`, flat selective logistic, HSC-style stopping, Parent-OpenMax, and MCC-EC.",
+      "step3": "Figure 3: leakage-audit heatmap showing, for each feature family and masked-child event, whether that feature was rebuilt, dropped, or failed audit.",
+      "step4": "Figure 4: parent-level scatter plots of masked-child gain versus temporal future-child gain for MCC-EC and the strongest generic baseline, with Pearson and Spearman values printed in-panel.",
+      "step5": "Table 1: main temporal benchmark results at coverage targets `0.60`, `0.80`, and `0.95`, including catastrophic overspecialization, correct-safe-prefix rate, hierarchical loss, selective EC-4 F1, and mean returned depth.",
+      "step6": "Table 2: masked-child benchmark and ablation results, including open-child AUROC, realized coverage, and the number of valid masked-child events after leakage audits.",
+      "step7": "Save all figures as `PNG` and `PDF`, and save every figure's source data as CSV under `figures/source_data/`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Check feasibility against the 8-hour budget",
+    "description": "Estimate runtime before execution and simplify only in ways that preserve the core claim, the three seeds, and the transfer experiment.",
+    "steps": {
+      "step1": "Shared GPU embedding pass for all retained proteins from `2018_02` and `2023_01`: about `2.2` hours on one RTX A6000 with batch size `8` and mixed precision.",
+      "step2": "Shared CPU preprocessing for cleaning, split generation, parent statistics, prototype construction, and masked-child manifest creation: about `0.9` hours on 4 CPU cores, partially overlapped with the embedding pass.",
+      "step3": "Per-seed shared scorer training plus simple baselines: about `18` minutes per seed, or `0.9` hours total across three seeds.",
+      "step4": "Per-seed selective baselines `max-probability`, `HSC-style`, and `Parent-OpenMax`: about `16` minutes per seed, or `0.8` hours total.",
+      "step5": "Per-seed MCC-EC masked-child rebuilds, conformal calibration, and evaluation: about `20` minutes per seed, or `1.0` hour total.",
+      "step6": "Per-seed ablations A through D: about `22` minutes per seed, or `1.1` hours total. If pilot timing exceeds estimates by more than 15%, keep all three seeds but reduce the parent cap from `12` to `10` before rerunning.",
+      "step7": "Aggregation, statistical testing, and plotting: about `0.6` hours. Total projected wall-clock time is about `7.5` hours with CPU/GPU overlap, which fits the budget without requiring multi-day runs or additional GPUs."
+    }
+  }
+]

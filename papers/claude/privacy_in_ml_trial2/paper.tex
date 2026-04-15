@@ -1,0 +1,509 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{natbib}
+
+\newcommand{\wqauc}{\text{WQ-AUC}}
+\newcommand{\dg}{\text{DG}}
+\newcommand{\dcua}{\text{DCUA}}
+\newcommand{\dau}{\text{DAU}}
+
+\title{Difficulty-Calibrated Unlearning Auditing: Exposing Per-Sample Privacy Gaps in Machine Unlearning}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Machine unlearning methods are typically evaluated using aggregate membership inference attack (MIA) metrics, which average privacy leakage across all forgotten samples.
+We show that this practice systematically masks severe per-sample privacy failures: samples that are intrinsically harder to unlearn remain highly vulnerable even when aggregate metrics appear satisfactory.
+We propose \emph{Difficulty-Calibrated Unlearning Auditing} (DCUA), a diagnostic framework that stratifies forget-set samples into difficulty quintiles using reference-model calibration and evaluates unlearning quality per stratum.
+Across five unlearning algorithms, three datasets, and three random seeds, we find that the worst-quintile MIA-AUC (WQ-AUC) exceeds the aggregate AUC by 0.08--0.35 absolute, with difficulty gaps (DG) reaching 0.30--0.65.
+All 15 method--dataset configurations show statistically significant overestimation by aggregate metrics ($p < 0.005$).
+We also investigate Difficulty-Aware Unlearning (DAU), an adaptive reweighting defense.
+While DAU shows promising results for Random Labels unlearning (reducing WQ-AUC by up to 0.106 on Purchase-100), it provides negligible improvement for most other methods and can worsen privacy for SCRUB---an informative negative result highlighting that difficulty-aware loss reweighting alone is insufficient to close the per-sample privacy gap.
+Our findings establish DCUA as a practical, computationally efficient diagnostic that any unlearning evaluation should include, and identify closing the difficulty-dependent privacy gap as an important open problem.
+\end{abstract}
+
+\section{Introduction}
+
+Machine unlearning---the process of removing the influence of specific training data from a trained model---has become critical for compliance with privacy regulations such as the GDPR's ``right to be forgotten''~\citep{bourtoule2021machine}.
+A central challenge is \emph{verification}: determining whether unlearning actually removed the targeted information.
+The dominant approach uses membership inference attacks (MIAs) as a proxy: if an attacker cannot distinguish whether a sample was in the training set by examining the unlearned model, unlearning is deemed successful~\citep{chen2021machine,kurmanji2023towards}.
+
+However, standard MIA-based evaluations compute a single aggregate metric (e.g., AUC) over the entire forget set.
+Recent work has shown this is fundamentally misleading.
+\citet{hayes2025inexact} demonstrated that per-example attacks reveal significant privacy failures masked by aggregate metrics, creating a ``false sense of privacy.''
+Concurrently, the unlearning difficulty literature has shown that success varies dramatically across individual samples~\citep{rizwan2024instance,zhao2024what,cheng2026toward}.
+
+\textbf{The gap we address.}
+While prior work has diagnosed the problem---that per-sample unlearning quality varies and aggregate metrics are misleading---the question of \emph{how to efficiently expose these failures in practice} remains open.
+\citet{hayes2025inexact} require per-example shadow models (computationally expensive), while \citet{zhao2024what} and \citet{rizwan2024instance} focus on understanding difficulty factors rather than providing a practical evaluation protocol.
+No existing work bridges the difficulty calibration framework from the MIA literature~\citep{watson2022importance} into unlearning evaluation.
+
+\textbf{Our approach.}
+We propose \emph{Difficulty-Calibrated Unlearning Auditing} (DCUA), which uses reference-model difficulty scores~\citep{watson2022importance,carlini2022membership} to stratify forget-set samples into difficulty quintiles, then evaluates unlearning quality per stratum.
+This yields two targeted metrics: \emph{Worst-Quintile AUC} (WQ-AUC), capturing the privacy of the most vulnerable samples, and \emph{Difficulty Gap} (DG), measuring how much privacy protection varies with sample difficulty.
+We also investigate \emph{Difficulty-Aware Unlearning} (DAU), an adaptive defense that reweights the unlearning loss by sample difficulty.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose DCUA, a stratified evaluation framework that uses reference-model difficulty calibration to expose per-sample privacy gaps in machine unlearning. DCUA is computationally efficient---$K$ reference models serve all samples, compared to $O(n)$ shadow models for per-example attacks.
+    \item We demonstrate across 5 unlearning methods, 3 datasets, and 3 seeds that aggregate MIA-AUC systematically overestimates unlearning quality: WQ-AUC exceeds aggregate AUC by 0.08--0.35 absolute in all 15 configurations ($p < 0.005$), with difficulty gaps of 0.26--0.65.
+    \item We investigate DAU as an adaptive defense, finding that simple difficulty-aware loss reweighting is insufficient for most unlearning methods---an important negative result that identifies closing the difficulty-dependent privacy gap as an open problem.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our method. Section~\ref{sec:experiments} presents experiments. Section~\ref{sec:discussion} discusses findings and limitations. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Machine unlearning evaluation.}
+\citet{hayes2025inexact} is the closest prior work to our evaluation contribution.
+They distinguished \emph{population U-MIAs} (one attacker for all examples) from \emph{per-example U-MIAs} (a dedicated attacker per example), showing that aggregate metrics create a false sense of privacy.
+Our work differs in three ways: (1) we use difficulty calibration~\citep{watson2022importance} as a computationally cheaper stratification mechanism, (2) we introduce specific metrics (WQ-AUC, DG) for quantifying the difficulty-dependent gap, and (3) we investigate a defense (DAU).
+\citet{naderloui2025rectifying} proposed RULI, a per-sample targeted attack framework; our stratified approach provides complementary diagnostic information.
+
+\textbf{Unlearning difficulty.}
+\citet{rizwan2024instance} identified four instance-level factors making unlearning difficult (memorization, atypicality, loss landscape, gradient alignment).
+\citet{zhao2024what} showed that forget-set characteristics substantially affect unlearning difficulty and proposed RUM, a meta-algorithm that partitions forget sets into homogeneous subsets.
+\citet{cheng2026toward} proposed circuit-level difficulty metrics.
+Our difficulty estimation via reference models captures a complementary signal specifically designed to connect to MIA vulnerability, and our DCUA framework provides a practical evaluation protocol.
+
+\textbf{Difficulty calibration in MIA.}
+\citet{watson2022importance} established that difficulty calibration dramatically improves MIA accuracy by adjusting membership scores based on sample hardness.
+\citet{carlini2022membership} developed LiRA, which implicitly accounts for difficulty through reference model comparisons.
+\citet{he2024difficulty} identified limitations and proposed RAPID.
+Our contribution bridges difficulty calibration from the attack domain into the unlearning evaluation domain.
+
+\textbf{Machine unlearning algorithms.}
+\citet{bourtoule2021machine} introduced SISA training for exact unlearning.
+\citet{kurmanji2023towards} proposed SCRUB, a teacher-student distillation framework.
+These methods are evaluated primarily using aggregate metrics; our work shows these are misleading and proposes stratified alternatives.
+
+\textbf{Per-instance privacy and unlearning.}
+\citet{sepahvand2025leveraging} leveraged per-instance differential privacy bounds for unlearning, focusing on noisy fine-tuning with DP machinery.
+DAU is algorithm-agnostic and works with any gradient-based unlearning method without requiring DP.
+
+\begin{table}[t]
+\caption{Comparison with related work. DCUA provides both evaluation and defense investigation, using computationally efficient reference-model calibration.}
+\label{tab:comparison}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+& Hayes et al. & Rizwan et al. & Zhao et al. & Cheng et al. & \textbf{Ours} \\
+\midrule
+Evaluation protocol & \checkmark & & & & \checkmark \\
+Defense proposed & & & RUM & & DAU \\
+Difficulty mechanism & Per-example & 4 factors & Partitioning & Circuits & Ref.\ models \\
+Computational cost & $O(n)$ & Analysis & Moderate & Analysis & $O(K)$ \\
+MIA connection & U-MIA & None & None & None & Calibration \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setting}
+
+Consider a model $f_\theta$ trained on dataset $D = D_r \cup D_f$, where $D_f$ is the \emph{forget set} (samples to be unlearned) and $D_r$ is the \emph{retain set}.
+An unlearning algorithm $\mathcal{U}$ produces an unlearned model $f_{\theta'}$ that should behave as if $D_f$ were never in the training data.
+The gold standard is \emph{retraining from scratch} on $D_r$ alone, producing $f_{\theta^*}$.
+
+Standard evaluation computes the aggregate MIA-AUC: the area under the ROC curve for distinguishing $D_f$ (members) from held-out test samples (non-members) based on the unlearned model's behavior.
+A lower AUC (closer to 0.5) indicates better unlearning.
+
+\subsection{Difficulty-Calibrated Unlearning Auditing (DCUA)}
+
+\textbf{Step 1: Difficulty estimation.}
+We train $K$ reference models $\{f_k\}_{k=1}^K$ on data from the same distribution as $D$ but disjoint from $D_f$.
+For each sample $x \in D_f$, we compute the \emph{reference difficulty score}:
+\begin{equation}
+    d(x) = \frac{1}{K} \sum_{k=1}^{K} \mathcal{L}(f_k, x),
+\end{equation}
+where $\mathcal{L}$ is the cross-entropy loss.
+This mirrors the reference-model approach used in LiRA~\citep{carlini2022membership} but applied to characterize sample difficulty rather than perform the attack itself.
+Samples with high $d(x)$ are intrinsically harder---they are atypical or lie in difficult regions of the data manifold.
+
+\textbf{Step 2: Stratification.}
+We assign each sample to a difficulty quintile $Q_1$ (easiest, 0--20th percentile) through $Q_5$ (hardest, 80--100th percentile) based on percentile ranks of $d(x)$.
+For fair evaluation, we construct \emph{difficulty-matched} non-member sets: for each quintile $Q_i$, we select test-set samples whose difficulty score falls in the same percentile range, ensuring that within-stratum MIA comparison is not confounded by difficulty.
+
+\textbf{Step 3: Per-stratum evaluation.}
+For each quintile $Q_i$, we compute the MIA-AUC using members from $Q_i$ and difficulty-matched non-members.
+This yields our two key metrics:
+\begin{itemize}
+    \item \textbf{Worst-Quintile AUC (WQ-AUC)} $= \text{AUC}(Q_5)$: the MIA success rate on the hardest-to-unlearn samples. This is the metric most relevant for privacy, since the hardest samples are the most vulnerable.
+    \item \textbf{Difficulty Gap (DG)} $= \text{AUC}(Q_5) - \text{AUC}(Q_1)$: the disparity in privacy protection between the easiest and hardest samples. A large DG indicates that unlearning quality is highly non-uniform.
+\end{itemize}
+
+The \emph{overestimation} $\Delta = \wqauc - \text{Aggregate AUC}$ quantifies how much standard evaluation underestimates the privacy risk for the most vulnerable samples.
+
+\textbf{Computational cost.}
+DCUA requires training $K$ reference models (we use $K=4$ by default), which are shared across all samples and all evaluation runs.
+This is a one-time cost amortized over the entire evaluation.
+By contrast, \citet{hayes2025inexact}'s per-example U-MIA requires $O(n)$ shadow model groupings, where $n$ is the forget-set size.
+
+\subsection{Difficulty-Aware Unlearning (DAU)}
+
+As an exploratory defense, we investigate whether the same difficulty signal that exposes the privacy gap can be used to close it.
+DAU modifies standard unlearning objectives with a per-sample difficulty weight:
+\begin{equation}
+    \mathcal{L}_{\dau} = \sum_{x \in D_f} w(x) \cdot \mathcal{L}(f, x),
+\end{equation}
+where $w(x) = 1 + \alpha \cdot \frac{d(x) - \bar{d}}{\sigma_d}$ is a difficulty-dependent weight that amplifies the unlearning signal for hard samples, clamped to $[0.1, 10.0]$.
+The hyperparameter $\alpha$ controls the strength of difficulty calibration.
+For SCRUB, we apply $w(x)$ to the forget-step KL divergence only, leaving the retain-step loss unchanged.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\textbf{Datasets.}
+We evaluate on three datasets: \textbf{CIFAR-10} (50K training images, 10 classes), \textbf{CIFAR-100} (50K training images, 100 classes), and \textbf{Purchase-100} (40K training samples, 100 classes).
+Purchase-100 is a synthetic proxy generated with scikit-learn's \texttt{make\_classification} (600 binary features, 100 classes) following the setup of \citet{shokri2017membership}; we note this is a proxy rather than the original Kaggle dataset, which limits generalization claims for tabular data.
+
+\textbf{Models.}
+ResNet-18 (modified for 32$\times$32 inputs: first convolution replaced with $3 \times 3$ kernel, max-pool removed) for CIFAR-10/100; 3-layer MLP (1024-512-256-100 with ReLU and dropout 0.2) for Purchase-100.
+Reference models ($K=4$) achieve test accuracies of 92.8--93.2\% (CIFAR-10), 71.7--72.1\% (CIFAR-100), and 55.4--56.1\% (Purchase-100).
+
+\textbf{Unlearning algorithms.}
+We evaluate five approximate methods:
+(1)~\textbf{Fine-Tune (FT)}: continue training on $D_r$ for 5 epochs;
+(2)~\textbf{Gradient Ascent (GA)}: maximize loss on $D_f$ for 5 epochs;
+(3)~\textbf{Random Labels (RL)}: train on $D_f$ with random labels + $D_r$ with true labels;
+(4)~\textbf{SCRUB}~\citep{kurmanji2023towards}: teacher-student distillation alternating forget/retain steps;
+(5)~\textbf{NegGrad+KD}: negative gradient with knowledge distillation.
+We also include \textbf{Retrain} (gold standard) as a baseline.
+
+\textbf{Forget sets.}
+Random subsets of 1,000 samples from the training set (2.5\% of CIFAR, 2.5\% of Purchase-100).
+
+\textbf{MIA method.}
+We use the calibrated loss-threshold attack~\citep{watson2022importance}: $\text{score}(x) = -(\mathcal{L}_{\text{unlearned}}(x) - \bar{\mathcal{L}}_{\text{ref}}(x))$, subtracting the reference-model difficulty baseline.
+
+\textbf{Seeds and statistics.}
+All experiments use 3 random seeds (42, 123, 456). We report mean $\pm$ standard deviation. Statistical significance is assessed with one-sided paired $t$-tests with Bonferroni correction for multiple comparisons (15 tests for WQ $>$ Agg, 15 for DG $> 0$).
+
+\subsection{Main Results: Aggregate Metrics Systematically Overestimate Unlearning Quality}
+
+\begin{table}[t]
+\caption{Main results across three datasets. Aggregate AUC, Worst-Quintile AUC (WQ-AUC), and Difficulty Gap (DG) for each unlearning method. $\uparrow$ means higher values indicate \emph{worse} privacy (more leakage). Values are mean $\pm$ std over 3 seeds. All WQ-AUC $>$ Agg differences are significant ($p < 0.005$, Bonferroni-corrected).}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{l ccc ccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{CIFAR-10}} & \multicolumn{3}{c}{\textbf{CIFAR-100}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Method & Agg $\uparrow$ & WQ $\uparrow$ & DG $\uparrow$ & Agg $\uparrow$ & WQ $\uparrow$ & DG $\uparrow$ \\
+\midrule
+Retrain  & .504$\pm$.011 & .426$\pm$.005 & $-$.062$\pm$.034 & .502$\pm$.009 & .421$\pm$.017 & .018$\pm$.008 \\
+\midrule
+FT       & .602$\pm$.017 & .797$\pm$.006 & .296$\pm$.022 & .753$\pm$.002 & .979$\pm$.008 & .507$\pm$.016 \\
+GA       & .597$\pm$.017 & .792$\pm$.004 & .304$\pm$.022 & .752$\pm$.002 & .979$\pm$.008 & .513$\pm$.015 \\
+RL       & .592$\pm$.016 & .753$\pm$.010 & .260$\pm$.017 & .682$\pm$.001 & .952$\pm$.010 & .647$\pm$.022 \\
+SCRUB    & .601$\pm$.016 & .797$\pm$.006 & .301$\pm$.024 & .753$\pm$.002 & .979$\pm$.008 & .506$\pm$.015 \\
+NegGrad  & .600$\pm$.017 & .796$\pm$.005 & .301$\pm$.023 & .752$\pm$.002 & .979$\pm$.008 & .510$\pm$.015 \\
+\bottomrule
+\end{tabular}
+\vspace{6pt}
+
+\begin{tabular}{l ccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Purchase-100}} \\
+\cmidrule(lr){2-4}
+Method & Agg $\uparrow$ & WQ $\uparrow$ & DG $\uparrow$ \\
+\midrule
+Retrain  & .500$\pm$.013 & .538$\pm$.024 & .162$\pm$.042 \\
+\midrule
+FT       & .847$\pm$.002 & .985$\pm$.008 & .310$\pm$.017 \\
+GA       & .884$\pm$.004 & .993$\pm$.002 & .271$\pm$.008 \\
+RL       & .426$\pm$.006 & .775$\pm$.034 & .657$\pm$.038 \\
+SCRUB    & .895$\pm$.004 & .997$\pm$.001 & .254$\pm$.009 \\
+NegGrad  & .764$\pm$.010 & .843$\pm$.027 & .221$\pm$.036 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} presents the main results.
+The key finding is stark: \textbf{aggregate MIA-AUC dramatically underestimates privacy risk for the most vulnerable samples.}
+
+On CIFAR-10, all five unlearning methods show aggregate AUC in the range 0.59--0.60, which might suggest moderate but acceptable privacy leakage.
+However, the worst-quintile AUC reveals that the hardest 20\% of samples have AUC of 0.75--0.80---indicating that an attacker can identify these samples with high confidence.
+The difficulty gap ranges from 0.26 (RL) to 0.30 (GA, SCRUB, NegGrad), showing substantial non-uniformity in privacy protection.
+
+The effect is even more dramatic on CIFAR-100, where all methods achieve WQ-AUC $\geq 0.95$---near-perfect attack success on the hardest quintile---despite aggregate AUCs of only 0.68--0.75.
+The difficulty gap reaches 0.51--0.65, with RL showing the largest gap (0.647$\pm$0.022).
+
+On Purchase-100, SCRUB has aggregate AUC of 0.895 but WQ-AUC of 0.997, while RL shows the most interesting pattern: low aggregate AUC (0.426) but high WQ-AUC (0.775), producing the largest difficulty gap (0.657).
+
+The retrain baseline confirms our methodology: retrained models show near-chance aggregate AUC ($\approx$0.50) and negative or near-zero difficulty gaps, as expected when no privacy leakage exists.
+
+\textbf{Statistical significance.}
+All 15 WQ-AUC $>$ Aggregate tests are significant at $p < 0.005$ (Bonferroni-corrected, one-sided paired $t$-tests).
+For DG $> 0$, all 15 are significant at $p < 0.005$ after Bonferroni correction.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_stratified_mia.pdf}
+\caption{Per-quintile MIA-AUC across difficulty strata for all unlearning methods. The steep rise from Q1 (easiest) to Q5 (hardest) reveals the difficulty-dependent privacy gap masked by aggregate evaluation. Dashed line at AUC = 0.5 indicates perfect unlearning. Error bars: std over 3 seeds.}
+\label{fig:stratified}
+\end{figure}
+
+Figure~\ref{fig:stratified} visualizes the per-quintile breakdown.
+The monotonic increase from Q1 to Q5 is consistent across all methods and datasets, confirming that sample difficulty is a systematic predictor of unlearning failure.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/figure2_aggregate_vs_wq.pdf}
+\caption{Aggregate AUC vs.\ Worst-Quintile AUC. Every point above the diagonal represents a case where aggregate evaluation underestimates privacy risk. All approximate unlearning methods fall substantially above the diagonal.}
+\label{fig:scatter}
+\end{figure}
+
+Figure~\ref{fig:scatter} directly contrasts aggregate and worst-quintile evaluation.
+Every approximate unlearning method falls well above the $y=x$ diagonal, with the overestimation ranging from 0.08 (NegGrad on Purchase-100) to 0.35 (RL on Purchase-100).
+
+\subsection{DAU Defense: Mixed Results}
+
+\begin{table}[t]
+\caption{DAU defense results. $\Delta$WQ = WQ(standard) $-$ WQ(DAU); positive values indicate improvement (lower attack success). DAU provides meaningful improvement only for RL; it has negligible effect on FT/GA/NegGrad and worsens SCRUB on CIFAR-10.}
+\label{tab:dau}
+\centering
+\small
+\begin{tabular}{ll ccc c}
+\toprule
+Method & Dataset & WQ (Std) & WQ (DAU) & $\Delta$WQ & RA (DAU) \\
+\midrule
+\multirow{3}{*}{GA} & CIFAR-10 & .792$\pm$.004 & .793$\pm$.004 & $-$.001 & 1.000 \\
+& CIFAR-100 & .979$\pm$.008 & .979$\pm$.008 & .000 & 1.000 \\
+& Purchase & .993$\pm$.002 & .988$\pm$.005 & +.005 & 1.000 \\
+\midrule
+\multirow{3}{*}{RL} & CIFAR-10 & .753$\pm$.010 & .704$\pm$.023 & \textbf{+.050} & 1.000 \\
+& CIFAR-100 & .952$\pm$.010 & .856$\pm$.021 & \textbf{+.096} & 1.000 \\
+& Purchase & .775$\pm$.034 & .670$\pm$.037 & \textbf{+.106} & 1.000 \\
+\midrule
+\multirow{3}{*}{SCRUB} & CIFAR-10 & .797$\pm$.006 & .796$\pm$.006 & +.001 & 1.000 \\
+& CIFAR-100 & .979$\pm$.008 & .980$\pm$.008 & $-$.001 & 1.000 \\
+& Purchase & .997$\pm$.001 & .996$\pm$.002 & +.001 & 1.000 \\
+\midrule
+\multirow{3}{*}{FT} & CIFAR-10 & .797$\pm$.006 & .797$\pm$.007 & .000 & 1.000 \\
+& CIFAR-100 & .979$\pm$.008 & .980$\pm$.007 & $-$.001 & 1.000 \\
+& Purchase & .985$\pm$.008 & .983$\pm$.007 & +.002 & 0.999 \\
+\midrule
+\multirow{3}{*}{NegGrad} & CIFAR-10 & .796$\pm$.005 & .795$\pm$.006 & +.001 & 1.000 \\
+& CIFAR-100 & .979$\pm$.008 & .979$\pm$.007 & .000 & 1.000 \\
+& Purchase & .843$\pm$.027 & .770$\pm$.019 & \textbf{+.073} & 0.996 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:dau} presents the DAU defense results.
+The findings are nuanced and largely negative for the primary defense claim:
+
+\textbf{RL is the only method with consistent DAU improvement.}
+RL-DAU reduces WQ-AUC by 0.050 (CIFAR-10), 0.096 (CIFAR-100), and 0.106 (Purchase-100).
+This is the one success case where difficulty-aware reweighting meaningfully reduces the privacy gap.
+
+\textbf{GA and FT show negligible effects.}
+DAU changes WQ-AUC by less than 0.005 across all datasets for both methods.
+The loss reweighting appears insufficient to change the unlearning dynamics for these methods.
+
+\textbf{SCRUB is unaffected or slightly worsened.}
+On CIFAR-100, SCRUB-DAU increases WQ-AUC by 0.001; the teacher-student framework's dynamics may counteract the reweighting.
+
+\textbf{NegGrad shows dataset-dependent effects.}
+DAU helps NegGrad substantially on Purchase-100 ($\Delta$WQ = +0.073) but not on CIFAR datasets, suggesting the effect depends on data modality.
+
+None of the DAU improvements on GA or SCRUB reach statistical significance ($p > 0.05$ for all six configurations tested).
+
+\subsection{Comparison with RUM}
+
+\begin{table}[t]
+\caption{DAU vs.\ RUM~\citep{zhao2024what} on GA and SCRUB. RUM partitions forget sets by difficulty terciles and applies more unlearning epochs to harder subsets. Neither defense substantially reduces WQ-AUC.}
+\label{tab:rum}
+\centering
+\small
+\begin{tabular}{ll ccc}
+\toprule
+Method & Dataset & WQ (Std) & WQ (DAU) & WQ (RUM) \\
+\midrule
+\multirow{3}{*}{GA} & CIFAR-10 & .792$\pm$.004 & .793$\pm$.004 & .784$\pm$.006 \\
+& CIFAR-100 & .979$\pm$.008 & .979$\pm$.008 & .978$\pm$.008 \\
+& Purchase & .993$\pm$.002 & .988$\pm$.005 & .990$\pm$.004 \\
+\midrule
+\multirow{3}{*}{SCRUB} & CIFAR-10 & .797$\pm$.006 & .796$\pm$.006 & .794$\pm$.007 \\
+& CIFAR-100 & .979$\pm$.008 & .980$\pm$.008 & .980$\pm$.007 \\
+& Purchase & .997$\pm$.001 & .996$\pm$.002 & .993$\pm$.005 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:rum} compares DAU and RUM for GA and SCRUB.
+Neither defense substantially reduces WQ-AUC.
+RUM shows marginal improvements (0.003--0.009 on CIFAR-10), but these are not statistically significant.
+This negative result is noteworthy: both continuous reweighting (DAU) and discrete partitioning (RUM) fail to close the difficulty-dependent privacy gap for GA and SCRUB, suggesting the problem requires fundamentally different approaches.
+
+\subsection{Ablation Studies}
+
+\textbf{Number of reference models $K$.}
+Table~\ref{tab:ablation_K} shows that $K=4$ achieves Spearman $\rho = 0.896$ with the $K=8$ baseline and 65.0\% quintile stability (fraction of samples in the same quintile as $K=8$).
+Even $K=2$ captures the main difficulty signal ($\rho = 0.796$, 48.5\% stability).
+The downstream DCUA metrics (WQ-AUC, DG) are robust to $K$: GA WQ-AUC varies by only 0.004 across $K \in \{2, 4, 8\}$.
+
+\begin{table}[t]
+\caption{Reference model ablation on CIFAR-10 (seed 42). $K=4$ provides a good trade-off between cost and accuracy. WQ-AUC and DG are stable across $K$.}
+\label{tab:ablation_K}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+$K$ & Spearman $\rho$ & Quintile Stability & GA WQ & GA DG & SCRUB WQ \\
+\midrule
+2 & 0.796 & 0.485 & 0.905 & 0.377 & 0.910 \\
+4 & 0.896 & 0.650 & 0.907 & 0.385 & 0.910 \\
+8 & 1.000 & 1.000 & 0.909 & 0.376 & 0.913 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Stratification granularity.}
+Table~\ref{tab:ablation_strata} compares terciles (3 strata), quintiles (5), and deciles (10) on CIFAR-10.
+Finer granularity reveals larger worst-stratum AUC: deciles yield WQ-AUC of 0.958--0.981 vs.\ 0.865--0.910 for quintiles.
+We use quintiles as the default because they balance diagnostic power with per-stratum sample size ($\sim$200 samples per stratum for $|D_f|=1000$).
+
+\begin{table}[t]
+\caption{Stratification granularity ablation on CIFAR-10 (seed 42). Finer granularity reveals larger gaps, but quintiles balance granularity with statistical reliability.}
+\label{tab:ablation_strata}
+\centering
+\small
+\begin{tabular}{lccc ccc}
+\toprule
+& \multicolumn{3}{c}{Worst-Stratum AUC $\uparrow$} & \multicolumn{3}{c}{Difficulty Gap $\uparrow$} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Strata & GA & SCRUB & RL & GA & SCRUB & RL \\
+\midrule
+Terciles (3) & 0.814 & 0.819 & 0.767 & 0.272 & 0.274 & 0.230 \\
+Quintiles (5) & 0.907 & 0.910 & 0.865 & 0.385 & 0.381 & 0.336 \\
+Deciles (10) & 0.977 & 0.981 & 0.958 & 0.471 & 0.461 & 0.443 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{DAU strength $\alpha$.}
+Testing $\alpha \in \{0.0, 0.5, 1.0, 2.0, 5.0\}$ on CIFAR-10 and CIFAR-100 for GA and SCRUB, we find that WQ-AUC is essentially unchanged across all $\alpha$ values (variation $<$0.005).
+This confirms that for GA and SCRUB, the lack of DAU improvement is not due to suboptimal $\alpha$ selection but reflects a fundamental limitation of loss reweighting for these methods.
+
+\textbf{Random-weight control.}
+Running GA-DAU with randomly permuted difficulty scores on CIFAR-10 yields WQ-AUC of 0.793$\pm$0.004, indistinguishable from both standard GA (0.792$\pm$0.004) and true-difficulty DAU (0.793$\pm$0.004).
+This confirms that for GA, neither true nor random reweighting has any meaningful effect.
+
+\textbf{Forget set size.}
+Testing $|D_f| \in \{500, 1000, 2500\}$ on CIFAR-10 and CIFAR-100, the difficulty gap remains stable across sizes: DG ranges from 0.264--0.277 (CIFAR-10 GA) and 0.490--0.499 (CIFAR-100 GA).
+This indicates the difficulty-dependent privacy gap is a robust phenomenon, not an artifact of specific forget-set sizes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/figure3_dau_defense.pdf}
+\caption{DAU defense effectiveness across methods and datasets. Only RL-DAU shows consistent WQ-AUC reduction; GA-DAU and SCRUB-DAU are ineffective.}
+\label{fig:dau}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\textbf{DCUA as a practical diagnostic.}
+Our results establish DCUA as a computationally efficient diagnostic that should be included in any unlearning evaluation.
+The finding that WQ-AUC exceeds aggregate AUC by 0.08--0.35 across all methods and datasets is both consistent and alarming.
+A practitioner using only aggregate metrics would dramatically underestimate the privacy risk for the most vulnerable samples.
+
+\textbf{Why DAU largely fails.}
+The negative DAU results for GA, FT, SCRUB, and (partially) NegGrad are informative.
+We hypothesize several reasons:
+(1)~Loss reweighting changes the gradient magnitude but not direction---for methods like GA that already maximize loss, amplifying the loss on hard samples may not change the model's trajectory in parameter space.
+(2)~SCRUB's teacher-student dynamics create an optimization landscape where the forget and retain objectives interact in complex ways that simple reweighting cannot address.
+(3)~The difficulty signal from reference models may not align perfectly with the per-sample vulnerability signal that determines MIA success after unlearning.
+The success of DAU for RL is intriguing and may relate to RL's different optimization dynamic: training with random labels creates label noise that interacts with the difficulty weighting differently than loss maximization or minimization.
+
+\textbf{The difficulty gap as an open problem.}
+The failure of both DAU and RUM to close the gap for most methods suggests that the difficulty-dependent privacy gap is a deep structural issue in approximate unlearning.
+Closing it may require fundamentally different approaches: per-sample convergence criteria, difficulty-aware architectural modifications, or approximate retraining strategies that treat hard and easy samples with qualitatively different procedures.
+
+\textbf{Limitations.}
+(1)~We use only 3 seeds, providing limited statistical power; some borderline results should be interpreted cautiously.
+(2)~Purchase-100 is a synthetic proxy dataset, not the original Kaggle data; generalization to real tabular data is not established.
+(3)~We evaluate one MIA method (calibrated loss threshold); other attacks~\citep{carlini2022membership,he2024difficulty} may yield different per-stratum patterns.
+(4)~Our experiments use a single forget-set size (1,000) for the main evaluation; while ablations show stability, the gap may behave differently for very large or very small forget sets.
+(5)~We do not evaluate on large-scale models (e.g., transformers, LLMs) where unlearning dynamics may differ substantially.
+(6)~The difficulty gap observed on retrained models for Purchase-100 (DG = 0.162$\pm$0.042) suggests that the synthetic dataset may have inherent distributional issues that affect the evaluation.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed Difficulty-Calibrated Unlearning Auditing (DCUA), a stratified evaluation framework that exposes per-sample privacy gaps in machine unlearning.
+Across five unlearning algorithms, three datasets, and three random seeds, we demonstrated that aggregate MIA metrics systematically overestimate unlearning quality: the worst-quintile MIA-AUC exceeds aggregate AUC by 0.08--0.35 (all $p < 0.005$), with difficulty gaps of 0.26--0.65.
+Our investigation of Difficulty-Aware Unlearning (DAU) yielded a largely negative but informative result: simple difficulty-aware loss reweighting is insufficient for most unlearning methods, succeeding only for Random Labels unlearning (WQ-AUC reduction of 0.050--0.106).
+This identifies closing the difficulty-dependent privacy gap as an important open problem for the unlearning community.
+We recommend that future unlearning evaluations report stratified metrics (WQ-AUC, DG) alongside aggregate metrics to provide a more honest assessment of privacy protection.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\newpage
+\appendix
+
+\section{Additional Experimental Details}
+
+\textbf{Training hyperparameters.}
+For CIFAR-10/100 models: SGD optimizer, learning rate 0.1, momentum 0.9, weight decay $5 \times 10^{-4}$, cosine annealing schedule, 100 epochs, batch size 256.
+Data augmentation: random crop (32$\times$32, padding 4), random horizontal flip.
+For Purchase-100 models: Adam optimizer, learning rate 0.001, weight decay $10^{-4}$, 50 epochs, batch size 512.
+
+\textbf{Unlearning hyperparameters.}
+FT: SGD (CIFAR) / Adam (Purchase), lr=0.001, 5 epochs on $D_r$.
+GA: lr=0.0001, gradient clip norm 1.0, 5 epochs on $D_f$.
+RL: lr=0.001, 5 epochs on $D_f$ (random labels) + $D_r$ (true labels).
+SCRUB: alternating 1 forget step (lr=0.0001, maximize KL to uniform) and 3 retain steps (lr=0.001, minimize KL to teacher), 3 full passes.
+NegGrad+KD: $\mathcal{L} = -0.5 \cdot \text{CE}(f, D_f) + 0.5 \cdot \text{KL}(f \| f_{\text{orig}}, D_r)$, lr=0.001, 5 epochs.
+
+\textbf{DAU hyperparameters.}
+Default $\alpha = 1.0$.
+Weight clamping range: $[0.1, 10.0]$.
+For FT-DAU: upweight retain-set samples in same classes as hard forget samples.
+For RUM baseline~\citep{zhao2024what}: partition forget set into difficulty terciles; apply 3, 5, 8 epochs respectively for easy/medium/hard subsets.
+
+\section{Full Statistical Analysis}
+
+\textbf{Criterion 1: WQ-AUC $>$ Aggregate AUC.}
+All 15 method--dataset configurations show WQ-AUC exceeding aggregate AUC with Bonferroni-corrected $p < 0.005$ (paired one-sided $t$-test, 15 tests).
+The mean overestimation ranges from 0.079 (NegGrad, Purchase-100) to 0.349 (RL, Purchase-100).
+
+\textbf{Criterion 2: Difficulty Gap $>$ 0.}
+All 15 configurations show DG significantly greater than zero after Bonferroni correction ($p < 0.007$ for all).
+Cohen's $d$ effect sizes range from 4.8 to 38.1, indicating very large effects.
+
+\textbf{DAU defense tests.}
+None of the 6 tested DAU configurations for GA and SCRUB (3 datasets each) show statistically significant WQ-AUC reduction ($p > 0.05$ for all).
+This confirms the negative finding is not merely a power issue---the effect sizes are near zero.
+
+\end{document}

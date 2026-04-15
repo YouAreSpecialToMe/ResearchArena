@@ -1,0 +1,132 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Configure deterministic CPU-only study",
+    "description": "Set up a reproducible environment for a characterization paper on switching costs in sequential causal design under the hard resource limit of 2 CPU cores, 128 GB RAM, no GPU, and about 8 total wall-clock hours.",
+    "steps": {
+      "step1": "Create a Python 3.11 environment with CPU-only packages: numpy, scipy, pandas, networkx, scikit-learn, matplotlib, seaborn, joblib, tqdm, and one graph package such as causaldag or pgmpy only if needed for GES, CPDAG handling, and MEC utilities. Do not install PyTorch, JAX, TensorFlow, CUDA, or any neural policy code because the plan must stay CPU-feasible.",
+      "step2": "Fix deterministic execution globally before any run: set PYTHONHASHSEED, numpy random seed, scipy random seed if used, and any library-specific seeds. Use the shared master seed list [11, 23, 37, 53, 71] for the main benchmark and the reduced seed list [11, 23, 37] for expensive exact-posterior and oracle-skeleton slices. Reuse the same matched instance seeds for every method.",
+      "step3": "Restrict each worker to one CPU thread by setting OMP_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, and NUMEXPR_NUM_THREADS=1. Run at most n_jobs=2 workers in parallel. Record explicitly in the run metadata that available GPUs = 0, so the study accounts for parallel execution through 2 CPU workers only.",
+      "step4": "Write one shared YAML or JSON config with fixed defaults: node counts d_main in {10, 15}, d_exact = 8, optional stress-test d = 20, graph families in {erdos_renyi, scale_free}, expected degree 2, observational sample size n_obs = 500, candidate actions = singleton hard and singleton soft interventions, batch sizes n_batch in {25, 50}, maximum planning horizon H in {1, 2, 3}, and maximum experimental rounds T_max = 8.",
+      "step5": "Fix common posterior and planning hyperparameters before any comparison: approximate particle count M = 96 for d in {10, 15}, M = 128 for d = 20 stress tests, ESS threshold = 0.5M, MH rejuvenation moves L = 4 per particle after resampling, rollout count R = 16 for routine planning, rollout count R = 24 only in the exact d = 8 slice, and top-K action pruning K = 5 for approximate horizon search.",
+      "step6": "Standardize outputs as one row per round and one summary row per run with columns: method, seed, graph_family, node_count, skeleton_mode, posterior_mode, intervention_regime, switch_regime, objective_mode, round_idx, previous_family, chosen_target, chosen_family, batch_size, immediate_exec_cost, immediate_sample_cost, immediate_switch_cost, cumulative_cost, remaining_budget, orientation_entropy, AUEC_partial, oriented_edge_fraction, restricted_SHD, full_SHD, switch_count, planner_runtime_sec, total_runtime_sec, ESS_before, ESS_after, MH_accept_rate, TV_orient_error, DAG_KL_error, calibration_brier, feasibility_margin, fallback_triggered, and run_status."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate matched synthetic causal design tasks",
+    "description": "Construct synthetic linear-Gaussian SCM benchmarks that directly test the paper's narrow claim: when do path-dependent setup costs actually change the budget-optimal policy for orienting edges inside an estimated or oracle skeleton.",
+    "steps": {
+      "step1": "For each seed, graph family, and node count, sample a random topological order and then sample order-consistent edges to obtain expected degree 2. Use two families: Erdős-Rényi DAGs as the default and order-respecting scale-free DAGs as a structural stress test. Reject draws with disconnected skeletons, singular covariance matrices, or MEC size above the exact-slice cap when d = 8.",
+      "step2": "Sample edge weights independently from Uniform([-1.5, -0.5] union [0.5, 1.5]) and noise variances from Uniform([0.8, 1.2]). Draw n_obs = 500 observational samples from each SCM. Fit an initial CPDAG C_hat with GES plus BIC on the observational data for the learned-skeleton condition.",
+      "step3": "Create three skeleton conditions. Learned-CPDAG uses the estimated C_hat and its skeleton S_hat. Oracle-CPDAG uses the true MEC projected to the true skeleton to isolate skeleton-estimation error. Exact-MEC d = 8 enumerates all DAGs consistent with the true or learned CPDAG whenever the MEC size is at most 512 DAGs and uses that exact posterior as a soundness reference.",
+      "step4": "Log the key confounders for every generated instance: number of edges in the true graph, number of undirected edges in C_hat, structural Hamming distance between true skeleton and S_hat, MEC size, and the orientation entropy at round 0. Use these covariates later to test whether switching-cost effects are dominated by skeleton error.",
+      "step5": "Define two intervention-family regimes that keep updates analytically tractable. Regime I, mild soft interventions: hard(i) replaces X_i with an exogenous N(0,1) draw; soft(i) preserves parents but adds mean shift delta = 0.75 and variance multiplier 1.25. Regime II, strong soft interventions: hard(i) unchanged; soft(i) uses delta = 1.5 and variance multiplier 2.0.",
+      "step6": "Define four switching regimes with fixed execution and sample costs. Use c_exec(hard)=1.0, c_exec(soft)=0.8, c_sample(hard)=c_sample(soft)=0.02, budget B in {14, 18} for the main study, and switch matrices S0=[[0,0],[0,0]], S1=[[0,1],[1,0]], S2=[[0,2],[2,0]], and S3=[[0,1],[3,0]]. Choose B=14 as the tight-budget regime where feasibility changes are common and B=18 as the moderate-budget regime where crossover without infeasibility can still appear."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run simple, strong, and exact-budget baselines",
+    "description": "Use fair baselines that separate the value of switching-cost modeling from generic non-myopic search and from budgeted finite-horizon optimization.",
+    "steps": {
+      "step1": "Baseline 1, Random feasible: sample uniformly from all currently feasible actions under the true path-dependent cost model and remaining budget. This is the required simple baseline and must obey the exact same budget, batch-size, and action-space constraints as all other methods.",
+      "step2": "Baseline 2, Myopic budgeted gain: choose the feasible action with the largest one-step expected reduction in skeleton-conditional orientation entropy. Use the same posterior representation and predictive simulation as the proposed planner, but no lookahead beyond one step.",
+      "step3": "Baseline 3, Horizon-2 additive-cost planner: run the same horizon-2 search machinery as the proposed planner, but set switching costs to zero inside the search objective while still charging the true switching cost during execution. This is the primary strong matched-class baseline for testing whether path dependence matters.",
+      "step4": "Baseline 4, Exact finite-horizon budgeted dynamic program: on the d = 8 exact-posterior slice, solve the finite-horizon budgeted objective with path-dependent transition costs by exhaustive tree search or dynamic programming over state (posterior, previous family, remaining budget) after top-K action pruning only when exact branching would exceed the preset runtime cap. This baseline is stronger than the heuristic planner and directly addresses the feedback requesting a non-heuristic budgeted comparator with transition costs.",
+      "step5": "Baseline 5, Ratio-objective selector: in the main benchmark only, evaluate a planner that ranks candidate first actions by expected gain divided by estimated path cost Delta/C_path and then executes greedily under the true budget. This baseline is not a paper claim; it is included only to demonstrate whether the older ratio objective changes conclusions relative to the budget-aligned objective.",
+      "step6": "For every approximate-posterior table, initialize Baselines 2, 3, 5, and the proposed planner from the exact same particle pool, weight update code, resampling rule, rollout count, and action screen. For the d = 8 exact slice, compare Baselines 1, 2, 3, 4, 5, and the proposed method under the same exact posterior; do not mix exact and approximate posterior methods in one table."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate switching-aware planning under budget-aligned objectives",
+    "description": "Test the central characterization claim that switching costs change the preferred sequential policy only in narrow regimes defined by budget margins and additive-value gaps, and that a switching-aware planner helps mainly inside those regimes.",
+    "steps": {
+      "step1": "Implement the proposed method as a horizon-2 switching-aware receding-horizon planner with state (posterior, previous family, remaining budget). Candidate actions are all singleton hard or soft interventions with batch sizes in {25, 50}. At each round, score feasible depth-2 sequences by expected terminal orientation entropy reduction V_B under the remaining budget and execute the first action of the best sequence.",
+      "step2": "Use the fixed-budget terminal objective as primary: V_B(pi) = E[H_orient(0) - H_orient(T_pi)] subject to the true path-dependent budget. Also compute area under orientation-entropy-versus-spent-budget curve (AUEC) as the main trajectory metric. Treat the ratio objective only as a secondary diagnostic; never use it as the primary success criterion.",
+      "step3": "Run the full main benchmark on learned CPDAGs for node counts d in {10, 15}, graph families in {erdos_renyi, scale_free}, intervention regimes in {mild_soft, strong_soft}, budgets in {14, 18}, and switch regimes in {S0, S1, S2, S3}. Use 5 seeds and methods {Random feasible, Myopic budgeted gain, Horizon-2 additive-cost, Ratio-objective selector, Proposed H=2 switching-aware}. This yields 2 x 2 x 2 x 2 x 4 x 5 = 320 matched problem instances and 1600 method-runs.",
+      "step4": "For every run, stop when no feasible action remains or when T_max = 8 rounds is reached. Record the full trajectory after each round so later analysis can separate early budget exhaustion from poor action quality. Ensure all methods see the same observation and intervention draws for each matched problem instance by pre-generating stochastic rollout seeds.",
+      "step5": "Compute a regime label for each problem instance before comparing methods: feasible-change regime if the additive-cost optimum becomes infeasible once switching costs are applied, value-crossover regime if both policies remain feasible but the switch-aware and additive planners swap order under the penalized inequality, and invariant regime otherwise. Use this label to stratify the reported results rather than only reporting aggregate averages.",
+      "step6": "Report the proposed method primarily as an analysis instrument, not a claimed new general causal design algorithm. The main table should therefore emphasize regime-conditioned differences between the proposed planner and Baseline 3, plus how often each theoretical regime occurs under the synthetic benchmark."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Validate the structural switching-cost characterization",
+    "description": "Run targeted synthetic analyses that test the finite-horizon invariance and crossover conditions directly, rather than relying only on large benchmark averages.",
+    "steps": {
+      "step1": "For d = 8 exact-posterior instances, enumerate all feasible action sequences up to horizon 3 under both budgets B in {14, 18}. For each sequence, compute additive value V_0, switch count N_sw, additive cost C_add, and exact budgeted value V_B. Use these quantities to verify Proposition 1 and Proposition 2 instance by instance.",
+      "step2": "Sweep scalar switching penalties lambda in {0, 0.5, 1, 1.5, 2, 3, 4} while holding the posterior and action catalog fixed. For each exact instance, determine the lambda interval where the additive-cost optimal policy remains optimal, and compare it against the analytically predicted invariance interval from the additive-value gap and switch-count gap.",
+      "step3": "Measure how often policy changes arise through each mechanism: feasibility loss only, joint-feasible crossover only, both mechanisms simultaneously, or no change. Summarize these frequencies separately for d = 8 exact, d = 10 learned-CPDAG, and d = 15 learned-CPDAG settings.",
+      "step4": "Quantify robustness of the switching-aware heuristic relative to the exact budgeted dynamic program on d = 8. Report regret in V_B, regret in AUEC, and exact agreement rate of the first selected action. Success here means the heuristic nearly matches the exact planner when switching costs matter, not that it beats it.",
+      "step5": "Check whether conclusions are unchanged when using three summaries: terminal V_B, AUEC, and the old ratio summary Delta/C_path. Report rank correlations across methods and identify any instances where the ratio objective selects policies that are provably suboptimal under the fixed budget.",
+      "step6": "Use this analysis section to support the paper's contribution claim: a general structural characterization of when transition costs can matter, plus an empirical quantification of how often those conditions occur in realistic short-horizon causal design tasks."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Audit posterior approximation and skeleton-estimation effects",
+    "description": "Determine whether any observed switching-cost effect is real or just an artifact of approximate posterior tracking or skeleton errors from the initial observational estimate.",
+    "steps": {
+      "step1": "Posterior audit on d = 8 exact-MEC problems: compare approximate particle posterior against exact posterior after every round for the proposed method and Baseline 3. Measure total variation error in edge-orientation marginals, KL divergence between exact and approximate DAG posteriors, calibration Brier score for directed-edge probabilities, and planner rank reversals under exact versus approximate posterior.",
+      "step2": "Learned-versus-oracle skeleton audit: on the reduced seed set [11, 23, 37], rerun Baseline 3 and the proposed planner under both learned CPDAG and oracle CPDAG for d = 15, graph families in {erdos_renyi, scale_free}, intervention regimes in {mild_soft, strong_soft}, and switch regimes in {S2, S3}. Keep all other randomness fixed.",
+      "step3": "For the learned-skeleton audit, regress the paired performance gain of the proposed method over Baseline 3 against skeleton SHD, initial number of unoriented edges, MEC size, and switch regime. This tests the concern that conclusions may be dominated by skeleton-estimation error rather than switching costs.",
+      "step4": "Use exact posterior and oracle skeleton jointly on the smallest slice d = 8 to define an upper-bound reference condition. Compare this upper-bound effect size with the learned-skeleton approximate-posterior effect size to quantify how much signal is lost to estimation error.",
+      "step5": "Predefine a posterior-soundness threshold: the particle posterior is considered adequate only if mean edge-orientation TV error stays below 0.05 and planner first-action agreement with the exact dynamic program exceeds 85 percent on the d = 8 slice. If this fails, limit claims to qualitative trends and state that posterior approximation remains a major confounder.",
+      "step6": "Predefine a skeleton-robustness threshold: the learned-CPDAG effect size must retain at least 50 percent of the oracle-CPDAG effect size on AUEC in S2 or S3. If not, report that switching-cost effects exist mainly under good initial skeleton estimates and weaken the practical claim accordingly."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run ablations for every nontrivial component",
+    "description": "Measure which parts of the study design actually create the observed effect: switching-aware objective, non-myopic lookahead, posterior maintenance, and family asymmetry.",
+    "steps": {
+      "step1": "Ablation A, no switching term: keep horizon H = 2 and the same posterior backend, but remove switching costs from the planner objective while still paying them during execution. This should numerically match Baseline 3 and acts as a consistency check.",
+      "step2": "Ablation B, myopic switching-aware: keep switching costs in the planner but reduce lookahead from H = 2 to H = 1. This tests whether non-myopic planning is needed once switching costs are modeled.",
+      "step3": "Ablation C, no MH rejuvenation: keep the particle filter but disable rejuvenation moves after resampling. This tests whether the approximate posterior quality, rather than switching-awareness, drives the gains.",
+      "step4": "Ablation D, symmetric-only costs: replace S3 with its symmetrized version [[0,2],[2,0]] while holding average switch magnitude fixed. This tests whether benefits rely on asymmetric family transition penalties or survive in simpler symmetric settings.",
+      "step5": "Run Ablations A through D on a focused subset: d = 15, both graph families, both intervention regimes, budget B = 14, switch regimes in {S2, S3}, and seeds [11, 23, 37]. Compare each ablation against the proposed planner on matched instances with the same posterior particles and rollout seeds.",
+      "step6": "Interpret ablations only as characterization evidence. The study should conclude that switching-awareness matters if Ablation A and Baseline 3 degrade in S2 or S3, that lookahead matters if Ablation B underperforms in tight-budget regimes, and that posterior quality matters only if Ablation C changes conclusions relative to the exact-posterior audit."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate against explicit success and failure criteria",
+    "description": "Define in advance what counts as support for the paper's claim, what would refute it, and which statistics to report for each comparison.",
+    "steps": {
+      "step1": "Primary metrics are terminal fixed-budget entropy reduction V_B and AUEC, both computed on the estimated skeleton target. Secondary scientific metrics are final oriented-edge fraction on S_hat, restricted SHD on S_hat, full SHD to the true DAG as a diagnostic only, and the fraction of budget spent on switching. Secondary systems metrics are planner runtime per round, total runtime per run, ESS trajectory, resampling frequency, and exact-search fallback rate.",
+      "step2": "Use matched-pair evaluation on identical generated instances for every method comparison. Report mean paired difference, median paired difference, 95 percent paired bootstrap confidence intervals with 1000 bootstrap resamples, and Wilcoxon signed-rank p-values for V_B and AUEC. Aggregate only after matching seed, graph family, node count, intervention regime, budget, and switch regime.",
+      "step3": "Define the main support criterion as follows: the proposed switching-aware planner must beat both the horizon-2 additive-cost baseline and the myopic budgeted-gain baseline on mean AUEC in at least 8 of the 12 nonzero-switch main groups formed by node count {10,15}, graph family {erdos_renyi, scale_free}, and switch regime {S1,S2,S3}, with the strongest evidence required in S2 and S3. In addition, the exact d = 8 slice must preserve the sign of the proposed-minus-additive difference under the exact dynamic-program baseline comparison.",
+      "step4": "Define an objective-alignment support criterion: method rankings under V_B and AUEC must agree with each other in at least 85 percent of main-benchmark groups, and the qualitative crossover story must remain the same when the ratio summary is reported only as a secondary diagnostic. If the ratio objective produces materially different conclusions, report that as evidence against the older objective rather than as support for the switching-aware planner.",
+      "step5": "Define failure criteria in advance. The paper's claim is unsupported if the exact d = 8 dynamic program shows no practical gap between switching-aware and additive-cost planning in S2 and S3, if learned-skeleton gains vanish after conditioning on skeleton error, if approximate posterior rank reversals are frequent, or if any apparent benefit appears only under the ratio objective and disappears under V_B and AUEC.",
+      "step6": "Treat timeouts, infeasible runs, numerical failures, and fallback events as reported outcomes rather than exclusions. If a method exceeds the runtime cap of 180 seconds per run on d = 15 or 300 seconds on d = 20, keep its completed results but mark that setting as outside the intended feasible operating range."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce figures and tables for a characterization paper",
+    "description": "Generate paper figures that make the contribution legible: when switching costs matter, why they matter, and whether the evidence survives stronger baselines and exact diagnostics.",
+    "steps": {
+      "step1": "Figure 1: orientation entropy versus spent budget curves for the proposed planner, the horizon-2 additive-cost baseline, and the myopic budgeted-gain baseline, split by node count and switch regime. Show mean curves with 95 percent bootstrap confidence bands over the 5 main seeds and both graph families.",
+      "step2": "Figure 2: regime map showing the fraction of instances classified as invariant, feasibility-change, or value-crossover across budgets B in {14,18} and switch regimes S0 through S3. This figure should visualize the empirical frequency of the theoretical mechanisms, not just final performance.",
+      "step3": "Figure 3: exact d = 8 validation plot of policy value versus lambda for enumerated horizon-3 policies, with analytically predicted crossover or invariance thresholds marked. This is the key figure connecting the theory to exact computation.",
+      "step4": "Figure 4: approximate-versus-exact posterior audit showing edge-orientation marginal scatter, DAG posterior KL over rounds, and a scatter of proposed-minus-additive AUEC under approximate posterior versus exact posterior. Include the identity line and annotate any planner rank reversals.",
+      "step5": "Figure 5: learned-versus-oracle skeleton comparison plus ablation summary, reporting AUEC, terminal V_B, switch count, and runtime for the proposed method, additive baseline, and Ablations B through D on the focused subsets.",
+      "step6": "Create Table 1 for the full learned-CPDAG main benchmark, Table 2 for exact d = 8 results including the exact dynamic-program baseline, Table 3 for posterior and skeleton audits, and Table 4 for ablations and objective-alignment checks. Save all tables as CSV and LaTeX, and all figures as both PNG and PDF."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Budget runtime within 8 wall-clock hours",
+    "description": "Estimate runtime conservatively before execution and stage the experiments so the most decision-relevant evidence runs first on the available 2 CPU cores.",
+    "steps": {
+      "step1": "Assume average single-core runtimes after implementation and profiling: Random feasible 0.05 minutes per run, Myopic budgeted gain 0.25 minutes, Horizon-2 additive-cost 0.65 minutes, Ratio-objective selector 0.45 minutes, Proposed H=2 switching-aware 0.8 minutes, exact d = 8 dynamic-program runs 1.2 minutes, and focused ablation runs 0.75 minutes. Use these as planning estimates, not guarantees.",
+      "step2": "Main learned-CPDAG benchmark estimate with 5 seeds: 320 matched instances x (0.05 + 0.25 + 0.65 + 0.45 + 0.8) = 704 CPU-minutes, or about 5.87 wall-clock hours on 2 cores if every method is run everywhere. To stay within budget, run the full 320-instance sweep only for methods {Myopic budgeted gain, Horizon-2 additive-cost, Proposed H=2}, and run Random plus Ratio-objective on a stratified half-sample of 160 matched instances. This reduces the main benchmark to 512 CPU-minutes, or about 4.27 wall-clock hours.",
+      "step3": "Exact d = 8 slice estimate: 3 seeds x 2 graph families x 2 intervention regimes x 2 budgets x 2 switch regimes {S2,S3} x 6 methods x 1.2 minutes = 172.8 CPU-minutes, about 1.44 wall-clock hours. Posterior exact-versus-approximate comparisons reuse these runs and should not be budgeted separately.",
+      "step4": "Oracle-skeleton audit estimate after restricting to d = 15: 3 seeds x 2 graph families x 2 intervention regimes x 2 switch regimes x 2 methods x 0.7 minutes = 67.2 CPU-minutes, about 0.56 wall-clock hours. Ablation estimate after restricting to budget B = 14: 3 seeds x 2 graph families x 2 intervention regimes x 2 switch regimes x 4 ablations x 0.75 minutes = 72 CPU-minutes, about 0.6 wall-clock hours.",
+      "step5": "Total planned wall-clock time for the required slices is about 6.87 hours: main benchmark 4.27 hours, exact d = 8 slice 1.44 hours, oracle-skeleton audit 0.56 hours, and ablations 0.6 hours. Use the remaining time for aggregation, plotting, and the optional Random-plus-Ratio half-sample if at least 45 minutes remain. Because GPUs = 0, all concurrency assumptions are based only on the 2 CPU workers.",
+      "step6": "Apply pruning rules before execution rather than during debugging. If pilot profiling shows the proposed planner exceeds 0.8 minutes per main run, keep the 5-seed main benchmark but skip the optional Random-plus-Ratio half-sample before reducing any required slice. Never drop the exact d = 8 dynamic-program slice, the additive-cost strong baseline, or the objective-alignment comparison, because those directly address the main reviewer risks."
+    }
+  }
+]

@@ -1,0 +1,496 @@
+\documentclass{article}
+
+% NeurIPS 2025 style
+\usepackage[final]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{natbib}
+
+% Custom commands
+\newcommand{\drg}{\text{DRG}\xspace}
+\newcommand{\fa}{\text{FA}\xspace}
+\newcommand{\ba}{\text{BA}\xspace}
+\newcommand{\crate}{\text{CR}\xspace}
+\newcommand{\flipbench}{\textsc{FlipBench}\xspace}
+
+\title{FlipBench: Measuring Directional Reasoning Asymmetry\\in Large Language Models}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Current reasoning benchmarks evaluate large language models (LLMs) in a single direction---typically deriving conclusions from premises---conflating genuine understanding with pattern matching. We introduce \flipbench, a benchmark of 1,200 matched forward-backward reasoning pairs across four domains (propositional logic, arithmetic, relational reasoning, and function computation) at three difficulty levels. Each problem instance has a forward variant (derive the conclusion) and a matched backward variant (recover the premise) testing the same underlying reasoning. All problems are programmatically generated with verified ground-truth answers. Evaluating five open-weight models (3.8B--32B parameters), we find that directional reasoning asymmetry is \emph{domain-specific} rather than universally forward-biased: propositional logic and relational reasoning exhibit large forward biases (DRG up to 42.0 and 33.3 percentage points, respectively), while arithmetic and function computation sometimes show backward advantages. The asymmetry is stable across dataset seeds (std $< 3$ pp) and, in relational reasoning, amplifies significantly with problem difficulty ($p = 0.031$). Reasoning-optimized training (DeepSeek-R1) does not uniformly reduce the gap---it amplifies the logic DRG to 39.3 pp while eliminating it in function computation. These findings demonstrate that directional consistency is a diagnostic dimension complementary to aggregate accuracy, revealing qualitative differences in how models process forward versus backward inference.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models achieve impressive scores on reasoning benchmarks spanning logic~\citep{parmar2024logicbench}, mathematics, and commonsense inference. Yet growing evidence suggests that high benchmark accuracy may not reflect genuine, robust reasoning. The \emph{Reversal Curse}~\citep{berglund2024reversal} demonstrated that LLMs trained on ``A is B'' fail to infer ``B is A,'' revealing a fundamental directional asymmetry in factual knowledge retrieval. Subsequent work showed that autoregressive models exhibit systematic biases favoring forward reasoning over backward reasoning in planning tasks~\citep{ren2025thinking}.
+
+However, a critical gap remains: while individual papers have probed directional asymmetry in narrow settings---factual recall, planning, or isolated logic rules---\textbf{no systematic, cross-domain benchmark exists that uses matched forward-backward problem pairs to quantify directional reasoning asymmetry}. Without such a benchmark, we cannot answer fundamental questions: Is the asymmetry universal across reasoning types? Does it scale with problem difficulty? Do reasoning-optimized models reduce the gap?
+
+We introduce \flipbench, a benchmark designed to fill this gap. The core insight is that genuine reasoning should be \emph{direction-invariant}: if a model truly understands a logical relationship, mathematical operation, or relational link, it should reason about it comparably in both the forward and backward directions. The gap between forward and backward performance on matched problem pairs---the \textbf{Directional Reasoning Gap} ($\drg = \fa - \ba$)---serves as a diagnostic signal separating genuine understanding from pattern matching.
+
+Our contributions are:
+\begin{itemize}
+    \item We introduce \flipbench, a benchmark of 1,200 matched forward-backward reasoning pairs across four domains with three difficulty levels, all programmatically generated with verified ground-truth answers.
+    \item We evaluate five open-weight models spanning 3.8B--32B parameters and two training paradigms (standard instruction tuning vs.\ reasoning-optimized RL training), revealing that directional asymmetry is \emph{domain-specific} rather than universally forward-biased.
+    \item We provide ablation studies on difficulty scaling, chain-of-thought prompting, and cross-seed stability, demonstrating that \flipbench captures a stable, meaningful diagnostic dimension complementary to aggregate accuracy.
+\end{itemize}
+
+The remainder of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \flipbench benchmark design. Section~\ref{sec:experiments} presents experimental results including main comparisons, ablations, and error analysis. Section~\ref{sec:discussion} discusses findings and limitations. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{The Reversal Curse.}
+\citet{berglund2024reversal} showed that autoregressive LLMs trained on ``A is B'' cannot infer ``B is A,'' demonstrating a fundamental asymmetry in factual knowledge storage. Follow-up work by \citet{golovneva2024analysis} analyzed and proposed mitigations, while \citet{allenzhu2025reversal} connected the phenomenon to transformer binding limitations. Our work extends this analysis from factual recall to \emph{reasoning}: we test whether the directional asymmetry that plagues knowledge retrieval also affects logical inference, mathematical computation, and relational reasoning.
+
+\paragraph{Logical Reasoning Benchmarks.}
+LogicBench~\citep{parmar2024logicbench} systematically evaluates 25 logical reasoning patterns but does not create matched pairs to measure the directional gap on the same underlying problem. SATBench~\citep{wei2025satbench} generates logic puzzles from SAT formulas, and ZebraLogic~\citep{lin2025zebralogic} tests constraint satisfaction at varying complexity. Our contribution is orthogonal: we focus on directional consistency rather than overall reasoning ability.
+
+\paragraph{Forward vs.\ Backward Reasoning in LLMs.}
+\citet{ren2025thinking} found that LLMs struggle with backward planning due to autoregressive generation biases. Surveys on empowering LLMs with logical reasoning~\citep{wang2025empowering} note this forward bias but provide no systematic benchmark. Our work fills this gap with a dedicated benchmark resource.
+
+\paragraph{Benchmark Quality and Meta-Evaluation.}
+Benchmark$^2$~\citep{qian2026benchmark} proposed meta-evaluation metrics for LLM benchmarks. Item Response Theory approaches~\citep{zhou2026lost} diagnose benchmark item quality. Benchmark Profiling~\citep{kim2025profiling} uses mechanistic interpretability to identify which abilities benchmarks test. Our work introduces a new diagnostic dimension---directional reasoning consistency---that these approaches do not capture.
+
+\paragraph{Reasoning Robustness.}
+ReasonBENCH~\citep{wang2025reasonbench} measures stochastic instability across multiple runs. \flipbench is complementary: we test \emph{structural invariance} (same reasoning, reversed direction) rather than surface-level perturbations. Similarly, the generation-verification gap literature~\citep{yan2025variation} studies asymmetry between generating and verifying solutions, whereas we compare two forms of generation (forward and backward).
+
+\section{Method: The \flipbench Benchmark}
+\label{sec:method}
+
+\subsection{Overview}
+
+\flipbench consists of 1,200 matched forward-backward reasoning pairs across four domains, each with three difficulty levels (100 pairs per level per domain). Every problem instance has a \textbf{forward variant} and a matched \textbf{backward variant} that test the same underlying reasoning operation in opposite directions. All problems are programmatically generated with verified ground-truth answers, enabling contamination-resistant evaluation and arbitrary scaling.
+
+\subsection{Domain Design}
+
+\paragraph{Domain 1: Propositional Logic (300 pairs).}
+Forward problems present a set of propositional rules (e.g., ``If P then Q'') and initial facts, asking the model to derive whether a target proposition is true or false via forward chaining. Backward problems present the same rules and the target proposition's truth value, asking the model to determine what initial facts must hold via backward chaining.
+\begin{itemize}
+    \item \textbf{Difficulty 1}: 1-hop (single rule application)
+    \item \textbf{Difficulty 2}: 2-hop (chained rules)
+    \item \textbf{Difficulty 3}: 3-hop (multi-step chaining with distractor rules)
+\end{itemize}
+
+\paragraph{Domain 2: Arithmetic Reasoning (300 pairs).}
+Forward problems provide a mathematical expression or word problem with all operands and ask the model to compute the result. Backward problems provide the result and all-but-one operand, asking the model to find the missing value.
+\begin{itemize}
+    \item \textbf{Difficulty 1}: Single operation
+    \item \textbf{Difficulty 2}: Two chained operations
+    \item \textbf{Difficulty 3}: Three chained operations with mixed operators
+\end{itemize}
+
+\paragraph{Domain 3: Relational Reasoning (300 pairs).}
+Forward problems present entity-relation facts (family relationships) and ask the model to derive a target relation by composing given relations. Backward problems present a compound relationship and ask the model to decompose it---identifying what base relationship holds.
+\begin{itemize}
+    \item \textbf{Difficulty 1}: Single-hop relations
+    \item \textbf{Difficulty 2}: Two-hop transitive relations
+    \item \textbf{Difficulty 3}: Three-hop with distractor entities
+\end{itemize}
+
+\paragraph{Domain 4: Function Computation (300 pairs).}
+Forward problems present a simple Python function and an input value, asking the model to compute the output. Backward problems present the same function and a target output, asking for the input that produces it. Functions are restricted to be invertible on the integer domain $[1, 50]$.
+\begin{itemize}
+    \item \textbf{Difficulty 1}: Single-operation functions (e.g., $f(x) = ax + b$)
+    \item \textbf{Difficulty 2}: Two composed operations
+    \item \textbf{Difficulty 3}: Three composed operations
+\end{itemize}
+
+\subsection{Design Principles}
+
+\textbf{Matched difficulty.} Forward and backward variants of the same pair involve identical reasoning depth. The backward variant reverses the direction of inference, not its complexity.
+
+\textbf{Verified ground truth.} All instances are programmatically generated with deterministic, verifiable answers. No human annotation is needed, eliminating label noise.
+
+\textbf{Controlled generation.} Each domain uses templated generation with randomized parameters from specified random seeds, enabling reproducibility and minimizing memorization risk.
+
+\textbf{Multiple seeds.} We generate three independent dataset versions (seeds 42, 123, 456) to assess cross-seed stability.
+
+\subsection{Metrics}
+
+We define the following metrics:
+\begin{itemize}
+    \item \textbf{Forward Accuracy (\fa)}: Accuracy on forward variants
+    \item \textbf{Backward Accuracy (\ba)}: Accuracy on backward variants
+    \item \textbf{Directional Reasoning Gap (\drg)}: $\fa - \ba$. Positive values indicate forward bias; negative values indicate backward advantage.
+    \item \textbf{Consistency Rate (\cr)}: Fraction of pairs where the model answers \emph{both} forward and backward correctly. If $\cr < \min(\fa, \ba)$, the model fails on \emph{different} instances in each direction, indicating direction-dependent error patterns rather than a uniform accuracy offset.
+\end{itemize}
+
+\subsection{Evaluation Protocol}
+
+Models are evaluated zero-shot with a standardized prompt template that is direction-agnostic: a system message (``You are a precise reasoning assistant. Answer the question below. Give your final answer on the last line in the format: ANSWER: <your answer>'') followed by the problem text. Temperature is set to 0 for deterministic outputs. Answers are parsed from the model output by extracting text after ``ANSWER:'' with domain-specific parsing (True/False for logic, integers for arithmetic and functions, entity names for relational).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Models.}
+We evaluate five open-weight models spanning different sizes and training paradigms:
+\begin{enumerate}
+    \item \textbf{Phi-3.5-mini} (3.8B) --- small general-purpose model~\citep{abdin2024phi3}
+    \item \textbf{Llama-3.1-8B-Instruct} --- medium-size general-purpose~\citep{grattafiori2024llama3}
+    \item \textbf{Qwen2.5-7B-Instruct} --- medium alternative family~\citep{yang2024qwen25}
+    \item \textbf{DeepSeek-R1-Distill-Qwen-7B} --- reasoning-optimized via RL training~\citep{guo2025deepseek}
+    \item \textbf{Qwen2.5-32B-Instruct-AWQ} --- larger model (4-bit quantized)~\citep{yang2024qwen25}
+\end{enumerate}
+
+This selection covers multiple model families, size scaling (3.8B $\to$ 32B), and standard versus reasoning-optimized training. All models are run using vLLM~\citep{kwon2023vllm} with float16 precision on a single NVIDIA RTX A6000 (48GB).
+
+\paragraph{Baselines.}
+We compute random-guessing baselines: 50\% for propositional logic (binary True/False), $\approx$0\% for arithmetic and function computation (open-ended integers), and $1/N$ for relational reasoning (choosing from $N$ mentioned entities).
+
+\paragraph{Seeds.}
+All models are evaluated on seed 42. Llama-3.1-8B and DeepSeek-R1-7B are additionally evaluated on seeds 123 and 456 for cross-seed stability analysis.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents the main results across all models and domains.
+
+\begin{table}[t]
+\caption{Main \flipbench results (seed 42). FA = Forward Accuracy (\%), BA = Backward Accuracy (\%), DRG = FA $-$ BA (pp), CR = Consistency Rate (\%). Bold indicates the largest $|\text{DRG}|$ per domain. $\dagger$ denotes statistical significance at $p < 0.05$ (McNemar's test with Bonferroni correction).}
+\label{tab:main}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccccccccccccc}
+\toprule
+& \multicolumn{4}{c}{Propositional Logic} & \multicolumn{4}{c}{Arithmetic} & \multicolumn{4}{c}{Relational} & \multicolumn{4}{c}{Function} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(lr){10-13} \cmidrule(lr){14-17}
+Model & FA & BA & DRG & CR & FA & BA & DRG & CR & FA & BA & DRG & CR & FA & BA & DRG & CR \\
+\midrule
+Phi-3.5-mini (3.8B) & 86.3 & 85.7 & 0.7 & 73.0 & 71.0 & 54.7 & 16.3$^\dagger$ & 50.0 & 78.3 & 45.0 & \textbf{33.3}$^\dagger$ & 31.7 & 39.0 & 93.0 & \textbf{$-$54.0} & 37.7 \\
+Llama-3.1-8B & 61.3 & 50.0 & 11.3 & 23.3 & 84.7 & 98.7 & $-$14.0 & 83.7 & 77.7 & 53.0 & 24.7$^\dagger$ & 43.3 & 87.0 & 99.7 & $-$12.7 & 86.7 \\
+Qwen2.5-7B & 85.0 & 67.7 & 17.3$^\dagger$ & 53.0 & 88.3 & 83.3 & 5.0 & 78.3 & 67.3 & 43.7 & 23.7$^\dagger$ & 30.3 & 100.0 & 99.3 & 0.7 & 99.3 \\
+DeepSeek-R1-7B & 88.0 & 48.7 & 39.3$^\dagger$ & 39.0 & 56.7 & 75.7 & $-$19.0 & 55.7 & 50.0 & 29.0 & 21.0$^\dagger$ & 17.3 & 99.3 & 99.7 & $-$0.3 & 99.0 \\
+Qwen2.5-32B & 100.0 & 58.0 & \textbf{42.0}$^\dagger$ & 58.0 & 100.0 & 98.0 & 2.0 & 98.0 & 85.0 & 67.0 & 18.0$^\dagger$ & 56.0 & 100.0 & 100.0 & 0.0 & 100.0 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Several key patterns emerge:
+
+\textbf{Directional asymmetry is domain-specific, not universally forward-biased.} Contrary to our initial hypothesis that forward reasoning would consistently outperform backward reasoning, the direction of asymmetry depends strongly on the domain. Propositional logic and relational reasoning show consistent forward biases across all models (DRG 0.7--42.0 pp for logic; 18.0--33.3 pp for relational). In contrast, arithmetic and function computation often exhibit \emph{backward advantages}: Llama-3.1-8B achieves 98.7\% backward accuracy versus 84.7\% forward on arithmetic (DRG $= -14.0$), and Phi-3.5-mini shows a striking $-54.0$ pp DRG on function computation.
+
+\textbf{Relational reasoning shows the most consistent forward bias.} All five models exhibit statistically significant forward bias in relational reasoning (DRG 18.0--33.3 pp, all $p < 0.05$ after Bonferroni correction), making this the domain with the most reliable directional asymmetry.
+
+\textbf{Propositional logic shows the largest absolute DRG magnitudes.} Qwen2.5-32B achieves perfect 100\% forward accuracy on propositional logic but only 58.0\% backward accuracy (DRG $= 42.0$ pp). DeepSeek-R1-7B shows a similar pattern (88.0\% vs.\ 48.7\%, DRG $= 39.3$ pp).
+
+\textbf{Function computation is largely direction-invariant for capable models.} Qwen2.5-7B, DeepSeek-R1-7B, and Qwen2.5-32B all achieve near-perfect accuracy in both directions (DRG $\leq 0.7$ pp), suggesting these models have genuinely learned function evaluation and inversion for simple functions.
+
+\subsection{Consistency Analysis}
+
+The consistency rate reveals that models often fail on \emph{different} instances depending on direction. Table~\ref{tab:main} shows that CR is consistently below $\min(\text{FA}, \text{BA})$ in most model-domain combinations. For example, Llama-3.1-8B in propositional logic has FA $= 61.3\%$ and BA $= 50.0\%$, but CR $= 23.3\%$---far below the 50.0\% that would be expected if backward errors were simply a subset of forward errors. This confirms that the DRG reflects genuine \emph{directional} variation, not merely a uniform accuracy offset.
+
+Figure~\ref{fig:consistency} breaks down pair-level outcomes into four categories: both correct, forward-only correct, backward-only correct, and both wrong.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig6_consistency.png}
+\caption{Pair-level outcome breakdown per model and domain. ``Fwd only'' and ``Bwd only'' segments indicate instances where the model succeeds in one direction but fails in the other. Large asymmetric segments (e.g., DeepSeek-R1-7B in logic) confirm direction-dependent error patterns.}
+\label{fig:consistency}
+\end{figure}
+
+\subsection{Ablation 1: DRG Across Difficulty Levels}
+
+Figure~\ref{fig:difficulty} shows how DRG varies with problem difficulty across the four domains.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig3_drg_by_difficulty.png}
+\caption{DRG across difficulty levels by domain (seed 42). In relational reasoning, the DRG increases significantly from difficulty 1 to difficulty 3 ($p = 0.031$, Wilcoxon signed-rank test). Other domains show more complex patterns.}
+\label{fig:difficulty}
+\end{figure}
+
+\textbf{Relational reasoning shows clear difficulty amplification.} The mean DRG across models increases from $-15.8$ pp at difficulty 1 to $+54.8$ pp at difficulty 3 (Wilcoxon signed-rank test $p = 0.031$). This is the only domain where the DRG monotonically increases with difficulty in a statistically significant manner.
+
+\textbf{Propositional logic shows modest amplification.} Mean DRG increases from 19.2 pp (easy) to 24.4 pp (hard), with an amplification factor of 1.27, though this is not statistically significant ($p = 0.44$).
+
+\textbf{Arithmetic and function domains show non-monotonic patterns.} In arithmetic, several models (Llama-3.1-8B, DeepSeek-R1-7B) show a \emph{backward} advantage that grows with difficulty---harder forward problems suffer more than harder backward problems. In function computation, Phi-3.5-mini's backward advantage diminishes with difficulty (DRG from $-85$ pp at difficulty 1 to $-22$ pp at difficulty 3).
+
+\subsection{Ablation 2: Standard vs.\ Reasoning-Optimized Training}
+
+We compare Qwen2.5-7B-Instruct (standard instruction tuning) with DeepSeek-R1-Distill-Qwen-7B (reasoning-optimized via RL), both based on similar architectures at the 7B scale. Figure~\ref{fig:standard_vs_reasoning} shows the comparison.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig4_standard_vs_reasoning.png}
+\caption{DRG comparison: standard (Qwen2.5-7B) vs.\ reasoning-optimized (DeepSeek-R1-7B) training across domains. Reasoning-optimized training reduces DRG in relational reasoning but amplifies it in propositional logic.}
+\label{fig:standard_vs_reasoning}
+\end{figure}
+
+\textbf{Reasoning-optimized training does not uniformly reduce directional asymmetry.} DeepSeek-R1-7B has a \emph{larger} DRG than Qwen2.5-7B in propositional logic (39.3 vs.\ 17.3 pp) but a \emph{smaller} DRG in relational reasoning (21.0 vs.\ 23.7 pp) and essentially zero DRG in function computation ($-0.3$ vs.\ 0.7 pp). In arithmetic, both models show opposite-sign DRGs (Qwen: $+5.0$; DeepSeek-R1: $-19.0$), reflecting different failure modes rather than a simple reduction.
+
+\subsection{Ablation 3: Chain-of-Thought Prompting}
+\label{sec:cot}
+
+We evaluate whether adding ``Think step by step before giving your final answer'' to the prompt reduces the DRG. Table~\ref{tab:cot} shows results for Llama-3.1-8B and DeepSeek-R1-7B with and without chain-of-thought (CoT) prompting.
+
+\begin{table}[t]
+\caption{Effect of chain-of-thought (CoT) prompting on DRG. Values are DRG in percentage points (seed 42). CoT substantially reduces the logic DRG for Llama but amplifies it for DeepSeek-R1.}
+\label{tab:cot}
+\centering
+\begin{tabular}{llcccc}
+\toprule
+Model & Prompt & Logic & Arithmetic & Relational & Function \\
+\midrule
+\multirow{2}{*}{Llama-3.1-8B} & Standard & 11.3 & $-$14.0 & 24.7 & $-$12.7 \\
+& CoT & 2.0 & 0.3 & 23.0 & $-$5.3 \\
+\midrule
+\multirow{2}{*}{DeepSeek-R1-7B} & Standard & 39.3 & $-$19.0 & 21.0 & $-$0.3 \\
+& CoT & 48.3 & $-$1.7 & 18.7 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CoT prompting has mixed effects. For Llama-3.1-8B, CoT reduces the logic DRG from 11.3 to 2.0 pp and the arithmetic DRG from $-14.0$ to 0.3 pp, but barely affects the relational DRG (24.7 $\to$ 23.0 pp). For DeepSeek-R1-7B, CoT slightly \emph{increases} the logic DRG (39.3 $\to$ 48.3 pp) while reducing the arithmetic DRG ($-19.0 \to -1.7$ pp). This suggests that CoT helps in domains where the model lacks inherent step-by-step reasoning strategies (arithmetic for Llama) but cannot compensate for deeply ingrained forward biases (logic for DeepSeek-R1).
+
+\subsection{Cross-Seed Stability}
+
+Table~\ref{tab:stability} shows that DRG measurements are stable across the three dataset seeds, with standard deviations below 2.6 pp in all cases.
+
+\begin{table}[t]
+\caption{Cross-seed stability of DRG (mean $\pm$ std across 3 seeds, in pp). All standard deviations are below 3 pp, confirming that \flipbench produces reliable measurements.}
+\label{tab:stability}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Model & Prop.\ Logic & Arithmetic & Relational & Function \\
+\midrule
+Llama-3.1-8B & $9.7 \pm 2.4$ & $-14.7 \pm 2.5$ & $25.1 \pm 1.9$ & $-12.7 \pm 0.8$ \\
+DeepSeek-R1-7B & $40.3 \pm 1.7$ & $-19.3 \pm 0.3$ & $24.2 \pm 2.6$ & $-0.2 \pm 0.2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Error Analysis}
+
+We analyze errors from the two models evaluated with CoT prompting (Llama-3.1-8B and DeepSeek-R1-7B) by categorizing backward-reasoning failures.
+
+\textbf{Propositional logic.} The dominant backward error types are \emph{rejecting the closed-world assumption} (models refuse to conclude ``False'' and instead state insufficient information) and \emph{uncertainty hedging} (models qualify answers instead of committing). DeepSeek-R1-7B additionally shows \emph{incorrect backward chaining} (23 of 50 sampled errors), where the model attempts backward reasoning but applies rules incorrectly.
+
+\textbf{Relational reasoning.} The most common error is \emph{wrong relationship type} (28--37 of 50 sampled errors across models), where models identify the correct entities but assign an incorrect relationship (e.g., responding ``uncle'' instead of ``grandfather'').
+
+\textbf{Arithmetic.} Errors split between \emph{computation errors} on forward problems and \emph{incorrect inverse operations} on backward problems. DeepSeek-R1-7B has a notably high parse failure rate (46 of 50 sampled arithmetic errors), indicating the model's chain-of-thought often fails to produce a clean final answer.
+
+\textbf{Function computation.} Errors are rare for most models. Phi-3.5-mini is the exception, with 183 forward errors (out of 204 total) primarily due to computation mistakes when evaluating functions.
+
+\subsection{Overview Visualization}
+
+Figure~\ref{fig:heatmap} provides a summary heatmap of DRG values across all model-domain combinations, and Figure~\ref{fig:scatter} shows the forward-versus-backward accuracy scatter plot.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[t]{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/fig1_drg_heatmap.png}
+\caption{DRG heatmap (models $\times$ domains). Red indicates forward bias; blue indicates backward advantage.}
+\label{fig:heatmap}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/fig2_forward_vs_backward.png}
+\caption{Forward vs.\ backward accuracy. Points below the diagonal indicate forward bias. Points above indicate backward advantage.}
+\label{fig:scatter}
+\end{subfigure}
+\caption{Overview of directional reasoning asymmetry across all model-domain combinations.}
+\label{fig:overview}
+\end{figure}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Directional asymmetry is real but not uniformly forward-biased.}
+Our results partially confirm and partially refute the initial hypothesis. We find statistically significant directional asymmetry in propositional logic (5 models, 3 significant) and relational reasoning (all 5 significant), supporting the existence of systematic DRG. However, the hypothesis that the gap is always forward-biased is refuted: arithmetic and function computation domains often show backward advantages, particularly for Llama-3.1-8B and DeepSeek-R1-7B.
+
+\paragraph{Why do some domains show backward advantages?}
+We hypothesize that the backward advantage in arithmetic and function computation for some models arises because the ``backward'' variants (find a missing operand; find an input given an output) may be better represented in instruction-tuning data as common word-problem formats. The ``forward'' variants (compute the result of a multi-step expression) may actually be harder for models that struggle with precise multi-step arithmetic---particularly at difficulty level 3, where Llama-3.1-8B's forward arithmetic accuracy drops to 54\% while backward accuracy remains at 98\%.
+
+\paragraph{Reasoning-optimized training creates new asymmetries.}
+DeepSeek-R1-7B's dramatically increased logic DRG (39.3 pp vs.\ Qwen2.5-7B's 17.3 pp) suggests that RL-based reasoning training may over-optimize for forward-chaining patterns, creating stronger directional biases in domains where forward reasoning templates are heavily rewarded during training.
+
+\paragraph{Model scale partially addresses asymmetry.}
+Qwen2.5-32B shows perfect forward accuracy in logic and arithmetic, but its backward logic accuracy (58.0\%) lags far behind, producing the largest observed DRG (42.0 pp). Scale helps \emph{absolute} performance but does not eliminate directional asymmetry---indeed, it may amplify it when forward performance saturates but backward performance does not.
+
+\paragraph{Limitations.}
+(1) Our benchmark covers four domains; generalization to other reasoning types (causal, spatial, temporal) is untested. (2) We evaluate five models; broader evaluation across more model families and sizes would strengthen conclusions. (3) The programmatic generation of problems, while ensuring correctness, may not capture the full complexity of natural-language reasoning tasks. (4) Some models (especially DeepSeek-R1-7B) have high parse failure rates, which may inflate apparent error rates. (5) We use zero-shot evaluation; few-shot prompting might yield different patterns.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \flipbench, a benchmark of 1,200 matched forward-backward reasoning pairs for measuring directional reasoning asymmetry in LLMs. Evaluating five models across four domains, we found that directional asymmetry is a real and domain-specific phenomenon: propositional logic and relational reasoning show robust forward biases (DRG up to 42.0 pp), while arithmetic and function computation can show backward advantages. The asymmetry is stable across dataset seeds (std $< 2.6$ pp) and amplifies with difficulty in relational reasoning ($p = 0.031$). Reasoning-optimized training does not uniformly reduce the gap, and chain-of-thought prompting has mixed domain-dependent effects.
+
+These findings establish directional consistency as a diagnostic dimension complementary to aggregate accuracy. We believe \flipbench can serve as a tool for diagnosing whether models exhibit genuine bidirectional reasoning ability---a property critical for applications requiring backward inference such as diagnosis, debugging, and root cause analysis. Future work should extend the benchmark to additional reasoning domains, evaluate larger model families, and investigate training-time interventions to reduce directional asymmetry.
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Abdin et~al.(2024)]{abdin2024phi3}
+Marah Abdin, Jyoti Aneja, Hany Awadalla, Ahmed Awadallah, Ammar~Ahmad Awan, Nguyen Bach, Alon Benhaim, Rafael Ferreira, and others.
+\newblock Phi-3 Technical Report: A Highly Capable Language Model Locally on Your Phone.
+\newblock \emph{arXiv preprint arXiv:2404.14219}, 2024.
+
+\bibitem[Allen-Zhu and Li(2025)]{allenzhu2025reversal}
+Zeyuan Allen-Zhu and Yuanzhi Li.
+\newblock Is the Reversal Curse a Binding Problem? Uncovering Limitations of Transformers from a Basic Generalization Failure.
+\newblock \emph{arXiv preprint arXiv:2504.01928}, 2025.
+
+\bibitem[Berglund et~al.(2024)]{berglund2024reversal}
+Lukas Berglund, Meg Tong, Max Kaufmann, Mikita Balesni, Asa~Cooper Stickland, Tomasz Korbak, and Owain Evans.
+\newblock The Reversal Curse: {LLMs} trained on ``{A} is {B}'' fail to learn ``{B} is {A}''.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem[Golovneva et~al.(2024)]{golovneva2024analysis}
+Olga Golovneva, Zeyuan Allen-Zhu, Jason Weston, and Sainbayar Sukhbaatar.
+\newblock An Analysis and Mitigation of the Reversal Curse.
+\newblock In \emph{Proceedings of EMNLP}, 2024.
+
+\bibitem[Grattafiori et~al.(2024)]{grattafiori2024llama3}
+Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, and others.
+\newblock The {Llama} 3 Herd of Models.
+\newblock \emph{arXiv preprint arXiv:2407.21783}, 2024.
+
+\bibitem[Guo et~al.(2025)]{guo2025deepseek}
+Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, and others.
+\newblock {DeepSeek-R1}: Incentivizing Reasoning Capability in {LLMs} via Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2501.12948}, 2025.
+
+\bibitem[Kim et~al.(2025)]{kim2025profiling}
+Dongryeol Kim and others.
+\newblock Benchmark Profiling: Mechanistic Diagnosis of {LLM} Benchmarks.
+\newblock In \emph{Proceedings of EMNLP}, 2025.
+
+\bibitem[Kwon et~al.(2023)]{kwon2023vllm}
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody~Hao Yu, Joseph~E. Gonzalez, Hao Zhang, and Ion Stoica.
+\newblock Efficient Memory Management for Large Language Model Serving with {PagedAttention}.
+\newblock In \emph{Proceedings of SOSP}, 2023.
+
+\bibitem[Lin et~al.(2025)]{lin2025zebralogic}
+Bill~Yuchen Lin and others.
+\newblock {ZebraLogic}: On the Scaling Limits of {LLMs} for Logical Reasoning.
+\newblock \emph{arXiv preprint arXiv:2502.01100}, 2025.
+
+\bibitem[Parmar et~al.(2024)]{parmar2024logicbench}
+Mihir Parmar, Nisarg Patel, Neeraj Varshney, Mutsumi Nakamura, Man Luo, Santosh Mashetty, Arindam Mitra, and Chitta Baral.
+\newblock {LogicBench}: Towards Systematic Evaluation of Logical Reasoning Ability of Large Language Models.
+\newblock In \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL)}, pages 13679--13707, 2024.
+
+\bibitem[Qian et~al.(2026)]{qian2026benchmark}
+Qi~Qian, Chengsong Huang, and others.
+\newblock Benchmark$^2$: Systematic Evaluation of {LLM} Benchmarks.
+\newblock \emph{arXiv preprint arXiv:2601.03986}, 2026.
+
+\bibitem[Ren et~al.(2025)]{ren2025thinking}
+Allen~Z. Ren, Brian Ichter, and Anirudha Majumdar.
+\newblock Thinking Forward and Backward: Effective Backward Planning with Large Language Models.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2025.
+
+\bibitem[Wang et~al.(2025{\natexlab{a}})]{wang2025empowering}
+Hanmeng Wang and others.
+\newblock Empowering {LLMs} with Logical Reasoning: A Comprehensive Survey.
+\newblock \emph{arXiv preprint arXiv:2502.15652}, 2025{\natexlab{a}}.
+
+\bibitem[Wang et~al.(2025{\natexlab{b}})]{wang2025reasonbench}
+Xiang Wang and others.
+\newblock {ReasonBENCH}: Benchmarking the (In)Stability of {LLM} Reasoning.
+\newblock \emph{arXiv preprint arXiv:2512.07795}, 2025{\natexlab{b}}.
+
+\bibitem[Wei et~al.(2025)]{wei2025satbench}
+Albert Wei and others.
+\newblock {SATBench}: Benchmarking {LLMs'} Logical Reasoning via Automated Puzzle Generation from {SAT} Formulas.
+\newblock In \emph{Proceedings of EMNLP}, 2025.
+
+\bibitem[Yan et~al.(2025)]{yan2025variation}
+Shuyan Yan and others.
+\newblock Variation in Verification: Understanding Verification Dynamics in Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2509.17995}, 2025.
+
+\bibitem[Yang et~al.(2024)]{yang2024qwen25}
+An~Yang, Baosong Yang, Beichen Zhang, and others.
+\newblock Qwen2.5 Technical Report.
+\newblock \emph{arXiv preprint arXiv:2412.15115}, 2024.
+
+\bibitem[Zhou et~al.(2026)]{zhou2026lost}
+Hongli Zhou, Hui Huang, Ziqing Zhao, and others.
+\newblock Lost in Benchmarks? Rethinking Large Language Model Benchmarking with Item Response Theory.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2026.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+\section{Additional Results}
+
+\subsection{Forward vs.\ Backward Accuracy by Model}
+
+Figure~\ref{fig:accuracy_breakdown} provides a detailed accuracy breakdown.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig7_accuracy_breakdown.png}
+\caption{Forward and backward accuracy breakdown per model and domain.}
+\label{fig:accuracy_breakdown}
+\end{figure}
+
+\subsection{Chain-of-Thought Ablation Visualization}
+
+Figure~\ref{fig:cot_fig} shows the CoT ablation results visually.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig5_cot_ablation.png}
+\caption{DRG with and without chain-of-thought prompting for Llama-3.1-8B and DeepSeek-R1-7B across four domains.}
+\label{fig:cot_fig}
+\end{figure}
+
+\subsection{Statistical Test Details}
+
+Table~\ref{tab:stats} reports detailed McNemar's test statistics for all model-domain combinations.
+
+\begin{table}[h]
+\caption{McNemar's test results for directional asymmetry. $p$-values are Bonferroni-corrected across 20 tests ($5$ models $\times$ $4$ domains).}
+\label{tab:stats}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccc}
+\toprule
+Model & Statistic & Prop.\ Logic & Arithmetic & Relational & Function \\
+\midrule
+\multirow{2}{*}{Phi-3.5-mini} & DRG (pp) & 0.7 & 16.3 & 33.3 & $-$54.0 \\
+ & $p$ (corrected) & 1.000 & $<$0.001 & $<$0.001 & 1.000 \\
+\midrule
+\multirow{2}{*}{Llama-3.1-8B} & DRG (pp) & 11.3 & $-$14.0 & 24.7 & $-$12.7 \\
+ & $p$ (corrected) & 0.176 & 1.000 & $<$0.001 & 1.000 \\
+\midrule
+\multirow{2}{*}{Qwen2.5-7B} & DRG (pp) & 17.3 & 5.0 & 23.7 & 0.7 \\
+ & $p$ (corrected) & $<$0.001 & 0.357 & $<$0.001 & 1.000 \\
+\midrule
+\multirow{2}{*}{DeepSeek-R1-7B} & DRG (pp) & 39.3 & $-$19.0 & 21.0 & $-$0.3 \\
+ & $p$ (corrected) & $<$0.001 & 1.000 & $<$0.001 & 1.000 \\
+\midrule
+\multirow{2}{*}{Qwen2.5-32B} & DRG (pp) & 42.0 & 2.0 & 18.0 & 0.0 \\
+ & $p$ (corrected) & $<$0.001 & 0.313 & $<$0.001 & 1.000 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\end{document}

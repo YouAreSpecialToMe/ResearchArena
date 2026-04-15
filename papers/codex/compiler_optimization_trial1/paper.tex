@@ -1,0 +1,307 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{microtype}
+\usepackage{graphicx}
+
+\title{DebtAware Beyond LastRunTracking?\\A Proxy Feasibility Boundary Study of Typed Rerun Suppression in LLVM}
+
+\author{Anonymous Author(s)}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+LLVM already has a practical nearby baseline for suppressing redundant transform-pass reruns: the 2024 \emph{LastRunTracking} direction skips a repeated pass when no compatible intervening change has occurred. That sharply narrows the remaining research question. Starting from a proposal for \emph{DebtAware}, we study a smaller question: for repeated cleanup passes inside a fixed stock proxy of \texttt{-O3}, do typed summaries of intervening mutations add useful signal beyond this binary heuristic when deciding whether a scheduled rerun can defer to its next stock sweep point? The executed workspace does not contain the planned patched-LLVM implementation; instead it contains a shared Python proxy harness over system LLVM. We therefore frame the result as evidence about feasibility and label identifiability, not as validation of a new compiler method. Across 9 benchmarks from CTMark, cBench, and PolyBench/C, \textsc{LastRunTracking} reduced compile time by 13.29\% versus stock, while a preregistered \textsc{RuleGuardrail} fallback achieved 12.82\% and an aggressive \textsc{RunOnce} anchor achieved 18.93\% with a much higher debt-event rate. The key negative result is that all 54 sampled replay labels were debt$=1$, so every fold triggered the preregistered low-label fallback and no learned policy could be trained. The main contribution is therefore a boundary result: in this small proxy corpus, the limiting factor is not model class but the absence of class-diverse debt labels beyond what \textsc{LastRunTracking} already captures.
+\end{abstract}
+
+\section{Introduction}
+
+LLVM optimization pipelines intentionally repeat cleanup passes because earlier transformations expose new simplification opportunities. Those reruns are useful, but they also consume compile time. The broader literature has therefore explored pass-order search, compiler autotuning, and learned pass selection \citep{ashouri2018survey, hellsten2023baco, liang2023learning, liu2024dco, zhao2025citroen}. For the present question, however, the strongest baseline is not a search method but LLVM's own engineering path: the October 10, 2024 RFC on avoiding transform-pass reruns that have just been run, together with the landed \emph{LastRunTracking} analysis, already suppresses repeated executions when no compatible intervening change has occurred \citep{llvm_rfc_avoid_running_2024, llvm_lastruntrackinganalysis_2024}.
+
+That baseline lowers the novelty ceiling substantially. The remaining question is narrow: if LLVM already knows whether any compatible change happened, does slightly richer mutation-typed bookkeeping add incremental value when deciding whether a repeated cleanup pass should run now or wait until the next stock occurrence of the same pass?
+
+The original proposal framed this as \emph{DebtAware}: a bounded empirical test of deferred-rerun \emph{debt} beyond \textsc{LastRunTracking}. The intended implementation was a patched LLVM study with counterfactual replay labels and tiny interpretable policies. The executed workspace is narrower. It contains a shared Python proxy harness over system LLVM, a fixed cleanup-heavy proxy pipeline, and four completed policies: stock, \textsc{LastRunTracking}, \textsc{RuleGuardrail}, and \textsc{RunOnce}. The preregistered learned policies and ablations were skipped because the replay labels collapsed completely.
+
+This paper is therefore deliberately scoped as a \emph{proxy feasibility boundary study}. It contributes evidence about whether the intended comparison can even be instantiated in a small CPU-only pilot, not a validated compiler optimization method.
+
+Our contributions are:
+\begin{itemize}
+  \item We refine the original DebtAware proposal into an honest proxy-study framing that isolates the incremental question beyond LLVM's \textsc{LastRunTracking} heuristic rather than claiming a new pass-scheduling framework.
+  \item We show on 9 executed benchmarks that proxy \textsc{LastRunTracking} reduces compile time by 13.29\% versus stock, while the preregistered rule fallback reaches 12.82\% and the aggressive \textsc{RunOnce} anchor reaches 18.93\% with a 0.6667 debt-event rate.
+  \item We identify the central feasibility bottleneck: all 54 sampled replay labels were debt$=1$, so every fold violated the preregistered minimum needed to fit learned policies.
+\end{itemize}
+
+Section~\ref{sec:related} separates peer-reviewed related work from LLVM engineering artifacts. Section~\ref{sec:method} describes the intended DebtAware method and the executed proxy deviation. Section~\ref{sec:experiments} reports the executed evidence. Section~\ref{sec:artifact} provides artifact traceability. Section~\ref{sec:discussion} discusses what the negative result means.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Peer-reviewed work on compiler autotuning and phase ordering.}
+Compiler autotuning has long studied how to search or predict profitable optimization choices \citep{ashouri2018survey}. Representative peer-reviewed examples include Bayesian optimization in BaCO \citep{hellsten2023baco}, coreset-based pass-order prediction \citep{liang2023learning}, pass-dependence modeling in DCO \citep{liu2024dco}, and compilation-statistics-guided phase ordering \citep{zhao2025citroen}. These papers optimize over larger search spaces than we do. They search or score sequences, subsequences, or compiler configurations; our study keeps the proxy pipeline fixed and asks only whether one already-scheduled repeated cleanup pass should execute immediately or defer to the next stock sweep point.
+
+\paragraph{Peer-reviewed work on pass skipping.}
+The closest archival paper is \citet{jayatilaka2021towards}, which predicts whether scheduled LLVM optimizations will modify IR and uses those predictions to reduce compile time. DebtAware was explicitly proposed as a narrower follow-on question. Instead of predicting immediate IR change, it targets \emph{deferred-rerun debt}: whether suppressing one current rerun until the next stock sweep point causes downstream divergence or unrecovered quality loss.
+
+\paragraph{Compile-time measurement as a systems concern.}
+Compile-time engineering should be evaluated directly, not only through final program runtime. \citet{engelke2024compiletime} make that point in the context of query-compilation backends. We follow the same perspective by reporting compile-time reduction, bookkeeping overhead, debt-event rate, runtime ratio on a runnable subset, and the pilot overheads that forced the study to narrow.
+
+\paragraph{LLVM engineering artifacts.}
+The direct systems baseline comes from LLVM itself rather than from a peer-reviewed paper. The October 10, 2024 LLVM RFC on avoiding reruns of transform passes that have just been run and the corresponding \textsc{LastRunTracking} analysis documentation show that LLVM already tracks whether compatible intervening changes have occurred since a pass last ran \citep{llvm_rfc_avoid_running_2024, llvm_lastruntrackinganalysis_2024}. These sources are engineering artifacts, not archival publications, and we treat them that way. They matter here because the paper's central question is incremental: whether \emph{typed} mutation summaries add value after that binary heuristic is already available.
+
+Unlike the peer-reviewed pass-ordering literature, and unlike LLVM's own rerun-suppression engineering baseline, our executed artifact does not establish a new optimization method. It provides evidence about feasibility and label identifiability for that incremental question.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Intended DebtAware method}
+
+The proposal asked whether mutation-typed summaries of intervening change improve rerun-deferral decisions beyond \textsc{LastRunTracking} for a very small set of repeatedly invoked cleanup passes, primarily \texttt{instcombine} and \texttt{simplifycfg}. The intended method used bounded single-rerun counterfactual replay. For a repeated pass opportunity, suppress only that immediate rerun, force execution at the next stock sweep point of the same pass kind, and label the opportunity debt$=1$ if the deferral causes post-sweep IR divergence, correctness failure, or artifact drift relative to stock \texttt{-O3}. Otherwise label it debt$=0$.
+
+The intended learned policies were tiny interpretable models, trained only if each fold and target pass had at least 24 labeled opportunities total and at least 6 examples in each class. This low-label rule was preregistered because data sparsity was a known risk.
+
+\subsection{Executed proxy study}
+
+The workspace did not execute the planned patched LLVM build. Instead, the completed artifact is a shared Python harness over system LLVM 18 tools, with a fixed proxy cleanup pipeline:
+\begin{center}
+\small
+\texttt{mem2reg $\rightarrow$ sroa $\rightarrow$ instcombine $\rightarrow$ simplifycfg $\rightarrow$}
+
+\texttt{jump-threading $\rightarrow$ instcombine $\rightarrow$ correlated-propagation $\rightarrow$ simplifycfg $\rightarrow$}
+
+\texttt{reassociate $\rightarrow$ gvn $\rightarrow$ instcombine $\rightarrow$ adce $\rightarrow$ simplifycfg $\rightarrow$ instcombine.}
+\end{center}
+
+The executed policies are:
+\begin{itemize}
+  \item \textbf{Stock}: execute every scheduled pass occurrence.
+  \item \textbf{\textsc{LastRunTracking}}: suppress a repeated target pass only when the binary compatible-change heuristic allows it.
+  \item \textbf{\textsc{RuleGuardrail}}: a preregistered deterministic fallback layered on top of \textsc{LastRunTracking}.
+  \item \textbf{\textsc{RunOnce}}: an aggressive anchor that executes only the first immediate repeated opportunity before deferring later occurrences to their stock sweep points.
+\end{itemize}
+
+The preregistered \textsc{LearnedChange}, \textsc{MutationDebt}, and ablations A--E were all skipped by the low-label fallback.
+
+\subsection{What the executed evidence can and cannot show}
+
+Because the artifact is a proxy harness rather than a patched compiler, we interpret it strictly as a feasibility study. A positive result would only have meant that the intended comparison looked worth pursuing in a real LLVM implementation. The executed negative result is stronger: the data never reached the point where the intended learned-policy comparison could be run at all.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Benchmarks.}
+The executed corpus contains 9 benchmarks, 3 from each suite. The benchmark list is \texttt{CTMark/\{branchy\_mix,cfg\_math,phi\_fold\}}, \texttt{cBench/\{call\_chain,mem\_combo,pointer\_walk\}}, and \texttt{PolyBenchC/\{loop\_nest,mat\_kernel,stencil\_like\}}. The workspace notes that real source trees were fetched for CTMark, cBench v1.1, and PolyBench/C 4.2.1, with one deviation: CTMark is represented here by benchmark-defining translation units rather than full benchmark binaries.
+
+\paragraph{Protocol.}
+Evaluation uses three leave-one-suite-out folds. Compile measurements use 3 repetitions per benchmark and report medians inside each benchmark row. Runtime validation uses 10 repetitions on a runnable subset of 6 benchmarks: \texttt{branchy\_mix}, \texttt{cfg\_math}, \texttt{call\_chain}, \texttt{pointer\_walk}, \texttt{loop\_nest}, and \texttt{mat\_kernel}.
+
+\paragraph{Pilot outcome.}
+The pilot immediately showed that the planned patched-LLVM study was infeasible under the budget. Median stock compile times for the three pilot programs were 0.0952~s, 0.0983~s, and 0.1122~s, while traced median times rose to 0.4241~s, 0.7597~s, and 0.4321~s. That corresponds to 345.59\%, 672.56\%, and 285.32\% trace overhead, respectively, with only 5 repeated opportunities per pilot benchmark.
+
+\paragraph{Metrics.}
+Our primary metric is compile-time reduction versus stock. We also report suppression rate, debt-event rate, bookkeeping overhead, runtime ratio, code-size ratio, and correctness pass rate. To avoid source ambiguity, Table~\ref{tab:main-results} uses the arithmetic means materialized in each per-policy file \texttt{exp/<policy>/results.json}. We do not mix those rows with the top-level geometric-mean fields from \texttt{results.json}.
+
+\subsection{Main comparison}
+
+Table~\ref{tab:main-results} reports the executed policies. \textsc{LastRunTracking} is the strongest credible deterministic policy in this proxy study: it reduces compile time by 13.29\% versus stock with 0.4000 suppression rate, 0.2222 debt-event rate, 0.63\% bookkeeping overhead, runtime ratio 0.9931, code-size ratio 1.0000, and correctness 1.0000.
+
+\textsc{RuleGuardrail} does not improve on that baseline. Its compile-time reduction is slightly lower at 12.82\%, with the same suppression and debt-event rates. The per-benchmark rows also show one clear downside: \texttt{PolyBenchC/loop\_nest} becomes 7.71\% slower than stock.
+
+\textsc{RunOnce} demonstrates that more aggressive suppression can recover more compile time, reaching 18.93\%, but it does so with a far worse 0.6667 debt-event rate. We therefore treat it as a failure anchor rather than a competitive policy.
+
+\begin{table*}[t]
+\caption{Main comparison for the executed proxy study. Every value is taken from \texttt{exp/stock/results.json}, \texttt{exp/last\_run\_tracking/results.json}, \texttt{exp/rule\_guardrail/results.json}, and \texttt{exp/run\_once/results.json}, using the arithmetic means stored in those files. Best deterministic values are in \textbf{bold}.}
+\label{tab:main-results}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Method & Compile reduction (\%) $\uparrow$ & Suppression rate $\uparrow$ & Debt-event rate $\downarrow$ & Overhead (\%) $\downarrow$ & Runtime ratio & Correctness \\
+\midrule
+Stock & 0.00 & 0.0000 & 0.0000 & \textbf{0.55} & 1.0000 & 1.0000 \\
+\textsc{LastRunTracking} & \textbf{13.29} & 0.4000 & \textbf{0.2222} & 0.63 & 0.9931 & 1.0000 \\
+\textsc{RuleGuardrail} & 12.82 & 0.4000 & \textbf{0.2222} & 0.63 & 0.9912 & 1.0000 \\
+\textsc{RunOnce} & 18.93 & \textbf{0.6000} & 0.6667 & 0.68 & \textbf{0.9823} & 1.0000 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Label collapse and skipped learning}
+
+The central empirical result is not a learned-policy win but a label collapse. Table~\ref{tab:labels} shows the replay-label cardinalities recorded in the top-level \texttt{results.json}. Each \texttt{instcombine} fold had 12 candidates and 12 labels, all debt$=1$. Each \texttt{simplifycfg} fold had 6 candidates and 6 labels, again all debt$=1$. No fold met the preregistered threshold for training.
+
+This matters scientifically because it means the intended incremental comparison was not merely unconvincing; it was uninstantiable in the executed corpus. Mutation-typed features could not be tested as a classifier because there were no debt$=0$ examples to learn from.
+
+\begin{table}[t]
+\caption{Replay-label cardinalities from \texttt{results.json}. Every row violates the preregistered minimum needed to fit learned policies, so \textsc{LearnedChange}, \textsc{MutationDebt}, and ablations A--E were skipped.}
+\label{tab:labels}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Held-out suite & Target pass & Candidates & Labeled & debt$=1$ & debt$=0$ \\
+\midrule
+PolyBench/C & \texttt{instcombine} & 12 & 12 & 12 & 0 \\
+PolyBench/C & \texttt{simplifycfg} & 6 & 6 & 6 & 0 \\
+cBench & \texttt{instcombine} & 12 & 12 & 12 & 0 \\
+cBench & \texttt{simplifycfg} & 6 & 6 & 6 & 0 \\
+CTMark & \texttt{instcombine} & 12 & 12 & 12 & 0 \\
+CTMark & \texttt{simplifycfg} & 6 & 6 & 6 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fold-level and pass-level behavior}
+
+Figure~\ref{fig:fold-bars} now shows the actual fold-level grouped bars requested by the plan. The relative ordering is stable across folds: \textsc{RunOnce} is always the most aggressive, while \textsc{LastRunTracking} and \textsc{RuleGuardrail} stay close.
+
+Figure~\ref{fig:pareto} summarizes the aggregate compile-time versus debt trade-off. Figure~\ref{fig:pass-stack} clarifies why \textsc{RunOnce} is risky: it increases the number of deferred repeated opportunities, especially for \texttt{instcombine}, and more of those deferred opportunities are associated with debt or later recovery.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_fold_compile_reduction.png}
+\caption{Mean compile-time reduction versus stock for each held-out suite. Each bar is the arithmetic mean of the 3 benchmark rows in that held-out fold, computed from the per-policy \texttt{benchmark\_rows} in \texttt{exp/last\_run\_tracking/results.json}, \texttt{exp/rule\_guardrail/results.json}, and \texttt{exp/run\_once/results.json}.}
+\label{fig:fold-bars}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.90\linewidth]{figures/figure2_pareto.png}
+\caption{Aggregate trade-off between mean compile-time reduction and mean debt-event rate. Each point uses arithmetic means over the 9 benchmark rows for one policy; the annotation reports mean bookkeeping overhead.}
+\label{fig:pareto}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{figures/figure3_pass_stack.png}
+\caption{Pass-level grouped bars for the executed deterministic policies. The y-axis is the mean number of repeated opportunities per benchmark row. ``Ran immediately'' is the mean count of repeated opportunities executed at once; ``deferred total'' is the mean count of suppressed repeated opportunities; ``deferred with debt/recovery'' is the mean count of suppressed opportunities multiplied by the row's debt-event rate, so it is a subset statistic rather than an additional total.}
+\label{fig:pass-stack}
+\end{figure}
+
+\section{Reproducibility and Artifact Traceability}
+\label{sec:artifact}
+
+The executed artifact is small enough that every reported result can be mapped to a specific source file.
+
+\paragraph{Benchmark and pipeline provenance.}
+The benchmark-source status is documented in \texttt{exp/original\_benchmark\_suites/SKIPPED.md}. The unexecuted patched LLVM plan is documented in \texttt{exp/original\_llvm\_build/SKIPPED.md}. The executed proxy pipeline and policy configuration are recorded inside each per-policy \texttt{exp/<policy>/results.json}.
+
+\paragraph{Executed and skipped policies.}
+Executed policies are stock, \textsc{LastRunTracking}, \textsc{RuleGuardrail}, and \textsc{RunOnce}. Skipped policies are \textsc{LearnedChange}, \textsc{MutationDebt}, and ablations A--E; each skip is recorded both in \texttt{results.json} and in \texttt{exp/<name>/SKIPPED.md}.
+
+\paragraph{Metric definitions used in the paper.}
+Compile reduction is the arithmetic mean of per-benchmark \texttt{compile\_time\_reduction\_pct\_vs\_stock}. Runtime ratio is the arithmetic mean of non-null \texttt{runtime\_ratio\_vs\_stock} values in each per-policy file. Suppression rate, debt-event rate, and bookkeeping overhead are arithmetic means over benchmark rows. Correctness is the mean \texttt{correctness\_pass\_rate}. Code-size ratio is 1.0000 for every executed policy.
+
+\begin{table}[t]
+\caption{Artifact map for every table and figure in this paper.}
+\label{tab:artifact-map}
+\centering
+\small
+\begin{tabular}{p{0.18\linewidth}p{0.74\linewidth}}
+\toprule
+Object & Source and aggregation \\
+\midrule
+Table~\ref{tab:main-results} & Arithmetic means stored in \texttt{exp/stock/results.json}, \texttt{exp/last\_run\_tracking/results.json}, \texttt{exp/rule\_guardrail/results.json}, and \texttt{exp/run\_once/results.json}. \\
+Table~\ref{tab:labels} & \texttt{results.json["label\_cardinalities"]}. \\
+Figure~\ref{fig:fold-bars} & Per-fold arithmetic means of \texttt{compile\_time\_reduction\_pct\_vs\_stock} derived from the per-policy \texttt{benchmark\_rows}. \\
+Figure~\ref{fig:pareto} & Per-policy arithmetic means of \texttt{compile\_time\_reduction\_pct\_vs\_stock}, \texttt{debt\_event\_rate}, and \texttt{bookkeeping\_overhead\_pct} derived from the per-policy \texttt{benchmark\_rows}. \\
+Figure~\ref{fig:pass-stack} & Per-policy arithmetic means derived from \texttt{instcombine\_suppressions\_mean}, \texttt{simplifycfg\_suppressions\_mean}, and \texttt{debt\_event\_rate} in the per-policy \texttt{benchmark\_rows}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The strongest conclusion is a boundary claim, not an algorithmic claim. This workspace does not show that DebtAware improves on \textsc{LastRunTracking}. It shows that, in the executed proxy corpus, the intended learned comparison cannot even be run because replay labels never produce a negative class.
+
+The executed deterministic evidence is still informative. A simple binary compatible-change heuristic already recovers a substantial compile-time win in this setting: 13.29\% mean reduction with no observed correctness or code-size regressions. The fixed mutation-based rule fallback does not improve on it. That weakens the immediate case for richer typed bookkeeping in this corpus, although it does not prove typed features are useless in larger or different workloads.
+
+Several limitations remain. First, the artifact is a shared Python proxy harness over system LLVM rather than a patched compiler with one policy switch. Second, the corpus is small: 9 benchmarks, with runtime validation on only 6. Third, CTMark is represented by translation units rather than full binaries. Fourth, the pilot trace overheads were far above the planned feasibility threshold. Fifth, all skipped learned policies and ablations are skipped for a good methodological reason, but their absence still leaves the empirical story incomplete.
+
+The next study should therefore focus less on model choice and more on data generation: a lower-overhead instrumentation path, a larger benchmark set, and a replay design that can surface naturally safe deferrals. Without those, the right claim is restraint: this artifact supplies evidence about feasibility and label identifiability, not a validated compiler optimization method.
+
+\section{Conclusion}
+
+We revisited a narrow question left open by LLVM's rerun-suppression engineering work: do typed summaries of intervening mutations add practical value beyond \textsc{LastRunTracking} when deciding whether a repeated cleanup rerun can wait until the next stock sweep point? In the executed workspace, the answer is a feasibility boundary rather than a positive method result. Proxy \textsc{LastRunTracking} reduces compile time by 13.29\% versus stock, while \textsc{RuleGuardrail} reaches 12.82\% and \textsc{RunOnce} reaches 18.93\% with much worse debt behavior. More importantly, all 54 replay labels collapse to debt$=1$, so the preregistered low-label fallback prevents learned-policy training entirely.
+
+The practical implication is that the next bottleneck is label identifiability, not classifier design. Before arguing for richer rerun-deferral policies beyond LLVM's existing binary heuristic, future work must first show a realistic setting that yields enough debt$=0$ examples to test them.
+
+\begin{thebibliography}{10}
+
+\bibitem[Ashouri et~al.(2018)Ashouri, Killian, Cavazos, Palermo, and
+  Silvano]{ashouri2018survey}
+Amir~H. Ashouri, William Killian, John Cavazos, Gianluca Palermo, and
+Cristina Silvano.
+\newblock A survey on compiler autotuning using machine learning.
+\newblock \emph{CoRR}, abs/1801.04405, 2018.
+
+\bibitem[Engelke and Schwarz(2024)]{engelke2024compiletime}
+Alexis Engelke and Tobias Schwarz.
+\newblock Compile-time analysis of compiler frameworks for query compilation.
+\newblock In \emph{Proceedings of the 22nd IEEE/ACM International Symposium on
+Code Generation and Optimization}, pages 233--244, 2024.
+
+\bibitem[Hellsten et~al.(2023)Hellsten, Souza, Lenfers, Lacouture, Hsu, Ejjeh,
+  Kjolstad, Steuwer, Olukotun, and Nardi]{hellsten2023baco}
+Erik Hellsten, Artur Souza, Johannes Lenfers, Rubens Lacouture, Olivia Hsu,
+Adel Ejjeh, Fredrik Kjolstad, Michel Steuwer, Kunle Olukotun, and Luigi Nardi.
+\newblock {BaCO}: A fast and portable {B}ayesian compiler optimization
+framework.
+\newblock In \emph{Proceedings of the 28th ACM International Conference on
+Architectural Support for Programming Languages and Operating Systems}, 2023.
+
+\bibitem[Jayatilaka et~al.(2021)Jayatilaka, Ueno, Georgakoudis, Park, and
+  Doerfert]{jayatilaka2021towards}
+Tarindu Jayatilaka, Hideto Ueno, Giorgis Georgakoudis, Eunjung Park, and
+Johannes Doerfert.
+\newblock Towards compile-time-reducing compiler optimization selection via
+machine learning.
+\newblock In \emph{Proceedings of the 2021 International Conference on Parallel
+Processing Workshops}, pages 23:1--23:6, 2021.
+
+\bibitem[Liang et~al.(2023)Liang, Stone, Shameli, Cummins, Elhoushi, Guo,
+  Steiner, Yang, Xie, Leather, and Tian]{liang2023learning}
+Youwei Liang, Kevin Stone, Ali Shameli, Chris Cummins, Mostafa Elhoushi,
+Jiadong Guo, Benoit Steiner, Xiaomeng Yang, Pengtao Xie, Hugh Leather, and
+Yuandong Tian.
+\newblock Learning compiler pass orders using coreset and normalized value
+prediction.
+\newblock In \emph{Proceedings of the 40th International Conference on Machine
+Learning}, volume 202 of \emph{Proceedings of Machine Learning Research},
+2023.
+
+\bibitem[Liu et~al.(2024)Liu, Fang, Wang, Xie, Huang, and Wang]{liu2024dco}
+Jianfeng Liu, Jianbin Fang, Ting Wang, Jing Xie, Chun Huang, and Zheng Wang.
+\newblock Efficient compiler optimization by modeling passes dependence.
+\newblock \emph{CCF Transactions on High Performance Computing}, 6:588--607,
+2024.
+
+\bibitem[LLVM Project(2024)]{llvm_lastruntrackinganalysis_2024}
+LLVM Project.
+\newblock {LastRunTrackingAnalysis.h}.
+\newblock LLVM doxygen documentation, 2024.
+
+\bibitem[dtcxzyw(2024)]{llvm_rfc_avoid_running_2024}
+dtcxzyw.
+\newblock [{RFC}][{Pipeline}] Avoid running transform passes that have just
+been run.
+\newblock LLVM Discourse, October 10 2024.
+
+\bibitem[Zhao et~al.(2025)Zhao, Xia, and Wang]{zhao2025citroen}
+Jiayu Zhao, Chunwei Xia, and Zheng Wang.
+\newblock Leveraging compilation statistics for compiler phase ordering.
+\newblock In \emph{Proceedings of the IEEE International Parallel and
+Distributed Processing Symposium}, 2025.
+
+\end{thebibliography}
+
+\end{document}

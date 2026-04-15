@@ -1,0 +1,379 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Hardware Capability Validation and Environment Setup",
+    "description": "Validate hardware PMU capabilities and measure PMU profiling overhead BEFORE any simulation work. This is a CRITICAL GATE - if PMU overhead exceeds 3%, the approach may not be viable.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Check CPU features for PMU support: grep -E 'pebs|ibs|arch_perfmon' /proc/cpuinfo | head -20",
+      "step2": "Check kernel version: uname -r (document: available 6.8.0 vs required 6.12+ for sched_ext)",
+      "step3": "Install required packages: pip install numpy scipy pandas matplotlib simpy tabulate",
+      "step4": "Verify perf tool availability: which perf && perf --version",
+      "step5": "Create experiment directory structure: mkdir -p experiments/{pmu_validation,simulator,baselines,unisched,ablations,results}",
+      "step6": "Document hardware specs: lscpu, numactl --hardware (if available), free -h"
+    },
+    "output_files": [
+      "logs/hardware_specs.txt",
+      "logs/pmu_availability.txt"
+    ],
+    "success_criteria": "PMU features available; perf tool functional; environment ready"
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "PMU Overhead Validation - CRITICAL GATE",
+    "description": "Measure actual PMU profiling overhead on real hardware using STREAM benchmark. This experiment determines if the UniSched approach is viable. If overhead > 3%, document and reconsider approach.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Create STREAM benchmark wrapper: Python script to run STREAM with varying array sizes (10M, 50M, 100M elements)",
+      "step2": "Run baseline STREAM without PMU: ./stream.exe, capture bandwidth (GB/s), record 5 runs",
+      "step3": "Run STREAM with PEBS at 0.5% sampling: perf record -e mem-loads:u,mem-stores:u -c 200000 -- ./stream.exe",
+      "step4": "Run STREAM with PEBS at 1.0% sampling: perf record -e mem-loads:u,mem-stores:u -c 100000 -- ./stream.exe",
+      "step5": "Run STREAM with PEBS at 2.0% sampling: perf record -e mem-loads:u,mem-stores:u -c 50000 -- ./stream.exe",
+      "step6": "Calculate overhead: (baseline_bandwidth - profiled_bandwidth) / baseline_bandwidth * 100%",
+      "step7": "Gate decision: If overhead <= 3%, proceed with confidence. If 3-5%, proceed with documented caution. If >5%, stop and document limitations.",
+      "step8": "Run additional microbenchmark: RandomAccess (pointer chasing) with/without PMU to validate latency-sensitive workload overhead"
+    },
+    "output_files": [
+      "logs/pmu_overhead_results.json",
+      "logs/pmu_overhead_report.txt"
+    ],
+    "success_criteria": "PMU overhead <= 5% (ideally <= 3%); results documented with statistical confidence intervals",
+    "feedback_addressed": "Feedback #3: Validates PMU overhead early before full experiments"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Topology Discovery and Simulator Calibration",
+    "description": "Characterize actual hardware NUMA topology and memory latency/bandwidth to calibrate simulator parameters. Even with simulation, we use real measurements where possible.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Enumerate NUMA topology: Create script to parse /sys/devices/system/node/node*/ for memory and CPU assignments",
+      "step2": "Measure memory latency between NUMA nodes: Use simple pointer-chasing benchmark (if root access available) or use documented typical values",
+      "step3": "Measure memory bandwidth: STREAM results from PMU validation provide local DRAM bandwidth baseline",
+      "step4": "Create CXL latency/bandwidth parameters for simulation: DRAM=100ns, CXL-local=200ns, CXL-remote=350ns (based on CXL 2.0/3.0 specifications)",
+      "step5": "Build topology configuration JSON: {nodes: [{id: 0, cpus: [0-31], memory_gb: 128, type: 'local_dram'}, {id: 1, cpus: [32-63], memory_gb: 512, type: 'cxl_attached'}]}",
+      "step6": "Create calibration report: Document which parameters are from real measurements vs. CXL specification estimates"
+    },
+    "output_files": [
+      "experiments/simulator/topology_config.json",
+      "experiments/simulator/calibration_report.txt"
+    ],
+    "success_criteria": "Topology documented; simulator parameters calibrated with real measurements where possible; CXL parameters justified with citations"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Workload Characterization and Dataset Generation",
+    "description": "Generate synthetic workload traces with varying memory access patterns that will be used across all schedulers for fair comparison. Characteristics based on real application behavior.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Define workload types: (a) Local-dominant (80% local DRAM access), (b) CXL-bandwidth-bound (60% CXL access, sequential), (c) Latency-sensitive (random access, low cache hit), (d) Mixed (combination)",
+      "step2": "Generate Redis/YCSB-like workload: Key-value operations with Zipfian key distribution, 70% read, read-heavy on hot keys",
+      "step3": "Generate Graph analytics workload: PageRank-style access patterns - iterative, high memory footprint, good locality",
+      "step4": "Generate STREAM-like workload: Sequential memory access, bandwidth-bound, configurable read/write ratio (2:1, 1:1, 1:2)",
+      "step5": "Generate Latency-sensitive workload: Pointer chasing, random access, small working set that fits cache",
+      "step6": "Scale generation: Create 3 workload sizes - small (10 tasks), medium (50 tasks), large (100 tasks) for scalability testing",
+      "step7": "Save workload traces as JSON: {workload_id, tasks: [{arrival_time, duration, mem_access_pattern, footprint_mb, access_nodes: {0: 0.8, 1: 0.2}}]}"
+    },
+    "output_files": [
+      "experiments/simulator/workloads/redis_ycsb.json",
+      "experiments/simulator/workloads/graph_pagerank.json",
+      "experiments/simulator/workloads/stream_bandwidth.json",
+      "experiments/simulator/workloads/latency_sensitive.json",
+      "experiments/simulator/workloads/mixed_workload.json"
+    ],
+    "success_criteria": "5 workload types generated; 3 sizes each; workloads have realistic memory access patterns based on published characteristics"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline Scheduler 1: Linux EEVDF Simulation",
+    "description": "Implement simulation of Linux's default EEVDF (Earliest Eligible Virtual Deadline First) scheduler. This is the simplest baseline representing stock Linux without NUMA awareness.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Implement EEVDF scheduler simulator: Virtual time-based scheduling, lag-based fairness, no NUMA awareness",
+      "step2": "Core algorithm: tasks sorted by virtual deadline, min_vruntime tracking, slice calculation based on weight",
+      "step3": "NUMA behavior: Tasks can run on any CPU; memory access latency depends on which node task runs on vs where memory was allocated",
+      "step4": "Run EEVDF on all 5 workload types (small, medium, large) × 3 random seeds (1, 2, 3)",
+      "step5": "Collect metrics: throughput (tasks completed/sec), avg/tail latency, CPU utilization, memory bandwidth per node",
+      "step6": "Save results: experiments/baselines/eevdf_results.json"
+    },
+    "output_files": [
+      "experiments/baselines/eevdf_scheduler.py",
+      "experiments/baselines/eevdf_results.json"
+    ],
+    "success_criteria": "EEVDF baseline implemented and run on all workloads; results stored for comparison"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline Scheduler 2: EEVDF + AutoNUMA Simulation",
+    "description": "Implement simulation of Linux EEVDF with AutoNUMA-style reactive page migration. This is the CRITICAL STRONG BASELINE - represents production Linux NUMA-aware scheduling.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Implement AutoNUMA-style reactive migration: Periodic scanning (every 1 second simulated time), page access sampling, CPU-follows-memory / memory-follows-CPU policies",
+      "step2": "Model AutoNUMA parameters: scan_delay=1s, max_numa_migrate_rate=8MB/s, numa_balancing_scan_size_mb=256",
+      "step3": "Implement page placement logic: Track where pages are allocated; when task accesses remote memory, trigger migration with bandwidth-limited rate",
+      "step4": "Model migration overhead: 1 microsecond per page + bandwidth constraint; cache invalidation modeled as cold-start penalty",
+      "step5": "Run EEVDF+AutoNUMA on all 5 workload types × 3 sizes × 3 random seeds",
+      "step6": "Collect additional AutoNUMA-specific metrics: migration count, bytes migrated, scan overhead",
+      "step7": "Save results: experiments/baselines/autonuma_results.json"
+    },
+    "output_files": [
+      "experiments/baselines/autonuma_scheduler.py",
+      "experiments/baselines/autonuma_results.json"
+    ],
+    "success_criteria": "AutoNUMA baseline with reactive migration implemented; comparison shows expected behavior (some improvement over EEVDF for NUMA workloads)",
+    "feedback_addressed": "Feedback #2: Add AutoNUMA as baseline in addition to EEVDF; Feedback #5: AutoNUMA is relevant existing mechanism for NUMA-aware scheduling"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline Scheduler 3: Tiresias-like Reactive Scheduler",
+    "description": "Implement simulation of Tiresias-style reactive page-fault-driven scheduling. Represents state-of-the-art CXL-aware kernel-modified approach.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Implement Tiresias-like reactive scheduler: Page-fault-driven thread migration, no proactive profiling",
+      "step2": "Model PTSR behavior: Reduced migration cost for page-table replication (50% of normal migration cost)",
+      "step3": "Migration trigger: Migrate task to memory-access-dominant NUMA node when remote access ratio exceeds threshold (60%)",
+      "step4": "Add hysteresis: Minimum interval between migrations (100ms) to prevent thrashing",
+      "step5": "Run on all 5 workload types × 3 sizes × 3 random seeds",
+      "step6": "Collect metrics: migration frequency, page faults, throughput, latency",
+      "step7": "Save results: experiments/baselines/tiresias_results.json"
+    },
+    "output_files": [
+      "experiments/baselines/tiresias_scheduler.py",
+      "experiments/baselines/tiresias_results.json"
+    ],
+    "success_criteria": "Tiresias-like baseline implemented; shows reactive migration behavior; results comparable to expected Tiresias behavior from literature"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline Scheduler 4: CXLAimPod-style Intra-Node Optimizer",
+    "description": "Implement simulation of CXLAimPod-style intra-node duplex optimization. Used to demonstrate the COMPLEMENTARY nature of UniSched (cross-NUMA) vs CXLAimPod (within-node).",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Implement CXLAimPod-style scheduler: Within single NUMA node, balance read-heavy and write-heavy tasks on same CXL memory controller",
+      "step2": "Model full-duplex CXL: Simultaneous read+write bandwidth = 2× unidirectional bandwidth",
+      "step3": "Task classification: Tag tasks as read-heavy (>70% reads), write-heavy (>70% writes), or balanced",
+      "step4": "Co-scheduling policy: Pair read-heavy with write-heavy on same node to exploit duplex channels",
+      "step5": "Note limitation: CXLAimPod doesn't solve cross-NUMA placement - assumes placement already decided",
+      "step6": "Run on bandwidth-heavy workloads with 2:1, 1:1, 1:2 read/write ratios × 3 seeds",
+      "step7": "Save results: experiments/baselines/cxlaimpod_results.json"
+    },
+    "output_files": [
+      "experiments/baselines/cxlaimpod_scheduler.py",
+      "experiments/baselines/cxlaimpod_results.json"
+    ],
+    "success_criteria": "CXLAimPod baseline demonstrates intra-node duplex optimization; results show complementary behavior to cross-NUMA scheduling",
+    "feedback_addressed": "Feedback #4: Clarify CXLAimPod distinction; Feedback #5: CXLAimPod vs UniSched are at different levels"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "UniSched Implementation - Full System",
+    "description": "Implement full UniSched simulator with proactive PMU-based profiling, topology-aware scoring, and cross-NUMA placement decisions.",
+    "estimated_time": "40 minutes",
+    "steps": {
+      "step1": "Implement PMU sampling simulator: Sample task memory access at configurable frequency (0.5%, 1%, 2%), track access distribution per NUMA node",
+      "step2": "Implement task classification: local-dominant (>60% local access), cxl-bandwidth-bound (>40% CXL sequential), latency-sensitive (high random access rate)",
+      "step3": "Implement topology-aware scoring function: score(cpu, task) = w1*compute_score + w2*memory_score + w3*migration_cost",
+      "step4": "Set weights: w1=0.4 (compute), w2=0.4 (memory), w3=0.2 (migration); compute_score based on CPU load, memory_score based on access pattern match",
+      "step5": "Implement latency-aware placement: For local-dominant tasks, strongly prefer same-node CPUs (memory_score bonus)",
+      "step6": "Implement bandwidth balancing: Monitor CXL controller saturation; migrate bandwidth-heavy tasks to less loaded controllers",
+      "step7": "Model PMU overhead: Add 0.5-2% overhead (based on Phase 1 validation) to each scheduling decision",
+      "step8": "Run UniSched on all 5 workload types × 3 sizes × 3 random seeds",
+      "step9": "Save results: experiments/unisched/unisched_full_results.json"
+    },
+    "output_files": [
+      "experiments/unisched/unisched_scheduler.py",
+      "experiments/unisched/unisched_full_results.json"
+    ],
+    "success_criteria": "UniSched fully implemented with all components; runs on all workloads; PMU overhead modeled based on real measurements"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 1: Topology-Only UniSched",
+    "description": "Remove per-task profiling, use only aggregate topology information. Tests the value of proactive PMU-based profiling vs. static topology awareness.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Modify UniSched: Remove per-task memory access tracking; use only NUMA topology for placement",
+      "step2": "Placement policy: Simple heuristic - prefer local DRAM node for all tasks unless load imbalance exceeds threshold",
+      "step3": "Run topology-only variant on all 5 workloads × 3 sizes × 3 seeds",
+      "step4": "Compare against full UniSched to measure value of profiling",
+      "step5": "Save results: experiments/ablations/unisched_topology_only_results.json"
+    },
+    "output_files": [
+      "experiments/ablations/unisched_topology_only_results.json"
+    ],
+    "success_criteria": "Ablation shows topology-only provides some benefit; but full system with profiling does better"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 2: Profiling-Only UniSched",
+    "description": "Remove topology-aware scoring, use only per-task profiling with standard load balancing. Tests the value of CXL topology awareness.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Modify UniSched: Keep per-task profiling but use standard load balancing (no memory topology in scoring)",
+      "step2": "Profiling used only for: Task classification (local vs CXL-bound) for post-hoc analysis, not for scheduling",
+      "step3": "Run profiling-only variant on all 5 workloads × 3 sizes × 3 seeds",
+      "step4": "Compare against full UniSched to measure value of topology awareness",
+      "step5": "Save results: experiments/ablations/unisched_profiling_only_results.json"
+    },
+    "output_files": [
+      "experiments/ablations/unisched_profiling_only_results.json"
+    ],
+    "success_criteria": "Ablation shows profiling alone helps; but combining with topology awareness provides best results"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 3: No Memory Coordination",
+    "description": "Remove the memory coordination component (userspace move_pages hints). Tests the value of coordinating CPU scheduling with page migration.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Modify UniSched: Disable memory coordination hints; CPU scheduler works in isolation",
+      "step2": "Compare with full system that coordinates via simulated move_pages()",
+      "step3": "Run on workloads with large memory footprints (graph analytics, large STREAM)",
+      "step4": "Save results: experiments/ablations/unisched_no_coordination_results.json"
+    },
+    "output_files": [
+      "experiments/ablations/unisched_no_coordination_results.json"
+    ],
+    "success_criteria": "Ablation shows memory coordination provides measurable benefit for large-footprint workloads"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity Analysis: PMU Sampling Frequency",
+    "description": "Test different PMU sampling frequencies to understand the overhead-accuracy tradeoff. Validates that our chosen 1% frequency is appropriate.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Run UniSched with sampling frequencies: 0.1%, 0.5%, 1.0%, 2.0%, 5.0%",
+      "step2": "For each frequency: Measure scheduling quality (throughput, latency) and overhead",
+      "step3": "Plot: X-axis=sampling frequency, Y-axis=(performance, overhead); identify knee point",
+      "step4": "Expected: Diminishing returns above 1-2%; validate that 1% is near-optimal",
+      "step5": "Save results: experiments/ablations/sensitivity_sampling_frequency.json"
+    },
+    "output_files": [
+      "experiments/ablations/sensitivity_sampling_frequency.json",
+      "experiments/ablations/sensitivity_sampling_frequency.png"
+    ],
+    "success_criteria": "Sensitivity analysis shows clear tradeoff curve; validates chosen 1% sampling frequency"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity Analysis: CXL Latency Variations",
+    "description": "Test UniSched performance under different CXL latency configurations to validate robustness across different CXL implementations.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Test CXL latency scenarios: (a) Low latency (CXL local=150ns, remote=250ns), (b) Medium (200ns, 350ns), (c) High (300ns, 500ns)",
+      "step2": "Run all schedulers (EEVDF, AutoNUMA, Tiresias, UniSched) on each scenario",
+      "step3": "Measure: Does UniSched's advantage increase with higher CXL latency? (Expected: yes)",
+      "step4": "Save results: experiments/ablations/sensitivity_cxl_latency.json"
+    },
+    "output_files": [
+      "experiments/ablations/sensitivity_cxl_latency.json"
+    ],
+    "success_criteria": "UniSched shows consistent improvements across C latency scenarios; advantage scales with CXL latency as expected"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis and Hypothesis Testing",
+    "description": "Perform rigorous statistical analysis on all results. Test the hypothesis that UniSched achieves >=5% improvement over EEVDF+AutoNUMA.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Aggregate all results: Load JSON results from all experiments into pandas DataFrame",
+      "step2": "Calculate mean and standard deviation for each metric across 3 random seeds",
+      "step3": "Perform paired t-test: UniSched vs each baseline on each workload; report p-values",
+      "step4": "Calculate confidence intervals: 95% CI for performance improvements",
+      "step5": "Compute effect sizes: Cohen's d for practical significance",
+      "step6": "Fairness analysis: Calculate Jain's fairness index for CPU time distribution across tasks",
+      "step7": "Test hypothesis: Check if UniSched achieves >=5% throughput improvement on >=3 benchmarks",
+      "step8": "Test overhead constraint: Verify simulated PMU overhead aligns with Phase 1 validation",
+      "step9": "Generate statistical summary report: experiments/results/statistical_analysis.txt"
+    },
+    "output_files": [
+      "experiments/results/statistical_analysis.txt",
+      "experiments/results/summary_table.csv"
+    ],
+    "success_criteria": "Statistical tests complete; p-values reported; confidence intervals calculated; hypothesis tested with evidence"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Simulation Limitations Documentation",
+    "description": "Explicitly document all simulation limitations as required by feedback. This is critical for scientific integrity.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Document CXL protocol limitations: Simulation uses parameterized latency/bandwidth; cannot capture actual CXL protocol handshaking, cache coherency overheads, or real contention arbitration",
+      "step2": "Document sched_ext limitations: Simulator approximates BPF scheduler behavior; actual sched_ext may have different latency characteristics, BPF verifier constraints not captured",
+      "step3": "Document migration cost limitations: Cache warmth and TLB effects are modeled heuristically based on literature values, not measured",
+      "step4": "Document PMU simulation limitations: Real PEBS/IBS has skid, latency, and buffer overflow effects not fully modeled",
+      "step5": "Document kernel version limitation: Results are from simulation, not real sched_ext deployment on Linux 6.12+",
+      "step6": "Create limitations report: experiments/results/SIMULATION_LIMITATIONS.md",
+      "step7": "Propose validation path: Describe how results could be validated with kernel 6.12+ upgrade"
+    },
+    "output_files": [
+      "experiments/results/SIMULATION_LIMITATIONS.md"
+    ],
+    "success_criteria": "All limitations explicitly documented; mitigation strategies described; path to real-hardware validation outlined",
+    "feedback_addressed": "Feedback #1: Address simulation limitations more explicitly; Feedback #4: Consider kernel upgrade for real sched_ext validation"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Performance Comparison Figures",
+    "description": "Create publication-quality figures comparing UniSched against all baselines. Include error bars and statistical significance markers.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Figure 1 - Throughput Comparison: Bar chart with error bars; X-axis=workloads, Y-axis=throughput (normalized to EEVDF), grouped by scheduler; include statistical significance markers (* for p<0.05, ** for p<0.01)",
+      "step2": "Figure 2 - Tail Latency Comparison: Similar format for p95 and p99 latency",
+      "step3": "Figure 3 - Ablation Study: Stacked bar or grouped bar showing contribution of each component (topology-only, profiling-only, full system)",
+      "step4": "Figure 4 - Sensitivity Analysis: Line plot showing performance vs sampling frequency with shaded confidence intervals",
+      "step5": "Figure 5 - CXL Bandwidth Utilization: Show improved bandwidth distribution across CXL controllers with UniSched",
+      "step6": "Figure 6 - Fairness vs Performance Tradeoff: Scatter plot showing Jain's fairness index vs throughput improvement",
+      "step7": "Save all figures: experiments/results/figures/*.png with 300 DPI for publication"
+    },
+    "output_files": [
+      "experiments/results/figures/fig1_throughput_comparison.png",
+      "experiments/results/figures/fig2_tail_latency_comparison.png",
+      "experiments/results/figures/fig3_ablation_study.png",
+      "experiments/results/figures/fig4_sensitivity_sampling.png",
+      "experiments/results/figures/fig5_bandwidth_utilization.png",
+      "experiments/results/figures/fig6_fairness_tradeoff.png"
+    ],
+    "success_criteria": "6 publication-quality figures generated; all include error bars; appropriate statistical markers"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Tables for Paper",
+    "description": "Create LaTeX/Markdown tables summarizing all results for inclusion in the paper.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Table 1 - Main Results: Workload | EEVDF | AutoNUMA | Tiresias | UniSched | Improvement over AutoNUMA; include throughput, p95 latency, fairness index",
+      "step2": "Table 2 - Ablation Study: Component | Throughput | Migration Count | Notes",
+      "step3": "Table 3 - PMU Overhead Validation: Sampling Frequency | STREAM Bandwidth | Overhead % | Status (validated in Phase 1)",
+      "step4": "Table 4 - Simulation Parameters: Parameter | Value | Source (measured vs estimated)",
+      "step5": "Table 5 - Workload Characteristics: Workload | Access Pattern | Local/CXL Ratio | Memory Footprint",
+      "step6": "Save tables as: experiments/results/tables/*.tex and *.md"
+    },
+    "output_files": [
+      "experiments/results/tables/table1_main_results.md",
+      "experiments/results/tables/table2_ablation.md",
+      "experiments/results/tables/table3_pmu_overhead.md",
+      "experiments/results/tables/table4_simulation_params.md",
+      "experiments/results/tables/table5_workloads.md"
+    ],
+    "success_criteria": "All tables generated; properly formatted; include all necessary information for paper"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Success Criteria Evaluation",
+    "description": "Evaluate all success criteria from the hypothesis and determine if they are met. Document confirming and refuting evidence.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "Criterion 1 - PMU Overhead: Check Phase 1 results; document if overhead <= 3%",
+      "step2": "Criterion 2 - Performance Improvement: Check if >=5% throughput improvement on >=3 benchmarks vs EEVDF+AutoNUMA",
+      "step3": "Criterion 3 - Bandwidth Utilization: Check if >=10% improvement in CXL bandwidth utilization",
+      "step4": "Criterion 4 - Fairness: Check if Jain's index remains >= 0.85 under competitive workloads",
+      "step5": "Criterion 5 - Deployability: Verify scheduler can be implemented via sched_ext (code analysis)",
+      "step6": "Generate final report: experiments/results/SUCCESS_CRITERIA_EVALUATION.md with PASS/FAIL for each criterion",
+      "step7": "Document any refuting evidence: If criteria not met, document why and what this means for the hypothesis"
+    },
+    "output_files": [
+      "experiments/results/SUCCESS_CRITERIA_EVALUATION.md"
+    ],
+    "success_criteria": "All success criteria evaluated; honest assessment of hypothesis support; refuting evidence documented if present"
+  }
+]

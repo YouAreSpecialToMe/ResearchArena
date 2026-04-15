@@ -1,0 +1,509 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage{multirow}
+
+\newcommand{\fli}{\text{FLI}}
+\newcommand{\topk}{\text{TopK}}
+\newcommand{\vp}{\mathbf{p}}
+\newcommand{\vu}{\mathbf{u}}
+\newcommand{\ndd}{\text{NDD}}
+
+\title{The Functional Anatomy of Sparse Features in Language Models}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Sparse autoencoders (SAEs) have become the primary tool for extracting interpretable features from language models, yet current evaluation relies on global metrics that cannot distinguish whether specific model capabilities are well-captured or lost in reconstruction residuals. We introduce the \emph{Functional Feature Atlas}, a systematic framework for mapping SAE features to model capabilities, and the \emph{Functional Localization Index} (FLI), a metric quantifying whether capabilities are supported by few specialized features (localized) or many distributed features. Evaluating four capabilities with clear causal signal on GPT-2 Small with 32K-feature TopK SAEs, we find a significant localization spectrum: factual recall and reasoning are highly localized (9--12 effective features), while syntactic processing and named entity recognition are distributed ($\sim$150 effective features)---a 16.7$\times$ difference. This spectrum is robust across SAE architectures (Spearman $\rho = 0.88$, $p < 10^{-6}$) and analysis thresholds. Feature overlap analysis reveals striking modularity, with 81.3\% of top features supporting exactly one capability. Our results provide the first capability-level evaluation of SAE faithfulness and reveal when feature-level interpretability is most and least reliable.
+\end{abstract}
+
+%==============================================================================
+\section{Introduction}
+%==============================================================================
+
+Sparse autoencoders (SAEs) have emerged as the primary tool for decomposing neural network activations into interpretable features~\citep{cunningham2024sparse,bricken2023monosemanticity}. By training an overcomplete dictionary with a sparsity constraint, SAEs extract features that are often monosemantic---activating for a single, human-interpretable concept. This approach has yielded remarkable insights, from identifying features for specific entities in Claude 3 Sonnet~\citep{templeton2024scaling} to enabling circuit tracing in production language models~\citep{lindsey2025circuit}.
+
+However, a critical question remains unanswered: \emph{how do individual SAE features collectively organize to produce model capabilities?} Current evaluation frameworks assess SAE quality through global metrics---reconstruction loss, sparsity, and aggregate interpretability scores~\citep{gao2024scaling,karvonen2025saebench}. Individual features are studied in isolation through automated interpretability pipelines~\citep{bills2023language}. Neither approach reveals the \emph{functional organization} of the feature space: which features support factual recall, which enable syntactic processing, and which underpin reasoning.
+
+This gap matters for both scientific understanding and practical application. If a model capability is supported by a small number of highly specialized features (\emph{localized}), it is amenable to feature-level interpretation and targeted intervention. If it requires the coordinated activation of hundreds of features (\emph{distributed}), single-feature analysis will miss the forest for the trees, and the capability may live partly in the SAE's reconstruction residual---the ``dark matter'' that standard SAEs fail to capture~\citep{engels2025decomposing}.
+
+We hypothesize that model capabilities exist on a spectrum from localized to distributed in SAE feature space, and that this localization spectrum reveals when SAE-based interpretability is most reliable. To test this, we introduce:
+
+\begin{itemize}
+    \item \textbf{The Functional Feature Atlas}: a systematic framework for mapping SAE features to model capabilities using gradient-weighted feature attribution across a taxonomy of six capabilities, validated by causal ablation.
+    \item \textbf{The Functional Localization Index (FLI)}: an entropy-based metric quantifying how concentrated a capability is in feature space, enabling principled comparison across capabilities, layers, and SAE architectures.
+    \item \textbf{Capability-level SAE evaluation}: the first analysis connecting SAE reconstruction residuals and feature overlap patterns to specific model behaviors, rather than treating them as global phenomena.
+\end{itemize}
+
+We evaluate our framework on GPT-2 Small with pre-trained TopK SAEs (32K features) from SAE Lens~\citep{bloom2024sae}. Of six capabilities evaluated, four show clear causal signal from feature attribution (factual recall, syntax, NER, reasoning), while two (semantic understanding, sentiment analysis) exhibit degenerate behavior that limits their informativeness (Section~\ref{sec:degenerate}). Among the four non-degenerate capabilities, we observe a striking localization spectrum: reasoning concentrates importance in just 9 effective features (FLI = 0.79) while syntax distributes across 150 features (FLI = 0.52)---a 16.7$\times$ range in effective feature counts. This spectrum is robust across SAE architectures (Spearman $\rho = 0.88$, $p < 10^{-6}$). Capabilities are highly modular, with near-zero feature overlap at peak layers.
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our framework and metrics. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses findings and limitations, and Section~\ref{sec:conclusion} concludes.
+
+%==============================================================================
+\section{Related Work}
+\label{sec:related}
+%==============================================================================
+
+\paragraph{Sparse Autoencoders for Interpretability.}
+SAEs have become the dominant approach for extracting interpretable features from neural networks. \citet{cunningham2024sparse} demonstrated that SAE features are more interpretable than individual neurons, while Anthropic's Scaling Monosemanticity project~\citep{templeton2024scaling} showed SAEs can extract millions of meaningful features from production models. Several architectural variants have been proposed, including TopK SAEs~\citep{gao2024scaling} and gated SAEs~\citep{rajamanoharan2024improving}. Our work differs from prior SAE research by studying how features collectively organize into capabilities rather than evaluating features individually or through global metrics.
+
+\paragraph{SAE Evaluation and Limitations.}
+SAEBench~\citep{karvonen2025saebench} provides the most comprehensive SAE evaluation to date, with eight diverse metrics across 200+ SAEs. A critical finding is that proxy metrics do not reliably predict downstream utility. The non-canonicality result~\citep{leask2025sparse} shows SAEs with different seeds learn different features, questioning whether any single SAE captures the ``true'' feature decomposition. Feature absorption~\citep{chanin2025absorption} demonstrates that hierarchical concepts break SAE sparsity assumptions. We extend evaluation to the capability level, revealing \emph{which} capabilities are well-served by SAEs and which are not.
+
+\paragraph{SAE Dark Matter.}
+\citet{engels2025decomposing} decomposed SAE reconstruction error into unlearned linear features, dense features, and nonlinear errors, showing that much dark matter is linearly predictable. We connect dark matter analysis to specific capabilities, testing whether the localization spectrum predicts how much task-relevant information resides in the residual versus in the features.
+
+\paragraph{Mechanistic Interpretability.}
+Circuit tracing~\citep{lindsey2025circuit} traces computation through cross-layer features for individual inputs. The Open Problems survey~\citep{sharkey2025open} identifies functional organization of features as a key open question. The linear representation hypothesis~\citep{park2024linear} characterizes the geometry of learned concepts. Our work provides a complementary, higher-level view by aggregating across examples to characterize capability-level organization.
+
+\paragraph{Feature Attribution.}
+Gradient-based attribution has a long history in interpretability~\citep{sundararajan2017axiomatic}. Activation patching~\citep{meng2022locating} provides causal validation. Our contribution is applying these established tools systematically to SAE features across a comprehensive capability taxonomy.
+
+%==============================================================================
+\section{Method}
+\label{sec:method}
+%==============================================================================
+
+\subsection{Overview}
+
+Our framework maps sparse autoencoder features to model capabilities through four stages: (1) defining capability-specific evaluation suites, (2) computing gradient-based feature attribution, (3) quantifying localization via the Functional Localization Index, and (4) analyzing feature overlap and residual information.
+
+\subsection{Capability Taxonomy}
+
+We define six core capabilities for language models, each with a targeted evaluation dataset:
+
+\begin{itemize}
+    \item \textbf{Factual Knowledge}: Cloze-style fact completion from LAMA~\citep{petroni2019language} (500 examples).
+    \item \textbf{Syntactic Processing}: Subject-verb agreement from BLiMP~\citep{warstadt2020blimp} (500 minimal pairs).
+    \item \textbf{Semantic Understanding}: Word sense disambiguation from WiC~\citep{pilehvar2019wic} (500 examples).
+    \item \textbf{Sentiment Analysis}: Sentiment classification from SST-2~\citep{socher2013recursive} (500 examples).
+    \item \textbf{Named Entity Recognition}: Entity type prediction from custom CoNLL-derived prompts (500 examples).
+    \item \textbf{Simple Reasoning}: Next-step inference from custom logical completion tasks (500 examples).
+\end{itemize}
+
+Each dataset is filtered to examples where GPT-2 Small exhibits non-trivial performance, ensuring the model exercises the relevant capability.
+
+\subsection{Gradient-Based Feature Attribution}
+
+For each capability $c$, layer $l$, and input example $x$, we compute feature importance using gradient-weighted activation:
+\begin{equation}
+    \text{importance}(f_i, x) = \left| a_i(x) \cdot \frac{\partial \mathcal{L}_c(x)}{\partial a_i(x)} \right|
+    \label{eq:attribution}
+\end{equation}
+where $a_i(x)$ is the activation of SAE feature $i$ on input $x$ and $\mathcal{L}_c(x)$ is the capability-specific loss. This measures both how active a feature is and how sensitive the task performance is to that activation.
+
+The capability-specific losses are:
+\begin{itemize}
+    \item Factual/NER/Reasoning: $\mathcal{L} = -\log P(\text{target token})$.
+    \item Syntax (BLiMP): Log-probability difference between grammatical and ungrammatical continuations at the critical diverging position.
+    \item Sentiment: Log-odds ratio between positive and negative sentiment word sets.
+    \item Semantic (WiC): Cosine similarity between contextualized embeddings of the target word in the two sentences.
+\end{itemize}
+
+We aggregate importance scores across 300 examples (subsampled with 3 random seeds: 42, 123, 456) to obtain a mean importance vector $\bar{\mathbf{s}}_c^{(l)} \in \mathbb{R}^{D}$ for each capability-layer pair, where $D = 32{,}768$ is the SAE dictionary size.
+
+\subsection{Functional Localization Index (FLI)}
+
+To quantify how concentrated a capability is in feature space, we define the Functional Localization Index:
+\begin{equation}
+    \fli(c, l) = 1 - \frac{H(\vp_c)}{H(\vu)}
+    \label{eq:fli}
+\end{equation}
+where $\vp_c$ is the normalized importance distribution (with $\epsilon = 10^{-10}$ for stability), $H(\cdot)$ is Shannon entropy, and $H(\vu) = \log D$ is the entropy of the uniform distribution over $D$ features.
+
+FLI $= 1$ means the capability is concentrated in a single feature; FLI $= 0$ means importance is uniformly distributed. We also report the \emph{effective number of features}:
+\begin{equation}
+    N_{\text{eff}}(c, l) = \exp\!\bigl(H(\vp_c)\bigr)
+\end{equation}
+which gives an intuitive count of how many features meaningfully contribute to a capability.
+
+\subsection{Causal Validation via Ablation}
+
+We validate that gradient-based attribution identifies causally important features through targeted zero-ablation. For each capability at its peak layer, we:
+\begin{enumerate}
+    \item Identify the top-$K$ features by mean importance.
+    \item Hook into the SAE, set activations of selected features to zero, and reconstruct the modified residual stream.
+    \item Measure capability-specific performance change relative to the unablated baseline.
+\end{enumerate}
+
+We report two causal metrics. The \emph{normalized drop difference} (NDD) is defined as:
+\begin{equation}
+    \ndd = \frac{\Delta_{\text{top}} - \Delta_{\text{random}}}{\text{baseline}}
+\end{equation}
+where $\Delta_{\text{top}}$ and $\Delta_{\text{random}}$ are the performance drops from ablating top-50 and random-50 features respectively. NDD ranges from 0 (no causal differentiation) to 1 (all capability lost by top features, none by random). We also report the \emph{causal fidelity ratio} $\Delta_{\text{top}} / \Delta_{\text{random}}$, capped at 100 to handle near-zero denominators.
+
+\subsection{Capability Overlap Analysis}
+
+We construct a capability overlap matrix $\mathbf{O}$ where:
+\begin{equation}
+    O_{ij} = \frac{|\topk(c_i) \cap \topk(c_j)|}{K}
+\end{equation}
+measuring the fraction of top-$K$ features shared between capabilities $i$ and $j$ at their respective peak layers. This reveals whether the model's feature space is modular (capabilities use distinct features) or shared (features serve multiple capabilities).
+
+\subsection{Dark Matter Probing}
+
+To measure how much capability-relevant information resides in SAE features versus the reconstruction residual, we train linear probes (logistic regression with L2 regularization, $C = 1.0$) on:
+\begin{enumerate}
+    \item SAE feature activations only,
+    \item SAE reconstruction residual only ($r = x - \hat{x}$),
+    \item the full original activation (upper bound), and
+    \item random projections (lower bound).
+\end{enumerate}
+
+The \emph{dark matter ratio} is defined as the residual probe accuracy divided by the feature probe accuracy. Values above 1.0 indicate more task-relevant information in the residual than in the features. Probes use 400 training and 100 test examples at each capability's peak layer.
+
+%==============================================================================
+\section{Experiments}
+\label{sec:experiments}
+%==============================================================================
+
+\subsection{Setup}
+
+\paragraph{Model and SAEs.} We use GPT-2 Small (124M parameters, 12 layers, 768-dimensional residual stream)~\citep{radford2019language} with pre-trained TopK SAEs from SAE Lens~\citep{bloom2024sae} (\texttt{gpt2-small-resid-post-v5-32k}) at all 12 residual stream positions. Each SAE has a dictionary size of $D = 32{,}768$ features with input dimension 768. For the architecture comparison, we additionally use Standard-24K SAEs from the Joseph Bloom release (residual stream pre-activation positions).
+
+\paragraph{Evaluation.} We use 500 examples per capability (3,000 total). Feature attribution uses 300 subsampled examples with 3 random seeds (42, 123, 456). Causal validation uses 200 examples per seed.
+
+\paragraph{Hardware and Runtime.} All experiments were run on a single NVIDIA RTX A6000 GPU (48GB VRAM). Feature attribution across all 6 capabilities $\times$ 12 layers $\times$ 3 seeds required approximately 90 minutes. Causal validation required approximately 60 minutes. Architecture comparison required approximately 45 minutes. Total runtime was under 4 hours.
+
+\subsection{Feature-Capability Mapping}
+
+Figure~\ref{fig:heatmap} shows the feature-capability heatmap across all 12 layers and 6 capabilities. Different capabilities exhibit distinct layer profiles: reasoning peaks at layer 1 (early), factual knowledge at layer 2, syntactic processing at layer 4, NER at layer 5, and sentiment at layer 8 (late). This layerwise differentiation is consistent with prior probing work but grounded in specific SAE features rather than model-internal representations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure1_feature_capability_heatmap.pdf}
+\caption{Feature-capability heatmap showing the sum of top-100 feature importances at each layer for each capability. Different capabilities peak at different layers, with early layers dominated by reasoning and factual recall, and later layers by sentiment.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Functional Localization Index}
+
+Table~\ref{tab:main} presents the main results for all six capabilities. The effective number of features varies by a factor of \textbf{16.7$\times$} between the most localized (reasoning: 9 effective features) and most distributed (syntax: 150 effective features) capabilities. A one-way ANOVA confirms that FLI varies significantly across capabilities ($F = 55.62$, $p < 10^{-22}$). The FLI ratio between the most and least localized capabilities is 1.53$\times$ (0.792 vs.\ 0.518), but the effective feature count is the more practically informative measure: a researcher examining reasoning would need to inspect $\sim$9 features, while understanding syntax would require $\sim$150.
+
+However, as detailed in Section~\ref{sec:degenerate}, two of the six capabilities (semantic understanding and sentiment analysis) exhibit degenerate causal behavior, limiting their informativeness for testing the localization hypothesis. We therefore focus our hypothesis tests on the four non-degenerate capabilities (factual, syntax, NER, reasoning).
+
+\begin{table}[t]
+\centering
+\caption{Main experimental results per capability at peak layer. FLI = Functional Localization Index ($\uparrow$ = more localized). $N_{\text{eff}}$ = effective number of features ($\downarrow$ = more concentrated). NDD = normalized drop difference from ablating top-50 vs.\ random-50 features ($\uparrow$ = stronger causal signal). DM Ratio = dark matter ratio. Feat.\ Acc = feature probe accuracy. $^\dagger$Degenerate capabilities (see Section~\ref{sec:degenerate}).}
+\label{tab:main}
+\begin{tabular}{lccccccc}
+\toprule
+Capability & Peak Layer & FLI $\uparrow$ & $N_{\text{eff}}$ $\downarrow$ & NDD $\uparrow$ & Fidelity$_{\text{cap}}$ $\uparrow$ & DM Ratio & Feat.\ Acc \\
+\midrule
+Reasoning   & 1 & \textbf{0.792}$\pm$0.000 & \textbf{9}   & 0.709$\pm$0.062 & 37.4 & 1.168 & 0.800 \\
+Factual     & 2 & 0.760$\pm$0.001          & 12            & \textbf{0.860}$\pm$0.030 & 23.9 & 1.051 & 0.940 \\
+NER         & 5 & 0.519$\pm$0.001          & 148           & 0.644$\pm$0.023 & 3.0  & 1.000 & 0.998$^{\ddagger}$ \\
+Syntax      & 4 & 0.518$\pm$0.001          & 150           & 0.031$\pm$0.018 & 1.5  & 0.963 & 0.804 \\
+\midrule
+Sentiment$^\dagger$   & 8 & 0.711$\pm$0.001 & 20  & $-$0.004$\pm$0.002 & 0.5 & 1.259 & 0.494 \\
+Semantic$^\dagger$    & 2 & 0.560$\pm$0.001 & 97  & 0.000$\pm$0.000  & 1.0 & 1.000 & 1.000 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+{\small $^{\ddagger}$NER probe accuracy inflated by severe class imbalance (39 positive / 461 negative); random baseline achieves 92.2\%.}
+\end{table}
+
+Figure~\ref{fig:fli} shows FLI profiles across layers. Reasoning and factual knowledge maintain high localization across most layers, while syntax remains consistently distributed. Sentiment shows high localization in early layers (layer 0: FLI = 0.79) but decreases in later layers.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure2_fli.pdf}
+\caption{Functional Localization Index across layers for each capability. Reasoning and factual knowledge are consistently localized (high FLI), while syntax and NER are consistently distributed (low FLI). Error bars show standard deviation across 3 seeds.}
+\label{fig:fli}
+\end{figure}
+
+\subsection{Causal Validation}
+
+Figure~\ref{fig:causal} shows causal validation results. We report the normalized drop difference (NDD) as the primary metric, as it is robust to near-zero denominators that plague the causal fidelity ratio.
+
+Among the four non-degenerate capabilities, factual recall shows the strongest causal signal (NDD = $0.860 \pm 0.030$): ablating the top-50 features eliminates 86\% of baseline performance beyond what random ablation removes. Reasoning also shows strong causal fidelity (NDD = $0.709 \pm 0.062$). NER shows moderate signal (NDD = $0.644 \pm 0.023$), while syntax shows only weak differentiation between top and random features (NDD = $0.031 \pm 0.018$), consistent with its distributed nature---many features contribute small amounts, so any 50 features capture a similar fraction.
+
+For dose-response curves, factual knowledge shows a sharp performance cliff: ablating the top-10 features already removes most of the capability. NER exhibits a similar pattern. In contrast, syntax shows a gradual decline across ablation sizes, consistent with its distributed nature.
+
+\textbf{Note on capped fidelity}: The raw causal fidelity ratio for reasoning ($37.4 \pm 44.3$) has standard deviation exceeding the mean because near-zero random drops create extreme ratios. After capping at 100 (one seed produced a ratio of 429), the mean is $37.4$. The NDD of $0.709 \pm 0.062$ provides a more stable summary of the same underlying signal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure3_causal_validation.pdf}
+\caption{Causal validation via feature ablation. Left: performance remaining after ablating top-$K$ features (dose-response). Right: comparison of top-50 vs.\ random-50 ablation drops. Factual and reasoning capabilities show strong causal fidelity; semantic and sentiment show degenerate behavior (Section~\ref{sec:degenerate}).}
+\label{fig:causal}
+\end{figure}
+
+\subsection{Degenerate Capabilities}
+\label{sec:degenerate}
+
+Two of our six capabilities show degenerate behavior that warrants detailed discussion:
+
+\paragraph{Semantic understanding (WiC).} Ablating top features and random features produce identical performance changes across all three seeds (NDD = 0.000). All probe conditions---features, residual, original, and even random projections---achieve near-perfect accuracy (1.0). This indicates that the WiC evaluation task, as implemented via cosine similarity of contextualized embeddings, is too easy for this layer: the binary same/different-sense label is perfectly predictable from any representation at layer 2, making it impossible to isolate feature-specific contributions. A harder evaluation (e.g., the WiC test set rather than validation, or evaluation at a later layer) would be needed.
+
+\paragraph{Sentiment analysis (SST-2).} Feature probe accuracy at the peak layer (layer 8) is 0.494, indistinguishable from chance (binary classification baseline = 0.50, label balance 265/235). The residual probe (0.622) substantially outperforms features, yielding the highest dark matter ratio (1.259). Causal ablation shows no meaningful differentiation (NDD = $-0.004$). This suggests that sentiment information at layer 8 is not well-captured by the TopK SAE's feature activations; the information may reside primarily in attention patterns or in the reconstruction residual. Evaluating at a different layer (e.g., layer 0, where FLI = 0.79) may yield different results.
+
+Because these two capabilities provide no meaningful causal signal, we exclude them from hypothesis tests requiring causal metrics (Sections~\ref{sec:hypothesis_tests} and~\ref{sec:discussion_spectrum}). The localization spectrum reported in the abstract and conclusion is based on the four non-degenerate capabilities ($N = 4$).
+
+\subsection{Capability Overlap}
+
+Figure~\ref{fig:overlap} presents the capability overlap matrix. At peak layers, capabilities are strikingly modular: most pairwise overlaps are 0--1\%. The largest overlap (10\%) is between factual and semantic capabilities, both peaking at layer 2. The global Jaccard overlap (across all layers) shows slightly higher sharing, with factual--NER (17.3\%) being the largest cross-capability similarity. Hierarchical clustering groups factual/semantic/NER together (knowledge-related) and syntax/reasoning/sentiment separately.
+
+Of the 5,578 unique features in any capability's top-100 (across all layers), 81.3\% support exactly one capability, 13.7\% support two, and only 0.6\% support all six. This confirms that SAE features are largely capability-specific.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure4_overlap.pdf}
+\caption{Capability overlap analysis. Left: pairwise overlap matrix at peak layers (most pairs share $<$1\% of top-100 features). Right: feature breadth distribution showing most features (81.3\%) support exactly one capability.}
+\label{fig:overlap}
+\end{figure}
+
+\subsection{Dark Matter Analysis}
+
+Figure~\ref{fig:dark_matter} shows probe accuracies for SAE features vs.\ reconstruction residuals. Among non-degenerate capabilities, syntax is the only one where features outperform the residual (DM ratio = 0.96, feature accuracy 80.4\% vs.\ residual 77.4\%). For factual recall, features (94.0\%) and residuals (98.8\%) both perform well, though the residual slightly outperforms (DM ratio = 1.05). Reasoning shows a larger gap: features achieve 80.0\% while the residual reaches 93.4\% (DM ratio = 1.17), suggesting that reasoning information is partially lost in SAE reconstruction.
+
+Contrary to our hypothesis, localization does not inversely predict dark matter dependence. The correlation is positive ($\rho = +0.81$, $p = 0.05$), opposite to prediction---more localized capabilities tend to have slightly higher dark matter ratios. This may reflect that localized capabilities create sharp activation patterns harder for SAEs to reconstruct precisely.
+
+\paragraph{NER class imbalance.} The NER probe achieves 99.8\% accuracy on features, residuals, and original activations alike. However, this result is uninformative: with a label distribution of 39 positive vs.\ 461 negative examples (7.8\% positive rate), a majority-class baseline achieves 92.2\%. The high probe accuracy largely reflects this imbalance rather than meaningful discriminative signal in the representations. We report NER probe accuracy for completeness but do not draw interpretive conclusions from it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure5_dark_matter.pdf}
+\caption{Dark matter analysis: probe accuracy on SAE features vs.\ reconstruction residuals for each capability. Sentiment shows the largest gap in favor of residuals (DM ratio = 1.26), while syntax is the only capability where features outperform the residual.}
+\label{fig:dark_matter}
+\end{figure}
+
+\subsection{SAE Architecture Comparison}
+
+Figure~\ref{fig:architecture} shows FLI scores for the primary TopK-32K SAEs versus Standard-24K SAEs across 18 capability-layer combinations. The Spearman rank correlation is $\rho = 0.884$ ($p < 10^{-6}$), confirming that the localization spectrum is a property of the model rather than an artifact of a particular SAE architecture. Reasoning remains the most localized and syntax the most distributed under both architectures.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/figure6_architecture_comparison.pdf}
+\caption{FLI consistency across SAE architectures. Each point represents one (capability, layer) pair. The strong correlation (Spearman $\rho = 0.884$, $p < 10^{-6}$) confirms localization patterns are model properties, not SAE artifacts.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Ablation Studies}
+
+\paragraph{Attribution Method Comparison.}
+Table~\ref{tab:ablation} compares gradient$\times$activation against activation-only, gradient-only, and random baselines. For factual knowledge, gradient$\times$activation and activation-only perform similarly (drops of 0.021 and 0.021), both substantially outperforming gradient-only (0.006) and random (0.002). For NER, the pattern is similar (drops of 0.043 and 0.044 vs.\ 0.018 and 0.015). Gradient-only attribution can produce negative drops (performance \emph{increases} after ablation), as seen for syntax ($-0.96$) and reasoning ($-0.01$), indicating it identifies features whose removal improves task performance. Overall, gradient$\times$activation provides reliable causal identification, though activation-only performs comparably for most capabilities.
+
+\begin{table}[t]
+\centering
+\caption{Attribution method comparison: performance drop from ablating top-50 features identified by each method at peak layer (seed 42). Higher drop indicates better causal identification. Negative values indicate ablation improved performance. $^\dagger$Degenerate capabilities.}
+\label{tab:ablation}
+\begin{tabular}{lcccc}
+\toprule
+Capability & Grad$\times$Act & Act-Only & Grad-Only & Random \\
+\midrule
+Factual   & 0.0209 & 0.0208 & 0.0060  & 0.0022 \\
+Syntax    & 0.2698 & 0.3350 & $-$0.9596 & 0.2937 \\
+NER       & 0.0433 & 0.0441 & 0.0182  & 0.0146 \\
+Reasoning & 0.0079 & 0.0078 & $-$0.0096 & 0.0000 \\
+\midrule
+Sentiment$^\dagger$ & 0.0016 & 0.0039 & $-$0.0027 & $-$0.0050 \\
+Semantic$^\dagger$  & 0.0950 & 0.1500 & 0.0950  & 0.0950 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Top-$K$ Sensitivity.}
+The FLI ranking of capabilities is robust to the choice of $K$. Rank correlation with the $K=100$ baseline exceeds 0.94 for $K \geq 50$ ($p < 0.005$) and 0.83 for $K \geq 25$ ($p < 0.05$). The overlap matrices also remain stable: capabilities with near-zero overlap at $K=100$ maintain near-zero overlap across all tested $K$ values (10, 25, 50, 100, 200, 500).
+
+\subsection{Hypothesis Tests}
+\label{sec:hypothesis_tests}
+
+We evaluate our success criteria on the four non-degenerate capabilities:
+
+\begin{enumerate}
+    \item \textbf{FLI variation} (partially supported): The FLI ratio between the most (reasoning, 0.792) and least (syntax, 0.518) localized capabilities is 1.53$\times$, below the 2$\times$ target. However, the effective feature count ratio is 16.7$\times$ (9 vs.\ 150), demonstrating substantial practical variation. ANOVA confirms significant differences ($F = 55.62$, $p < 10^{-22}$).
+    \item \textbf{Causal fidelity} (partially supported): NDD shows a trend consistent with the hypothesis---factual (NDD = 0.86) and reasoning (0.71) are more causally faithful than NER (0.64) and syntax (0.03)---but with only $N = 4$ data points, formal correlation tests lack statistical power (Spearman $\rho = 0.49$, $p = 0.33$ on all six capabilities).
+    \item \textbf{Dark matter dependence} (refuted): The correlation between FLI and dark matter ratio is positive ($\rho = +0.81$), opposite to the predicted negative direction.
+    \item \textbf{Architecture consistency} (confirmed): Spearman $\rho = 0.884$ ($p < 10^{-6}$) across 18 capability-layer pairs between TopK-32K and Standard-24K SAEs.
+    \item \textbf{Interpretability prediction} (refuted): Token-interpretability scores were not significantly different between localized and distributed capabilities ($p = 0.88$).
+\end{enumerate}
+
+%==============================================================================
+\section{Discussion}
+\label{sec:discussion}
+%==============================================================================
+
+\subsection{The Localization Spectrum Is Real and Robust}
+\label{sec:discussion_spectrum}
+
+Our central finding is that model capabilities exist on a measurable localization spectrum in SAE feature space. Reasoning and factual recall concentrate their importance in fewer than 12 features, while syntactic processing and NER spread across $\sim$150 features. This spectrum is:
+\begin{itemize}
+    \item \textbf{Statistically significant}: ANOVA $F = 55.62$, $p < 10^{-22}$.
+    \item \textbf{Architecture-robust}: Spearman $\rho = 0.884$ between TopK-32K and Standard-24K SAEs.
+    \item \textbf{Threshold-robust}: Stable ranking for $K \geq 25$.
+\end{itemize}
+
+The 16.7$\times$ variation in effective feature counts is the most practically informative finding: it directly quantifies the difference in complexity a researcher faces when attempting feature-level analysis of different capabilities.
+
+\subsection{Feature Space Is Modular}
+
+The near-zero overlap between capability-specific feature sets at peak layers (Figure~\ref{fig:overlap}) reveals that SAE features are largely capability-specific. This modularity supports the utility of feature-level analysis: examining the top features for a given capability will generally not confound analysis with features serving other purposes. The 81.3\% of features supporting exactly one capability suggests that the SAE dictionary effectively partitions the feature space by function.
+
+\subsection{Limitations of the Localization Hypothesis}
+
+Two of our five success criteria were refuted:
+
+\paragraph{Dark matter dependence.} We predicted that distributed capabilities would depend more on dark matter (SAE residuals). Instead, we found a positive correlation ($\rho = +0.81$): more localized capabilities tend to have slightly higher dark matter ratios. This may reflect that localized capabilities create sharp activation patterns that are harder for SAEs to reconstruct precisely, leaving informative residuals.
+
+\paragraph{Token-level interpretability.} We predicted that features supporting localized capabilities would be more ``token-interpretable'' (higher max decoder--embedding cosine similarity). Token-interpretability scores were similar across the localization spectrum (0.19 vs.\ 0.20, $p = 0.88$). This suggests that feature interpretability depends on feature-level properties rather than on capability-level organization.
+
+\subsection{Limitations}
+
+Our study has several important limitations:
+
+\begin{itemize}
+    \item \textbf{Model scale}: We evaluated only GPT-2 Small (124M parameters). The localization spectrum may differ in larger models where capabilities are more developed.
+    \item \textbf{Effective capability count}: Only four of six capabilities produced clear causal signal ($N = 4$ for correlation analyses), severely limiting statistical power. Expanding the capability taxonomy is a priority for future work.
+    \item \textbf{Degenerate evaluations}: The WiC-based semantic evaluation was too easy at the evaluated layer, and sentiment features showed chance-level probe accuracy. These reflect limitations in evaluation design rather than inherent problems with the framework.
+    \item \textbf{NER class imbalance}: The NER probe dataset has extreme class imbalance (39/461), making probe accuracy an unreliable metric for this capability. Future work should balance classes or use metrics like AUROC.
+    \item \textbf{Probe simplicity}: We used logistic regression with fixed $C = 1.0$. Hyperparameter sensitivity analysis and nonlinear probes may yield different conclusions about dark matter content.
+\end{itemize}
+
+\subsection{Reproducibility}
+
+All experiments used PyTorch 2.x with TransformerLens for model loading and SAE Lens for SAE loading. Random seeds (42, 123, 456) were set for both data subsampling and PyTorch operations. Linear probes used scikit-learn's \texttt{LogisticRegression} with L2 regularization ($C = 1.0$, \texttt{max\_iter}=1000, \texttt{solver}=lbfgs). SAE identifiers: primary TopK-32K (\texttt{gpt2-small-resid-post-v5-32k}), alternative Standard-24K (Joseph Bloom release, \texttt{resid\_pre} positions). Total compute: $\sim$4 hours on one NVIDIA RTX A6000 (48GB).
+
+%==============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%==============================================================================
+
+We introduced the Functional Feature Atlas and the Functional Localization Index (FLI) for mapping sparse autoencoder features to model capabilities. Evaluating six capabilities on GPT-2 Small---four of which produced clear causal signal---we found that capabilities span a significant localization spectrum: reasoning and factual recall are supported by $\sim$9--12 specialized features, while syntactic processing and NER require $\sim$150 distributed features, a 16.7$\times$ difference in effective feature counts. This spectrum is robust across SAE architectures (Spearman $\rho = 0.88$) and analysis parameters. Feature overlap analysis reveals striking modularity, with 81.3\% of features supporting exactly one capability.
+
+These results provide the first capability-level evaluation of SAE faithfulness. However, two of six capability evaluations were degenerate, and the relationship between localization and dark matter dependence was opposite to our prediction. Future work should extend this analysis to larger models, more capabilities with robust evaluations, and more sophisticated interpretability metrics to build a more complete picture of when and why SAE-based interpretability succeeds.
+
+%==============================================================================
+% References
+%==============================================================================
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Bills et~al.(2023)]{bills2023language}
+Bills, S., Cammarata, N., Mossing, D., Tillman, H., Gao, L., Goh, G., Sutskever, I., Leike, J., Wu, J., and Saunders, W.
+\newblock Language models can explain neurons in language models.
+\newblock \emph{OpenAI Blog}, 2023.
+
+\bibitem[Bloom et~al.(2024)]{bloom2024sae}
+Bloom, J., et~al.
+\newblock {SAE Lens}: A library for training and analyzing sparse autoencoders.
+\newblock \emph{GitHub repository}, 2024.
+
+\bibitem[Bricken et~al.(2023)]{bricken2023monosemanticity}
+Bricken, T., Templeton, A., Batson, J., Chen, B., Jermyn, A., Conerly, T., Turner, N., Anil, C., Denison, C., Askell, A., Lasenby, R., Wu, Y., Kravec, S., Schiefer, N., Maxwell, T., Joseph, N., Hatfield-Dodds, Z., Tamkin, A., Nguyen, K., McLean, B., Burke, J.~E., Hume, T., Carter, S., Henighan, T., and Olah, C.
+\newblock Towards Monosemanticity: Decomposing Language Models With Dictionary Learning.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+
+\bibitem[Chanin et~al.(2025)]{chanin2025absorption}
+Chanin, D., Wilken-Smith, J., Dulka, T., Bhatnagar, H., Golechha, S., and Bloom, J.
+\newblock A is for Absorption: Studying Feature Splitting and Absorption in Sparse Autoencoders.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2025.
+
+\bibitem[Cunningham et~al.(2024)]{cunningham2024sparse}
+Cunningham, H., Ewart, A., Riggs, L., Huben, R., and Sharkey, L.
+\newblock Sparse Autoencoders Find Highly Interpretable Features in Language Models.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem[Engels et~al.(2025)]{engels2025decomposing}
+Engels, J., Riggs, L., and Tegmark, M.
+\newblock Decomposing The Dark Matter of Sparse Autoencoders.
+\newblock \emph{Transactions on Machine Learning Research (TMLR)}, 2025.
+
+\bibitem[Gao et~al.(2024)]{gao2024scaling}
+Gao, L., Dupr\'{e} la Tour, T., Tillman, H., Goh, G., Tow, R., Radford, A., Sutskever, I., Leike, J., and Wu, J.
+\newblock Scaling and Evaluating Sparse Autoencoders.
+\newblock \emph{OpenAI Technical Report}, 2024.
+
+\bibitem[Karvonen et~al.(2025)]{karvonen2025saebench}
+Karvonen, A., Rager, C., Lin, J., Tigges, C., Bloom, J., Chanin, D., Lau, Y.-T., Farrell, E., McDougall, C., Ayonrinde, K., Till, D., Wearden, M., Conmy, A., Marks, S., and Nanda, N.
+\newblock {SAEBench}: A Comprehensive Benchmark for Sparse Autoencoders in Language Model Interpretability.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2025.
+
+\bibitem[Leask et~al.(2025)]{leask2025sparse}
+Leask, P., Bussmann, B., Pearce, M., Bloom, J., Tigges, C., Al~Moubayed, N., Sharkey, L., and Nanda, N.
+\newblock Sparse Autoencoders Do Not Find Canonical Units of Analysis.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\bibitem[Lindsey et~al.(2025)]{lindsey2025circuit}
+Lindsey, J., et~al.
+\newblock Circuit Tracing: Revealing Computational Graphs in Language Models.
+\newblock \emph{Anthropic}, 2025.
+
+\bibitem[Meng et~al.(2022)]{meng2022locating}
+Meng, K., Bau, D., Mitchell, A., and Yosinski, J.
+\newblock Locating and Editing Factual Associations in {GPT}.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem[Park et~al.(2024)]{park2024linear}
+Park, K., Choe, Y.~J., and Veitch, V.
+\newblock The Linear Representation Hypothesis and the Geometry of Large Language Models.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem[Petroni et~al.(2019)]{petroni2019language}
+Petroni, F., Rockt\"{a}schel, T., Riedel, S., Lewis, P., Bakhtin, A., Wu, Y., and Miller, A.
+\newblock Language Models as Knowledge Bases?
+\newblock In \emph{Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing (EMNLP)}, 2019.
+
+\bibitem[Pilehvar \& Camacho-Collados(2019)]{pilehvar2019wic}
+Pilehvar, M.~T. and Camacho-Collados, J.
+\newblock {WiC}: The Word-in-Context Dataset for Evaluating Context-Sensitive Meaning Representations.
+\newblock In \emph{Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics (NAACL)}, 2019.
+
+\bibitem[Radford et~al.(2019)]{radford2019language}
+Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., and Sutskever, I.
+\newblock Language Models are Unsupervised Multitask Learners.
+\newblock \emph{OpenAI Blog}, 2019.
+
+\bibitem[Rajamanoharan et~al.(2024)]{rajamanoharan2024improving}
+Rajamanoharan, S., Conmy, A., Smith, L., Lieberum, T., Varma, V., Kram\'{a}r, J., Shah, R., and Nanda, N.
+\newblock Improving Dictionary Learning with Gated Sparse Autoencoders.
+\newblock \emph{arXiv preprint arXiv:2404.16014}, 2024.
+
+\bibitem[Sharkey et~al.(2025)]{sharkey2025open}
+Sharkey, L., Chughtai, B., Batson, J., Lindsey, J., Wu, J., et~al.
+\newblock Open Problems in Mechanistic Interpretability.
+\newblock \emph{arXiv preprint arXiv:2501.16496}, 2025.
+
+\bibitem[Socher et~al.(2013)]{socher2013recursive}
+Socher, R., Perelygin, A., Wu, J., Chuang, J., Manning, C.~D., Ng, A., and Potts, C.
+\newblock Recursive Deep Models for Semantic Compositionality Over a Sentiment Treebank.
+\newblock In \emph{Proceedings of the 2013 Conference on Empirical Methods in Natural Language Processing (EMNLP)}, 2013.
+
+\bibitem[Sundararajan et~al.(2017)]{sundararajan2017axiomatic}
+Sundararajan, M., Taly, A., and Yan, Q.
+\newblock Axiomatic Attribution for Deep Networks.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem[Templeton et~al.(2024)]{templeton2024scaling}
+Templeton, A., Conerly, T., Marcus, J., Lindsey, J., Bricken, T., Chen, B., Pearce, A., Citro, C., Ameisen, E., Jones, A., Cunningham, H., Turner, N.~L., McDougall, C., MacDiarmid, M., Freeman, C.~D., Sumers, T.~R., Rees, E., Batson, J., Jermyn, A., Carter, S., Olah, C., and Henighan, T.
+\newblock Scaling Monosemanticity: Extracting Interpretable Features from {Claude} 3 {Sonnet}.
+\newblock \emph{Transformer Circuits Thread}, 2024.
+
+\bibitem[Warstadt et~al.(2020)]{warstadt2020blimp}
+Warstadt, A., Parrish, A., Liu, H., Mohananey, A., Peng, W., Wang, S.-F., and Bowman, S.~R.
+\newblock {BLiMP}: The Benchmark of Linguistic Minimal Pairs for {English}.
+\newblock \emph{Transactions of the Association for Computational Linguistics (TACL)}, 8:\penalty0 377--392, 2020.
+
+\end{thebibliography}
+
+\end{document}

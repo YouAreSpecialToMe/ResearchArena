@@ -1,0 +1,347 @@
+\documentclass{article}
+\usepackage[dandb]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{tabularx}
+
+\newcommand{\tb}{TwinBench}
+\newcommand{\pir}{\textsc{PIR}}
+\newcommand{\bfa}{\textsc{BFA}}
+\newcommand{\css}{\textsc{CSS}}
+\newcommand{\fca}{\textsc{FCA}}
+\newcommand{\msva}{\textsc{MSVA}}
+
+\title{TwinBench: A Synthetic Procedural-Core Pilot for Coupled Invariance and Boundary Sensitivity in QA}
+
+\author{Anonymous Authors}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Question answering benchmarks often probe paraphrase robustness and answer-updating sensitivity separately, even though deployment failures can require both properties on the same underlying instance. We study a benchmark-engineering pilot that couples these pressures in one cluster release unit. Each \tb\ cluster contains a seed question, two answer-preserving paraphrases, one minimal answer-changing flip with deterministic gold recomputation, and a separate format-control item. The executed artifact is intentionally narrow: a 72-cluster synthetic procedural-core pilot spanning arithmetic, temporal, and table/list reasoning, with synthetic audit metadata rather than a completed human-verification release. Across four open instruction-tuned models and three seeds, canonical seed accuracy exceeds the coupled Cluster Semantic Score (\css) by 24.2 percentage points on average, and uncoupled mean semantic-variant accuracy exceeds \css\ by 25.7 points. The strongest model, Gemma-2-9B-it, reaches 52.8\% on seed questions but only 26.4\% on \css. Reporting the run-time details promised in the artifact plan, the evaluated models span 0.161--0.487 seconds mean latency, 0.329--0.946 seconds p95 latency, and 6.68--17.81 GB peak VRAM. These results support a limited claim: even a small synthetic pilot can show that coupled cluster scoring exposes semantic failures that single-prompt accuracy and uncoupled variant averages obscure, while also clarifying what a benchmark release still needs before it can claim audited status.
+\end{abstract}
+
+\section{Introduction}
+
+Single-prompt benchmark accuracy is often an optimistic proxy for semantic robustness. Prior work shows that paraphrases can substantially change question answering outcomes \citep{choi2025roparqparaphraseawarealignmentlarge,lunardi2025robustnessreliabilitybenchmarkbasedevaluation,rabinovich-etal-2023-predicting}, while counterfactual or edited-evidence interventions reveal failures to update answers when the underlying situation changes \citep{chen2025counterbench,zhong-etal-2023-mquake,fang-etal-2025-lastingbench}. A separate benchmark-quality literature argues that benchmark construction artifacts, rank instability, and contamination defenses strongly affect what measured scores actually mean \citep{vendrow2025largelanguagemodelbenchmarks,reuel2024betterbenchassessingaibenchmarks,alzahrani2024benchmarkstargetsrevealingsensitivity,qian2026benchmark2systematicevaluationllm}. Together, these results motivate benchmark objects that are smaller, more explicit, and easier to audit.
+
+The gap addressed here is not a new semantic phenomenon. Paraphrase invariance, answer-changing sensitivity, and coupled invariance/sensitivity have already been studied in QA, knowledge editing, and adjacent multimodal settings \citep{choi2025roparqparaphraseawarealignmentlarge,zhong-etal-2023-mquake,lee2026lgip}. The missing piece is a release unit that couples these checks on the same seed item so that evaluation can ask a stricter question: can a model preserve the answer under meaning-preserving rewrites \emph{and} update the answer correctly after a tightly localized semantic flip?
+
+We study that question in a deliberately narrow form. Each \tb\ cluster contains a canonical seed question $q_0$, two answer-preserving paraphrases $q_1,q_2$, one answer-changing minimal flip $q_3$, and a separate format control $q_4$. The main score, \css, requires a model to answer all of $q_0$--$q_2$ correctly with a consistent normalized answer and also answer $q_3$ correctly with a different normalized answer. This turns invariance and boundary sensitivity into a coupled criterion rather than two disconnected checks.
+
+The executed artifact, however, is a \emph{synthetic procedural-core pilot}, not an audited benchmark release. The evidence-grounded slice remained validation-only because the preregistered content and audit-availability gates failed, and the stored adjudication fields are synthetic pipeline outputs rather than records from a real human annotation campaign. We therefore foreground the study as a pilot benchmark-engineering paper and avoid any claim that a completed human-verification pipeline was run.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.5em]
+    \item We formalize a cluster-based QA evaluation unit that couples paraphrase invariance and answer-updating sensitivity on the same seed item, with deterministic gold recomputation for the flip.
+    \item We instantiate that design as a 72-cluster synthetic procedural-core pilot covering arithmetic, temporal, and table/list reasoning, evaluated across four open instruction-tuned models and three release seeds.
+    \item We show that coupled scoring is materially stricter than canonical-question accuracy and uncoupled semantic-variant averages: averaged across models, $q_0$ accuracy exceeds \css\ by 24.2 points and \msva\ exceeds \css\ by 25.7 points.
+    \item We report the performance and artifact details promised by the experiment plan, including mean latency, p95 latency, peak VRAM, environment/configuration summaries, split stability, and design ablations.
+\end{itemize}
+
+Section~\ref{sec:related} positions the pilot against prior robustness and benchmark-quality work, Section~\ref{sec:method} defines the cluster object and scores, Section~\ref{sec:experiments} reports construction, evaluation, and ablations, Section~\ref{sec:repro} summarizes reproducibility details, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Paraphrase robustness.}
+RoParQ is the closest QA benchmark in spirit: it constructs a closed-book paraphrase benchmark and evaluates robustness to paraphrased questions \citep{choi2025roparqparaphraseawarealignmentlarge}. Semantic-consistency work likewise uses paraphrase agreement as a proxy for answer reliability \citep{rabinovich-etal-2023-predicting}. \tb\ differs in unit and goal: paraphrases are not standalone test items but part of a cluster that must also support one correct answer-changing flip.
+
+\paragraph{Counterfactual QA and answer updating.}
+CounterBench focuses on counterfactual reasoning under formal-rule interventions \citep{chen2025counterbench}. MQuAKE studies whether factual edits propagate to downstream multi-hop consequences in knowledge-editing evaluation \citep{zhong-etal-2023-mquake}. \tb\ borrows the importance of answer-changing interventions, but evaluates raw models rather than editors and couples the flip with answer-preserving paraphrases on the same seed item.
+
+\paragraph{Benchmark defense and benchmark quality.}
+LastingBench shows that edited evidence can defend a benchmark against knowledge leakage \citep{fang-etal-2025-lastingbench}. BetterBench and Benchmark$^2$ focus on benchmark quality assessment, interpretability, and ranking reliability rather than on a particular task format \citep{reuel2024betterbenchassessingaibenchmarks,qian2026benchmark2systematicevaluationllm}. Do-LLM-benchmarks-test-reliability and When-Benchmarks-are-Targets similarly emphasize that brittle construction choices can obscure the behavior a benchmark claims to measure \citep{vendrow2025largelanguagemodelbenchmarks,alzahrani2024benchmarkstargetsrevealingsensitivity}. \tb\ is best understood as a small benchmark-design response in this space: it proposes a stricter cluster object, but in the present paper only demonstrates it as a pilot artifact.
+
+\paragraph{Coupled invariance and sensitivity.}
+Language-Guided Invariance Probing of Vision-Language Models studies invariance and sensitivity jointly in a neighboring multimodal setting \citep{lee2026lgip}. That further narrows our novelty claim. The contribution here is not that invariance and sensitivity should both matter, but that a QA benchmark can make them the release-time atomic unit and can expose how that design behaves in a controlled synthetic pilot.
+
+\begin{table*}[t]
+\caption{How the executed \tb\ pilot differs from nearby datasets and benchmark-quality papers. The final row reflects what was actually executed in this workspace, not the broader proposal.}
+\label{tab:comparison}
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+Work & Primary unit & Main behavior tested & Release / audit emphasis & Difference from this pilot \\
+\midrule
+RoParQ \citep{choi2025roparqparaphraseawarealignmentlarge} & Standalone QA items with paraphrases & Paraphrase robustness & Dataset construction for paraphrase stress tests & No answer-changing flip coupled to the same seed item \\
+CounterBench \citep{chen2025counterbench} & Counterfactual reasoning instances & Answer change under counterfactual interventions & Task design, not release metadata & No paraphrase-invariance requirement on the same instance \\
+MQuAKE \citep{zhong-etal-2023-mquake} & Multi-hop knowledge-editing examples & Consequences of factual edits & Evaluation of editors and post-edit behavior & Targets knowledge editing rather than raw-model cluster robustness \\
+LastingBench \citep{fang-etal-2025-lastingbench} & Rewritten benchmark items & Benchmark defense against leakage & Counterfactual rewriting pipeline & Uses edited evidence for freshness, not coupled cluster scoring \\
+BetterBench / Benchmark$^2$ \citep{reuel2024betterbenchassessingaibenchmarks,qian2026benchmark2systematicevaluationllm} & Existing benchmarks as assessment targets & Benchmark quality and ranking reliability & Quality criteria and meta-evaluation & Assess benchmark quality broadly rather than proposing a new QA release unit \\
+\tb\ pilot (this paper) & Five-item QA cluster & Coupled paraphrase invariance + answer-changing flip & Synthetic release metadata; no real human audit executed & Synthetic pilot only, with the evidence slice kept out of the core release \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Cluster structure}
+
+The benchmark object is a five-item cluster:
+\begin{itemize}[leftmargin=1.5em]
+    \item $q_0$: canonical seed question;
+    \item $q_1,q_2$: answer-preserving paraphrases of $q_0$;
+    \item $q_3$: one minimal semantic flip whose gold answer differs from $q_0$ and is recomputed deterministically;
+    \item $q_4$: a format-control variant reported separately.
+\end{itemize}
+
+The primary semantic unit is $q_0$--$q_3$. We keep $q_4$ out of the headline score because the pilot is meant to measure coupled semantic robustness rather than format-following ability.
+
+\subsection{Prompting and normalization}
+
+All models use the same chat-style prompt wrapper: a system instruction requesting precise answers with no reasoning explanation, followed by the user question and a normalization-specific answer suffix. Numeric items append ``Return only the final answer as digits,'' while date items append ``Return only the final answer as a date.'' Decoding is deterministic: \texttt{do\_sample=False}, temperature 0.0, top-$p$ 1.0, repetition penalty 1.0, and at most 32 generated tokens. The executed seeds are 11, 22, and 33.
+
+Normalization is deterministic and rule-based. Numeric answers are canonicalized to integers or trimmed decimals; date answers are parsed to ISO format; and generic strings are lowercased and whitespace-normalized. In the executed pilot, the exact-string ablation produces the same \css\ as normalized scoring for every model, indicating that the main results are not driven by permissive normalization.
+
+\subsection{Metrics}
+
+Let $\hat{a}_i$ be the normalized prediction for $q_i$ and $a_i^\star$ its normalized gold label. We define
+\begin{align}
+\pir &= \mathbb{1}\!\left[\bigwedge_{i=0}^{2} \hat{a}_i = a_i^\star \ \land\ \hat{a}_0 = \hat{a}_1 = \hat{a}_2 \right], \\
+\bfa &= \mathbb{1}\!\left[\hat{a}_3 = a_3^\star \right], \\
+\css &= \mathbb{1}\!\left[\pir = 1 \ \land\ \bfa = 1 \ \land\ \hat{a}_3 \neq \hat{a}_0 \right], \\
+\fca &= \mathbb{1}\!\left[\hat{a}_4 = a_4^\star \right].
+\end{align}
+
+We also report canonical-question accuracy on $q_0$ and mean semantic-variant accuracy
+\[
+\msva = \frac{1}{4}\sum_{i=0}^{3} \mathbb{1}\!\left[\hat{a}_i = a_i^\star \right],
+\]
+which uses the same semantic questions but ignores within-cluster coupling.
+
+\subsection{Executed construction scope}
+
+The proposal targeted a broader release including an evidence-grounded slice and real human verification. The executed artifact is narrower. Each seed yields a 72-cluster procedural-core release with 28 arithmetic, 24 temporal, and 20 table/list clusters, balanced across splits A and B with 36 clusters per split. Every accepted cluster has a textually distinct $q_3$ and a changed recomputed $q_3$ gold answer.
+
+The evidence-grounded slice remained validation-only for all three seeds. The recorded gate-failure reasons are \texttt{real\_human\_annotation\_unavailable} and \texttt{content\_gates\_failed}, so those items are not part of the core release. Likewise, while the artifact bundle includes adjudication-style fields and agreement summaries, the executed-vs-proposed summary explicitly states that real dual human verification was not run. We therefore treat all stored audit fields as synthetic pipeline metadata rather than as evidence of completed human annotation.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Benchmark instances.}
+Across all three seeds, the procedural-core pilot is stable: 72 accepted clusters, 72 answer-changing flips, and 72 textually distinct $q_3$ items per seed. The candidate pool before selection contains 104 procedural candidates per seed: 40 arithmetic, 34 temporal, and 30 table/list.
+
+\paragraph{Construction outcomes.}
+Table~\ref{tab:construction} summarizes the release funnel. Arithmetic keeps 28 of 40 candidates, temporal keeps 24 of 34, and table/list keeps 20 of 30. Averaged over seeds, the procedural pool yields 103.3 automatic passes, 99.3 audited passes, and a capped 72-cluster release. Mean adjudication rates are 28.3\% for arithmetic, 38.2\% for temporal, and 33.1\% for table/list. The evidence-grounded validation pool contains 30 pilot candidates per seed but never enters the core release.
+
+\paragraph{Synthetic audit diagnostics.}
+Because the audit is synthetic, we do not present these fields as benchmark-quality evidence. They are still informative about why the artifact cannot be framed as an audited release. Percent agreement is often high, but mean Cohen's $\kappa$ is weak or negative for paraphrase validity (-0.028), answer uniqueness (0.060), answer-change validity (0.034), outside-knowledge leakage (-0.032), and fluency/well-formedness (0.063); only flip locality reaches a clearly positive mean $\kappa$ (0.429). This mismatch is one reason the paper is framed as a pilot rather than a finalized benchmark release.
+
+\paragraph{Models.}
+We evaluate the executed model roster: Qwen2.5-3B-Instruct, Mistral-7B-Instruct-v0.3, Llama-3.1-8B-Instruct, and Gemma-2-9B-it. This follows \texttt{plan.json} and the executed artifact summary; it differs from the earlier proposal draft, which listed Qwen2.5-7B-Instruct.
+
+\paragraph{Implementation.}
+Inference uses Hugging Face Transformers with \texttt{device\_map="auto"} and \texttt{torch.bfloat16} when CUDA is available. Bootstrap confidence intervals use 1000 cluster resamples. For every model we report accuracy-like metrics, mean latency, p95 latency, and peak allocated VRAM from the recorded runs.
+
+\begin{table}[t]
+\caption{Construction statistics for the procedural-core pilot. Counts are averaged across the three executed seeds where ranges are shown.}
+\label{tab:construction}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Family & Candidates & Automatic pass & Audited pass & Kept & Mean adjud. \\
+\midrule
+Arithmetic & 40 & 40 & 38--40 & 28 & 28.3\% \\
+Temporal & 34 & 34 & 32 & 24 & 38.2\% \\
+Table/list & 30 & 29--30 & 28 & 20 & 33.1\% \\
+\midrule
+Core release total & 104 & 103--104 & 98--100 & 72 & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main results}
+\label{sec:main}
+
+Figure~\ref{fig:model-metrics} and Table~\ref{tab:main} show the main pattern: coupled semantic evaluation is much stricter than single-prompt or uncoupled scoring. Averaged across the four models, $q_0$ accuracy exceeds \css\ by 24.2 points and \msva\ exceeds \css\ by 25.7 points. All four models show the same direction of the $q_0-\css$ gap in both construction splits.
+
+Gemma-2-9B-it is strongest on every primary semantic metric, reaching 52.8\% $q_0$ accuracy, 55.3\% \msva, 42.1\% \pir, 38.4\% \bfa, and 26.4\% \css. Even for this strongest model, the paired $q_0-\css$ gap is 26.5 points with a 95\% bootstrap interval of 20.8--32.4 points. Qwen2.5-3B-Instruct shows the largest gap at 35.3 points (28.7--41.7). The pilot therefore supports a narrow but consistent claim: canonical-question accuracy overestimates coupled semantic robustness.
+
+The format-control metric \fca\ is higher than \css\ for every model, peaking at 77.8\% for Gemma-2-9B-it. This supports the decision to keep $q_4$ outside the main semantic score. It is easier for models to follow a formatting variation than to preserve the answer across paraphrases and then update it under a meaning-changing flip.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_model_metrics.pdf}
+\caption{Main evaluation metrics on the 72-cluster procedural-core pilot. Bars are means over the three executed seeds; error bars are 95\% bootstrap confidence intervals over clusters.}
+\label{fig:model-metrics}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Main model results on the procedural-core pilot. Accuracy-like metrics are percentages with 95\% bootstrap intervals over clusters. Latency and VRAM are means over executed runs. Best accuracy-like values are in \textbf{bold}; lower latency and VRAM are better.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccccc}
+\toprule
+Model & $q_0$ Acc$\uparrow$ & \msva$\uparrow$ & \pir$\uparrow$ & \bfa$\uparrow$ & \css$\uparrow$ & \fca$\uparrow$ & $\Delta(q_0-\css)\uparrow$ & Mean lat. (s)$\downarrow$ & p95 lat. (s)$\downarrow$ & Peak VRAM (GB)$\downarrow$ \\
+\midrule
+Qwen2.5-3B-Instruct & 42.1 [35.2, 48.6] & 39.1 [34.4, 43.2] & 23.6 [18.1, 29.2] & 24.1 [18.5, 29.6] & 6.9 [3.7, 10.2] & 42.1 [35.2, 48.6] & 35.3 [28.7, 41.7] & 0.184 & 0.375 & \textbf{6.68} \\
+Mistral-7B-Instruct-v0.3 & 20.8 [15.3, 26.4] & 21.4 [17.1, 25.8] & 9.7 [6.0, 13.9] & 18.5 [13.4, 24.1] & 6.5 [3.2, 9.7] & 34.3 [28.2, 40.7] & 14.4 [9.7, 19.0] & 0.237 & 0.453 & 13.87 \\
+Llama-3.1-8B-Instruct & 26.9 [20.8, 32.4] & 32.6 [28.7, 36.6] & 17.1 [12.5, 22.2] & 16.7 [11.6, 21.8] & 6.0 [3.2, 9.3] & 50.5 [44.0, 56.9] & 20.7 [15.3, 26.4] & \textbf{0.161} & \textbf{0.329} & 15.43 \\
+Gemma-2-9B-it & \textbf{52.8 [46.3, 59.3]} & \textbf{55.3 [50.3, 60.1]} & \textbf{42.1 [35.6, 48.6]} & \textbf{38.4 [31.9, 45.4]} & \textbf{26.4 [20.8, 32.9]} & \textbf{77.8 [72.2, 82.9]} & 26.5 [20.8, 32.4] & 0.487 & 0.946 & 17.81 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Split stability}
+
+Figure~\ref{fig:split-gap} compares split A and split B. The sign of the $q_0-\css$ gap is stable for all four models, but the pilot does not support strong rank claims: the recorded split-wise Spearman correlation of \css\ ranks is only 0.4. Gemma-2-9B-it is the most stable across splits, with 25.9\% \css\ on split A and 26.9\% on split B. Qwen2.5-3B-Instruct still shows a large semantic gap in both splits (33.3 and 37.0 points). This is the intended operating point of the pilot: enough signal for failure analysis, not enough power for a leaderboard release.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure2_split_gap.pdf}
+\caption{Split-wise gap between canonical-question accuracy and \css, computed as $q_0$ Acc $-$ \css. Bars are means over the three seeds; error bars are 95\% bootstrap confidence intervals over clusters.}
+\label{fig:split-gap}
+\end{figure}
+
+\subsection{Ablations}
+\label{sec:ablations}
+
+Table~\ref{tab:ablation} isolates which design choices make \css\ hard. Removing the flip requirement raises scores for every model by 3.3--16.8 points, while removing paraphrase coupling raises scores by 3.8--9.6 points. Both components matter, with the answer-changing flip typically contributing the larger gain.
+
+Including the format-control item in the headline score does not help. It reduces the mean score by 0.5--3.7 points, confirming that $q_4$ should stay separate. The synthetic auto-only release ablation is inconsistent and near zero on average, which is unsurprising given that the executed audit fields are themselves synthetic.
+
+The clearest benchmark-engineering effect is deterministic gold recomputation. Disabling recomputation lowers \css\ by 16.1 points for Qwen2.5-3B-Instruct, 11.0 points for Llama-3.1-8B-Instruct, and 44.1 points for Gemma-2-9B-it; Mistral-7B-Instruct-v0.3 shows no mean change in this small validation subset. Relaxing the evidence policy collapses evidence-slice \css\ by 84.4--100.0 points, supporting the decision to keep the evidence family out of the core release. Exact-string scoring is identical to normalized scoring for all four models.
+
+\begin{table*}[t]
+\caption{Ablation deltas relative to full \css, in percentage points. Positive values mean the ablated score is easier than \css; negative values mean the change makes the score stricter.}
+\label{tab:ablation}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+Model & No paraphrase & No flip & Include $q_4$ & Auto-only & No recompute & Relaxed evidence & Exact string \\
+\midrule
+Qwen2.5-3B-Instruct & +9.6 & +16.8 & -1.4 & -5.7 & -16.1 & -100.0 & 0.0 \\
+Mistral-7B-Instruct-v0.3 & +6.9 & +3.3 & -1.4 & -11.3 & 0.0 & -100.0 & 0.0 \\
+Llama-3.1-8B-Instruct & +3.8 & +11.0 & -3.7 & 0.0 & -11.0 & -84.4 & 0.0 \\
+Gemma-2-9B-it & +5.5 & +15.8 & -0.5 & -0.3 & -44.1 & -100.0 & 0.0 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Failure analysis}
+
+Figure~\ref{fig:failure-modes} shows that combined failures dominate. Averaged over seeds, the combined-failure bucket covers 59.3\% of clusters for Qwen2.5-3B-Instruct, 78.2\% for Mistral-7B-Instruct-v0.3, 72.2\% for Llama-3.1-8B-Instruct, and 45.8\% for Gemma-2-9B-it. Paraphrase-only and flip-only failures are secondary, while format-only failures remain rare at 1.4--4.2\%. The benchmark is therefore not mostly surfacing formatting artifacts; it is surfacing clusters where models fail the coupled semantic requirement itself.
+
+Figure~\ref{fig:construction-waterfall} complements this with the construction funnel. Averaged across seeds, 104 procedural candidates shrink to a 72-cluster release after automatic filtering, synthetic audit rejection, and cap-based selection. The evidence-grounded slice stays out of core because both content gates and audit availability fail.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/figure3_failure_modes.pdf}
+\caption{Failure-mode breakdown on the procedural-core pilot, averaged over the three executed seeds. The stacked bars show the mean fraction of clusters assigned to each failure type.}
+\label{fig:failure-modes}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure4_construction_waterfall.pdf}
+\caption{Construction funnel for the procedural-core pilot, averaged over seeds. The evidence-grounded validation slice is omitted because it never enters the core release.}
+\label{fig:construction-waterfall}
+\end{figure}
+
+\section{Reproducibility}
+\label{sec:repro}
+
+The workspace contains the construction summaries, accepted-cluster files, per-model prediction logs, bootstrap summaries, ablation outputs, failure analyses, and vector figures used in this paper. Table~\ref{tab:repro} summarizes the key environment and configuration details that are explicitly present in the artifacts and code.
+
+The executed-vs-proposed artifact summary records Python 3.12.7, noting that Python 3.11 was unavailable in this workspace. The inference code loads one model at a time with Transformers, uses \texttt{torch.bfloat16} when CUDA is available, and records peak allocated VRAM with \texttt{torch.cuda.max\_memory\_allocated}. The benchmark scope is fixed to the accepted procedural-core pilot release, and the split assignment is deterministic with 36 accepted clusters in each of splits A and B for every seed. Minimum detectable effects for \css\ are 3.2--6.1 points across the four models, which is comparable to or larger than some pairwise model gaps; this is why model ranking is treated as exploratory rather than definitive.
+
+\begin{table}[t]
+\caption{Concise reproducibility summary for the executed pilot. All entries are taken from the artifact configuration, execution summary, or evaluation code.}
+\label{tab:repro}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Aspect & Executed setting \\
+\midrule
+Study scope & Synthetic procedural-core pilot \\
+Python & 3.12.7 \\
+Seeds & 11, 22, 33 \\
+Core release size & 72 clusters per seed \\
+Family mix & 28 arithmetic, 24 temporal, 20 table/list \\
+Splits & 36 in split A, 36 in split B \\
+Models & Qwen2.5-3B, Mistral-7B, Llama-3.1-8B, Gemma-2-9B \\
+Decoding & Temperature 0.0, top-$p$ 1.0, max 32 tokens \\
+Prompt style & System instruction + answer-only suffix \\
+Implementation & Transformers, \texttt{device\_map="auto"}, BF16 on CUDA \\
+Bootstrap & 1000 cluster resamples \\
+Audit status & Synthetic audit metadata; no real human audit executed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The strongest claim supported by the executed artifacts is diagnostic: coupled cluster scoring reveals failures that seed-question accuracy and uncoupled semantic-variant averages miss. That claim is consistent across all four models and both construction splits, and the ablations indicate that both paraphrase coupling and answer-changing pressure contribute materially to the observed difficulty.
+
+The paper's limitations are equally central. First, this is not a human-audited benchmark release. The audit metadata are synthetic pipeline outputs, so the paper cannot claim finished annotation quality or release readiness. Second, the evidence-grounded slice did not clear the preregistered gates and remains validation-only. Third, the benchmark is small by design. With 72 clusters, it supports failure analysis and design ablations better than it supports leaderboard separation; the split-wise \css\ rank correlation of 0.4 makes that concrete. Fourth, the core release is entirely procedural and uses numeric/date normalization, so generalization to broader open-domain QA is untested.
+
+These limitations do not invalidate the pilot, but they do narrow its contribution. The present artifact shows that the cluster design is promising enough to merit a fully audited next stage. It does not yet justify release claims that imply completed human verification, broad-domain coverage, or stable model ranking.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper studied \tb\ as a small benchmark-engineering pilot rather than as a finalized benchmark release. The executed procedural-core artifact couples paraphrase invariance and answer-changing sensitivity on the same seed item, and the resulting \css\ metric is substantially stricter than canonical-question accuracy and uncoupled variant averages. Averaged across four open models, $q_0$ accuracy exceeds \css\ by 24.2 points and \msva\ exceeds \css\ by 25.7 points; the strongest model, Gemma-2-9B-it, still drops from 52.8\% on $q_0$ to 26.4\% on \css.
+
+The main lesson is methodological. Even a small synthetic pilot can reveal that coupled semantic robustness is materially harder than single-prompt accuracy suggests, but the benchmark-quality literature is right that construction and audit details matter. The next step is therefore not to scale the leaderboard, but to execute the same cluster design with real human verification and to admit the evidence-grounded slice only if it clears the same strict gates.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+
+\section{Appendix Cases}
+\label{sec:appendix-cases}
+
+Table~\ref{tab:appendix-cases} adds the missing model field so every example row is uniquely traceable to one observed model behavior. Some cluster identifiers recur across rows because different models exhibit different behaviors on the same cluster; including the model resolves that ambiguity.
+
+\begin{table*}[t]
+\caption{Representative appendix cases from the executed pilot. Each row is uniquely traceable by model, seed-encoded cluster identifier, and split.}
+\label{tab:appendix-cases}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllllll}
+\toprule
+Model & Cluster ID & Split & Family & Failure mode & Flip template & Observed pattern \\
+\midrule
+Gemma-2-9B-it & \texttt{arith\_s11\_034} & A & Arithmetic & Pass & \texttt{quantity\_replacement::diff} & $q_0{=}1$, \pir$=1$, \bfa$=1$, \css$=1$, \fca$=1$ \\
+Llama-3.1-8B-Instruct & \texttt{arith\_s11\_034} & A & Arithmetic & Combined failure & \texttt{quantity\_replacement::diff} & $q_0{=}0$, \pir$=0$, \bfa$=0$, \css$=0$, \fca$=0$ \\
+Llama-3.1-8B-Instruct & \texttt{arith\_s22\_001} & A & Arithmetic & Paraphrase failure & \texttt{quantity\_replacement::prod} & $q_0{=}0$, \pir$=0$, \bfa$=1$, \css$=0$, \fca$=0$ \\
+Qwen2.5-3B-Instruct & \texttt{arith\_s33\_005} & A & Arithmetic & Flip-update failure & \texttt{quantity\_replacement::prod} & $q_0{=}1$, \pir$=1$, \bfa$=0$, \css$=0$, \fca$=1$ \\
+Llama-3.1-8B-Instruct & \texttt{arith\_s33\_005} & A & Arithmetic & Format-only failure & \texttt{quantity\_replacement::prod} & $q_0{=}1$, \pir$=1$, \bfa$=1$, \css$=1$, \fca$=0$ \\
+Mistral-7B-Instruct-v0.3 & \texttt{arith\_s11\_007} & B & Arithmetic & Pass & \texttt{quantity\_replacement::sum} & $q_0{=}1$, \pir$=1$, \bfa$=1$, \css$=1$, \fca$=1$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\end{document}

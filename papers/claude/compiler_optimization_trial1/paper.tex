@@ -1,0 +1,495 @@
+\documentclass[11pt]{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{natbib}
+
+\title{The Algebra of Compiler Passes: An Empirical Study of Idempotency, Commutativity, and Convergence in LLVM Optimization Pipelines}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+%=============================================================================
+% ABSTRACT
+%=============================================================================
+\begin{abstract}
+Modern compilers apply dozens of optimization passes in carefully engineered sequences, yet the fundamental algebraic properties governing pass composition remain poorly characterized. We present a systematic empirical study of 46 LLVM optimization passes across a benchmark suite of 87 programs (30 from PolyBench/C, 57 hand-written synthetic programs covering diverse optimization patterns). We characterize three algebraic properties: \emph{idempotency} (whether $P^2 = P$), \emph{pairwise commutativity} (whether pass order matters), and \emph{constructive/destructive interference} (whether combined effects exceed individual contributions). We find that 91.3\% of passes are empirically idempotent (95\% CI: [79.7\%, 96.6\%]), that 10.1\% of pass pairs are non-commutative with non-commutativity concentrated among loop transformation and value numbering passes, and that while only 2.8\% of pairs show significant interference, the interfering pairs exhibit strong effects (up to 37.8\% destructive interference for \texttt{mem2reg}$+$\texttt{sroa}). We further identify 142 true oscillation cycles in pass subsets and show that 12.6\% of benchmarks fail to converge under iterative \texttt{-O2} application. An algebra-guided ordering heuristic achieves a geometric mean instruction count ratio of 0.456 on our benchmark suite (65\% synthetic), compared to 0.591 for \texttt{-O2}, though this advantage may diminish on established benchmark suites such as cBench or SPEC. Our primary contributions are the algebraic characterization itself and the systematic detection of oscillation cycles, which are benchmark-composition-independent findings.
+\end{abstract}
+
+%=============================================================================
+% 1. INTRODUCTION
+%=============================================================================
+\section{Introduction}
+
+Modern compilers such as LLVM~\citep{lattner2004llvm} apply over 100 optimization passes in carefully orchestrated sequences to transform intermediate representations (IR) into efficient machine code. The effectiveness of the overall optimization pipeline depends critically on which passes are selected and in what order they are applied---the well-known \emph{phase-ordering problem}~\citep{kulkarni2012mitigating}.
+
+The phase-ordering problem has been attacked primarily through search-based methods that treat the compiler as a black box: genetic algorithms~\citep{pan2025synergy}, reinforcement learning~\citep{jain2022posetrl,deng2025compilerdream}, and iterative compilation~\citep{ashouri2017micomp}. While these methods achieve impressive results, they share a common limitation: they do not exploit the \emph{intrinsic algebraic structure} of the pass space. Compiler engineers intuitively know that some passes ``enable'' others, some ``undo'' each other's work, and some have no effect when applied twice. These observations correspond to well-defined algebraic properties---constructive/destructive interference, commutativity, and idempotency---yet no systematic empirical characterization exists for real-world compiler passes.
+
+Furthermore, practitioners have observed that iteratively applying optimization pipelines can lead to oscillating behavior---passes that ``flip-flop'' the IR without converging~\citep{regehr2018llvm}. This oscillation phenomenon has been noted anecdotally but never systematically characterized.
+
+\paragraph{Key insight.} We propose to treat LLVM optimization passes as operators on a structured space of IR programs and systematically characterize their algebraic properties. By measuring idempotency, pairwise commutativity, and interference across diverse benchmarks, we build a \emph{pass interaction algebra} that reveals the compositional structure of the optimization space.
+
+\paragraph{Contributions.} Our contributions are:
+\begin{itemize}[nosep]
+  \item We present the first systematic algebraic characterization of 46 LLVM optimization passes, measuring idempotency rates, pairwise commutativity, and constructive/destructive interference across 87 benchmark programs.
+  \item We identify and verify 142 true oscillation cycles in small pass subsets, providing the first systematic evidence that the \texttt{simplifycfg}$+$\texttt{loop-rotate}$+$\texttt{loop-simplify} combination cycles on loop-intensive programs with significant instruction count amplitude (20--76 instructions).
+  \item We construct an algebra-guided pass ordering heuristic that uses phase-based ordering, synergy chaining, and interference avoidance, achieving a geometric mean instruction count ratio of 0.456 vs.\ 0.591 for \texttt{-O2} on our benchmark suite.
+  \item We provide an honest assessment of which success criteria were met and which were not, including the finding that non-commutativity and interference rates are lower than hypothesized when computed over all pairs (including trivially inactive ones).
+\end{itemize}
+
+The remainder of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our methodology. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses findings and limitations. Section~\ref{sec:conclusion} concludes.
+
+%=============================================================================
+% 2. RELATED WORK
+%=============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Phase-ordering problem.}
+The problem of selecting and ordering compiler optimization passes has been studied for decades. \citet{kulkarni2012mitigating} formulated phase ordering as a Markov process and used neural networks to predict pass sequences. MiCOMP~\citep{ashouri2017micomp} decomposed the problem into optimization sub-sequences, achieving 1.31$\times$ average speedup. POSET-RL~\citep{jain2022posetrl} used reinforcement learning with partially ordered sets. CompilerDream~\citep{deng2025compilerdream} learned a world model of the compiler using model-based RL, achieving state-of-the-art results on CompilerGym~\citep{cummins2021compilergym}. \citet{pan2025synergy} introduced a synergy-guided genetic algorithm for nested LLVM pass pipelines. \citet{liang2023learning} used coreset selection and normalized value prediction for efficient pass ordering. All these methods treat passes as opaque actions; we characterize their \emph{intrinsic properties}.
+
+\paragraph{Pass dependence modeling.}
+\citet{liu2024efficient} constructed optimization dependence graphs (ODGs) capturing pairwise performance dependence between passes. This is the closest work to ours, but focuses on sequential dependence (which pass must come before which) rather than algebraic properties (commutativity, idempotency, interference magnitude). Our interference quantification provides a continuous metric complementing their binary dependence edges.
+
+\paragraph{Program representation for compiler optimization.}
+ProGraML~\citep{cummins2021programl} introduced graph-based program representations for ML-driven optimization. CompilerGym~\citep{cummins2021compilergym} provided standardized RL environments. These focus on program representation; our work focuses on pass characterization.
+
+\paragraph{Compiler pass interactions.}
+The phenomenon of passes undoing each other's work has been documented informally. \citet{regehr2018llvm} observed oscillating behavior in LLVM's optimization pipeline, noting interactions between jump threading and loop canonicalization. Our work provides the first systematic quantification of these phenomena, confirming and extending such anecdotal observations with rigorous measurements across 87 benchmarks.
+
+%=============================================================================
+% 3. METHOD
+%=============================================================================
+\section{Method}
+\label{sec:method}
+
+We study 46 LLVM transform passes available through the \texttt{opt} tool with the New Pass Manager (LLVM 18.1.3). Let $\mathcal{P} = \{P_1, \ldots, P_{46}\}$ denote the set of passes and $\mathcal{B} = \{B_1, \ldots, B_{87}\}$ the benchmark programs compiled to unoptimized LLVM IR at \texttt{-O0}. We define $\text{IC}(X)$ as the instruction count of IR program $X$ and $h(X)$ as a structural hash of $X$ (ignoring names and metadata).
+
+\subsection{Idempotency Characterization}
+
+For each pass $P$ and benchmark $B$, we apply $P$ once to obtain $P(B)$ and then apply $P$ again to obtain $P(P(B))$. A pass is \emph{strongly idempotent} on $B$ if $h(P(B)) = h(P(P(B)))$ (structurally identical IR). It is \emph{weakly idempotent} if $\text{IC}(P(B)) = \text{IC}(P(P(B)))$ but hashes differ. We report per-pass idempotency rates across all 87 benchmarks.
+
+\subsection{Pairwise Commutativity Analysis}
+
+For each pair $(P_i, P_j)$ and benchmark $B$, we compute:
+\begin{align}
+  \text{IR}_{ij} &= P_j(P_i(B)), \quad \text{IR}_{ji} = P_i(P_j(B))
+\end{align}
+A pair is \emph{commutative} on $B$ if $h(\text{IR}_{ij}) = h(\text{IR}_{ji})$. We build a $46 \times 46$ commutativity matrix where entry $(i,j)$ gives the fraction of 25 representative benchmarks on which passes $i$ and $j$ commute. A pair is classified as \emph{non-commutative} if it commutes on fewer than 50\% of benchmarks.
+
+\subsection{Interference Quantification}
+
+For each pair $(P_i, P_j)$ and benchmark $B$, we define the interference score:
+\begin{align}
+  I(P_i, P_j; B) &= \delta_{ij} - (\delta_i + \delta_j)
+\end{align}
+where $\delta_i = \text{IC}(B) - \text{IC}(P_i(B))$ is the instruction count reduction from $P_i$ alone, and $\delta_{ij} = \text{IC}(B) - \text{IC}(P_j(P_i(B)))$ is the reduction from applying both. Positive $I$ indicates constructive interference (synergy); negative $I$ indicates destructive interference (passes undo each other). We normalize by baseline instruction count and report average interference across 20 representative benchmarks.
+
+\subsection{Convergence and Cycle Analysis}
+
+For each benchmark, we iteratively apply a standard optimization pipeline (\texttt{-O2}, \texttt{-O3}, or \texttt{-Oz}) up to 10 iterations, recording $\text{IC}$ and $h$ after each. A benchmark has \emph{converged} when two consecutive iterations produce the same structural hash. We detect \emph{oscillation} when the hash sequence contains a cycle of length $\geq 2$.
+
+For cycle detection in small pass subsets, we apply candidate pass combinations (2--4 passes) cyclically for up to 50 iterations and detect repeated hash patterns. We test 25 candidate subsets across 40 benchmarks, focusing on known interacting passes.
+
+\subsection{Algebra-Guided Pass Ordering}
+\label{sec:ordering}
+
+Using the measured algebraic properties, we construct a pass ordering heuristic with three components:
+\begin{enumerate}[nosep]
+  \item \textbf{Pruning}: Remove passes that are idempotent and produce no average instruction count reduction.
+  \item \textbf{Phase-based ordering}: Group passes into phases (canonicalization $\to$ simplification $\to$ loop optimization $\to$ cleanup) based on semantic categories.
+  \item \textbf{Synergy chaining}: Within each phase, order passes to maximize constructive interference by placing synergistic pairs adjacent. Separate destructively interfering pairs with buffer passes.
+\end{enumerate}
+The resulting sequence has 20 passes and requires no per-benchmark search.
+
+%=============================================================================
+% 4. EXPERIMENTS
+%=============================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Compiler.} LLVM 18.1.3 with the New Pass Manager, using \texttt{opt} for all pass applications.
+
+\paragraph{Passes.} 46 transform passes commonly used in \texttt{-O1} through \texttt{-O3} pipelines, including \texttt{adce}, \texttt{aggressive-instcombine}, \texttt{bdce}, \texttt{constmerge}, \texttt{correlated-propagation}, \texttt{dce}, \texttt{deadargelim}, \texttt{dse}, \texttt{early-cse}, \texttt{gvn}, \texttt{instcombine}, \texttt{jump-threading}, \texttt{licm}, \texttt{loop-rotate}, \texttt{loop-simplify}, \texttt{loop-unroll}, \texttt{mem2reg}, \texttt{newgvn}, \texttt{reassociate}, \texttt{sccp}, \texttt{simplifycfg}, \texttt{sroa}, \texttt{tailcallelim}, among others.
+
+\paragraph{Benchmarks.} 87 programs comprising: (1) 30 kernels from PolyBench/C 4.2.1~\citep{pouchet2012polybench} covering linear algebra, datamining, stencils, and medley categories; (2) 57 hand-written synthetic programs covering recursive algorithms (fibonacci, quicksort, mergesort), string processing, control-flow-heavy code (state machines, nested conditions), arithmetic-heavy code (polynomial evaluation, matrix operations), struct/pointer operations (linked lists, tree traversal), and loop optimization targets. All benchmarks are compiled to LLVM IR at \texttt{-O0} with the \texttt{-disable-O0-optnone} flag. A full listing with statistics appears in Appendix~\ref{app:benchmarks}.
+
+\paragraph{Metrics.} Instruction count (IC) is the primary metric, measured via \texttt{opt} instruction counting. We report instruction count ratios relative to \texttt{-O0} baseline (lower is better). Structural IR hashes enable exact equality comparison.
+
+\paragraph{Hardware.} All experiments run on a 2-core CPU with 128~GB RAM. Total experiment time: approximately 55 minutes.
+
+\subsection{Experiment 1: Idempotency Survey}
+
+We tested all 46 passes on all 87 benchmarks (4,002 valid pass applications, each requiring two \texttt{opt} invocations).
+
+\begin{table}[t]
+\centering
+\caption{Idempotency classification of 46 LLVM optimization passes across 87 benchmarks. A pass is strongly idempotent if $h(P(B)) = h(P(P(B)))$ for all benchmarks; weakly idempotent if instruction counts always match but hashes may differ; mostly idempotent if idempotent on $>$90\% of benchmarks.}
+\label{tab:idempotency}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Classification} & \textbf{Count} & \textbf{Fraction} \\
+\midrule
+Strongly idempotent & 41 & 89.1\% \\
+Weakly idempotent & 1 & 2.2\% \\
+Mostly idempotent ($>$90\%) & 4 & 8.7\% \\
+Non-idempotent & 0 & 0.0\% \\
+\midrule
+Total idempotent (strong + weak) & 42 & \textbf{91.3\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:idempotency} summarizes the results. 91.3\% of passes (42/46) are strongly or weakly idempotent across all benchmarks (95\% CI: [79.7\%, 96.6\%], binomial test $p < 10^{-5}$ against $H_0: \text{rate} \leq 60\%$). The four ``mostly idempotent'' passes are idempotent on $>$90\% of benchmarks but exhibit program-dependent non-idempotency on specific inputs, likely due to canonicalization choices that differ depending on IR structure. No pass is consistently non-idempotent. Figure~\ref{fig:idempotency} shows the per-pass breakdown.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig1_idempotency.pdf}
+\caption{Per-pass idempotency rate (fraction of 87 benchmarks on which $P^2 = P$ structurally). Passes are sorted by rate and colored by semantic category. The vast majority achieve 100\% idempotency; the four ``mostly idempotent'' passes remain above 90\%.}
+\label{fig:idempotency}
+\end{figure}
+
+\subsection{Experiment 2: Pairwise Commutativity}
+
+We tested all 1,035 unique pass pairs on 25 representative benchmarks (15 PolyBench, 10 synthetic).
+
+Of 1,035 pairs, 105 (10.1\%) are non-commutative (commute on fewer than 50\% of benchmarks; 95\% CI: [8.5\%, 12.1\%]). This is well below the hypothesized 30\% threshold. However, the low aggregate rate is partly explained by the large number of \emph{trivially commutative} pairs---passes that have no effect on most benchmarks and therefore trivially commute. Among the 242 \emph{active pairs} (where both passes modify at least one benchmark), the non-commutativity rate rises to 23.4\%.
+
+The non-commutative pairs are concentrated among a small set of ``order-sensitive'' passes. As shown in Table~\ref{tab:top_pairs} and Figure~\ref{fig:commutativity}, \texttt{loop-rotate} is involved in the most non-commutative interactions (non-commutative with 15 other passes), followed by \texttt{licm} (5 pairs) and \texttt{gvn} (5 pairs). The commutativity heatmap (Figure~\ref{fig:commutativity}) reveals that loop transformation passes form a dense non-commutative cluster, while scalar simplification passes largely commute with each other.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig2_commutativity_heatmap.pdf}
+\caption{Commutativity matrix for 46 passes on 25 benchmarks. Dark cells indicate non-commutative pairs (order matters). Non-commutativity concentrates around loop transformation passes (\texttt{loop-rotate}, \texttt{licm}, \texttt{indvars}) and value numbering passes (\texttt{gvn}).}
+\label{fig:commutativity}
+\end{figure}
+
+\subsection{Experiment 3: Interference Measurement}
+
+We measured interference for all 1,035 pass pairs on 20 representative benchmarks.
+
+Only 29 pairs (2.8\%) exhibit significant interference ($|I| > 5\%$ of baseline IC), below the hypothesized 10\% threshold. However, the pairs that \emph{do} interfere show remarkably strong effects. Table~\ref{tab:top_pairs} lists the top synergistic and destructive pairs.
+
+\begin{table}[t]
+\centering
+\caption{Top synergistic (constructive) and destructive pass pairs by mean interference percentage across 20 benchmarks. Positive values indicate synergy; negative values indicate passes undo each other's work.}
+\label{tab:top_pairs}
+\begin{tabular}{llr}
+\toprule
+\textbf{Pass A} & \textbf{Pass B} & \textbf{Interference (\%)} \\
+\midrule
+\multicolumn{3}{l}{\textit{Top Constructive (Synergistic) Pairs}} \\
+\texttt{loop-rotate} & \texttt{simplifycfg} & +10.36 \\
+\texttt{gvn} & \texttt{instcombine} & +8.81 \\
+\texttt{instcombine} & \texttt{loop-rotate} & +8.44 \\
+\texttt{jump-threading} & \texttt{loop-rotate} & +8.44 \\
+\texttt{gvn} & \texttt{loop-rotate} & +7.14 \\
+\midrule
+\multicolumn{3}{l}{\textit{Top Destructive Pairs}} \\
+\texttt{mem2reg} & \texttt{sroa} & $-$37.78 \\
+\texttt{gvn} & \texttt{loop-unroll} & $-$25.49 \\
+\texttt{gvn} & \texttt{newgvn} & $-$22.63 \\
+\texttt{newgvn} & \texttt{sroa} & $-$18.58 \\
+\texttt{mem2reg} & \texttt{newgvn} & $-$18.55 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The strongest destructive pair is \texttt{mem2reg}$+$\texttt{sroa} ($-37.78\%$). Both passes perform memory-to-register promotion: \texttt{mem2reg} handles simple \texttt{alloca} instructions while \texttt{sroa} performs scalar replacement of aggregates. When applied sequentially, the first pass removes the opportunities the second would exploit, resulting in strong negative interference. Similarly, \texttt{gvn}$+$\texttt{newgvn} ($-22.63\%$) are two implementations of global value numbering that redundantly perform the same optimization. The interference heatmap is shown in Figure~\ref{fig:interference}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig4_interference_heatmap.pdf}
+\caption{Interference heatmap for 46 passes. Red indicates destructive interference (passes undo each other); blue indicates constructive interference (synergy). Most pairs show near-zero interference, but the few interfering pairs exhibit strong effects.}
+\label{fig:interference}
+\end{figure}
+
+The constructive pairs are equally interpretable: \texttt{loop-rotate}$+$\texttt{simplifycfg} ($+10.36\%$) shows that rotating loop headers creates CFG simplification opportunities that simplifycfg can then exploit. \texttt{gvn}$+$\texttt{instcombine} ($+8.81\%$) demonstrates that value numbering identifies redundancies that instruction combining can then fold.
+
+\subsection{Experiment 4: Convergence Analysis}
+
+We applied \texttt{-O2}, \texttt{-O3}, and \texttt{-Oz} iteratively (up to 10 iterations) on all 87 benchmarks.
+
+\begin{table}[t]
+\centering
+\caption{Convergence statistics for iterative pipeline application across 87 benchmarks. ``Converged'' means the IR reached a structural fixed point; ``Oscillating'' means the instruction count oscillates without converging.}
+\label{tab:convergence}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Pipeline} & \textbf{Converged} & \textbf{Oscillating} & \textbf{Within 2 iters} & \textbf{Avg.\ iters} \\
+\midrule
+\texttt{-O2} & 75/87 & 11/87 (12.6\%) & 13.8\% & 3.12 \\
+\texttt{-O3} & 75/87 & 11/87 (12.6\%) & 13.8\% & 3.17 \\
+\texttt{-Oz} & 86/87 & 1/87 (1.1\%) & 25.3\% & 2.78 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:convergence} shows that \texttt{-O2} and \texttt{-O3} exhibit identical convergence behavior: 75 benchmarks converge (averaging 3.1 iterations) while 11 oscillate. \texttt{-Oz}, which avoids code-size-increasing transformations like loop unrolling, converges more reliably (86/87). Figure~\ref{fig:convergence} shows representative convergence curves.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig5_convergence.pdf}
+\caption{Instruction count trajectories under iterative pipeline application. Most benchmarks converge within 3--5 iterations. Some benchmarks exhibit persistent oscillation (non-monotonic IC sequences that do not reach a fixed point).}
+\label{fig:convergence}
+\end{figure}
+
+\subsection{Experiment 5: Cycle Detection}
+
+We tested 25 candidate pass subsets across 40 benchmarks, identifying 142 true oscillation cycles (cycles of length $\geq 2$) alongside 614 fixed-point convergences.
+
+The most prolific cycling subset is \texttt{simplifycfg}$+$\texttt{loop-rotate}$+$\texttt{loop-simplify}, which cycles on all 30 PolyBench benchmarks with cycle length 3 and instruction count amplitudes ranging from 20 to 76 instructions. This confirms and extends anecdotal reports~\citep{regehr2018llvm}: loop rotation creates CFG structure that simplifycfg wants to simplify, but simplification recreates the structure that loop-simplify then wants to canonicalize, creating a perpetual cycle. Figure~\ref{fig:cycles} visualizes representative cycles.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig6_cycles.pdf}
+\caption{State-transition diagrams for detected oscillation cycles. The \texttt{simplifycfg}$+$\texttt{loop-rotate}$+$\texttt{loop-simplify} subset produces length-3 cycles on all PolyBench kernels, with each pass undoing part of the previous pass's transformation.}
+\label{fig:cycles}
+\end{figure}
+
+\subsection{Experiment 6: Algebra-Guided Ordering}
+
+We compared the algebra-guided heuristic (Section~\ref{sec:ordering}) against standard LLVM optimization levels and two algorithmic baselines across all 87 benchmarks.
+
+\begin{table}[t]
+\centering
+\caption{Comparison of pass ordering methods. IC ratio is the geometric mean instruction count ratio relative to \texttt{-O0} (lower is better, $\downarrow$). The algebra-guided method uses a fixed 20-pass sequence requiring no per-benchmark search.}
+\label{tab:ordering}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Geo.\ Mean IC Ratio} $\downarrow$ & \textbf{\# Passes} \\
+\midrule
+\texttt{-O1} & 0.547 & varies \\
+\texttt{-O2} & 0.591 & varies \\
+\texttt{-O3} & 0.644 & varies \\
+\texttt{-Oz} & 0.514 & varies \\
+Random ordering & 0.576 & 30 \\
+Greedy search & \textbf{0.431} & $\leq$15 \\
+\midrule
+Algebra-guided (ours) & 0.456 & 20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ordering} presents the results. The algebra-guided method achieves 0.456, outperforming all standard optimization levels (\texttt{-O1}: 0.547, \texttt{-O2}: 0.591, \texttt{-O3}: 0.644, \texttt{-Oz}: 0.514) and random ordering (0.576). It wins on 66/87 benchmarks against \texttt{-O2}, ties on 5, and loses on 16 (Wilcoxon signed-rank $p < 10^{-10}$, Cohen's $d = -0.76$).
+
+The greedy search baseline achieves the best overall result (0.431) by evaluating all 46 passes at each of up to 15 steps, making it approximately $46 \times 15 / 20 \approx 35\times$ more expensive per benchmark. The algebra-guided method's advantage is that it uses a \emph{fixed} pre-computed sequence with no per-benchmark search.
+
+\paragraph{The \texttt{-O3} $>$ \texttt{-O1} IC anomaly.} A counterintuitive finding is that \texttt{-O3} (0.644) produces \emph{higher} instruction counts than \texttt{-O1} (0.547) and even \texttt{-O2} (0.591). This is because \texttt{-O3} enables aggressive inlining and loop unrolling, which increase code size (instruction count) while potentially improving execution speed. Since our metric is instruction count rather than execution time, \texttt{-O3}'s code-expanding transformations appear as regressions. This effect may be amplified on our synthetic benchmarks, many of which contain small functions and simple loops that are aggressively inlined. On established benchmark suites with larger, more realistic programs, the magnitude of this effect would likely differ. The \texttt{-Oz} result (0.514) further confirms this interpretation: \texttt{-Oz} explicitly optimizes for code size and achieves the best IC ratio among standard levels.
+
+Figure~\ref{fig:ordering} shows the comparison graphically.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig7_ordering_comparison.pdf}
+\caption{Geometric mean instruction count ratio across 87 benchmarks for all methods. Lower is better. Error bars show standard deviation across seeds for methods with randomness.}
+\label{fig:ordering}
+\end{figure}
+
+\subsection{Ablation Study}
+
+We ablated each component of the algebra-guided heuristic on a 40-benchmark subset.
+
+\begin{table}[t]
+\centering
+\caption{Ablation study on 40 benchmarks. Each row removes one component from the full algebra-guided method. IC ratio is geometric mean relative to \texttt{-O0} ($\downarrow$).}
+\label{tab:ablation}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Variant} & \textbf{Geo.\ Mean IC Ratio} $\downarrow$ & \textbf{Reduction (\%)} & \textbf{\# Passes} \\
+\midrule
+Full method & \textbf{0.442} & 55.8 & 20 \\
+$-$ Synergy chaining & 0.442 & 55.9 & 20 \\
+$-$ Anti-interference & 0.448 & 55.2 & 20 \\
+$-$ Idempotency pruning & 0.516 & 48.4 & 30 \\
+$-$ Phase-based ordering & 0.516 & 48.4 & 15 \\
+Top-K passes only & 0.484 & 51.7 & 10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} reveals that \textbf{phase-based ordering} and \textbf{idempotency pruning} are the most important components, each contributing approximately 7.4 percentage points of IC reduction. In contrast, within-phase synergy chaining provides negligible additional benefit ($<$0.1pp), suggesting that pass \emph{category} structure matters more than fine-grained pairwise synergy scores. This is consistent with compiler engineering practice, where pass pipelines are organized into coarse phases rather than optimized at the pair level.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig8_ablation.pdf}
+\caption{Ablation study: instruction count ratio for each variant. Phase-based ordering and idempotency pruning contribute most; synergy chaining has minimal independent effect.}
+\label{fig:ablation}
+\end{figure}
+
+%=============================================================================
+% 5. DISCUSSION AND LIMITATIONS
+%=============================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Success criteria assessment.}
+Table~\ref{tab:summary} summarizes which success criteria were met. Three of six criteria were met: idempotency rate exceeds 60\%, oscillation is detected, and the algebra-guided ordering improves over \texttt{-O2}. Two criteria were \emph{not} met: non-commutativity (10.1\% vs.\ 30\% threshold) and significant interference (2.8\% vs.\ 10\% threshold). The clustering criterion was also not met (adjusted Rand index $= -0.005$).
+
+\begin{table}[t]
+\centering
+\caption{Summary of algebraic properties and success criteria.}
+\label{tab:summary}
+\begin{tabular}{lrrl}
+\toprule
+\textbf{Property} & \textbf{Value} & \textbf{Criterion} & \textbf{Met?} \\
+\midrule
+Idempotency rate & 91.3\% & $>60\%$ & Yes \\
+Non-commutativity rate & 10.1\% & $>30\%$ & No \\
+Active non-commutativity rate & 23.4\% & --- & --- \\
+Significant interference rate & 2.8\% & $>10\%$ & No \\
+Oscillating benchmarks (\texttt{-O2}) & 11/87 & $>0$ & Yes \\
+True pass oscillation cycles & 142 & $>0$ & Yes \\
+Algebra-guided IC ratio & 0.456 & $<$ \texttt{-O2} (0.591) & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpreting low commutativity and interference rates.}
+The low aggregate rates for non-commutativity and interference reflect the structure of the pass space: many passes are highly specialized and have no effect on most benchmarks. When two passes both have no effect, they trivially commute and show zero interference. Among \emph{active} pairs (both passes modify at least one benchmark), non-commutativity rises to 23.4\%. The practical implication is that ordering constraints are concentrated among a small set of ``order-sensitive'' passes---primarily loop transformations and value numbering---while the majority of the pass space has trivial algebraic structure.
+
+\paragraph{Benchmark validity.}
+A major limitation of this study is the benchmark composition: 57 of 87 benchmarks (65\%) are hand-written synthetic programs. The original proposal specified cBench (23 programs), PolyBench (30), and LLVM test-suite programs (20--30), but only PolyBench was included due to environment constraints. This is the single biggest threat to the ordering comparison claims. The 13.5 percentage point improvement of the algebra-guided method over \texttt{-O2} may partly reflect the characteristics of our synthetic benchmarks (small functions, simple loops, predictable optimization patterns). On established suites like cBench or SPEC, the advantage would likely be smaller.
+
+That said, the algebraic characterization findings---idempotency rates, oscillation cycles, and the structure of non-commutativity and interference---are more robust to benchmark composition because they measure intrinsic pass properties rather than aggregate performance. The \texttt{simplifycfg}$+$\texttt{loop-rotate}$+$\texttt{loop-simplify} cycling occurs on \emph{all} PolyBench kernels (the established subset), and the \texttt{mem2reg}$+$\texttt{sroa} destructive interference reflects a genuine implementation overlap in LLVM.
+
+\paragraph{The \texttt{-O3} instruction count anomaly.}
+The finding that \texttt{-O3} (0.644) produces higher instruction counts than \texttt{-O1} (0.547) is primarily explained by \texttt{-O3}'s aggressive inlining and loop unrolling, which increase code size. This is a well-known trade-off: \texttt{-O3} optimizes for \emph{execution speed}, not code size. However, the magnitude of this effect on our benchmark suite may be amplified by the synthetic benchmarks' small function sizes and simple loop structures, which present particularly attractive inlining and unrolling targets. On programs with larger functions and more complex control flow, the IC increase from inlining would be proportionally smaller.
+
+\paragraph{Statistical limitations.}
+The commutativity experiment uses 25 benchmarks and interference uses 20, creating sampling uncertainty. While the idempotency result has narrow confidence intervals ([79.7\%, 96.6\%]), the commutativity and interference results would benefit from bootstrap confidence intervals computed on benchmark subsets. We report point estimates with Wilson score CIs where available, but acknowledge that the small benchmark counts limit the precision of per-pair estimates.
+
+\paragraph{Reproducibility.}
+All experiment code, benchmark programs, and analysis scripts are available at \url{https://anonymous.4open.science/r/pass-algebra} (anonymous for review). The 57 synthetic benchmarks are generated programmatically and are included in the repository.
+
+%=============================================================================
+% 6. CONCLUSION
+%=============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented the first systematic algebraic characterization of LLVM optimization passes, measuring idempotency, pairwise commutativity, and interference across 46 passes and 87 benchmarks. Our key findings are:
+
+\begin{enumerate}[nosep]
+  \item LLVM passes are overwhelmingly idempotent: 91.3\% satisfy $P^2 = P$ structurally across all benchmarks, confirming that most passes are mathematical projections.
+  \item Non-commutativity and interference are \emph{sparse but concentrated}: only 10.1\% of pairs are non-commutative and 2.8\% show significant interference, but these few pairs involve the most important passes (\texttt{loop-rotate}, \texttt{gvn}, \texttt{simplifycfg}) and exhibit strong effects (up to 37.8\% destructive interference).
+  \item Iterative \texttt{-O2} application fails to converge on 12.6\% of benchmarks, and we identify 142 true oscillation cycles, with \texttt{simplifycfg}$+$\texttt{loop-rotate}$+$\texttt{loop-simplify} cycling on all PolyBench programs.
+  \item An algebra-guided ordering heuristic using phase-based structure and pruning achieves 0.456 IC ratio vs.\ 0.591 for \texttt{-O2} on our benchmark suite, though this result requires validation on established suites.
+\end{enumerate}
+
+Future work should extend this analysis to established benchmark suites (cBench, SPEC), investigate whether the algebraic properties generalize across LLVM versions, and explore integration of pass interaction algebras into ML-based phase-ordering methods to reduce their search spaces.
+
+%=============================================================================
+% REFERENCES
+%=============================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{12}
+
+\bibitem[Ashouri et~al.(2017)]{ashouri2017micomp}
+Amir~H. Ashouri, Andrea Bignoli, Gianluca Palermo, Cristina Silvano, Sameer Kulkarni, and John Cavazos.
+\newblock {MiCOMP}: Mitigating the compiler phase-ordering problem using optimization sub-sequences and machine learning.
+\newblock \emph{ACM Transactions on Architecture and Code Optimization}, 14(3), 2017.
+
+\bibitem[Cummins et~al.(2021a)]{cummins2021compilergym}
+Chris Cummins, Bram Wasti, Jiadong Guo, Brandon Cui, Jason Ansel, Sahir Gomez, Somya Jain, Jia Liu, Olivier Teytaud, Benoit Steiner, Yuandong Tian, and Hugh Leather.
+\newblock {CompilerGym}: Robust, performant compiler optimization environments for {AI} research.
+\newblock \emph{arXiv preprint arXiv:2109.08267}, 2021.
+
+\bibitem[Cummins et~al.(2021b)]{cummins2021programl}
+Chris Cummins, Zacharias~V. Fisches, Tal Ben-Nun, Torsten Hoefler, Michael F~P O'Boyle, and Hugh Leather.
+\newblock {ProGraML}: A graph-based program representation for data flow analysis and compiler optimizations.
+\newblock In \emph{Proceedings of the 38th International Conference on Machine Learning (ICML)}, volume 139 of \emph{PMLR}, pages 2244--2253, 2021.
+
+\bibitem[Deng et~al.(2025)]{deng2025compilerdream}
+Chaoyi Deng, Jialong Wu, Ningya Feng, Jianmin Wang, and Mingsheng Long.
+\newblock {CompilerDream}: Learning a compiler world model for general code optimization.
+\newblock In \emph{Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining}, 2025.
+
+\bibitem[Jain et~al.(2022)]{jain2022posetrl}
+Shalini Jain, Yashas Andaluri, S.~VenkataKeerthy, and Ramakrishna Upadrasta.
+\newblock {POSET-RL}: Phase ordering for optimizing size and execution time using reinforcement learning.
+\newblock In \emph{IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)}, 2022.
+
+\bibitem[Kulkarni and Cavazos(2012)]{kulkarni2012mitigating}
+Sameer Kulkarni and John Cavazos.
+\newblock Mitigating the compiler optimization phase-ordering problem using machine learning.
+\newblock In \emph{Proceedings of the ACM International Conference on Object Oriented Programming Systems Languages and Applications (OOPSLA)}, pages 147--160, 2012.
+
+\bibitem[Lattner and Adve(2004)]{lattner2004llvm}
+Chris Lattner and Vikram Adve.
+\newblock {LLVM}: A compilation framework for lifelong program analysis \& transformation.
+\newblock In \emph{Proceedings of the International Symposium on Code Generation and Optimization (CGO)}, pages 75--86, 2004.
+
+\bibitem[Liang et~al.(2023)]{liang2023learning}
+Jingzhi Liang, Lei Ma, Chao Qian, and Yang Yu.
+\newblock Learning compiler pass orders using coreset and normalized value prediction.
+\newblock In \emph{Proceedings of the 40th International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem[Liu et~al.(2024)]{liu2024efficient}
+Yuanjie Liu, Jianfeng Fang, Wenming Wang, Hao Xue, Hanlin Huang, and Jian Wang.
+\newblock Efficient compiler optimization by modeling passes dependence.
+\newblock \emph{CCF Transactions on High Performance Computing}, 2024.
+
+\bibitem[Pan et~al.(2025)]{pan2025synergy}
+Haolin Pan, Jinyuan Dong, Mingjie Xing, and Yanjun Wu.
+\newblock Synergy-guided compiler auto-tuning of nested {LLVM} pass pipelines.
+\newblock \emph{arXiv preprint arXiv:2510.13184}, 2025.
+
+\bibitem[Pouchet(2012)]{pouchet2012polybench}
+Louis-No\"el Pouchet.
+\newblock {PolyBench/C}: The polyhedral benchmark suite, version 4.2.1.
+\newblock \url{http://polybench.sourceforge.net}, 2012.
+
+\bibitem[Regehr(2018)]{regehr2018llvm}
+John Regehr.
+\newblock How {LLVM} optimizes a function.
+\newblock \emph{Embedded in Academia blog}, 2018.
+\newblock \url{https://blog.regehr.org/archives/1603}.
+
+\end{thebibliography}
+
+%=============================================================================
+% APPENDIX
+%=============================================================================
+\appendix
+
+\section{Benchmark Details}
+\label{app:benchmarks}
+
+Our benchmark suite comprises 87 programs: 30 from PolyBench/C 4.2.1 and 57 hand-written synthetic programs. Below we describe the synthetic benchmarks in detail.
+
+\paragraph{PolyBench/C (30 programs).} The PolyBench suite~\citep{pouchet2012polybench} contains loop-intensive kernels from six categories: linear algebra (BLAS, kernels, solvers), datamining, stencils, and medley. Programs range from 20--100 lines of C with 1--3 functions, featuring primarily nested loop structures with array accesses.
+
+\paragraph{Synthetic benchmarks (57 programs).} These were written to cover optimization patterns underrepresented in PolyBench:
+\begin{itemize}[nosep]
+  \item \textbf{Numerical kernels} (13 programs): \texttt{matmul}, \texttt{gemm}, \texttt{jacobi\_2d}, \texttt{seidel\_2d}, \texttt{fdtd\_2d}, \texttt{lu}, \texttt{cholesky}, \texttt{mvt}, \texttt{atax}, \texttt{bicg}, \texttt{gesummv}, \texttt{symm}, \texttt{syrk}. Loop-intensive kernels similar to PolyBench, 15--40 lines, 1--2 functions, loop nesting depth 2--4.
+  \item \textbf{Recursive algorithms} (4 programs): \texttt{fibonacci}, \texttt{quicksort}, \texttt{mergesort}, \texttt{binary\_search}. Test function call and recursion optimizations. 20--60 lines, 2--4 functions, nesting depth 0--2.
+  \item \textbf{String/data processing} (5 programs): \texttt{string\_match}, \texttt{string\_reverse}, \texttt{crc32}, \texttt{histogram}, \texttt{sieve}. Character and byte-level operations. 15--40 lines, 1--3 functions, nesting depth 1--2.
+  \item \textbf{Control-flow heavy} (3 programs): \texttt{state\_machine}, \texttt{nested\_conditions}, \texttt{calculator}. Switch statements, deeply nested branches. 30--80 lines, 1--3 functions, nesting depth 0--1 (branch-heavy rather than loop-heavy).
+  \item \textbf{Loop optimization targets} (8 programs): \texttt{loop\_invariant}, \texttt{loop\_reduction}, \texttt{loop\_unroll\_candidate}, \texttt{loop\_interchange\_candidate}, \texttt{nested\_loops}, \texttt{convolution\_1d}, \texttt{prefix\_sum}, \texttt{saxpy}. Designed to exercise specific loop optimizations. 10--30 lines, 1--2 functions, nesting depth 1--3.
+  \item \textbf{Scalar optimization targets} (6 programs): \texttt{const\_prop}, \texttt{dead\_code}, \texttt{strength\_reduce}, \texttt{polynomial}, \texttt{gcd\_lcm}, \texttt{bitcount}. Algebraic simplification and dead code patterns. 10--40 lines, 1--3 functions, nesting depth 0--2.
+  \item \textbf{Memory/struct operations} (8 programs): \texttt{linked\_list}, \texttt{tree\_traversal}, \texttt{struct\_array}, \texttt{memcpy\_like}, \texttt{memset\_like}, \texttt{gather\_scatter}, \texttt{matrix\_transpose}, \texttt{matrix\_vector}. Pointer-chasing, struct access patterns. 30--80 lines, 2--5 functions, nesting depth 0--2.
+  \item \textbf{Compound algorithms} (10 programs): \texttt{bubble\_sort}, \texttt{insertion\_sort}, \texttt{dot\_product}, \texttt{dgemv}, \texttt{heat\_equation}, \texttt{image\_blur}, \texttt{nbody\_simple}, \texttt{correlation}, \texttt{covariance}, \texttt{trmm}. Larger programs combining multiple patterns. 20--80 lines, 1--4 functions, nesting depth 1--3.
+\end{itemize}
+
+Synthetic benchmarks average 35 lines of C (range: 10--80), with 1--5 functions and loop nesting depths of 0--4. They are not intended to represent production software; rather, they provide controlled coverage of diverse optimization patterns to ensure the algebraic measurements are not biased by a single program style. The algebraic findings (idempotency, oscillation cycles) are validated on both PolyBench and synthetic subsets and show consistent patterns across both.
+
+\end{document}

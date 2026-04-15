@@ -1,0 +1,249 @@
+\documentclass{article}
+\usepackage[final]{neurips_2023}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\providecommand{\doi}[1]{doi: #1}
+
+\title{SPARE-Gain: A Low-Compute Benchmark of Baseline-Relative Routing for Unseen-Perturbation Pseudobulk Prediction}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\yb}{\hat{y}_0}
+\newcommand{\yc}{\hat{y}_1}
+\newcommand{\gain}{g_{\mathrm{RMSE}}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Single-cell perturbation modeling is crowded with expressive architectures, while recent evaluations show that simple baselines remain difficult to beat and that aggregate metrics can overstate perturbation-specific progress. We therefore study a narrower question: given a frozen low-compute pseudobulk baseline and a lightweight residual corrector, do conformal lower-bound scores rank perturbations better than simpler routing signals? SPARE-Gain benchmarks six routing policies on Adamson, Norman, and Replogle using perturbation-level train, route-development, calibration, and test splits. The headline evaluation is a matched-acceptance ranking study: for each router, we compare the top-ranked 20\%, 40\%, and 60\% of test perturbations under the same acceptance budget. At the pre-registered 40\% target, the classifier gate is best on Adamson and Replogle, while the non-conformal gain regressor is best on Norman (mean accepted-set RMSE gain 0.000846 versus 0.000667 for the conformal lower-bound router). The conformal score improves over pure uncertainty filtering on all three datasets, but it is never the best method at the main operating point, and its apparent advantages are concentrated in Adamson and Replogle where each seed has only 8 and 10 calibration perturbations. Across matched-acceptance comparisons, hard-subset slices, and executed sensitivities, the benchmark therefore supports a negative result: low-compute routing can help, but conformal calibration does not show a robust advantage over simpler ranking rules in this regime.
+\end{abstract}
+
+\section{Introduction}
+Predicting cellular responses to unseen perturbations has become a central problem in single-cell machine learning, with methods such as scGen, CPA, GEARS, AttentionPert, BioDSNN, and PerturbNet pursuing increasingly expressive representations and inductive biases \citep{lotfollahi2019scgen,lotfollahi2023cpa,roohani2024gears,bai2024attentionpert,tan2024biodsnn,yu2025perturbnet}. At the same time, recent benchmarking has raised the bar for credible progress. Systema shows that standard evaluation can reward systematic perturbed-versus-control variation rather than perturbation-specific generalization \citep{vinastorne2025systema}, and recent comparison studies report that simple baselines remain highly competitive \citep{ahlmanneltze2025linearbaseline,kernfeld2025forecasting}.
+
+That setting motivates a narrower question than ``can we build a better perturbation predictor?'' In many practical deployments, a cheap baseline is already available. The relevant decision is whether a more complex correction should be used on a given perturbation at all. SPARE-Gain asks whether that routing decision can be ranked using \emph{baseline-relative improvement} scores instead of generic uncertainty.
+
+Concretely, we freeze the stronger of two low-compute pseudobulk baselines, train a small residual corrector on a responsive gene panel, and compare six routing policies: always baseline, always correct, a classifier gate, an uncertainty-threshold gate, a non-conformal gain regressor, and a conformal lower-bound gain router. The conformal model produces a calibrated lower bound on perturbation-level RMSE gain, but the paper's headline evaluation is not threshold deployment on that bound. Instead, it is a matched-acceptance ranking study that asks whether conformal scores order perturbations better than simpler alternatives.
+
+Our contributions are:
+\begin{itemize}
+    \item We formulate unseen-perturbation routing as certification of \emph{baseline-relative} gain rather than selective prediction for a single model.
+    \item We provide a low-compute benchmark on Adamson, Norman, and Replogle with matched-acceptance comparisons, hard-subset slices, biological summary metrics, ablations, and executed sensitivity analyses.
+    \item We show a negative result: at the pre-registered 40\% acceptance target, the conformal lower-bound router is never the best method, and the best-powered dataset favors a simpler non-conformal gain regressor.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the benchmark and routing rules, Section~\ref{sec:experiments} presents the experiments, Section~\ref{sec:discussion} discusses limitations and implications, and Section~\ref{sec:repro} records reproducibility details and artifact locations.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Perturbation prediction.}
+Latent arithmetic and conditional generative modeling established the modern perturbation-prediction literature \citep{lotfollahi2019scgen,lotfollahi2023cpa}. More recent methods target unseen or combinatorial perturbations with stronger architectural priors, including GEARS, AttentionPert, BioDSNN, and PerturbNet \citep{roohani2024gears,bai2024attentionpert,tan2024biodsnn,yu2025perturbnet}. PRESCRIBE is especially relevant because it uses uncertainty-aware filtering for single-cell perturbation prediction \citep{cheng2025prescribe}. Unlike these papers, SPARE-Gain does not introduce a new perturbation backbone; it isolates the decision of whether to switch away from a named frozen baseline.
+
+\paragraph{Benchmark framing.}
+Systema argues that perturbation-response benchmarks should separate perturbation-specific generalization from easier systematic variation \citep{vinastorne2025systema}. Independent comparisons similarly report that strong simple baselines remain hard to outperform \citep{ahlmanneltze2025linearbaseline,kernfeld2025forecasting}. We adopt that skeptical framing directly: the goal is not to showcase a sophisticated predictor, but to test whether routing adds value under carefully matched acceptance rates.
+
+\paragraph{Selective prediction, abstention, and calibration.}
+Selective regression and reject-option methods decide when a predictor should abstain \citep{geifman2019selectivenet,denis2020regression,sokol2024conformalized}. Learning-to-defer methods choose between decision-makers instead of abstaining outright \citep{mozannar2020consistent}. Conformal Risk Control and Learn then Test show how calibration can target explicit risk constraints rather than raw confidence \citep{angelopoulos2024conformal,angelopoulos2022learn}. SPARE-Gain is closest in spirit to this latter line, but differs in the target quantity: we calibrate a lower bound on \emph{relative gain against a frozen baseline}, not coverage or risk for a single predictor.
+
+\section{Method}
+\label{sec:method}
+\subsection{Problem Setup}
+For perturbation descriptor $x$, let $y(x)$ denote the true pseudobulk response, $\yb(x)$ the frozen baseline prediction, and $\yc(x)$ the baseline plus residual correction. The routing task is to decide, before observing $y(x)$, whether to output $\yb(x)$ or $\yc(x)$.
+
+The primary gain target is perturbation-level RMSE improvement,
+\begin{equation}
+\gain(x) = \mathrm{RMSE}(\yb(x), y(x)) - \mathrm{RMSE}(\yc(x), y(x)).
+\end{equation}
+Positive gain means the correction helped. The benchmark fixes this all-gene RMSE gain as the primary endpoint and treats top-DE RMSE, Pearson-delta, and pathway-score gains as sensitivity targets.
+
+\subsection{Low-Compute Predictors}
+The executed pipeline follows the proposal but is intentionally small. For each dataset and seed, we retain the top 1{,}500 high-variance genes from training cells, add perturbation target genes when present, define a responsive panel of up to 256 genes from recurrent training perturbation effects, and define a top-DE evaluation set of up to 200 genes.
+
+\paragraph{Frozen baseline.}
+Two cheap baselines are fit on training perturbations only. For Adamson and Replogle, the first baseline is a descriptor-nearest-neighbor regressor over perturbation deltas with $k \in \{3,5,8\}$ and temperature $\tau \in \{0.5,1,2\}$ chosen on the route-development split. For Norman, the simple baseline is additive composition of seen single-gene effects. The second baseline is a ridge regressor from perturbation descriptors to pseudobulk expression, optionally through a truncated SVD target space. The lower route-development RMSE baseline is frozen and used for every router.
+
+\paragraph{Residual corrector.}
+The residual model predicts either the panel residual $y-\yb$ or, in one ablation, the panel expression directly. Inputs concatenate the baseline panel prediction, the training-control pseudobulk, hashed target descriptors, pair-composition and co-target graph features, retrieval-derived prototype residuals from training perturbations, and novelty-style diagnostics such as nearest-neighbor density and cross-view disagreement. The corrector is a two-hidden-layer MLP with width 256, GELU activations, dropout 0.1, AdamW, batch size 64, learning rate $10^{-3}$, weight decay $10^{-4}$, and early stopping over at most 200 epochs.
+
+\subsection{Routing Features and Policies}
+The router observes perturbation-level features available before the test response is known:
+\begin{itemize}
+    \item baseline norm and predicted residual norm on the responsive panel;
+    \item Monte Carlo dropout uncertainty from five stochastic forward passes;
+    \item retrieval similarity, entropy, density, and cross-view disagreement;
+    \item novelty features derived from descriptor distance to training perturbations;
+    \item Norman-specific indicators for 0-seen and 1-seen target combinations.
+\end{itemize}
+
+We compare six policies:
+\begin{enumerate}
+    \item \textbf{Always baseline}: always output $\yb$.
+    \item \textbf{Always correct}: always output $\yc$.
+    \item \textbf{Classifier gate}: fit a gradient boosting classifier for $\mathbb{1}[\gain(x)>0]$.
+    \item \textbf{Uncertainty gate}: rank perturbations by negative predictive uncertainty.
+    \item \textbf{Gain regressor}: fit a gradient boosting regressor for $\mathbb{E}[\gain(x)\mid z]$.
+    \item \textbf{Conformal lower-bound router}: fit a lower-quantile regressor $q_\alpha(z)$ with $\alpha=0.2$, calibrate it on held-out perturbations, and use the calibrated lower bound as a routing score.
+\end{enumerate}
+
+The conformal router uses route-development perturbations for the quantile model and the calibration split for the additive adjustment:
+\begin{equation}
+\tilde{q}_\alpha(z) = q_\alpha(z) - \hat{\Delta},
+\end{equation}
+where $\hat{\Delta}$ is the empirical 90th percentile of $q_\alpha(z_i)-\gain(x_i)$ on calibration perturbations.
+
+\subsection{Matched-Acceptance Evaluation}
+The natural deployment rule for the conformal score is to accept the residual correction when $\tilde{q}_\alpha(z)>0$. That sign-threshold rule is \emph{not} the headline evaluation reported in this paper. The executed benchmark instead studies whether each router yields a useful \emph{ranking} of test perturbations under a fixed acceptance budget. For acceptance target $r \in \{0.2,0.4,0.6\}$ and $n_{\mathrm{test}}$ held-out perturbations, we accept the top
+\begin{equation}
+k(r) = \max \left(1, \mathrm{round}(r \cdot n_{\mathrm{test}})\right)
+\end{equation}
+perturbations under each router's score. This matched-acceptance protocol removes confounding from different router conservativeness and is the primary endpoint throughout the paper. The conformal router is therefore evaluated as a lower-bound \emph{ranking score}, not as a standalone deployed threshold policy.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+We evaluate on Adamson, Norman, and Replogle perturbation datasets in a pseudobulk-first setting. Splits are defined at the perturbation level. Adamson has 45 training, 15 route-development, 8 calibration, and 7 test perturbations for each seed; Replogle has 62/21/10/11; Norman has 60--66/80--83/40--42/39--42, depending on the seed-specific combinatorial split. The canonical runs use seeds 42, 43, and 44.
+
+The calibrated operating point is underpowered on Adamson and Replogle because every seed has fewer than 20 calibration perturbations (8 and 10, respectively), while Norman has 40--42. This distinction matters for interpretation and is preserved in all conclusions below.
+
+Implementation follows the exact executed pipeline in \texttt{exp/shared/pipeline.py}. The residual corrector has 397{,}568 trainable parameters. The selected baseline has 395{,}289 to 411{,}858 effective parameters depending on dataset, while the router models are tiny (1{,}600--3{,}000 effective tree parameters). Runs were executed on CUDA with an NVIDIA RTX A6000; mean end-to-end runtime per seed is 2.91\,s on Adamson, 11.29\,s on Norman, and 2.05\,s on Replogle.
+
+\begin{table}[t]
+\caption{Primary matched-acceptance comparison at the 40\% target operating point. Values are mean accepted-set RMSE gain over three seeds, with higher better. The realized acceptance is 42.9\% on Adamson, 40.5\% on Norman, and 36.4\% on Replogle because the test sets are small. Best router per dataset is in \textbf{bold}.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Adamson gain $\uparrow$ & Norman gain $\uparrow$ & Replogle gain $\uparrow$ \\
+\midrule
+Always baseline & 0.000000 & 0.000000 & 0.000000 \\
+Always correct & -0.000915 & 0.000501 & -0.000146 \\
+Classifier gate & \textbf{0.000148} & 0.000601 & \textbf{0.000057} \\
+Uncertainty gate & -0.002590 & 0.000283 & -0.000376 \\
+Gain regressor & -0.001584 & \textbf{0.000846} & -0.000065 \\
+Conformal gate & -0.000812 & 0.000667 & 0.000021 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Results}
+Table~\ref{tab:main} gives the pre-registered primary endpoint. The clearest finding is not a conformal win, but that the conformal lower-bound score is never the best router at the 40\% operating point. Adamson and Replogle favor the classifier gate (0.000148 and 0.000057), while Norman favors the non-conformal gain regressor (0.000846). The conformal router is second-best on Norman (0.000667) and only marginally positive on Replogle (0.000021).
+
+Norman is the decisive case because it is the only adequately powered calibration setting. There, the conformal-minus-gain delta is negative (-0.000179), while the conformal-minus-uncertainty delta is positive (+0.000385). In other words, calibration improves over naive uncertainty ranking, but not enough to beat direct gain prediction on the only dataset with 40--42 calibration perturbations.
+
+The operating-point sweep in Figure~\ref{fig:matched_acceptance} shows that this conclusion is stable across 20\%, 40\%, and 60\% target acceptance. On Adamson, the conformal router improves from -0.001295 at 20\% to -0.000709 at 60\%, but remains behind the classifier gate. On Norman, all three learned routers remain positive and closely clustered; the gain regressor stays strongest at 20\%, 40\%, and 60\% (0.000726, 0.000846, and 0.000786). On Replogle, the conformal router is positive only at 20\% and 40\% (0.000485 and 0.000021) and turns slightly negative by 60\% (-0.000071).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/matched_acceptance_bars.png}
+\caption{Primary endpoint at 20\%, 40\%, and 60\% target acceptance. The comparison is always matched by acceptance within each dataset. The strongest pattern is not a consistent conformal advantage, but dataset dependence: Norman favors the non-conformal gain regressor, while Adamson and Replogle remain noisy and calibration-limited.}
+\label{fig:matched_acceptance}
+\end{figure}
+
+\subsection{Selective Risk and Biological Summaries}
+Figure~\ref{fig:selective} reports selective-risk curves across the full acceptance range. The curves reinforce the main finding: routing can help, but the gain is small and method rankings depend on the dataset. On Adamson, the best average selective score is still close to zero, which is consistent with the weak or negative gains in Table~\ref{tab:main}. On Norman and Replogle, selective ordering is more meaningful, but the conformal curve is not uniquely dominant.
+
+The biological summary metrics also fail to provide a strong rescue story for conformal routing. Relative to always baseline at the 40\% operating point, the conformal router on Adamson decreases top-20 responsive-gene overlap by 0.0683, sign accuracy by 0.0405, and pathway correlation by 0.1303. On Norman, it improves those quantities by 0.0176, 0.0752, and 0.0160, but the non-conformal gain regressor still has the best primary RMSE gain. On Replogle, conformal routing slightly improves top-20 overlap (+0.0117) but slightly worsens sign accuracy (-0.0064) and pathway correlation (-0.0004). These results support a restrained interpretation: accepted-set RMSE gains do not translate into a broad, consistent biological improvement story.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/selective_risk.png}
+\caption{Selective-risk curves over the full acceptance grid. Gains are modest on all three datasets, and the conformal gate is not consistently dominant over the simpler gain regressor or classifier gate.}
+\label{fig:selective}
+\end{figure}
+
+\subsection{Ablations}
+Table~\ref{tab:ablation} summarizes representative seed-42 ablations at the 40\% target acceptance. These are intentionally diagnostic rather than triumphant. Removing conformal calibration (\emph{raw quantile}) gives the same 40\% outcome as the conformal gate in all three datasets, indicating that the calibrated adjustment contributes little under the present split sizes. Removing novelty features changes the result only slightly. By contrast, switching the residual model from residual prediction to direct panel prediction changes the routing landscape substantially, sometimes for the better (Norman: 0.005388) and sometimes in a way that simply helps the uncertainty gate more than the conformal one (Adamson: 0.004689 for uncertainty vs.\ 0.001468 for conformal). The benchmark therefore suggests that backbone design choices matter more than the conformal wrapper.
+
+\begin{table}[t]
+\caption{Representative seed-42 ablation diagnostics for the conformal gate at the 40\% target acceptance. Values are mean accepted-set RMSE gain. The key negative result is that disabling conformal calibration reproduces the same operating-point value as the full conformal gate.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Variant & Adamson & Norman & Replogle \\
+\midrule
+Full conformal gate & 0.000038 & 0.002221 & -0.000106 \\
+No conformal adjustment & 0.000038 & 0.002221 & -0.000106 \\
+No novelty features & 0.000038 & 0.002316 & -0.000161 \\
+No retrieval features & -0.000838 & 0.001847 & -0.000057 \\
+Uncertainty-only features & 0.000038 & 0.002262 & -0.000142 \\
+Direct panel prediction & 0.001468 & 0.005388 & 0.001758 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sensitivity Analyses}
+The executed sensitivities are visible in both Table~\ref{tab:sensitivity} and Figure~\ref{fig:sensitivity}. The main trend is instability on the underpowered datasets and relative stability on Norman. Across quantile levels, Adamson remains negative at $\alpha=0.1$ and $\alpha=0.2$ (-0.000812 in both cases) and only improves to -0.000224 at $\alpha=0.3$. Replogle flips sign across quantile choices (+0.000166, +0.000021, and -0.000241), while Norman stays positive and roughly monotone (0.000550, 0.000667, and 0.000721).
+
+The gain-definition sensitivities tell a similar story. Norman remains positive under pathway, Pearson, and top-DE gain targets (0.001836, 0.002335, and 0.002856), whereas Replogle is negative under all three alternates. Adamson improves only modestly under pathway and Pearson gains (+0.000463 each) and is essentially unchanged under top-DE gain (+0.000038).
+
+Cross-fit calibration and alternate route/calibration allocations again separate Norman from the other two datasets. Norman stays positive under cross-fit calibration (0.002917) and all tested split reallocations (0.001937 to 0.002221). Adamson and Replogle fluctuate around zero under split changes, and calibration-size subsampling does not materially change the seed-42 result because the calibration sets are already tiny. We therefore treat any apparent conformal advantages in Adamson and Replogle as calibration-limited rather than decisive.
+
+\begin{table}[t]
+\caption{Executed sensitivity analyses for the conformal lower-bound router at the 40\% matched-acceptance target. Values are mean accepted-set RMSE gain over the completed runs. Higher is better.}
+\label{tab:sensitivity}
+\centering
+\scriptsize
+\begin{tabular}{lrrrrrrr}
+\toprule
+Dataset & $\alpha=.1$ & $\alpha=.2$ & $\alpha=.3$ & Top-DE & Pearson & Pathway & Cross-fit \\
+\midrule
+Adamson & -0.000812 & -0.000812 & -0.000224 & 0.000038 & 0.000463 & 0.000463 & -0.000399 \\
+Norman & 0.000550 & 0.000667 & 0.000721 & 0.002856 & 0.002335 & 0.001836 & 0.002917 \\
+Replogle & 0.000166 & 0.000021 & -0.000241 & -0.000366 & -0.000106 & -0.000030 & -0.000106 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/sensitivity.png}
+\caption{Sensitivity analysis for split choice, quantile level, and alternate gain definitions. Stability is dataset-dependent: Norman remains positive across settings, while Adamson and Replogle move around zero and sometimes change sign.}
+\label{fig:sensitivity}
+\end{figure}
+
+\subsection{Hard Subsets and Diagnostics}
+Figure~\ref{fig:hardsubsets} makes the hard-subset outcome explicit. Adamson and Replogle test perturbations collapse into a single novelty bin (\texttt{q4}) under the current training-only novelty definition, so quartile stratification is not informative there; the figure states that directly rather than implying a missing analysis. Norman retains the intended combinatorial hardness structure. On its hardest \texttt{0-seen} subset, both conformal and uncertainty routing are negative (-0.000274 and -0.000200), so the benchmark does not support a strong claim on the most difficult held-out combinations. On \texttt{2-seen} combinations, the conformal router is positive (0.000296) while uncertainty is negative (-0.001264), but that subset result does not overturn the main matched-acceptance ranking in Table~\ref{tab:main}.
+
+Router diagnostics further support the negative framing. The mean Jaccard overlap between conformal and uncertainty accepted sets at 40\% acceptance is 0.567 on Adamson, 0.328 on Norman, and 0.206 on Replogle, so the conformal router is not literally reproducing uncertainty ranking. Nevertheless, those score-level differences rarely translate into a best-in-class operating-point result.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/hard_subset_results.png}
+\caption{Hard-subset analysis for the main 40\% matched-acceptance comparison. Adamson and Replogle collapse into a single novelty bin under the executed novelty definition, so no informative quartile slice exists there. Norman retains the planned combinatorial hardness groups; the hardest \texttt{0-seen} subset remains negative for both conformal and uncertainty routing.}
+\label{fig:hardsubsets}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main limitation is calibration size. Adamson and Replogle have only 8 and 10 calibration perturbations per seed, far below what would be comfortable for decisive conformal claims. A second limitation is scope: all results are pseudobulk-first, so they say nothing about preserving cell-state heterogeneity. Third, the executed feature space is narrower than originally proposed. Curated GO and pathway descriptors were not restored locally; the runs therefore use hashed target identity, simple co-target graph features, retrieval statistics, and training-derived gene modules for pathway-style analysis.
+
+These limitations matter because they point in opposite directions. Limited calibration data should, if anything, make conformal conclusions weaker. At the same time, the negative result is already visible before asking for richer biology features or larger models. The paper therefore should not be read as ``conformal routing never helps.'' It should be read as a controlled benchmark result: under a realistic low-compute pseudobulk pipeline, conformal certification of baseline-relative gain does not yet justify a strong deployment claim beyond simpler matched-acceptance routing rules.
+
+\section{Reproducibility and Artifact Map}
+\label{sec:repro}
+The executed benchmark uses seeds 42, 43, and 44 throughout. Splits are defined at perturbation identity level with a canonical 60/20/10/10 train/route-dev/calibration/test allocation for Adamson and Replogle, and the Norman split enforces combinatorial hardness structure before applying the same route-dev and calibration proportions. The exact perturbation counts are Adamson 45/15/8/7, Replogle 62/21/10/11, and Norman 66/80/40/40 for seed 42, 63/82/42/39 for seed 43, and 60/83/41/42 for seed 44. For a target acceptance rate $r \in \{0.2,0.4,0.6\}$, each router accepts the top $\max(1,\mathrm{round}(r n_{\mathrm{test}}))$ test perturbations, yielding realized mean acceptance fractions of 0.428571 on Adamson, 0.405006 on Norman, and 0.363636 on Replogle at the nominal 40\% operating point.
+
+The preprocessing and model hyperparameters are fixed in the executed code: 1{,}500 training-defined high-variance genes, a responsive panel of up to 256 genes, a top-DE set of up to 200 genes, descriptor hashes of width 64, an MLP residual corrector with two 256-unit hidden layers and dropout 0.1, AdamW with learning rate $10^{-3}$, weight decay $10^{-4}$, batch size 64, and at most 200 epochs, and gradient-boosting router models with depth 3 and 200 trees for the classifier or 300 trees for the gain and quantile regressors. The conformal quantile level is $\alpha=0.2$ in the main runs and the calibration adjustment uses the empirical 90th percentile. Runs used CUDA on an NVIDIA RTX A6000 (48\,GB visible memory); mean total runtime per seed is 2.91\,s on Adamson, 11.29\,s on Norman, and 2.05\,s on Replogle.
+
+The artifact mapping is explicit. Table~\ref{tab:main} comes from \path{figures/main_table.csv}, aggregated from \path{exp/*/main/seed_*/metrics.json}. Figure~\ref{fig:matched_acceptance}, Figure~\ref{fig:selective}, Figure~\ref{fig:sensitivity}, and Figure~\ref{fig:hardsubsets} correspond to \path{figures/matched_acceptance_bars.png}, \path{figures/selective_risk.png}, \path{figures/sensitivity.png}, and \path{figures/hard_subset_results.png}, respectively, with raw row-level inputs in \path{figures/all_metrics.csv} and \path{exp/*/*/seed_*/per_perturbation.csv}. Split counts are recorded in \path{figures/calibration_counts.csv} and \path{splits/*/seed_*.json}. Per-run hyperparameters and runtime metadata are in \path{exp/*/*/seed_*/config.json} and \path{exp/*/*/seed_*/runtime.json}. Feature artifacts and split memberships are saved under \path{features/*/seed_*/} and \path{features/*/seed_*/variant_*}. The hardware snapshot used for the run version is \path{logs/hardware_stage2_retry1_v3.txt}.
+
+\section{Conclusion}
+We introduced SPARE-Gain, a benchmark for deciding when a lightweight residual corrector should replace a frozen pseudobulk baseline on unseen perturbations. The benchmark evaluates routing scores under matched acceptance rather than claiming deployment performance from a fixed threshold rule. Across Adamson, Norman, and Replogle, the conformal lower-bound router improves over uncertainty ranking but is never the best method at the pre-registered 40\% operating point: the classifier gate is best on Adamson and Replogle, and the non-conformal gain regressor is best on Norman (0.000846 vs.\ 0.000667 for conformal). The appropriate conclusion is therefore a negative benchmark result: low-compute routing can help, but conformal calibration does not yet show a robust advantage over simpler alternatives under careful matched-acceptance evaluation. Future work should revisit the question with larger calibration splits, richer biological features, and cell-state-resolved targets rather than stronger claims from the current low-data regime.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

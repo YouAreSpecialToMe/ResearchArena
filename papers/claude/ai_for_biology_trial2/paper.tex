@@ -1,0 +1,437 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{natbib}
+
+\newcommand{\epignn}{\textsc{EpiGNN}}
+\newcommand{\ftmlp}{MLP$_\text{fit}$}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bh}{\mathbf{h}}
+\newcommand{\bC}{\mathbf{C}}
+\newcommand{\bA}{\mathbf{A}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{EpiGNN: Multi-Mutation Protein Fitness Prediction via Message Passing on Language Model-Derived Residue Coupling Graphs}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Protein language models (PLMs) predict multi-mutation fitness effects by summing independent single-mutation scores, ignoring epistatic interactions between co-occurring mutations.
+We propose \epignn{}, a lightweight graph neural network that predicts fitness by modeling inter-mutation interactions through message passing on mutation-centric subgraphs.
+For each multi-mutant variant, \epignn{} constructs a small graph where nodes are mutated positions with PLM-derived embeddings and edges encode residue-residue coupling extracted from ESM-2 attention maps.
+Graph attention layers propagate information between mutated positions, and the model predicts fitness directly from the resulting representations.
+Evaluated on seven deep mutational scanning datasets from ProteinGym containing multi-mutation variants, \epignn{} achieves an average Spearman $\rho$ of 0.629, substantially outperforming additive ESM-2 scoring ($\rho = 0.111$) and ridge regression ($\rho = 0.595$).
+We find that training the model to predict fitness directly, rather than the epistatic residual, is critical for performance---switching the training objective alone accounts for a 0.472-point improvement.
+Importantly, while \epignn{} is an effective multi-mutation fitness predictor, it does not capture epistatic interactions in isolation (mean epistasis correlation $= -0.111$), and architecture ablations on a two-protein subset reveal that a simpler MLP without graph structure can match or exceed \epignn{}'s performance.
+These findings suggest that the training objective and PLM-derived features, rather than graph architecture, are the primary drivers of performance.
+\end{abstract}
+
+\section{Introduction}
+
+Predicting how mutations affect protein function is a central challenge in protein engineering and molecular biology.
+Deep mutational scanning (DMS) experiments have generated millions of variant-function measurements, and protein language models (PLMs) such as ESM-2~\citep{lin2023evolutionary} achieve impressive zero-shot accuracy on single-mutation fitness prediction through masked marginal scoring~\citep{meier2021language}.
+However, real-world protein engineering typically involves introducing \emph{multiple simultaneous mutations}, where the combined fitness effect is not simply the sum of individual effects---a phenomenon known as \emph{epistasis}~\citep{wu2016adaptation}.
+
+Current PLM-based fitness predictors handle multi-mutation variants by assuming additivity: the predicted fitness is the sum of single-mutation scores.
+This assumption systematically fails when epistatic interactions are present.
+\citet{dieckhaus2025protein} demonstrated that even state-of-the-art stability prediction models fail to capture epistatic interactions of double point mutations, while \citet{nambiar2025plm_epistasis} showed that PLMs \emph{do} encode pairwise epistatic information in their attention maps---but this information is not exploited by standard scoring approaches.
+
+We propose \epignn{}, a graph neural network architecture that models interactions between co-occurring mutations to improve multi-mutation fitness prediction.
+For each multi-mutant variant, \epignn{} constructs a small \emph{mutation-centric subgraph} where nodes represent mutated positions (with PLM-derived features) and edges encode residue coupling information extracted from ESM-2 attention maps.
+Graph attention message passing~\citep{brody2022how} propagates information between mutated positions, producing representations that capture inter-mutation dependencies.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \epignn{}, a mutation-centric graph neural network that predicts multi-mutation protein fitness by modeling inter-mutation interactions through message passing on PLM-derived coupling graphs.
+    \item We demonstrate that \epignn{} substantially outperforms additive PLM baselines and ridge regression on seven ProteinGym DMS datasets, achieving a mean Spearman $\rho$ of 0.629 versus 0.111 (additive) and 0.595 (ridge).
+    \item Through ablation studies, we identify that training on direct fitness prediction rather than the epistatic residual is the single most important design choice, and we present honest negative results: the graph architecture does not clearly outperform a simpler MLP on a two-protein subset, PLM coupling edges do not significantly outperform random edges ($p = 0.483$), and the model does not capture epistatic interactions in isolation (mean epistasis correlation $= -0.111$).
+\end{itemize}
+
+The rest of this paper is organized as follows: Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes our approach, Section~\ref{sec:experiments} presents experimental results and ablations, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Protein language models for fitness prediction.}
+PLMs such as ESM-2~\citep{lin2023evolutionary}, ESM-1v~\citep{meier2021language}, and Tranception~\citep{notin2022tranception} leverage evolutionary statistics learned from large protein sequence databases for zero-shot fitness prediction.
+These models compute fitness effects via masked marginal scoring (ESM) or autoregressive log-likelihoods (Tranception).
+For multi-mutation variants, fitness is predicted as the sum of independent single-mutation scores, which fails to capture epistatic interactions.
+ProteinGym~\citep{notin2023proteingym} provides comprehensive benchmarks for evaluating these methods, including multi-mutation DMS assays.
+Our work builds on PLM representations but introduces explicit modeling of inter-mutation interactions.
+
+\paragraph{Epistasis in protein language models.}
+\citet{nambiar2025plm_epistasis} demonstrated that PLMs capture pairwise structural and functional epistasis in a zero-shot setting, showing that attention maps align with residue-residue contacts and that nonlinear transformations of PLM outputs correlate with functional couplings.
+\citet{tsui2024recovering} studied higher-order interaction recovery from PLMs theoretically.
+Both works are analytical rather than predictive.
+Our work operationalizes the insight that PLM attention maps encode coupling information by using it as edge features in a graph neural network.
+
+\paragraph{Structure-based epistasis prediction.}
+\citet{huynh2025dynamics} introduced a dynamics-based GNN that uses molecular dynamics (MD) simulations to compute residue coupling, achieving strong fitness and epistasis prediction.
+However, MD simulations require hours to days per protein, limiting scalability.
+We replace MD-derived dynamics with PLM attention-derived coupling, which requires only a single forward pass through the language model.
+
+\paragraph{Multi-mutation stability and fitness prediction.}
+SPURS~\citep{li2025spurs} uses rewired protein generative models for stability prediction including higher-order mutations.
+GraphESMStable~\citep{zhang2026graphesmstable} combines ESM embeddings with 3D structural features and an epistasis decoder for stability prediction.
+Both methods construct full protein-level graphs.
+In contrast, \epignn{} uses lightweight mutation-centric subgraphs that contain only the mutated positions, making the model focused and efficient.
+\citet{dieckhaus2025protein} showed that current stability models struggle with epistatic interactions, motivating architectures that explicitly model non-additive effects.
+
+\section{Method}
+\label{sec:method}
+
+\epignn{} takes a multi-mutation protein variant and predicts its fitness through four steps: (1) PLM feature extraction, (2) mutation graph construction, (3) graph attention message passing, and (4) fitness prediction.
+We describe each step below.
+
+\subsection{PLM Feature Extraction}
+
+For each protein, we use ESM-2 (650M parameters)~\citep{lin2023evolutionary} to extract two types of features from the wild-type sequence:
+
+\paragraph{Per-residue embeddings.}
+We run ESM-2 on the wild-type sequence to obtain per-residue embeddings $\bh_i \in \R^{1280}$ from the final hidden layer, where $i$ indexes residue positions.
+For each mutation at position $i$ (wild-type residue $w \to$ mutant residue $m$), we also compute a scalar mutation score via masked marginal scoring:
+\begin{equation}
+    s_i = \log P(m \mid \text{context}) - \log P(w \mid \text{context})
+\end{equation}
+
+\paragraph{Residue coupling matrix.}
+We extract a coupling matrix $\bC \in \R^{L \times L}$ from ESM-2's attention maps.
+We average attention weights across heads in layers 20--33 (deeper layers encode more structural information~\citep{rao2021msa}), symmetrize the result, and apply Average Product Correction (APC) to remove phylogenetic background signal:
+\begin{equation}
+    C_{ij}^{\text{apc}} = C_{ij}^{\text{raw}} - \frac{\bar{C}_{i\cdot} \cdot \bar{C}_{\cdot j}}{\bar{C}}
+\end{equation}
+where $\bar{C}_{i\cdot}$ and $\bar{C}_{\cdot j}$ are row and column means, and $\bar{C}$ is the global mean.
+
+\subsection{Mutation Graph Construction}
+
+For a multi-mutant variant with mutations at positions $\{p_1, p_2, \ldots, p_k\}$, we construct a directed mutation subgraph $G = (V, E)$:
+
+\paragraph{Nodes.}
+$V = \{p_1, \ldots, p_k\}$, where each node $p_i$ has features derived from the wild-type ESM-2 embedding at that position, scaled by the masked marginal score:
+\begin{equation}
+    \bx_{p_i} = \bh_{p_i} \cdot (1 + 0.1 \cdot s_{p_i})
+\end{equation}
+
+\paragraph{Edges.}
+The graph is fully connected among all mutated positions.
+Each directed edge $(p_i, p_j)$ carries a three-dimensional feature vector:
+\begin{equation}
+    \mathbf{e}_{ij} = \left[ C_{p_i, p_j}^{\text{apc}}, \; \frac{|p_i - p_j|}{100}, \; \frac{1}{1 + |p_i - p_j|} \right]
+\end{equation}
+encoding the PLM-derived coupling score, normalized sequence separation, and inverse sequence separation.
+For single-mutant variants, a self-loop edge is added.
+
+\subsection{Graph Attention Message Passing}
+
+We apply two layers of GATv2~\citep{brody2022how} on the mutation subgraph.
+Each layer uses 4 attention heads with 32-dimensional outputs per head (128 total).
+Edge features are projected and incorporated into the attention computation:
+\begin{align}
+    \alpha_{ij} &= \frac{\exp\left(\mathbf{a}^T \text{LeakyReLU}\left(\mathbf{W}_1 \bh_i^{(\ell)} \| \mathbf{W}_2 \bh_j^{(\ell)} + \mathbf{W}_e \mathbf{e}_{ij}\right)\right)}{\sum_{j' \in \mathcal{N}(i)} \exp\left(\mathbf{a}^T \text{LeakyReLU}\left(\mathbf{W}_1 \bh_i^{(\ell)} \| \mathbf{W}_2 \bh_{j'}^{(\ell)} + \mathbf{W}_e \mathbf{e}_{ij'}\right)\right)} \\
+    \bh_i^{(\ell+1)} &= \bh_i^{(\ell)} + \text{LayerNorm}\left(\sum_{j \in \mathcal{N}(i)} \alpha_{ij} \mathbf{W}_v \bh_j^{(\ell)}\right)
+\end{align}
+where $\|$ denotes concatenation, $\mathbf{W}_e$ projects edge features, and we use residual connections with layer normalization.
+Node features are initially projected from 1280 to 128 dimensions via a linear layer.
+
+\subsection{Fitness Prediction}
+
+After message passing, we aggregate node representations via sum pooling and predict fitness through an MLP readout:
+\begin{equation}
+    \hat{y} = \text{MLP}\left(\sum_{i \in V} \bh_i^{(L)}\right)
+\end{equation}
+where $\text{MLP}: \R^{128} \to \R$ consists of two linear layers with ReLU activation and dropout ($p=0.1$).
+The model is trained to minimize mean squared error between predicted and observed fitness:
+\begin{equation}
+    \mathcal{L} = \sum_v \left\| \hat{y}_v - y_v \right\|^2
+\end{equation}
+
+We found that training on direct fitness prediction substantially outperforms training on the epistatic residual ($y_v - \sum_i s_i$), as discussed in Section~\ref{sec:ablation}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets.}
+We use seven DMS assays from the ProteinGym benchmark~\citep{notin2023proteingym} that contain substantial numbers of multi-mutation variants (at least 200 variants with $\geq 2$ simultaneous mutations).
+Table~\ref{tab:datasets} summarizes the datasets.
+These span diverse protein families including fluorescent proteins (GFP), SH3 domains (GRB2), transcription factors (YAP1), metabolic enzymes (HIS7), RNA-binding proteins (PABP), IgG-binding proteins (SPG1), and toxin-antitoxin system components (F7YBW8).
+
+\begin{table}[t]
+\centering
+\caption{Dataset statistics for multi-mutant variants ($\geq 2$ simultaneous substitutions) used in experiments. Counts reflect variants after filtering to multi-mutants only. Datasets exceeding 15{,}000 variants were randomly subsampled to 15{,}000 for training efficiency.}
+\label{tab:datasets}
+\begin{tabular}{lrrrr}
+\toprule
+Protein & Multi-mutants & Doubles & Triple+ & Seq.\ length \\
+\midrule
+F7YBW8 (Aakre 2015) & 9{,}155 & 499 & 8{,}656 & 93 \\
+GFP (Sarkisyan 2016) & 42{,}671$^\dagger$ & 11{,}954 & 30{,}717 & 238 \\
+GRB2 (Faure 2021) & 62{,}189$^\dagger$ & 62{,}189 & 0 & 217 \\
+HIS7 (Pokusaeva 2019) & 254{,}614$^\dagger$ & 1{,}243 & 253{,}371 & 220 \\
+PABP (Melamed 2013) & 36{,}370$^\dagger$ & 36{,}370 & 0 & 577 \\
+SPG1 (Olson 2014) & 535{,}917$^\dagger$ & 535{,}917 & 0 & 448 \\
+YAP1 (Araya 2012) & 8{,}669 & 8{,}669 & 0 & 504 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small{$^\dagger$Subsampled to 15{,}000 variants for training.}
+\end{table}
+
+\paragraph{Baselines.}
+We compare against three baselines:
+\begin{itemize}
+    \item \textbf{Additive ESM-2}: Zero-shot prediction where multi-mutation fitness is the sum of individual masked marginal scores~\citep{meier2021language}. No training required.
+    \item \textbf{Ridge Regression}: A supervised baseline using ESM-2-derived features: additive score, number of mutations, PCA-reduced mutation embeddings (64 dimensions), and pairwise coupling statistics. Regularization parameter selected via inner cross-validation.
+    \item \textbf{MLP (no graph)}: An ablation of \epignn{} that removes graph structure. Mutation features are sum-pooled (without message passing) and concatenated with tabular features before prediction. Trained on the epistatic residual to match our initial experimental design.
+\end{itemize}
+
+\paragraph{Evaluation protocol.}
+For each protein, we perform 3-fold cross-validation with 3 random seeds (42, 123, 456), yielding 9 evaluations per protein.
+We report Spearman's $\rho$ between predicted and observed fitness as the primary metric.
+Statistical significance is assessed via Wilcoxon signed-rank tests across the 9 fold-seed combinations per protein.
+
+\paragraph{Implementation details.}
+\epignn{} uses 2 GATv2 layers with 4 attention heads (32 dims/head), hidden dimension 128, and dropout 0.1.
+Training uses Adam optimizer with learning rate $5 \times 10^{-4}$, weight decay $10^{-4}$, batch size 64, and maximum 300 epochs with early stopping (patience 30) based on validation Spearman $\rho$.
+Learning rate is reduced on plateau (patience 10, factor 0.5).
+The model has approximately 600K trainable parameters.
+ESM-2 feature extraction takes 2--3 hours and model training takes $<$1 hour per protein on a single NVIDIA RTX A6000 GPU (48GB).
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents multi-mutation fitness prediction results across all seven proteins.
+Figure~\ref{fig:main_results} provides a visual comparison.
+
+\begin{table}[t]
+\centering
+\caption{Multi-mutation fitness prediction: Spearman $\rho$ (mean $\pm$ std across 3 seeds $\times$ 3 folds). Best in \textbf{bold}, second-best \underline{underlined}. All supervised methods use the fitness training objective except MLP, which uses the epistatic residual target (see Section~\ref{sec:ablation} for discussion).}
+\label{tab:main}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+Protein & Additive ESM-2 & Ridge Regression & MLP (no graph) & \epignn{} \\
+\midrule
+F7YBW8 & $0.277 \pm 0.017$ & $\underline{0.326 \pm 0.130}$ & $0.293 \pm 0.016$ & $\textbf{0.354} \pm 0.030$ \\
+GFP & $0.131 \pm 0.012$ & $\underline{0.623 \pm 0.006}$ & $0.508 \pm 0.010$ & $\textbf{0.709} \pm 0.013$ \\
+GRB2 & $-0.176 \pm 0.016$ & $\underline{0.637 \pm 0.009}$ & $-0.189 \pm 0.016$ & $\textbf{0.659} \pm 0.009$ \\
+HIS7 & $0.379 \pm 0.007$ & $\textbf{0.596} \pm 0.008$ & $0.376 \pm 0.007$ & $\underline{0.541 \pm 0.055}$ \\
+PABP & $0.201 \pm 0.015$ & $\underline{0.608 \pm 0.005}$ & $0.194 \pm 0.015$ & $\textbf{0.677} \pm 0.020$ \\
+SPG1 & $-0.138 \pm 0.010$ & $\underline{0.779 \pm 0.007}$ & $-0.175 \pm 0.011$ & $\textbf{0.842} \pm 0.002$ \\
+YAP1 & $0.103 \pm 0.025$ & $\underline{0.593 \pm 0.007}$ & $0.097 \pm 0.025$ & $\textbf{0.619} \pm 0.011$ \\
+\midrule
+Average & $0.111$ & $\underline{0.595}$ & $0.158$ & $\textbf{0.629}$ \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_main_results.pdf}
+\caption{Multi-mutation fitness prediction across seven ProteinGym DMS datasets. \epignn{} (fitness target) achieves the highest mean Spearman $\rho$ (0.629). Error bars show standard deviation across 3 seeds $\times$ 3 folds.}
+\label{fig:main_results}
+\end{figure}
+
+\epignn{} achieves the highest mean Spearman $\rho$ of 0.629, outperforming the additive ESM-2 baseline ($\rho = 0.111$) by a large margin and ridge regression ($\rho = 0.595$) by 5.7\%.
+The improvement over additive ESM-2 is statistically significant on all seven proteins ($p < 0.01$, Wilcoxon signed-rank test).
+
+The additive ESM-2 baseline performs poorly on multi-mutation fitness prediction, even producing negative correlations on GRB2 ($\rho = -0.176$) and SPG1 ($\rho = -0.138$), indicating that the additive assumption is particularly harmful for these proteins.
+Ridge regression provides a strong supervised baseline, benefiting from direct access to mutation features and coupling statistics.
+\epignn{} outperforms ridge on 6 of 7 proteins; the exception is HIS7, where ridge achieves $\rho = 0.596$ versus \epignn{}'s $\rho = 0.541$.
+The largest improvements over ridge are observed on GFP ($+0.086$), PABP ($+0.069$), and SPG1 ($+0.063$).
+
+The MLP baseline, trained on the epistatic residual, achieves only $\rho = 0.158$ on average.
+However, as we show in Section~\ref{sec:ablation}, this poor performance is primarily due to the training objective rather than the lack of graph structure.
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+We conduct ablation studies to understand the contribution of each design choice.
+Due to computational constraints, architecture ablations with the fitness training objective were run on a subset of two proteins (F7YBW8 and GFP); the ESM-2 backbone ablation was run on all seven proteins.
+Results are summarized in Tables~\ref{tab:ablation_objective} and~\ref{tab:ablation_arch}.
+
+\paragraph{Training objective is critical.}
+The most impactful design choice is the training objective.
+Training \epignn{} on the epistatic residual (observed fitness minus additive ESM-2 score) reduces performance from $\rho = 0.629$ to $\rho = 0.157$---a dramatic degradation of 0.472 points across all seven proteins.
+This is our strongest finding: switching the training target from epistatic residual to direct fitness accounts for a larger performance difference than any architectural change.
+We hypothesize that the epistatic residual is a noisy target: it conflates genuine epistatic effects with noise in both the observed fitness measurements and the additive ESM-2 scores.
+Direct fitness prediction allows the model to learn a more robust mapping.
+
+\begin{table}[t]
+\centering
+\caption{Effect of training objective on \epignn{} performance across all 7 proteins. Mean Spearman $\rho$.}
+\label{tab:ablation_objective}
+\begin{tabular}{lcc}
+\toprule
+Training Target & Mean $\rho$ & $\Delta$ \\
+\midrule
+\epignn{} (fitness target) & $0.629$ & --- \\
+\epignn{} (epistasis residual target) & $0.157$ & $-0.472$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Architecture ablations on F7YBW8 and GFP (mean Spearman $\rho$ across 2 proteins, 3 seeds $\times$ 3 folds). All variants use the fitness training objective. PLM backbone ablation uses all 7 proteins.}
+\label{tab:ablation_arch}
+\begin{tabular}{lccccc}
+\toprule
+ & \multicolumn{2}{c}{F7YBW8} & \multicolumn{2}{c}{GFP} & Mean \\
+Variant & $\rho$ & $\pm$ & $\rho$ & $\pm$ & $\rho$ \\
+\midrule
+\epignn{} (2-layer, PLM edges) & $0.354$ & $0.028$ & $0.709$ & $0.013$ & $0.531$ \\
+\ftmlp{} (no graph) & $\mathbf{0.423}$ & $0.019$ & $\mathbf{0.782}$ & $0.005$ & $\mathbf{0.603}$ \\
+Random coupling edges & $0.354$ & $0.025$ & $0.723$ & $0.009$ & $0.538$ \\
+1 GATv2 layer & $0.297$ & $0.052$ & $0.706$ & $0.016$ & $0.501$ \\
+3 GATv2 layers & $0.356$ & $0.031$ & $0.715$ & $0.019$ & $0.536$ \\
+\midrule
+\multicolumn{6}{l}{\emph{PLM backbone (all 7 proteins)}} \\
+ESM-2 150M & \multicolumn{4}{c}{---} & $0.374$ \\
+ESM-2 650M (\epignn{}) & \multicolumn{4}{c}{---} & $0.629$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Graph structure does not improve over MLP on the tested subset.}
+On the F7YBW8/GFP subset, removing graph structure (\ftmlp{}, no message passing) with the same fitness training objective yields $\rho = 0.603$, which \emph{exceeds} the full \epignn{} ($\rho = 0.531$).
+This is an important negative result: on these two proteins, the graph message passing architecture does not provide benefit over simple sum-pooling of mutation features.
+The MLP outperforms \epignn{} on both F7YBW8 ($0.423$ vs.\ $0.354$) and GFP ($0.782$ vs.\ $0.709$), suggesting that the PLM-derived node features carry sufficient information for fitness prediction and that the graph structure may introduce unnecessary complexity for these proteins.
+We note that this comparison is limited to two proteins; the relative performance on the remaining five proteins is unknown.
+
+\paragraph{PLM coupling edges do not significantly outperform random edges.}
+Replacing PLM-derived coupling scores with random edge weights yields $\rho = 0.538$ on the two-protein subset, comparable to \epignn{}'s $\rho = 0.531$.
+A Wilcoxon signed-rank test across all protein-fold-seed combinations finds no significant difference ($p = 0.483$, $n = 18$).
+This indicates that the specific coupling information from PLM attention maps does not provide a statistically significant advantage over random connectivity in the graph, further questioning whether the graph structure captures meaningful inter-residue interactions.
+
+\paragraph{Number of GNN layers.}
+Two GATv2 layers (our default, $\rho = 0.531$) outperform one layer ($\rho = 0.501$) but are comparable to three layers ($\rho = 0.536$) on the two-protein subset.
+The mutation subgraphs are small (typically 2--4 nodes), so these differences are modest.
+
+\paragraph{PLM backbone size.}
+Using ESM-2 150M instead of 650M reduces performance from $\rho = 0.629$ to $\rho = 0.374$ across all seven proteins ($\Delta = -0.255$), confirming that the richer representations from the larger model substantially contribute to prediction quality.
+Figure~\ref{fig:ablations} visualizes the ablation results.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure3_ablations.pdf}
+\caption{Ablation study results comparing \epignn{} variants. Architecture ablations (left group) are on the F7YBW8/GFP subset; the PLM backbone comparison (right) uses all 7 proteins. Note that \ftmlp{} (no graph) outperforms \epignn{} on the tested subset.}
+\label{fig:ablations}
+\end{figure}
+
+\subsection{Analysis}
+
+\paragraph{Performance by mutation count.}
+Figure~\ref{fig:mutation_count} shows Spearman $\rho$ stratified by the number of mutations per variant.
+\epignn{} maintains strong performance across double and triple+ mutants, while the additive baseline degrades for higher-order mutants where epistatic interactions become more prevalent.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure4_mutation_count.pdf}
+\caption{Fitness prediction performance (Spearman $\rho$) stratified by mutation count. \epignn{} maintains strong performance on higher-order mutants where additive models struggle.}
+\label{fig:mutation_count}
+\end{figure}
+
+\paragraph{Per-protein improvement.}
+\epignn{}'s improvement over the additive baseline varies substantially across proteins, from $+0.077$ on F7YBW8 to $+0.980$ on SPG1.
+The largest gains occur on proteins where the additive baseline produces negative correlations (GRB2, SPG1), suggesting these proteins have fitness landscapes that are particularly non-additive and where supervised modeling provides the greatest benefit.
+Figure~\ref{fig:target_comparison} provides a per-protein comparison across training targets.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure5_target_comparison.pdf}
+\caption{Per-protein comparison of \epignn{} with fitness target vs.\ epistasis residual target. The fitness target consistently and substantially outperforms the epistasis residual target across all seven proteins.}
+\label{fig:target_comparison}
+\end{figure}
+
+\paragraph{Epistasis prediction: a negative result.}
+We evaluated whether \epignn{} specifically captures the non-additive component of fitness (epistasis = observed fitness $-$ sum of single-mutation effects).
+The mean epistasis correlation across proteins was $\rho_{\text{epi}} = -0.111 \pm 0.246$, indicating that \textbf{\epignn{} does not reliably predict the epistatic component in isolation}.
+This is a critical negative result: despite the name and motivation, the model functions as a general multi-mutation fitness predictor rather than an epistasis-specific predictor.
+The model learns to predict total fitness effectively by leveraging the rich PLM features, but does not decompose its predictions into additive and epistatic components.
+This aligns with our finding that direct fitness prediction outperforms epistasis residual prediction.
+
+\paragraph{Improvement does not correlate with epistasis magnitude.}
+We tested whether \epignn{}'s improvement over the additive baseline correlates with the mean epistasis magnitude per protein, which would support the hypothesis that the model benefits more from explicit interaction modeling on highly epistatic landscapes.
+The correlation was negative and non-significant (Spearman $\rho = -0.536$, $p = 0.215$), providing no evidence for this hypothesis.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Summary of findings.}
+\epignn{} demonstrates that supervised models operating on PLM-derived features can substantially improve multi-mutation fitness prediction over additive baselines.
+The approach achieves an average Spearman $\rho$ of 0.629 across seven diverse proteins, compared to 0.111 for the standard additive approach and 0.595 for ridge regression.
+
+\paragraph{The training objective matters more than architecture.}
+Our most striking finding is that the training objective has a far greater impact than architectural choices.
+Switching from epistasis residual prediction to direct fitness prediction improved \epignn{} by 0.472 points ($\rho = 0.157 \to 0.629$), while the best architectural improvement on the two-protein subset was 0.030 points (2 vs.\ 1 GATv2 layer).
+This suggests that the field's focus on architectural innovation for epistasis modeling should be complemented by careful attention to training objectives and target formulations.
+
+\paragraph{On the naming: EpiGNN as a fitness predictor, not an epistasis predictor.}
+Despite the ``epistasis-aware'' motivation, our results show that \epignn{} does not specifically capture epistatic interactions (mean epistasis correlation $= -0.111$).
+The model is more accurately described as a supervised multi-mutation fitness predictor that leverages PLM features.
+The graph architecture, designed to model inter-mutation epistatic interactions, did not outperform a simpler MLP on the proteins tested for architectural ablations.
+We retain the name for consistency with our original proposal, but emphasize that the model's value lies in multi-mutation fitness prediction rather than epistasis detection.
+
+\paragraph{Limitations.}
+Our work has several important limitations:
+\begin{enumerate}
+    \item \textbf{Graph structure benefit is unclear.} On the two-protein subset where we ran fitness-target ablations, the MLP without graph structure outperformed \epignn{} ($\rho = 0.603$ vs.\ $0.531$). Without fitness-target MLP results on all seven proteins, we cannot determine whether the graph architecture is beneficial in general.
+    \item \textbf{PLM coupling edges are not significantly better than random edges} ($p = 0.483$), undermining the hypothesis that attention-derived coupling encodes meaningful inter-residue interactions for this task.
+    \item \textbf{No epistasis prediction.} The model does not capture epistatic interactions in isolation (mean epistasis correlation $= -0.111$), meaning it should not be used as an epistasis detector.
+    \item \textbf{Ridge regression wins on HIS7.} On one protein (HIS7), ridge regression outperforms \epignn{} ($\rho = 0.596$ vs.\ $0.541$), showing the approach does not uniformly dominate simpler methods.
+    \item \textbf{No cross-protein generalization.} Our evaluation is limited to within-protein cross-validation; cross-protein transfer was planned but not conducted.
+    \item \textbf{Limited architecture ablation scope.} Fitness-target architecture ablations were run on only 2 of 7 proteins due to computational constraints.
+\end{enumerate}
+
+\paragraph{Relation to concurrent work.}
+\citet{huynh2025dynamics} achieve strong epistasis prediction using molecular dynamics-derived coupling with GNNs.
+Our approach replaces expensive MD simulations with PLM attention-derived coupling.
+While the PLM features enable strong fitness prediction, the coupling-based graph structure did not provide clear benefits over simpler architectures in our experiments.
+Future work could investigate combining PLM features with lightweight structure-based features (e.g., from predicted structures via ESMFold) to better capture inter-residue interactions.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \epignn{}, a mutation-centric graph neural network for multi-mutation protein fitness prediction.
+On seven ProteinGym DMS datasets, \epignn{} achieves an average Spearman $\rho$ of 0.629, outperforming additive ESM-2 ($\rho = 0.111$) and ridge regression ($\rho = 0.595$).
+Our key finding is that the training objective---direct fitness prediction rather than epistasis residual prediction---is the single most important design choice, accounting for a 0.472-point improvement.
+
+However, we also report important negative results: the graph architecture does not clearly outperform an MLP with the same features on a two-protein subset, PLM coupling edges are not significantly better than random edges ($p = 0.483$), and the model does not predict epistasis in isolation (mean epistasis correlation $= -0.111$).
+These results suggest that the primary value lies in supervised learning on rich PLM features with an appropriate training objective, rather than in the specific graph architecture.
+
+Future work should investigate cross-protein generalization, run fitness-target MLP comparisons on all proteins to definitively assess the graph architecture's contribution, and develop training objectives that better target epistatic interactions while maintaining predictive performance.
+
+\section*{Reproducibility Statement}
+
+All experiments use publicly available data from ProteinGym~\citep{notin2023proteingym} and the open-source ESM-2 model~\citep{lin2023evolutionary}.
+Hyperparameters are reported in Section~\ref{sec:experiments}.
+All models were trained on a single NVIDIA RTX A6000 GPU (48GB VRAM).
+Total compute for all experiments was approximately 8 hours (2--3 hours for ESM-2 feature extraction, 5--6 hours for model training and evaluation across all methods, ablations, and seeds).
+Random seeds used were 42, 123, and 456.
+Code will be made available upon publication.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\end{document}

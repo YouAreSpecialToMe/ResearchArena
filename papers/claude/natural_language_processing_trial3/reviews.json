@@ -1,0 +1,135 @@
+{
+  "reviews": [
+    {
+      "scores": {
+        "novelty": 5,
+        "soundness": 7,
+        "significance": 5,
+        "clarity": 8,
+        "reproducibility": 8,
+        "experimental_rigor": 7,
+        "references": 8,
+        "reference_integrity": 9,
+        "results_integrity": 9
+      },
+      "overall_score": 6,
+      "decision": "revision",
+      "summary": "This paper proposes PRA-Score, a training-free confidence metric for RAG systems that measures agreement between an LLM's parametric answer (without retrieval) and its retrieval-augmented answer. Four agreement measures (exact match, token F1, NLI entailment, token probability delta) are evaluated on NQ, TriviaQA, and PopQA with Llama-3-8B and Mistral-7B. PRA-F1 achieves up to 0.857 AUROC on Mistral-7B TriviaQA, outperforming baselines, and combining PRA with existing signals yields 2-13 AUROC point improvements. However, effectiveness is strongly model-dependent, with only modest gains on Llama-3-8B.",
+      "novelty_assessment": "I conducted extensive searches for prior work. The core idea of comparing parametric vs. retrieval-augmented answers already appears in several concurrent/prior works: PAIRS (arXiv 2508.04057) compares parametric and pseudo-context-augmented answers for retrieval triggering; SUGAR (arXiv 2501.04899) uses semantic entropy from parametric generation as a retrieval trigger; Self-Routing RAG (arXiv 2504.01018) verbalizes parametric knowledge for source routing; and CBDR (arXiv 2509.06472) uses hidden-state confidence deltas for dynamic retrieval. The paper correctly positions itself against these works, noting its focus on post-generation calibration rather than retrieval triggering/routing. This distinction is valid and meaningful, but the core mechanism (comparing two answer modes) is shared with multiple existing works. The novelty lies in the application (calibration for selective prediction) rather than the technique. The method itself is simple\u2014token F1 between two text strings. I found no paper proposing exactly PRA-Score for post-generation calibration, so the specific application is novel, but the contribution is incremental given the crowded space of parametric-retrieval comparison methods.",
+      "strengths": [
+        "Unusually honest analysis: the paper openly discusses that PRA-Score works dramatically well on Mistral-7B but only modestly on Llama-3-8B, rather than cherry-picking favorable results. This is commendable scientific practice.",
+        "Well-structured experimental evaluation with 3 seeds, 9 confidence signals, 3 datasets, and 2 models. The multi-seed evaluation with reported standard deviations enables meaningful comparison.",
+        "The cost-benefit analysis (Section 4.6) provides practical value: PRA-Score achieves better AUROC-per-inference-pass than self-consistency (1 extra pass vs 4), making the trade-off concrete and actionable.",
+        "Good related work positioning: the paper clearly differentiates PRA-Score from PAIRS, SUGAR, CBDR, and Self-Routing RAG by focusing on post-generation calibration rather than retrieval triggering.",
+        "The diagnostic framework based on answer change rate is a useful practical contribution for practitioners deciding whether to deploy PRA-Score.",
+        "Comprehensive ablation studies covering agreement measures, retriever choice (dense vs sparse), and number of retrieved passages."
+      ],
+      "weaknesses": [
+        "Strong model dependence severely limits the paper's claims. With only 2 models tested and dramatically different results (PRA-F1 achieves 0.857 AUROC on Mistral TriviaQA but only 0.575 on Llama TriviaQA), it is unclear whether the Mistral results or the Llama results represent the typical case. The paper acknowledges this but does not resolve it.",
+        "The method is conceptually simple\u2014computing token F1 between two answer strings\u2014which limits the technical contribution. PRA-NLI, which was hypothesized as the primary variant, underperforms the simpler PRA-F1, suggesting the semantic agreement component adds little value.",
+        "Evaluation scope is narrow: only English short-answer QA with 500 questions per seed. The applicability to long-form generation, multi-hop reasoning, or multilingual settings is untested and unclear.",
+        "The planned 70B model experiment was not completed, which is a significant gap given that model scale is likely to affect parametric-retrieval divergence patterns. This experiment would have substantially strengthened the paper.",
+        "The sparse retriever ablation uses TF-IDF instead of the planned BM25, which weakens the retriever robustness claim. BM25 is the standard sparse baseline.",
+        "Some comparisons lack statistical significance with only 3 seeds \u00d7 500 questions, as the paper itself acknowledges (e.g., Llama TriviaQA PRA-F1 0.575\u00b10.022 vs P(answer) 0.623\u00b10.011\u2014overlapping CIs).",
+        "The combination via logistic regression (Table 3) uses ~250 labeled examples for fitting, but the paper doesn't discuss how this data is obtained in practice or how sensitive results are to the calibration set size."
+      ],
+      "detailed_feedback": "The paper presents a clean idea with an honest evaluation, but it needs to strengthen its contribution for acceptance. The most critical revision is expanding the model evaluation: testing on at least 2-3 additional models (e.g., Phi-3, Gemma-2, Qwen-2, as the authors suggest) would transform the model dependence from a fatal limitation into a well-characterized phenomenon. The 70B model experiment should also be completed to assess scale effects. Second, the paper should provide a more formal treatment of the diagnostic framework: instead of the informal 'answer change rate' heuristic, formalize the conditions under which PRA-Score is expected to be effective and validate this predictor on held-out models. Third, consider evaluating on at least one long-form generation task (e.g., biography generation with FActScore) to test generalizability beyond short-answer QA. Fourth, add a SelfCheckGPT-NLI baseline as acknowledged in Section 5, since this is the most natural comparison for cross-mode vs within-mode NLI-based consistency. Finally, the logistic regression combination should include a sensitivity analysis for calibration set size and a cross-dataset evaluation to assess whether the fitted combination generalizes.",
+      "questions_for_authors": [
+        "Have you tested PRA-Score on any other models beyond Llama-3-8B and Mistral-7B? Even preliminary results on one additional model would help characterize the model dependence.",
+        "What is the answer change rate for each model-dataset combination? Reporting this directly would make the diagnostic framework more concrete.",
+        "How sensitive is the logistic regression combination (Table 3) to the calibration set size? What happens with 50, 100, or 500 labeled examples?",
+        "For the Llama-3-8B case where PRA provides modest gains, do you have intuition for what kind of instruction tuning would make a model more vs less amenable to PRA-Score?",
+        "Could the poor PRA-NLI performance be due to the NLI model choice? Have you tried other NLI models beyond DeBERTa-v3-large on MNLI?"
+      ],
+      "integrity_check": "Results integrity is strong. Experiment source code exists in exp/ with well-structured modules (pra_score.py, run_inference.py, run_analysis.py, etc.) implementing all described methods. Experiment logs show real vLLM inference runs with Llama-3.1-8B-Instruct and Mistral-7B-Instruct-v0.3, including realistic timing data (17ms/q parametric, ~100ms/q RAG). I verified multiple numbers from paper tables against results.json: Exp1 Table 1 accuracy and AUROC values match exactly (e.g., Llama NQ 0.359/0.386 accuracy, 0.591/0.601 AUROC); Exp2 Table 2 headline claim PRA-F1 Mistral TriviaQA 0.857\u00b10.005 matches results.json 0.8568\u00b10.005; all spot-checked individual signal AUROCs match to 3 decimal places. All 12 references I verified are real, verifiable publications with correct titles, authors, and venues. No evidence of fabrication or manipulation.",
+      "source": "agent:Claude Code"
+    },
+    {
+      "scores": {
+        "novelty": 3,
+        "soundness": 4,
+        "significance": 5,
+        "clarity": 7,
+        "reproducibility": 7,
+        "experimental_rigor": 4,
+        "references": 5,
+        "reference_integrity": 4,
+        "results_integrity": 4
+      },
+      "overall_score": 4,
+      "decision": "reject",
+      "summary": "The paper proposes PRA-Score, a post-generation confidence signal for RAG that measures agreement between a model\u2019s parametric answer and its retrieval-augmented answer, using EM/F1/NLI-style agreement scores and optional logistic-regression fusion with standard confidence baselines. Experiments on NQ, TriviaQA, and PopQA with Llama-3-8B and Mistral-7B report that PRA-F1 is often strong on Mistral and sometimes complementary to existing signals. The core claim is that parametric-retrieval agreement is a useful calibration signal for selective prediction in RAG.",
+      "novelty_assessment": "I performed the required novelty checks with multiple search strategies: exact-title searches on Google Scholar/Semantic Scholar found no exact existing paper with this title; concept searches for parametric-vs-retrieval agreement and RAG calibration surfaced several close papers; baseline-following searches verified PAIRS, SUGAR, Self-Routing RAG, CBDR, URAG, and NAACL Rules/NAACL; and recent venue/proceedings searches surfaced prior calibration-oriented RAG work. The closest overlaps are PAIRS (https://arxiv.org/abs/2508.04057), which already uses parametric vs augmented-answer agreement as a decision signal, CBDR (https://arxiv.org/abs/2509.06472), which treats parametric knowledge as a confidence signal in RAG, NAACL/NAACL Rules (https://arxiv.org/abs/2601.11004), which directly studies confidence calibration in RAG, URAG (https://arxiv.org/abs/2603.19281), which benchmarks uncertainty in RAG, and especially CalibRAG / Calibrated Decision-Making through LLM-Assisted Retrieval (https://arxiv.org/abs/2411.08891), which already targets calibration-oriented RAG. I therefore do not find the novelty claim strong: the paper\u2019s specific signal is a reasonable variant, but the overall idea is incremental and sits in an already active line of work on calibration-aware or uncertainty-aware RAG. Given these overlaps, novelty should be scored below the acceptance bar.",
+      "strengths": [
+        "The paper is clearly written and easy to follow, with a straightforward method definition and an honest discussion of model dependence.",
+        "The workspace includes code, raw generation files, aggregated results, and logs, so the submission is more auditable than many papers.",
+        "The main paper tables are numerically consistent with the final `results.json`; I manually cross-checked the calibration, individual-signal, combination, top-k, and cost tables against the aggregated results.",
+        "The authors do not hide negative findings: RAG often hurts accuracy here, PRA is weak on Llama in several settings, and the paper explicitly discusses these limitations."
+      ],
+      "weaknesses": [
+        "Novelty is limited. Closely related prior work already studies calibration-oriented RAG and parametric-vs-retrieval comparison, most notably CalibRAG (https://arxiv.org/abs/2411.08891), PAIRS (https://arxiv.org/abs/2508.04057), CBDR (https://arxiv.org/abs/2509.06472), URAG (https://arxiv.org/abs/2603.19281), and NAACL Rules/NAACL (https://arxiv.org/abs/2601.11004).",
+        "The evaluation pipeline is shaky. Generated answers often ignore the \u201cfew words\u201d instruction and become long, repetitive, or malformed; in `results/generations_llama8b_*`, many RAG outputs contain repeated phrases or prompt spillover, which makes EM-style correctness and confidence measurement less reliable.",
+        "The correctness metric is lenient: `exact_match` checks whether any normalized gold answer is a substring of the prediction, which can over-credit verbose answers that merely contain the target span somewhere inside a noisy response.",
+        "The TriviaQA preprocessing looks problematic. The saved gold-answer lists contain many odd aliases/disambiguation strings, e.g. for \u201cWho was the British Prime Minister in 1953?\u201d the gold list starts with unrelated aliases such as `Tango (cat)` and `Death and state funeral of Winston Churchill`. Even if correct aliases are also present later, this indicates weak dataset handling.",
+        "Figure provenance is inconsistent. The paper uses `figures/figure5_popularity.pdf`, but that file predates the final rerun, whereas several other figures and `results.json` were regenerated later. This means at least one included figure is stale relative to the final result set.",
+        "Supporting artifacts are inconsistent: `figures/table1_main_results.tex` contains obsolete numbers that do not match the final `results.json`, showing the workspace mixes old and new outputs.",
+        "Reference metadata quality is poor. Several cited works exist, but BibTeX metadata do not reliably match the real publications; e.g. `ren2025cbdr` has the wrong author list relative to the arXiv paper, and `xu2024knowledge` omits Zhijiang Guo from the author list compared with ACL Anthology.",
+        "Experimental scope is too narrow for the paper\u2019s framing: only two small/medium open models, no larger-scale follow-up despite the paper centering a scale/divergence hypothesis, and no direct SelfCheckGPT-NLI comparison despite its relevance."
+      ],
+      "detailed_feedback": "The paper could become a solid workshop or revision candidate, but it needs tighter positioning and a cleaner experimental foundation. First, substantially narrow the novelty claim: frame PRA as a simple post-generation agreement feature within the broader calibration-aware RAG literature, not as the first meaningful use of parametric-retrieval comparison. Second, fix the evaluation pipeline before drawing strong conclusions: enforce concise answer extraction, use a stricter short-answer normalization or exact-span evaluation, and audit the TriviaQA alias handling carefully. Third, regenerate all figures and tables from one final pipeline only, and remove stale artifacts from the workspace. Fourth, strengthen the analysis around the claimed mechanism by explicitly measuring answer-change/divergence rates and showing that they predict PRA utility. Finally, clean up the references so titles, authors, and venues exactly match the cited publications.",
+      "questions_for_authors": [
+        "How many generated answers violate the intended short-answer format, and how do the main results change if you post-process outputs to first-span answers only?",
+        "Can you explain the TriviaQA preprocessing choices and verify that the alias lists do not introduce spurious or corrupted gold answers?",
+        "Why is the included popularity figure older than the final rerun artifacts, and can you confirm it was regenerated from the same results used in the paper tables?",
+        "How does PRA compare directly to prior calibration-oriented RAG methods such as CalibRAG and NAACL Rules/NAACL, rather than only to generic confidence baselines?",
+        "Can you provide a direct quantitative test of the proposed divergence hypothesis, e.g. answer-change rate versus PRA AUROC across models/settings?"
+      ],
+      "integrity_check": "The paper\u2019s tables mostly match `results.json`, and the logs show real batched inference runs with saved outputs, so I do not see evidence of fabricated numbers. However, I do see integrity concerns: the workspace mixes stale and final artifacts, at least one included figure appears to be from an earlier run, generated answers are often malformed, and the evaluation/data-processing pipeline has issues substantial enough that I do not fully trust the empirical conclusions.",
+      "source": "agent:Codex"
+    },
+    {
+      "scores": {
+        "novelty": 7,
+        "soundness": 7,
+        "significance": 6,
+        "clarity": 7,
+        "reproducibility": 8,
+        "experimental_rigor": 6,
+        "references": 8,
+        "reference_integrity": 9,
+        "results_integrity": 9
+      },
+      "overall_score": 6,
+      "decision": "revision",
+      "summary": "This paper proposes PRA-Score, a training-free confidence metric for RAG systems that measures agreement between parametric (without retrieval) and retrieval-augmented answers. The authors evaluate four agreement measures across three QA datasets and two models, finding that PRA-F1 achieves strong AUROC (up to 0.857) on Mistral-7B and that combining PRA with existing signals improves performance by 2-13 AUROC points.",
+      "novelty_assessment": "After searching for related work, I found that while parametric-retrieval agreement has been explored in prior work, existing approaches use it for different purposes: PAIRS (Chen et al., 2025) uses it for retrieval triggering (pre-generation efficiency), CBDR (Ren et al., 2025) uses hidden-state confidence deltas requiring model internals, and Self-Routing RAG (Wu et al., 2025) requires fine-tuning. The use of output-level parametric-retrieval agreement specifically for post-generation calibration and selective prediction appears to be novel. The paper appropriately distinguishes itself from these related works in Section 2.",
+      "strengths": [
+        "The idea is simple, intuitive, and training-free - comparing parametric vs. RAG answers provides a natural confidence signal",
+        "Strong empirical results on Mistral-7B (0.857 AUROC) demonstrating the potential of the approach",
+        "Honest analysis of model dependence - the paper acknowledges that PRA-Score works much better on Mistral than Llama and proposes a diagnostic framework",
+        "Comprehensive baselines including token probability, entropy, verbalized confidence, and self-consistency",
+        "Cost-benefit analysis showing PRA is more efficient than self-consistency (1 vs 4 extra passes)",
+        "All experiment code and results are provided, enabling verification"
+      ],
+      "weaknesses": [
+        "Model dependence is a major limitation - PRA-F1 performs well on Mistral-7B but only modestly on Llama-3-8B. With only two models, it's unclear which behavior is typical",
+        "No statistical significance tests reported when claiming improvements",
+        "Ablation studies are limited - for example, no analysis of how performance varies with the quality of the retriever",
+        "The paper was limited to short-answer QA; long-form generation and multilingual settings are not explored",
+        "Only 3 seeds with 500 questions each - the authors acknowledge this may be underpowered for some comparisons",
+        "No comparison to SelfCheckGPT-NLI which could be a stronger baseline for semantic consistency"
+      ],
+      "detailed_feedback": "To strengthen this paper for acceptance: (1) Add at least one more model (e.g., Qwen-2 or Gemma-2) to better understand the model dependence phenomenon - this is currently the biggest weakness. (2) Include statistical significance tests (e.g., paired t-tests or bootstrap confidence intervals) when claiming improvements over baselines. (3) Add a comparison to SelfCheckGPT-NLI as it uses NLI-based consistency checking which is more comparable to PRA-NLI than simple self-consistency. (4) Expand the ablation study to analyze how retriever quality affects PRA signals. (5) Consider adding a 70B model analysis as mentioned in limitations - even a small sample would help assess scalability. The paper is well-written and the core idea is sound, but the limited model coverage and lack of statistical testing hold it back from a clear accept.",
+      "questions_for_authors": [
+        "Can you explain why Llama-3-8B shows such different behavior from Mistral-7B? Is it due to instruction tuning differences, context window handling, or something else?",
+        "Did you test whether PRA-Score is complementary to SelfCheckGPT-NLI? This would help isolate the contribution of the cross-mode (parametric vs RAG) signal from within-mode consistency.",
+        "How sensitive is PRA-Score to the quality of the retriever? Would the signal still be useful with a much worse retriever (e.g., random retrieval)?",
+        "Have you tested whether the answer change rate diagnostic reliably predicts PRA effectiveness on other models?"
+      ],
+      "integrity_check": "Results appear genuine. All numbers in the paper's tables match the results.json file exactly (verified Table 2 and Table 3). Experiment source code exists and implements what the paper describes. References were verified through online searches and all key citations are real. No evidence of fabrication or data manipulation.",
+      "source": "agent:Kimi Code"
+    }
+  ],
+  "avg_score": 5.333333333333333,
+  "decision": "reject"
+}

@@ -1,0 +1,321 @@
+\documentclass{article}
+
+\usepackage[final]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[numbers]{natbib}
+
+\title{Are Early Artifact Forecasts Actionable for Membership Privacy?\\A Budget-Matched Study of Selective Intervention}
+
+\author{%
+  Anonymous Author(s) \\
+  Anonymous Institution \\
+  \texttt{anonymous@example.com}
+}
+
+\newcommand{\lira}{LiRA-lite}
+\newcommand{\purch}{Purchase100}
+\newcommand{\cifar}{CIFAR-10}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Recent work shows that membership-inference risk is highly heterogeneous across records, can often be estimated from training artifacts, and should be evaluated through low-FPR and disparity-sensitive metrics rather than average AUC alone. We study a narrower question: under a fixed training and intervention budget, are early artifact forecasts actionable enough to improve privacy for the records that appear most vulnerable? We run a budget-matched empirical study on \purch{} and \cifar{} using a 15\% warm-up, a fixed top-10\% intervention budget, refreshes every four epochs, and the same class-conditional vicinal smoothing operator for all targeted methods. The key comparison is between forecast-driven targeting and equally cheap alternatives: random targeting, loss-only targeting, global mixup, RelaxLoss, and three forecast ablations. The main result is negative. On \purch{}, forecast quality is non-trivial for the targeted-forecast policy (Spearman $\rho=0.359\pm0.009$, Precision@10 $=23.50\pm0.50$\%), but this does not translate into better protection: worst-decile leakage rises to $0.917\pm0.464$\% versus $0.083\pm0.144$\% for targeted-random and $0.194\pm0.127$\% for ERM. On \cifar{}, forecast quality is weak ($\rho=-0.007\pm0.006$) and targeted-forecast again fails to beat the matched-budget baselines. These results suggest that early artifact forecasts can be predictive without being actionable under a strict selective-intervention budget.
+\end{abstract}
+
+\section{Introduction}
+
+Membership inference leakage is not uniform across training records. Prior work shows that even well-generalized models can contain individually vulnerable points \citep{long2018understanding}, that record-level risk can be estimated from training artifacts without shadow-model auditing \citep{pollock2024free}, and that vulnerable records can often be identified before convergence \citep{chen2025evaluating}. At the same time, recent evaluation work argues that privacy reporting should emphasize low-false-positive operating points and disparity across records rather than only average attack strength \citep{carlini2022membership, wang2025membership}.
+
+Those ingredients make selective defenses attractive. If high-risk records can be forecast early, perhaps a learner can spend a fixed intervention budget only on those records and obtain a better privacy-utility trade-off than uniform smoothing or naive targeting rules. However, nearby work already studies selective or adaptive privacy defenses \citep{li2024mist, jarin2022miashield, chen2025adamixup}. We discuss those methods for positioning, but do not directly reimplement them in our runtime-constrained benchmark. The remaining question is therefore narrower than inventing a new defense family: \emph{are early artifact forecasts actionable once the intervention budget, refresh schedule, and runtime budget are held fixed?}
+
+We answer that question with a budget-matched empirical study. Starting from a short ERM warm-up, we compute a non-learned per-record forecast from loss-trace interquartile range, mean loss, inverse margin, and prediction-flip count. We then target the top 10\% of records every four epochs and apply the same class-conditional vicinal smoothing operator used by the other targeted baselines. This lets us isolate whether the forecast itself adds value over obvious alternatives.
+
+The outcome is a clean negative result for the headline claim. On \purch{}, forecast scores retain meaningful correlation with final attack scores, but targeted-forecast still worsens worst-decile leakage relative to both ERM and simpler targeted baselines. On \cifar{}, forecast quality is weak and selective forecasting again fails to improve the key privacy metrics. The paper's contribution is therefore a mechanism-and-benchmarking result: under this protocol, predictive early signals do not suffice to make selective intervention worthwhile.
+
+Our contributions are:
+\begin{itemize}
+    \item We present a budget-matched study of forecast-driven selective intervention for membership privacy, using the same warm-up, top-10\% budget, refresh schedule, and smoothing operator for all targeted methods.
+    \item We show that forecast quality and intervention utility diverge. On \purch{}, targeted-forecast achieves the best forecast quality among the refreshed targeted methods ($\rho=0.359\pm0.009$, Precision@10 $=23.50\pm0.50$\%) yet increases worst-decile leakage to $0.917\pm0.464$\%; on \cifar{}, forecast quality is near-random and privacy does not improve.
+    \item We provide a reproducible negative result over $54$ runs (2 datasets, 9 methods, 3 seeds) indicating that, under a strict single-GPU budget, simpler baselines match or outperform forecast-driven targeting on the privacy outcomes that matter most.
+\end{itemize}
+
+Section~\ref{sec:related} reviews prior work, Section~\ref{sec:method} formalizes the protocol, Section~\ref{sec:experiments} presents the experiments and ablations, Section~\ref{sec:discussion} discusses limitations and interpretation, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Instance-level vulnerability and early predictability.}
+\citet{long2018understanding} showed that well-generalized models can still expose individually vulnerable training records. \citet{pollock2024free} proposed artifact-based record-level risk estimation, while \citet{chen2025evaluating} studied the temporal dynamics of membership privacy and found that vulnerability is often visible early in training. Our work is downstream of this line: we do not claim to discover heterogeneity or early predictability, but to test whether those signals are actionable under a fixed intervention budget.
+
+\paragraph{Selective and proactive defenses.}
+Several recent defenses already motivate selective protection. MIST explicitly concentrates protection on vulnerable points \citep{li2024mist}; MIAShield studies proactive exclusion mechanisms \citep{jarin2022miashield}; and pruning-based selective defenses also target exposed records or regions of the model \citep{shang2025pruned}. Our scope is narrower. We study a simpler online trigger inside ordinary training, with matched compute and matched intervention budget across alternatives.
+
+\paragraph{Global and adaptive empirical defenses.}
+Global defenses such as adversarial regularization \citep{nasr2018adversarial}, RelaxLoss \citep{chen2022relaxloss}, convex-concave loss \citep{liu2024ccl}, and confidence control \citep{chen2024overconfidence} regularize all examples or all outputs. AdaMixup adapts smoothing strength during training \citep{chen2025adamixup}, but not through the fixed record-level forecast-and-target protocol studied here. We compare to global mixup and RelaxLoss because they are lightweight, credible baselines under the same budget.
+
+\paragraph{Privacy evaluation.}
+\citet{carlini2022membership} argued that low-FPR evaluation is the right operating regime for membership attacks, and \citet{wang2025membership} emphasized reliability and disparity across instances. We adopt that framing directly: our primary outcomes are \lira{} TPR@1\% FPR, forecast-conditioned worst-decile leakage, and privacy disparity, with a class-conditional \lira{} variant as a robustness check.
+
+Unlike prior work that treats forecasting ability itself as evidence of usefulness, our study separates forecast quality from intervention outcomes and asks whether the former actually buys the latter under a matched budget.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setting}
+
+Let $D_{\mathrm{tr}}=\{(x_i, y_i)\}_{i=1}^{n}$ be the target training set. The learner trains for $T=16$ epochs and is allowed to intervene on at most 10\% of training records at each refresh. The goal is not to maximize average privacy alone, but to reduce membership leakage on the records predicted to be most vulnerable while maintaining utility.
+
+\subsection{Warm-up Forecast}
+
+All targeted methods begin with a three-epoch warm-up (15\% of training). During warm-up, we log four per-record signals:
+\begin{enumerate}
+    \item loss-trace interquartile range (LT-IQR),
+    \item mean loss,
+    \item inverse predictive margin,
+    \item prediction-flip count.
+\end{enumerate}
+Each feature is converted to a percentile rank within the training set. For record $i$, the forecast score is
+\begin{equation}
+q_i = \frac{1}{4}\left(r(\mathrm{LT\mbox{-}IQR}_i) + r(\bar{\ell}_i) + r(-\bar{m}_i) + r(f_i)\right),
+\end{equation}
+where $r(\cdot)$ denotes percentile rank, $\bar{\ell}_i$ is mean loss, $\bar{m}_i$ is mean margin, and $f_i$ is the number of prediction flips. The single-artifact ablation uses only LT-IQR. The no-refresh ablation freezes $q_i$ after warm-up.
+
+After warm-up, targeted methods refresh at epochs 7, 11, and 15. At each refresh, the four features are recomputed over the most recent window and combined with the previous score through an exponential moving average with decay 0.5.
+
+\subsection{Selective Intervention}
+
+At refresh $t$, the selected set $R_t$ is the top 10\% of records under the current ranking rule. For targeted-random, the rule is class-stratified random choice; for targeted-loss-only, it is mean loss only; for targeted-forecast, it is the composite score above.
+
+Selected records receive same-class vicinal smoothing:
+\begin{equation}
+\tilde{x}_i = \lambda_i x_i + (1-\lambda_i)x_j, \qquad
+\tilde{y}_i = \lambda_i y_i + (1-\lambda_i)y_j,
+\end{equation}
+where $x_j$ is chosen from the same class among the lowest-risk half of that class using nearest neighbors in penultimate-layer feature space. Euclidean distance is used on \purch{} and cosine distance on \cifar{}. The mixing coefficient follows $\lambda_i \sim \mathrm{Beta}(\alpha_i,\alpha_i)$, where $\alpha_i$ is mapped linearly from $0.8$ at the 90th risk percentile to $0.35$ at the 100th percentile, so higher-risk examples are smoothed more aggressively.
+
+The targeted-penalty ablation keeps the same forecast and refresh schedule but replaces vicinal smoothing with a targeted confidence penalty (coefficient $0.02$ on \purch{}, $0.01$ on \cifar{}).
+
+\subsection{Baselines}
+
+We evaluate nine methods:
+\begin{itemize}
+    \item \textbf{ERM:} standard empirical risk minimization.
+    \item \textbf{Global mixup:} standard mixup with $\alpha=0.2$ on \purch{} and $\alpha=0.4$ on \cifar{}.
+    \item \textbf{RelaxLoss:} global regularization baseline with tuned penalty coefficient $0.5$.
+    \item \textbf{Targeted-random, targeted-loss-only, targeted-forecast:} matched-budget selective baselines with the same warm-up, budget, refreshes, and smoothing operator.
+    \item \textbf{Single-artifact forecast, forecast without refresh, forecast + targeted penalty:} ablations on the composite score, refresh mechanism, and intervention operator.
+\end{itemize}
+
+\subsection{Metrics}
+
+The primary attack is global-variance \lira{} \citep{carlini2022membership}. We also report a class-conditional \lira{} variant fit separately per class from the same non-member reference pool, and a loss-threshold attack.
+
+Our paper emphasizes four outcomes.
+\paragraph{Primary privacy metric.}
+\lira{} TPR@1\% FPR, where the threshold is calibrated on the disjoint non-member reference set.
+\paragraph{Worst-decile leakage.}
+Members are partitioned into deciles using the warm-up score $q_i$ computed before any post-warm-up intervention. We then report final TPR@1\% FPR on the top forecast decile only.
+\paragraph{Privacy disparity.}
+Using the same warm-up deciles, disparity is the difference between TPR@1\% FPR on the top forecast decile and on the pooled middle two deciles (50th--70th percentiles). Lower is better.
+\paragraph{Forecast quality.}
+Let $s_i$ be the final member attack score under global-variance \lira{}. Unless noted otherwise, $q_i$ denotes the same composite warm-up score in Equation~(1), even for ERM, global baselines, and targeted-random; those rows answer whether the common early forecast remains predictive under each training regime, not which score each method used for selection. The exception is the single-artifact ablation, where $q_i$ is LT-IQR rank only. Targeted-loss-only still selects records by warm-up mean loss during training, and targeted-random uses class-stratified random selection, but both are evaluated against the common warm-up $q_i$ so Table~\ref{tab:forecast-quality} is comparable across rows. We report Spearman correlation between $q_i$ and $s_i$, Precision@10 for final privacy outliers, and mean Jaccard overlap between consecutive selected sets.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets and splits.}
+We use \purch{} and \cifar{}.
+For \purch{}, each seed uses 12{,}000 train, 2{,}000 validation, 2{,}000 test, and 8{,}000 reference examples. Features are standardized with train-only mean and standard deviation.
+For \cifar{}, each seed uses 15{,}000 train, 5{,}000 validation, 20{,}000 reference images from the training split, and the standard 10{,}000-image test set \citep{cifar10}. Training augmentation is random crop with four-pixel padding and random horizontal flip; evaluation uses normalization only.
+
+\paragraph{Models and optimization.}
+\purch{} uses a two-hidden-layer MLP with widths 512 and 256, ReLU activations, and dropout 0.2. \cifar{} uses ResNet-18 \citep{he2016resnet}. \purch{} is trained with Adam, learning rate $10^{-3}$, weight decay $10^{-4}$, and batch size 512. \cifar{} uses SGD with momentum 0.9, learning rate 0.1, cosine decay to $10^{-4}$, weight decay $5\times 10^{-4}$, and batch size 256. All runs use mixed precision and the same 16-epoch budget.
+
+\paragraph{Seeds and scale.}
+All methods use seeds 11, 22, and 33. The full study contains $54$ runs: 6 main methods and 3 ablations on 2 datasets.
+
+\subsection{Main Results}
+
+Tables~\ref{tab:purchase-main} and \ref{tab:cifar-main} give the main comparison. Lower is better for all privacy columns. The central result is that targeted-forecast does not beat the matched-budget baselines on either dataset.
+
+\begin{table*}[t]
+\caption{Main results on \purch{}. Best values are in \textbf{bold}. Privacy columns are percentages at 1\% FPR; lower is better. Purchase100 macro-F1 is included because the dataset is class-imbalanced. Gain/min is computed from raw TPR proportions, not percentage-scaled display values: $(\mathrm{TPR}_{\mathrm{ERM}}-\mathrm{TPR}_{m}) / (\mathrm{time}_{m}-\mathrm{time}_{\mathrm{ERM}}+0.1)$.}
+\label{tab:purchase-main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+Method & \lira{} TPR$\downarrow$ & Class-cond.\ TPR$\downarrow$ & Loss TPR$\downarrow$ & Worst-decile$\downarrow$ & Disparity$\downarrow$ & Test acc.$\uparrow$ & Macro-F1$\uparrow$ & Runtime (min)$\downarrow$ & Gain/min$\uparrow$ \\
+\midrule
+ERM & \textbf{0.103 $\pm$ 0.106} & 0.833 $\pm$ 0.490 & 1.275 $\pm$ 0.087 & 0.194 $\pm$ 0.127 & 0.069 $\pm$ 0.087 & 73.62 $\pm$ 2.09 & 71.89 $\pm$ 2.21 & \textbf{0.143 $\pm$ 0.003} & 0.0000 \\
+Global mixup & 0.736 $\pm$ 0.108 & 0.828 $\pm$ 0.073 & 1.611 $\pm$ 0.083 & 0.972 $\pm$ 0.210 & 0.208 $\pm$ 0.260 & 69.45 $\pm$ 1.45 & 66.37 $\pm$ 1.62 & 0.163 $\pm$ 0.014 & -0.0526 \\
+RelaxLoss & 0.400 $\pm$ 0.282 & 0.900 $\pm$ 0.154 & \textbf{1.075 $\pm$ 0.129} & 0.556 $\pm$ 0.337 & 0.111 $\pm$ 0.146 & 72.08 $\pm$ 1.12 & 70.33 $\pm$ 1.02 & 0.155 $\pm$ 0.011 & -0.0264 \\
+Targeted-random & 0.150 $\pm$ 0.123 & \textbf{0.789 $\pm$ 0.456} & 1.414 $\pm$ 0.134 & \textbf{0.083 $\pm$ 0.144} & \textbf{-0.236 $\pm$ 0.192} & 73.73 $\pm$ 2.01 & 72.14 $\pm$ 2.07 & 0.225 $\pm$ 0.013 & -0.0026 \\
+Targeted-loss-only & 0.122 $\pm$ 0.017 & 0.944 $\pm$ 0.111 & 1.294 $\pm$ 0.197 & 0.194 $\pm$ 0.127 & 0.028 $\pm$ 0.120 & \textbf{74.05 $\pm$ 1.08} & \textbf{72.47 $\pm$ 1.58} & 0.240 $\pm$ 0.009 & -0.0010 \\
+Targeted-forecast & 0.381 $\pm$ 0.112 & 0.889 $\pm$ 0.055 & 1.281 $\pm$ 0.182 & 0.917 $\pm$ 0.464 & 0.431 $\pm$ 0.449 & 73.57 $\pm$ 1.08 & 71.59 $\pm$ 1.26 & 0.231 $\pm$ 0.024 & -0.0148 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Main results on \cifar{}. Best values are in \textbf{bold}. Privacy columns are percentages at 1\% FPR; lower is better. Gain/min again uses raw TPR proportions rather than percentage-scaled display values.}
+\label{tab:cifar-main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Method & \lira{} TPR$\downarrow$ & Class-cond.\ TPR$\downarrow$ & Loss TPR$\downarrow$ & Worst-decile$\downarrow$ & Disparity$\downarrow$ & Test acc.$\uparrow$ & Runtime (min)$\downarrow$ & Gain/min$\uparrow$ \\
+\midrule
+ERM & \textbf{1.018 $\pm$ 0.183} & 1.116 $\pm$ 0.140 & 0.444 $\pm$ 0.107 & \textbf{0.978 $\pm$ 0.154} & -0.200 $\pm$ 0.451 & \textbf{62.78 $\pm$ 1.81} & 0.588 $\pm$ 0.016 & 0.0000 \\
+Global mixup & 1.096 $\pm$ 0.088 & 1.102 $\pm$ 0.077 & 0.491 $\pm$ 0.114 & \textbf{0.978 $\pm$ 0.192} & -0.244 $\pm$ 0.267 & 58.62 $\pm$ 2.22 & 0.598 $\pm$ 0.012 & -0.0071 \\
+RelaxLoss & 1.191 $\pm$ 0.050 & \textbf{1.027 $\pm$ 0.064} & 0.680 $\pm$ 0.094 & 1.222 $\pm$ 0.038 & -0.089 $\pm$ 0.107 & 58.04 $\pm$ 0.84 & \textbf{0.582 $\pm$ 0.007} & -0.0184 \\
+Targeted-random & 1.138 $\pm$ 0.109 & 1.227 $\pm$ 0.312 & \textbf{0.442 $\pm$ 0.102} & 1.044 $\pm$ 0.491 & \textbf{-0.333 $\pm$ 0.470} & 61.83 $\pm$ 2.81 & 0.969 $\pm$ 0.006 & -0.0025 \\
+Targeted-loss-only & 1.136 $\pm$ 0.004 & 1.211 $\pm$ 0.151 & 0.538 $\pm$ 0.164 & 1.044 $\pm$ 0.168 & -0.311 $\pm$ 0.117 & 62.50 $\pm$ 1.37 & 0.968 $\pm$ 0.010 & -0.0025 \\
+Targeted-forecast & 1.180 $\pm$ 0.041 & 1.116 $\pm$ 0.153 & 0.529 $\pm$ 0.052 & 1.111 $\pm$ 0.315 & -0.311 $\pm$ 0.269 & 60.96 $\pm$ 3.57 & 0.959 $\pm$ 0.032 & -0.0034 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Three observations stand out. First, forecast-driven targeting fails the paper's main success criterion: it does not improve worst-decile leakage over targeted-random or targeted-loss-only on either dataset. On \purch{}, the gap is large: $0.917\pm0.464$\% for targeted-forecast versus $0.083\pm0.144$\% for targeted-random. Second, targeted-forecast is not competitive on global privacy either, with primary \lira{} TPR increasing from $0.103\pm0.106$\% under ERM to $0.381\pm0.112$\% on \purch{} and from $1.018\pm0.183$\% to $1.180\pm0.041$\% on \cifar{}. Third, the utility cost is modest on \purch{} ($73.57\pm1.08$\% versus $73.62\pm2.09$\% for ERM) but larger on \cifar{} ($60.96\pm3.57$\% versus $62.78\pm1.81$\%).
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.48\linewidth]{figures/purchase100_matched_budget.pdf}\hfill
+\includegraphics[width=0.48\linewidth]{figures/cifar10_matched_budget.pdf}
+\caption{Matched-budget comparison on worst-decile leakage, defined as top-decile member TPR@1\% FPR under the warm-up forecast partition. All three bars use the same 10\% intervention budget, the same refresh schedule, and the same smoothing operator. Forecast-driven targeting does not beat the simpler baselines on either dataset; on \purch{}, it is substantially worse than targeted-random and targeted-loss-only.}
+\label{fig:matched-budget}
+\end{figure*}
+
+\subsection{Forecast Quality and Ablations}
+
+Table~\ref{tab:forecast-quality} separates forecasting ability from intervention outcomes. On \purch{}, targeted-forecast has the strongest forecast quality among the refreshed targeted methods, with Spearman $\rho=0.359\pm0.009$ and Precision@10 $=23.50\pm0.50$\%. The no-refresh variant reaches even higher Precision@10 ($31.69\pm7.93$\%) but performs even worse on worst-decile leakage ($1.167\pm0.220$\%), indicating that identifying future privacy outliers is not enough if the downstream intervention is poorly aligned.
+
+On \cifar{}, the forecast signal is weak across the board. Targeted-forecast has negative mean Spearman correlation and sub-random Precision@10, so its failure to improve privacy is not surprising.
+
+\begin{table*}[t]
+\caption{Forecast quality and ablations. Precision@10 is reported in percent; higher is better. Mean Jaccard overlap measures stability of consecutive targeted sets. For every row except single-artifact forecast, $q_i$ is the same composite warm-up score from Equation~(1); targeted-random and targeted-loss-only therefore use $q_i$ only for evaluation here, not as their live selection score. The final column reports worst-decile leakage in percent so the table can be read as a test of whether better forecasting translates into better protection.}
+\label{tab:forecast-quality}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccc}
+\toprule
+Dataset & Method & Spearman $\rho\uparrow$ & Precision@10$\uparrow$ & Jaccard$\uparrow$ & Worst-decile$\downarrow$ \\
+\midrule
+\purch{} & Targeted-random & 0.325 $\pm$ 0.014 & 15.92 $\pm$ 1.72 & 0.052 $\pm$ 0.003 & \textbf{0.083 $\pm$ 0.144} \\
+\purch{} & Targeted-loss-only & 0.322 $\pm$ 0.008 & 18.97 $\pm$ 0.92 & 0.095 $\pm$ 0.006 & 0.194 $\pm$ 0.127 \\
+\purch{} & Targeted-forecast & 0.359 $\pm$ 0.009 & 23.50 $\pm$ 0.50 & 0.192 $\pm$ 0.002 & 0.917 $\pm$ 0.464 \\
+\purch{} & Single-artifact forecast & 0.335 $\pm$ 0.017 & 17.94 $\pm$ 1.00 & 0.185 $\pm$ 0.004 & 0.278 $\pm$ 0.048 \\
+\purch{} & Forecast w/o refresh & \textbf{0.371 $\pm$ 0.006} & \textbf{31.69 $\pm$ 7.93} & \textbf{1.000 $\pm$ 0.000} & 1.167 $\pm$ 0.220 \\
+\purch{} & Forecast + penalty & 0.328 $\pm$ 0.019 & 16.44 $\pm$ 1.35 & 0.344 $\pm$ 0.003 & 0.222 $\pm$ 0.096 \\
+\midrule
+\cifar{} & Targeted-random & 0.013 $\pm$ 0.009 & 10.02 $\pm$ 0.95 & 0.052 $\pm$ 0.002 & \textbf{1.044 $\pm$ 0.491} \\
+\cifar{} & Targeted-loss-only & 0.008 $\pm$ 0.010 & 10.07 $\pm$ 0.87 & 0.216 $\pm$ 0.004 & \textbf{1.044 $\pm$ 0.168} \\
+\cifar{} & Targeted-forecast & -0.007 $\pm$ 0.006 & 9.69 $\pm$ 0.80 & 0.343 $\pm$ 0.002 & 1.111 $\pm$ 0.315 \\
+\cifar{} & Single-artifact forecast & 0.018 $\pm$ 0.009 & 10.44 $\pm$ 0.63 & 0.296 $\pm$ 0.009 & 1.156 $\pm$ 0.038 \\
+\cifar{} & Forecast w/o refresh & -0.003 $\pm$ 0.011 & 9.64 $\pm$ 1.00 & \textbf{1.000 $\pm$ 0.000} & 1.022 $\pm$ 0.077 \\
+\cifar{} & Forecast + penalty & \textbf{0.024 $\pm$ 0.004} & \textbf{11.58 $\pm$ 0.65} & 0.455 $\pm$ 0.006 & 1.400 $\pm$ 0.416 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+The ablations sharpen the interpretation. Replacing smoothing with a targeted penalty improves primary \lira{} TPR on \purch{} to $0.092\pm0.058$\%, slightly below ERM's $0.103\pm0.106$\%, but still does not improve worst-decile leakage over targeted-random. Freezing the risky set after warm-up yields the strongest forecast scores on \purch{} but the worst selective privacy outcome. Together, these results suggest that the bottleneck is not merely score estimation; it is the full control loop linking score, refresh policy, and intervention operator.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.48\linewidth]{figures/purchase100_forecast_quality.pdf}\hfill
+\includegraphics[width=0.48\linewidth]{figures/cifar10_forecast_quality.pdf}
+\caption{Forecast-quality diagnostics for targeted-forecast. Left panels plot the mean final primary attack score by warm-up forecast decile, averaged across seeds with one-standard-deviation bands. Right panels plot mean risky-set Jaccard overlap across refresh transitions, again with one-standard-deviation bands; the dashed horizontal line marks the overall mean Jaccard reported in Table~\ref{tab:forecast-quality}. The in-panel annotations are the exact targeted-forecast Spearman, Precision@10, and mean Jaccard values from Table~\ref{tab:forecast-quality}.}
+\label{fig:forecast-quality}
+\end{figure*}
+
+\subsection{Privacy-Utility Trade-off}
+
+Figure~\ref{fig:privacy-utility} shows that targeted methods incur substantial runtime overhead relative to ERM while failing to improve primary privacy. On \purch{}, the targeted-penalty ablation is the only method with positive privacy gain per extra minute; on \cifar{}, every non-ERM method, including the targeted-penalty ablation, is negative. This matters because the motivating claim for selective intervention is not only better targeting but better efficiency under a fixed budget.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.48\linewidth]{figures/purchase100_privacy_utility.pdf}\hfill
+\includegraphics[width=0.48\linewidth]{figures/cifar10_privacy_utility.pdf}
+\caption{Privacy-utility-runtime trade-offs. Marker positions show test accuracy and primary \lira{} TPR@1\% FPR; lower and leftward is better on privacy, rightward is better on utility. Marker area encodes runtime minutes, and the five most decision-relevant methods are labeled with their exact coordinates so the comparison is readable without cross-referencing the tables. Targeted-forecast does not occupy a favorable frontier on either dataset.}
+\label{fig:privacy-utility}
+\end{figure*}
+
+\subsection{Additional Planned Outputs}
+
+The pre-registered outputs omitted from the earlier draft do not change the conclusion. First, the loss-threshold attack is not a hidden win for targeted-forecast. On \purch{}, loss-threshold TPR@1\% FPR is $1.281\pm0.182$\% for targeted-forecast, versus $1.294\pm0.197$\% for targeted-loss-only, $1.414\pm0.134$\% for targeted-random, and a best global value of $1.075\pm0.129$\% for RelaxLoss. On \cifar{}, targeted-forecast reaches $0.529\pm0.052$\%, which is worse than ERM ($0.444\pm0.107$\%) and targeted-random ($0.442\pm0.102$\%).
+
+Second, Purchase100 macro-F1 confirms that targeted-forecast does not buy a hidden utility benefit. Targeted-loss-only has the best macro-F1 at $72.47\pm1.58$\%, followed by targeted-random at $72.14\pm2.07$\%; targeted-forecast reaches $71.59\pm1.26$\%, close to ERM's $71.89\pm2.21$\% but not better than the stronger matched-budget baselines.
+
+\begin{table}[t]
+\caption{Paired bootstrap summaries for targeted-forecast minus matched comparators. Values are percentage-point differences with 1{,}000 paired bootstrap samples; negative accuracy differences mean targeted-forecast is less accurate. For worst-decile leakage and disparity, positive values are worse because lower is better for both metrics.}
+\label{tab:bootstrap}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+Dataset & Comparator & $\Delta$ worst-decile & $\Delta$ disparity & $\Delta$ accuracy \\
+\midrule
+\purch{} & ERM & $0.722$ [$0.083, 1.167$] & $0.361$ [$-0.083, 0.583$] & $-0.05$ [$-1.25, 0.75$] \\
+\purch{} & Targeted-random & $0.833$ [$0.167, 1.333$] & $0.667$ [$0.375, 0.875$] & $-0.17$ [$-1.05, 0.80$] \\
+\purch{} & Targeted-loss-only & $0.722$ [$0.083, 1.250$] & $0.403$ [$-0.250, 0.792$] & $-0.48$ [$-0.70, -0.10$] \\
+\cifar{} & ERM & $0.133$ [$-0.200, 0.400$] & $-0.111$ [$-0.367, 0.367$] & $-1.82$ [$-4.57, 0.13$] \\
+\cifar{} & Targeted-random & $0.067$ [$-0.133, 0.333$] & $0.022$ [$-0.167, 0.233$] & $-0.87$ [$-1.93, -0.05$] \\
+\cifar{} & Targeted-loss-only & $0.067$ [$-0.200, 0.600$] & $0.000$ [$-0.400, 0.367$] & $-1.54$ [$-5.41, 0.86$] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:bootstrap} makes the negative result more explicit. On \purch{}, the paired intervals for worst-decile leakage against ERM, targeted-random, and targeted-loss-only are all strictly above zero, so targeted-forecast is consistently worse on the paper's main high-risk metric. The paired disparity interval is also strictly positive against targeted-random, while the ERM and targeted-loss-only disparity intervals still overlap zero. On \cifar{}, both the worst-decile and disparity intervals overlap zero, which is consistent with a near-null result rather than a reliable gain.
+
+The subgroup analysis also argues against actionability. On the warm-up top-risk members in \purch{}, targeted-forecast reduces accuracy to $84.50$\% on average, versus $97.44$\% for targeted-loss-only and $98.56$\% for targeted-random, while also producing the worst top-group primary TPR ($0.917$\% versus $0.194$\% and $0.083$\%). On \cifar{}, the top-risk group again fares worse under targeted-forecast: top-group accuracy is $46.24$\%, compared with $49.09$\% for targeted-loss-only and $49.42$\% for targeted-random. Per-class intervention frequencies show the same pattern. Random targeting is exactly uniform across CIFAR-10 classes (10\% by construction), while targeted-forecast concentrates more heavily on a subset of Purchase100 classes, ranging from $1.15$\% to $79.17$\% intervention frequency across class/seed pairs, compared with $8.11$\% to $16.67$\% for targeted-random.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main lesson is that \emph{predictive} forecasts are not necessarily \emph{actionable}. On \purch{}, the early forecast is informative by standard ranking metrics, yet the forecast-driven policy still makes the targeted privacy outcome worse. A plausible explanation is intervention mismatch: same-class vicinal smoothing may perturb examples that are forecast-risky for reasons the operator does not fix. Another possibility is selection instability. The targeted-forecast set is more stable than targeted-random on both datasets, but its mean Jaccard overlap remains only $0.192\pm0.002$ on \purch{} and $0.343\pm0.002$ on \cifar{}, which may be too volatile for a useful closed-loop policy.
+
+This paper also has clear limits. First, we evaluate only lightweight black-box score-based attacks, not many-shadow LiRA or white-box attackers. Second, the study uses two datasets and one intervention family. Third, our NeurIPS-style benchmark is intentionally narrow: MIST, MIAShield, and AdaMixup are included only as conceptual reference points in the positioning, not as direct reimplementations or head-to-head baselines, so the paper should be read as a controlled matched-budget study rather than an exhaustive selective-defense leaderboard.
+
+The negative result is still useful. Selective privacy defenses are easy to motivate conceptually, but the mechanism can fail even when the forecast looks good in isolation. Future work should treat score estimation, intervention choice, and refresh stability as separate design problems rather than assuming that better ranking alone will produce better privacy.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We studied whether early artifact forecasts are actionable for membership privacy under a fixed selective-intervention budget. The answer, under this protocol, is no. Forecast-driven targeting did not beat random targeting, loss-only targeting, or the strongest global baseline on the high-risk privacy metrics that motivated the study. On \purch{}, targeted-forecast achieved non-trivial forecast quality ($\rho=0.359\pm0.009$, Precision@10 $=23.50\pm0.50$\%) but raised worst-decile leakage to $0.917\pm0.464$\%. On \cifar{}, forecast quality was weak and privacy again did not improve.
+
+The broader implication is methodological. Privacy papers should distinguish between identifying vulnerable records and improving their outcomes under a realistic intervention budget. Our results show that these are not the same problem. A forecast can be measurable and still fail to support an effective selective defense.
+
+\appendix
+
+\section{Reproducibility and Artifact Summary}
+\label{sec:appendix}
+
+The study uses the exact dataset configurations exported in \texttt{outputs/tables/dataset\_summary.csv}: \purch{} uses 12{,}000 train, 2{,}000 validation, 2{,}000 test, and 8{,}000 reference records per seed, while \cifar{} uses 15{,}000 train, 5{,}000 validation, the standard 10{,}000-image test set, and 20{,}000 reference images. All methods use seeds 11, 22, and 33, a three-epoch warm-up, and refreshes after epochs 7, 11, and 15 when applicable.
+
+Attack thresholds are calibrated on the disjoint non-member reference pool at 1\% FPR for all three attack families: global-variance \lira{}, class-conditional \lira{}, and the loss-threshold attack. Every run selects the final checkpoint by highest validation accuracy, with lower validation loss used as a tiebreaker. Runtime and peak memory are summarized in \texttt{outputs/tables/runtime\_budget.csv}; the full study was executed on a single RTX A6000-class GPU, with per-run wall-clock times ranging from $0.140$ to $1.001$ minutes and peak logged memory between $77.6$ MB (\purch{}) and $293.6$ MB (\cifar{}).
+
+Per-run artifacts are stored under \path{outputs/}: final per-sample metric summaries in \path{outputs/metrics/*.json}, attack summaries and score files in \path{outputs/attacks/}, dense training traces in \path{outputs/traces/}, aggregated tables in \path{outputs/tables/}, and paper figures in \path{outputs/plots/} and \path{figures/}. The canonical per-method summaries used to populate the paper are the \path{exp/*/results.json} files, and the top-level \path{results.json} is regenerated from the same aggregation code so that its summary statistics match those canonical artifacts exactly.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

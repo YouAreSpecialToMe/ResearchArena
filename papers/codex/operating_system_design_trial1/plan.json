@@ -1,0 +1,147 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze CPU-only environment and reproducibility rules",
+    "description": "Create one reproducible evaluation environment that matches the actual resource budget: 2 CPU cores, 128 GB RAM, 0 GPUs, and about 8 hours total wall-clock time.",
+    "steps": {
+      "step1": "Run all experiments on one Linux machine and record `uname -a`, kernel version, compiler version, Python version, and repository commit hash in `artifacts/env.txt`.",
+      "step2": "Use CPU only. Set global concurrency to at most 2 worker processes because available GPU count is 0 and only 2 CPU cores are available for replay or systems runs.",
+      "step3": "Use the same seeds for every method and every matched workload setting: `11`, `17`, and `23`. Use those seeds for synthetic trace generation, shadow sampling, sentinel assignment, and tie-breaking.",
+      "step4": "Fix page size at 4 KiB, replay time unit as one page reference, and cache capacity unit as page frames. Disallow huge pages, learned models, and GPU code paths.",
+      "step5": "Write one run-level JSON record and one epoch-level JSONL stream per run under `artifacts/runs/`. Required run fields are `workload_family`, `cache_ratio`, `seed`, `method`, `trace_length`, `miss_ratio`, `weighted_miss_cost`, `regret_to_oracle_fixed`, `switch_count`, `unstable_epoch_fraction`, `selector_cpu_ms`, and `metadata_bytes`.",
+      "step6": "Before the full matrix, run one pilot per workload family. If any replay exceeds 4 minutes on one core, shorten only trace length or number of cache ratios; do not drop seeds, core baselines, or ablations."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate four label-free replay workloads",
+    "description": "Use only label-free synthetic workloads so the paper does not rely on privileged scan or compaction labels and so the causal claim is tested under controlled interference and phase change.",
+    "steps": {
+      "step1": "Generate `PhaseLoop` traces with 1,800,000 page references over a universe of 200,000 pages. Alternate three 300,000-reference phases: sequential scan over 160,000 pages, loop over 40,000 pages, and hotspot-random access over 20,000 pages from a Zipf distribution with exponent `1.2`.",
+      "step2": "Generate `TwoTenantMix` traces with 1,800,000 total references from two tenants sharing one cache. Tenant A issues 70 percent of requests from a 24,000-page hotspot with Zipf exponent `1.1`. Tenant B issues 30 percent of requests as either a sequential scan over 180,000 pages or a cyclic loop over 80,000 pages, alternating every 300,000 references.",
+      "step3": "Generate `SkewShift` traces with 1,800,000 references from one tenant whose popularity law shifts every 450,000 references: Zipf exponent sequence `0.8 -> 1.3 -> 0.9 -> 1.4`, with hotspot identities re-sampled at each shift from a 200,000-page universe.",
+      "step4": "Generate `StationaryZipf` negative-control traces with 1,800,000 references from a fixed Zipf distribution with exponent `1.1` over 200,000 pages and no intentional phase boundaries.",
+      "step5": "For each workload family, derive two cache capacities from the measured unique-page working set on the first 300,000 references: `0.5x` and `0.8x` working-set coverage. Keep these same ratios for all methods and seeds.",
+      "step6": "Store one manifest per generated trace in `artifacts/data_manifest.json` containing seed, trace length, unique pages, phase boundaries, tenant mix, working-set estimate, and derived cache capacities."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze policy portfolio, selector definitions, and hyperparameters",
+    "description": "Lock method definitions before running the matrix so the evaluation answers the novelty question cleanly and does not drift into unrelated controller features.",
+    "steps": {
+      "step1": "Use the fixed policy portfolio `LRU`, `MRU`, `LFU-aging`, and `LHD`. Do not include label-derived experts, learned experts, or application hints.",
+      "step2": "Implement `LFU-aging` with a 4-epoch exponential decay factor `0.5` and 8-bit saturated frequency counters. Implement `LHD` with 8 size bins, 16 age buckets, and page sizes fixed at 4 KiB so the size term is constant but the age-density machinery remains comparable.",
+      "step3": "Use `LRU` as the simple baseline and `ARC` as the strong adaptive single-policy baseline.",
+      "step4": "Implement `RecentWindow` as the strongest uncalibrated adaptive baseline: rank experts by sampled-shadow weighted miss cost over the last 2 epochs, with no sentinel correction.",
+      "step5": "Implement `LeaderSetDuel` as the direct monitored-region baseline: assign the same sentinel budget used by DuelCache, choose the active expert directly from realized sentinel outcomes, and do not use whole-cache correction.",
+      "step6": "Implement `NoCalibration` as DuelCache with identical sampled shadows and switching logic but with `delta_e(p)=0` for every expert and epoch.",
+      "step7": "Implement `DuelCache` with shadow sampling rate `1 percent` of pages, default sentinel fraction `2 percent` of cache capacity, epoch length `100,000` references, hysteresis margin `2 percent` of the current active policy estimated cost, minimum dwell time `2` epochs, and switching penalty `c0` obtained from the substrate microbenchmark.",
+      "step8": "Use only one active policy at a time, one sampled shadow per inactive policy, one scalar correction term per expert per epoch, and one variance-aware scale term `w_e(p)` computed from the previous 3 epochs of sentinel residual variance and sentinel coverage."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the primary replay comparison matrix",
+    "description": "Compare simple, strong, and closest-prior adaptive baselines against DuelCache on the same label-free traces, capacities, and seeds.",
+    "steps": {
+      "step1": "For each of 4 workload families, 2 cache ratios, and 3 seeds, run 6 methods: `LRU`, `ARC`, `RecentWindow`, `LeaderSetDuel`, `NoCalibration`, and `DuelCache`. This gives `4 x 2 x 3 x 6 = 144` replay runs.",
+      "step2": "Use the same weighted miss-cost function for every method: cost `1.0` for each page miss and cost `0.05` per policy switch normalized by average epoch miss cost. This keeps the comparison label-free and captures small switching overhead without kernel-specific labels.",
+      "step3": "For each matched workload setting, compute `OracleFixed`, the best fixed policy from `LRU`, `MRU`, `LFU-aging`, and `LHD` over the whole trace, and report regret to that oracle for every adaptive method.",
+      "step4": "Log per-run metrics `miss_ratio`, `weighted_miss_cost`, `regret_to_oracle_fixed`, `switch_count`, `unstable_epoch_fraction`, `selector_cpu_ms`, and `metadata_bytes`.",
+      "step5": "Execute at most 2 replay runs in parallel, one per core, and keep each replay single-threaded."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Establish whether biased counterfactual ranking exists",
+    "description": "Directly test the paper's central technical assumption by comparing sampled shadow rankings with exact full-policy replay on short windows where ground truth is affordable.",
+    "steps": {
+      "step1": "Select exact-replay windows only from the two novelty-critical non-stationary workloads: `TwoTenantMix` and `SkewShift`. For each seed, sample 3 windows of 120,000 references aligned to different phases, for `2 workloads x 3 seeds x 3 windows = 18` windows.",
+      "step2": "For every selected window, replay each fixed expert exactly as active policy over the whole window to obtain the true expert ordering and true weighted miss costs. This gives `18 windows x 4 experts = 72` exact runs.",
+      "step3": "On the same windows, run `RecentWindow`, `LeaderSetDuel`, `NoCalibration`, and `DuelCache` in shortened selector mode so they produce epoch-level expert rankings and cost estimates without needing full-trace execution.",
+      "step4": "For each epoch, compute Kendall tau between estimated and true expert ordering, Spearman correlation between estimated and true expert costs, and mean absolute percentage error of per-expert weighted miss-cost estimates.",
+      "step5": "Treat the core technical assumption as unsupported if `NoCalibration` already matches exact rankings closely, defined as median Kendall tau at least `0.85` and mean absolute percentage error at most `10 percent` on both novelty-critical workloads."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Test calibration transfer and policy-selection effectiveness",
+    "description": "Measure whether sentinel-derived bias estimates transfer beyond the reserved region and whether better ranking actually improves online whole-cache decisions.",
+    "steps": {
+      "step1": "Run the full replay matrix and analyze `TwoTenantMix` and `SkewShift` first because they are the novelty-critical workloads with either interference or non-stationary popularity.",
+      "step2": "At each epoch, log `hat_M_e(p)`, `ShadowSentinel_e(p)`, `RealSentinel_e(p)`, `delta_e(p)`, `w_e(p)`, `tilde_M_e(p)`, the selected expert, and whether the selected expert matched the exact best expert on windows where ground truth is available.",
+      "step3": "Compare `DuelCache` against `RecentWindow` and `LeaderSetDuel` on weighted miss cost, regret to `OracleFixed`, switch count, and unstable-epoch fraction. Use matched seeds and capacities only; no extra tuning for DuelCache.",
+      "step4": "Measure calibration transfer by computing the correlation between sentinel residual `delta_e(p)` and actual full-cache shadow error, plus the fraction of epochs where calibration improves expert ranking and the fraction where it degrades ranking.",
+      "step5": "Treat the novelty claim as failed if either `RecentWindow` or `LeaderSetDuel` matches `DuelCache` within 95 percent paired bootstrap confidence intervals on both non-stationary workload families."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel component and stress failure modes",
+    "description": "Test whether each retained component matters and explicitly map the regimes where calibration transfer fails instead of assuming global validity.",
+    "steps": {
+      "step1": "Ablation A: `NoCalibration` removes the sentinel correction term entirely.",
+      "step2": "Ablation B: `NoSentinelScaling` keeps correction but fixes `w_e(p)=1` for all epochs to test whether variance-aware scaling matters.",
+      "step3": "Ablation C: `DirectSentinelOnly` uses only `RealSentinel_e(p)` as the selection signal, without any sampled whole-cache shadows, to test whether whole-cache shadows are necessary beyond monitored-region dueling.",
+      "step4": "Run the three ablations only on `TwoTenantMix` and `SkewShift`, both cache ratios, and all 3 seeds. This gives `2 workloads x 2 ratios x 3 seeds x 3 ablations = 36` replay runs.",
+      "step5": "Run a transfer stress test for DuelCache and NoCalibration by varying sentinel fraction `{0.5 percent, 1 percent, 2 percent, 5 percent}` and sentinel placement `{uniform-hash, tenant-local, contiguous-reserved}` on one representative seed for `TwoTenantMix` and `SkewShift`. This gives `2 workloads x 4 fractions x 3 placements x 2 methods = 48` runs.",
+      "step6": "For the stress test, report ranking-improvement rate, ranking-degradation rate, correlation of sentinel residual with full-cache error, and identify at least one concrete failure regime such as tenant-local sentinels under dominant background scans."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run one small end-to-end programmable-substrate validation",
+    "description": "Validate the systems claim with a real two-policy controller on a programmable substrate, not just switching latency and metadata overhead in isolation.",
+    "steps": {
+      "step1": "Use one locally available programmable Linux page-cache substrate such as `cache_ext` or the closest equivalent. Implement only `LRU`, `MRU`, and the minimal DuelCache control path needed to switch between them based on one sentinel-corrected ranking signal.",
+      "step2": "Use a file-backed phase-changing workload with 3 phases repeated 5 times: 30 seconds sequential scan over a file larger than cache, 30 seconds hotspot-random reads over a small hot subset, and 30 seconds cyclic loop over a medium working set. Use one foreground process and one background interferer so the shared-cache setting remains present.",
+      "step3": "Run 3 seeds by randomizing file offsets and phase start offsets. Compare static `LRU`, static `MRU`, uncalibrated `RecentWindow`, and two-policy `DuelCache` under identical cache size and file layout.",
+      "step4": "Measure end-to-end runtime, major page faults, throughput in operations per second, switch count, median and p95 switch latency, and controller metadata bytes.",
+      "step5": "Use this real-system run only as a narrow validation. If the substrate is unstable, keep the scope to the two-policy controller and the one workload above, but still require end-to-end effectiveness rather than overhead-only measurement.",
+      "step6": "Treat the systems claim as unsupported unless `DuelCache` improves either runtime or page-fault count by at least `3 percent` over both static policies while keeping median switch latency below `250 ms`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply success criteria, confidence intervals, and falsifiers",
+    "description": "Use explicit confirmatory and falsifying criteria that match `proposal.md` and `idea.json` and can reject the paper's main claim if the evidence is weak.",
+    "steps": {
+      "step1": "Aggregate replay results across matched workload-ratio-seed triples with means, medians, and 95 percent paired bootstrap confidence intervals using `10,000` resamples.",
+      "step2": "Use paired Wilcoxon signed-rank tests for `DuelCache` versus `ARC`, `RecentWindow`, and `LeaderSetDuel` on weighted miss cost over the full replay matrix. Report effect sizes, not just p-values.",
+      "step3": "Confirm the main replay claim only if, on at least 2 non-stationary workload families, `DuelCache` lowers weighted miss cost by at least `5 percent` versus both `RecentWindow` and `LeaderSetDuel`.",
+      "step4": "Confirm the ranking claim only if, on shortened exact windows, `DuelCache` improves Kendall tau by at least `0.10` absolute and reduces mean absolute percentage error by at least `15 percent` versus `NoCalibration`.",
+      "step5": "Confirm the negative-control robustness claim only if, on `StationaryZipf`, `DuelCache` stays within `2 percent` of the better of `LRU` and `ARC` on weighted miss cost.",
+      "step6": "Confirm the transfer claim only if calibration improves ranking in a majority of epochs for at least one balanced multi-tenant setting and one single-tenant phase-shift setting, while also exposing at least one failure regime.",
+      "step7": "State the claim as refuted or sharply narrowed if exact windows show little ranking bias, if sentinel transfer fails except in narrow settings, or if the real substrate run shows no end-to-end benefit."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready tables and plots",
+    "description": "Generate only the figures and tables required to support or refute the narrowed claim about bias correction and transfer.",
+    "steps": {
+      "step1": "Create one main table with rows `LRU`, `ARC`, `RecentWindow`, `LeaderSetDuel`, `NoCalibration`, and `DuelCache`, and columns `weighted_miss_cost`, `miss_ratio`, `regret_to_oracle_fixed`, `switch_count`, `selector_cpu_ms`, and `metadata_bytes`.",
+      "step2": "Create one exact-window ranking table with columns `Kendall_tau`, `Spearman_rho`, and `MAPE` for `RecentWindow`, `LeaderSetDuel`, `NoCalibration`, and `DuelCache`.",
+      "step3": "Plot one per-epoch timeline each for `TwoTenantMix` and `SkewShift` showing active expert, raw estimate `hat_M_e`, calibrated estimate `tilde_M_e`, exact best expert on sampled exact windows, and switch points.",
+      "step4": "Plot one transfer figure showing correlation between sentinel residual and full-cache error, split by sentinel placement and sentinel fraction.",
+      "step5": "Plot one failure-mode heatmap with rows as sentinel placements, columns as sentinel fractions, and cell values as calibration-improvement rate.",
+      "step6": "Plot one systems figure with runtime and page-fault bars for static `LRU`, static `MRU`, `RecentWindow`, and two-policy `DuelCache`, plus a small switch-latency distribution panel.",
+      "step7": "Export figures as PDF, tables as CSV, and write `artifacts/summary.json` containing one boolean field per confirmatory and falsifying criterion."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Check runtime against the actual 8-hour budget",
+    "description": "Estimate total wall-clock time before execution and keep the plan feasible by constraining trace lengths and the number of exact windows rather than by weakening baselines or dropping seeds.",
+    "steps": {
+      "step1": "Primary replay matrix: `144` runs at an estimated `1.8` minutes each gives about `259` serial minutes or about `130` wall-clock minutes on 2 CPU cores.",
+      "step2": "Ablations: `36` runs at `1.8` minutes each gives about `65` serial minutes or about `33` wall-clock minutes on 2 CPU cores.",
+      "step3": "Transfer stress test: `48` runs at `1.5` minutes each gives about `72` serial minutes or about `36` wall-clock minutes on 2 CPU cores.",
+      "step4": "Exact-window ground truth: `72` exact expert runs at `0.8` minutes each plus `72` shortened selector runs at `0.4` minutes each gives about `86` serial minutes or about `43` wall-clock minutes on 2 CPU cores.",
+      "step5": "Trace generation, manifests, and pilot checks: budget `45` wall-clock minutes. Aggregation and plotting: budget `35` wall-clock minutes.",
+      "step6": "Programmable-substrate validation: budget `120` wall-clock minutes for build, three seeded end-to-end runs, and one rerun margin.",
+      "step7": "Reserve `60` wall-clock minutes contingency for debugging or one rerun batch. Total planned wall-clock time is about `8.0` hours. If pilots exceed estimates, first reduce exact-window count from 18 to 12 before changing any main replay comparison."
+    }
+  }
+]

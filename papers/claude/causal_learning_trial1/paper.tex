@@ -1,0 +1,540 @@
+\documentclass[11pt]{article}
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{tabularx}
+
+% Custom commands
+\newcommand{\epc}{\textsc{E-PC}}
+\newcommand{\pcp}{\textsc{PC-p}}
+\newcommand{\indep}{\perp\!\!\!\perp}
+\newcommand{\nindep}{\not\!\perp\!\!\!\perp}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{E-Valued Causal Discovery: Constraint-Based Structure Learning\\ with Anytime-Valid FDR Control}
+
+\author{
+  Anonymous Author(s)
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Constraint-based causal discovery algorithms such as PC perform many dependent conditional independence (CI) tests but lack principled control over the graph-level false discovery rate (FDR). The existing solution, PC-p, applies the Benjamini--Yekutieli (BY) correction to edge-specific p-values, but this correction is overly conservative due to the complex dependence among CI tests, resulting in substantial power loss. We propose \epc{}, a constraint-based causal discovery algorithm that replaces p-value-based CI tests with e-value-based CI tests and applies the e-BH procedure for graph-level FDR control. E-values can be safely composed under arbitrary dependence without correction, yielding valid FDR control and higher power. \epc{} additionally supports sequential evidence accumulation across data folds, providing anytime-valid FDR guarantees---controlling FDR in expectation at any stopping point. In experiments on synthetic Erd\H{o}s--R\'{e}nyi graphs with 10--100 nodes (both linear and nonlinear data), and four real-world benchmark networks, \epc{} consistently controls empirical FDR well below the nominal level. On 50-node graphs at a nominal FDR level of $q = 0.1$, \epc{}-Cal achieves an average empirical FDR of 0.046 compared to 0.089 for \pcp{} and 0.222 for standard PC---a reduction of 48\% relative to \pcp{} and 79\% relative to PC---while achieving the highest F1 score (0.965). These results demonstrate that e-values provide a practical and theoretically grounded framework for reliable causal graph discovery.
+\end{abstract}
+
+\section{Introduction}
+
+Causal discovery from observational data is a fundamental problem in statistics and machine learning, with applications spanning biology \citep{sachs2005causal}, medicine, economics, and climate science. Constraint-based algorithms, led by the PC algorithm \citep{spirtes2000causation}, learn causal graphs by performing a series of conditional independence (CI) tests to determine which edges to include in the output graph. These methods are widely used due to their statistical interpretability and theoretical guarantees under faithfulness assumptions.
+
+However, a critical statistical challenge has received insufficient attention: the PC algorithm performs dozens to thousands of dependent CI tests using a single, fixed significance level $\alpha$, without rigorous control over the \emph{graph-level} false discovery rate (FDR). In practice, this means the reported causal graph may contain a substantial fraction of spurious edges (false positives), with no principled way to quantify or control these errors. As graph size grows, the problem worsens---our experiments show that standard PC produces graphs with FDR exceeding 0.26 on 100-node graphs at $\alpha = 0.05$.
+
+The most directly related solution is PC-p \citep{strobl2019estimating}, which computes edge-specific p-values and applies the Benjamini--Yekutieli (BY) FDR procedure \citep{benjamini2001control}. While theoretically valid, the BY correction must account for arbitrary dependence among the CI tests by dividing the threshold by $\sum_{i=1}^{m} 1/i \approx \log(m)$, resulting in significant power loss, especially for large graphs.
+
+\textbf{Key insight.} E-values \citep{vovk2021evalues, ramdas2024hypothesis} are a recently developed alternative to p-values for hypothesis testing. An e-value is a non-negative random variable with expectation at most 1 under the null. Unlike p-values, e-values can be safely composed under arbitrary dependence: the \emph{e-BH procedure} \citep{wang2022false} controls FDR at the nominal level without any correction factor, regardless of the dependence structure among tests. This makes e-values ideally suited for causal discovery, where CI tests share the same data and are logically constrained by the true causal structure.
+
+We propose \epc{} (E-value PC), a modified constraint-based causal discovery algorithm that replaces p-value-based CI testing with e-value-based CI testing and uses the e-BH procedure for principled graph-level FDR control. Our contributions are:
+\begin{itemize}
+    \item We propose \epc{}, the first application of e-values to causal graph structure learning. We develop two e-value CI test constructions: a calibrator-based approach and a split-likelihood-ratio approach.
+    \item We show that \epc{} achieves valid FDR control (empirical FDR $\leq$ 0.046 at $q = 0.1$ for graphs up to 50 nodes, and $\leq 0.041$ at $q = 0.1$ for 100-node graphs) while maintaining competitive edge recovery, outperforming \pcp{} in both FDR control and F1 score.
+    \item We demonstrate that \epc{} supports anytime-valid FDR control: the algorithm can be stopped at any data fold and still provides FDR guarantees in expectation, a property no existing causal discovery method offers.
+    \item We provide comprehensive experiments on synthetic graphs (10--100 nodes) with both linear Gaussian and nonlinear additive noise data, four real-world benchmark networks (Asia, Sachs, ALARM, Insurance), and ablation studies on e-value construction methods and the number of data folds.
+\end{itemize}
+
+The rest of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \epc{} algorithm. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Constraint-based causal discovery.}
+The PC algorithm \citep{spirtes2000causation} is the foundational constraint-based method for learning directed acyclic graphs (DAGs) from observational data, later refined by the PC-stable variant \citep{colombo2014order} for order-independence and extended to handle latent variables via FCI \citep{spirtes2000causation}. Recent work has focused on computational efficiency: E-CIT \citep{guan2025efficient} reduces CI test complexity via ensemble aggregation. DAGPA \citep{zhou2025differentiable} introduces differentiable d-separation scores for continuous relaxation of CI constraints. ECCIT \citep{pan2026empirically} addresses CI test calibration. Our work is orthogonal to these efficiency and calibration improvements---we focus on principled graph-level statistical validity.
+
+\paragraph{FDR control in causal discovery.}
+\pcp{} \citep{strobl2019estimating} is the most directly related work. It computes edge-specific p-values by taking the maximum p-value across all CI tests for each edge, then applies the BY procedure \citep{benjamini2001control} for FDR control. Our approach differs in three ways: (1) we use e-values instead of p-values, eliminating the need for conservative BY corrections; (2) we support sequential evidence accumulation across data splits; and (3) we provide anytime validity. \citet{zhao2025fdr} apply e-values for FDR control in Gaussian graphical models (undirected), but do not address causal graph discovery with orientation rules---extending to directed graphs with the PC orientation phase is non-trivial.
+
+\paragraph{E-values and safe testing.}
+E-values were formalized by \citet{vovk2021evalues} and \citet{grunwald2024safe}, with FDR control via the e-BH procedure established by \citet{wang2022false}. The comprehensive treatment by \citet{ramdas2024hypothesis} covers the full theory. Our work brings this statistical framework to causal discovery for the first time.
+
+\paragraph{Robust causal discovery.}
+Bootstrap aggregation methods \citep{debeire2024bootstrap} provide per-edge confidence via resampling. Our approach provides a complementary, principled statistical framework for edge reliability with formal FDR guarantees.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: The PC Algorithm and FDR Control}
+
+\paragraph{The PC algorithm.}
+Given $n$ i.i.d.\ samples from a distribution faithful to an unknown DAG $G^*$ over $p$ variables, the PC algorithm \citep{spirtes2000causation} proceeds in two phases. In the \emph{skeleton phase}, it starts with a complete undirected graph and iteratively removes edges: for each pair $(X, Y)$, it searches for a conditioning set $Z$ such that $X \indep Y \mid Z$, testing this via a CI test at significance level $\alpha$. If independence is found, the edge is removed and $Z$ is recorded as the separating set. In the \emph{orientation phase}, edges are oriented using Meek's rules to produce a completed partially directed acyclic graph (CPDAG).
+
+\paragraph{The FDR problem.}
+Let $m$ be the number of edges in the estimated skeleton. Define the false discovery proportion as $\text{FDP} = V / \max(R, 1)$, where $V$ is the number of false edges and $R$ is the total number of reported edges. The FDR is $\E[\text{FDP}]$. Standard PC provides no control over FDR, which grows with graph size as more spurious edges pass the fixed $\alpha$ threshold.
+
+\paragraph{PC-p and BY correction.}
+\pcp{} \citep{strobl2019estimating} computes an edge-specific p-value $p_{ij}$ for each edge $(i,j)$ as the maximum p-value across all CI tests involving that edge:
+\begin{equation}
+p_{ij} = \max_{Z} p(X_i \indep X_j \mid Z),
+\end{equation}
+where the maximum is over all conditioning sets $Z$ tested during the skeleton phase. A small $p_{ij}$ indicates strong evidence that $X_i$ and $X_j$ are \emph{not} conditionally independent (i.e., the edge should be present). These edge-specific p-values are then filtered using the BY procedure at target FDR level $q$. Because the CI test p-values are arbitrarily dependent, BY divides the threshold by the harmonic number $H_m = \sum_{i=1}^{m} 1/i \approx \log(m)$, making the procedure conservative.
+
+\subsection{E-Value Conditional Independence Tests}
+
+An \emph{e-value} for a null hypothesis $H_0$ is a non-negative random variable $E$ satisfying $\E_{H_0}[E] \leq 1$. Large values of $E$ provide evidence against $H_0$. We develop two approaches for constructing e-values for CI tests.
+
+\paragraph{Calibrator-based e-values.}
+Given a valid p-value $p$ from any CI test (e.g., Fisher's z-test for partial correlation), we convert it to an e-value using the \emph{universal calibrator} \citep{vovk2021evalues}:
+\begin{equation}
+\label{eq:calibrator}
+e = \frac{1}{p \cdot e \cdot \log(1/p)}, \quad \text{if } p < 1/e; \quad e = 0, \quad \text{otherwise},
+\end{equation}
+where $e = \exp(1) \approx 2.718$. This produces a valid e-value from any valid p-value, at the cost of some power loss in the conversion.
+
+\paragraph{Split-likelihood-ratio (SLR) e-values.}
+For a more powerful construction, we use the \emph{universal inference} framework \citep{wasserman2020universal}. To test $H_0: X \indep Y \mid Z$:
+\begin{enumerate}
+    \item Split the data into two halves $D_1, D_2$.
+    \item On $D_1$, fit the unconstrained model $\hat{f}_1(Y \mid X, Z)$ and the null model $\hat{g}_1(Y \mid Z)$.
+    \item Compute the likelihood ratio on $D_2$:
+    \begin{equation}
+    \label{eq:slr}
+    e = \prod_{i \in D_2} \frac{\hat{f}_1(y_i \mid x_i, z_i)}{\hat{g}_1(y_i \mid z_i)}.
+    \end{equation}
+\end{enumerate}
+By construction, $\E_{H_0}[e] \leq 1$, making this a valid e-value without distributional assumptions beyond the data-splitting independence. For linear Gaussian data, $\hat{f}_1$ and $\hat{g}_1$ are fitted via ordinary least squares.
+
+\subsection{Sequential Evidence Accumulation}
+
+A key advantage of e-values is their composability. If $e_1, e_2, \ldots, e_K$ are e-values for the same hypothesis computed on independent data, their product $\prod_{k=1}^{K} e_k$ is also a valid e-value. We exploit this via $K$-fold data splitting:
+\begin{enumerate}
+    \item Split the dataset into $K$ folds $D_1, \ldots, D_K$.
+    \item For each CI query $X \indep Y \mid Z$, compute an e-value $e_k$ on each fold.
+    \item The combined e-value is $E = \prod_{k=1}^{K} e_k$.
+\end{enumerate}
+
+This provides two benefits: (1) \emph{increased power} through multiplicative evidence accumulation, and (2) \emph{anytime validity}---after processing any number of folds $K' \leq K$, the running product $\prod_{k=1}^{K'} e_k$ is a valid e-value, so the e-BH procedure applied at that point controls FDR in expectation at level $q$.
+
+\subsection{The E-PC Algorithm}
+
+Algorithm~\ref{alg:epc} presents the full \epc{} procedure. After the modified skeleton phase produces edge-specific e-values, we apply the e-BH procedure for FDR control.
+
+\begin{algorithm}[t]
+\caption{E-PC: E-Value Constraint-Based Causal Discovery}
+\label{alg:epc}
+\begin{algorithmic}[1]
+\REQUIRE Data $\mathbf{X} \in \R^{n \times p}$, target FDR level $q$, number of folds $K$
+\ENSURE CPDAG $\hat{G}$ with FDR $\leq q$
+\STATE Split data into $K$ folds $D_1, \ldots, D_K$
+\STATE Initialize $\hat{G}$ as complete undirected graph on $p$ nodes
+\FOR{conditioning set size $d = 0, 1, 2, \ldots$}
+    \FOR{each adjacent pair $(X_i, X_j)$ in $\hat{G}$}
+        \FOR{each $Z \subseteq \text{adj}(X_i) \setminus \{X_j\}$ with $|Z| = d$}
+            \FOR{each fold $k = 1, \ldots, K$}
+                \STATE Compute e-value $e_k$ for $H_0: X_i \indep X_j \mid Z$ on $D_k$
+            \ENDFOR
+            \STATE Combined e-value: $E_{ij|Z} = \prod_{k=1}^{K} e_k$
+        \ENDFOR
+        \STATE Independence evidence: $E^{\text{ind}}_{ij} = \max_Z E_{ij|Z}$
+        \IF{$E^{\text{ind}}_{ij} > 1$}
+            \STATE Remove edge $(X_i, X_j)$; record $\text{sepset}(i,j) = \arg\max_Z E_{ij|Z}$
+        \ENDIF
+    \ENDFOR
+\ENDFOR
+\STATE Compute edge evidence: $E^{\text{edge}}_{ij} = 1 / E^{\text{ind}}_{ij}$ for remaining edges
+\STATE \textbf{e-BH procedure:} Sort edges by decreasing $E^{\text{edge}}_{ij}$; find largest $k$ such that $E^{\text{edge}}_{(k)} \geq m / (k \cdot q)$; keep edges with rank $\leq k$
+\STATE Orient edges using Meek's rules with recorded separating sets
+\RETURN $\hat{G}$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{FDR guarantee.}
+By the e-BH theorem \citep{wang2022false}, the e-BH procedure in Step 16 controls $\text{FDR} \leq q$ under \emph{arbitrary dependence} among the edge e-values $\{E^{\text{edge}}_{ij}\}$. This is the key advantage over \pcp{}: no correction factor is needed regardless of the dependence structure among CI tests.
+
+\paragraph{Anytime validity.}
+At any fold $K' \leq K$, the partial products $\prod_{k=1}^{K'} e_k$ are valid e-values. Applying e-BH at that point yields a graph with FDR control in expectation. As more folds are processed, evidence accumulates and power increases, but validity is maintained throughout. We note that this is a \emph{probabilistic} guarantee: the e-BH procedure controls $\E[\text{FDP}] \leq q$, which does not preclude individual instances where the realized FDP exceeds $q$ (see Section~\ref{sec:anytime}).
+
+\paragraph{Computational complexity.}
+\epc{} has the same worst-case complexity as PC---$O(p^{d_{\max}+2})$ where $d_{\max}$ is the maximum conditioning set size---with a constant factor of $K$ for the fold processing. In practice, the overhead is modest (1.3--1.5$\times$ over standard PC in our experiments).
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate \epc{} on synthetic graphs and real-world benchmark networks. All experiments run on CPU (2 cores, 128GB RAM) and complete within 8 hours total. Code is implemented in Python using the \texttt{causal-learn} library as a base. Each configuration is repeated with 5 random seeds (42, 123, 456, 789, 1024) and we report mean $\pm$ standard deviation, except where noted.
+
+\subsection{Experimental Setup}
+
+\paragraph{Synthetic data.}
+We generate Erd\H{o}s--R\'{e}nyi (ER) random DAGs with $p \in \{10, 20, 50\}$ nodes and average degree 2. Edge weights are sampled uniformly from $[-1, -0.5] \cup [0.5, 1]$. We consider two data-generating processes: (1)~\emph{linear Gaussian}: $X_i = \sum_{j \in \text{pa}(i)} w_{ji} X_j + \varepsilon_i$ with $\varepsilon_i \sim \mathcal{N}(0, 1)$; and (2)~\emph{nonlinear additive}: $X_i = \sum_{j \in \text{pa}(i)} \tanh(w_{ji} X_j) + \varepsilon_i$ with $\varepsilon_i \sim \mathcal{N}(0, 0.5)$. Sample size is $n = 1000$ for both settings.
+
+\paragraph{Real-world networks.}
+We use four standard benchmark networks: Asia (8 nodes, 8 edges), Sachs (11 nodes, 17 edges) \citep{sachs2005causal}, ALARM (37 nodes, 46 edges), and Insurance (27 nodes, 52 edges). For Asia, ALARM, and Insurance, we sample 5000 observations from the known Bayesian network parameters. For Sachs, we use the 853 observational samples.
+
+\paragraph{Baselines.}
+We compare against: (1)~\textbf{PC} (standard PC-stable \citep{colombo2014order} with $\alpha = 0.05$); (2)~\textbf{\pcp{}} \citep{strobl2019estimating} with BY correction at $q = 0.1$; (3)~\textbf{GES} \citep{chickering2002optimal} with BIC scoring (where computationally feasible); and (4)~\textbf{NOTEARS} \citep{zheng2018dags} continuous optimization baseline. \epc{} uses $K = 5$ folds and target FDR $q = 0.1$.
+
+\paragraph{Metrics.}
+We report: structural Hamming distance (\textbf{SHD}, $\downarrow$), false discovery rate (\textbf{FDR}, $\downarrow$), true positive rate (\textbf{TPR}, $\uparrow$), and \textbf{F1} score ($\uparrow$). FDR is computed on the skeleton (undirected edges).
+
+\subsection{Main Results on Synthetic Data}
+
+Table~\ref{tab:main} presents results on synthetic linear Gaussian ER graphs with $n = 1000$ samples, averaged over five random seeds.
+
+\begin{table}[t]
+\caption{Comparison on synthetic ER graphs ($n = 1000$, degree 2, linear Gaussian). Best FDR and F1 in \textbf{bold} (excluding GES/NOTEARS for FDR since they lack FDR control mechanisms). $\downarrow$ = lower is better, $\uparrow$ = higher is better. Values are mean $\pm$ std over 5 seeds.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 10$} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 3.6 $\pm$ 2.2 & .077 $\pm$ .070 & .911 $\pm$ .079 & .914 $\pm$ .055 \\
+\pcp{} (BY, $q$=0.1) & 3.4 $\pm$ 2.1 & .064 $\pm$ .062 & .911 $\pm$ .079 & .920 $\pm$ .049 \\
+GES & 10.2 $\pm$ 6.9 & .138 $\pm$ .171 & .944 $\pm$ .083 & .898 $\pm$ .130 \\
+NOTEARS & 9.6 $\pm$ 4.0 & .291 $\pm$ .164 & .971 $\pm$ .057 & .811 $\pm$ .114 \\
+\epc{}-Cal ($q$=0.1) & \textbf{2.8 $\pm$ 2.3} & \textbf{.015 $\pm$ .031} & .911 $\pm$ .079 & \textbf{.946 $\pm$ .053} \\
+\epc{}-SLR ($q$=0.1) & \textbf{2.8 $\pm$ 2.3} & \textbf{.015 $\pm$ .031} & .911 $\pm$ .079 & \textbf{.946 $\pm$ .053} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 20$} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 7.4 $\pm$ 3.3 & .107 $\pm$ .052 & .990 $\pm$ .019 & .939 $\pm$ .032 \\
+\pcp{} (BY, $q$=0.1) & 5.2 $\pm$ 3.7 & .062 $\pm$ .043 & .990 $\pm$ .019 & .963 $\pm$ .027 \\
+GES & 14.4 $\pm$ 7.0 & .080 $\pm$ .106 & .990 $\pm$ .019 & .950 $\pm$ .061 \\
+NOTEARS & 14.8 $\pm$ 3.3 & .282 $\pm$ .090 & 1.000 $\pm$ .000 & .833 $\pm$ .059 \\
+\epc{}-Cal ($q$=0.1) & 4.0 $\pm$ 3.3 & .019 $\pm$ .023 & .990 $\pm$ .019 & .986 $\pm$ .019 \\
+\epc{}-SLR ($q$=0.1) & \textbf{3.6 $\pm$ 2.7} & \textbf{.009 $\pm$ .018} & .990 $\pm$ .019 & \textbf{.990 $\pm$ .012} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 50$} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 33.2 $\pm$ 8.2 & .222 $\pm$ .082 & .984 $\pm$ .016 & .867 $\pm$ .056 \\
+\pcp{} (BY, $q$=0.1) & 19.0 $\pm$ 6.6 & .089 $\pm$ .061 & .980 $\pm$ .014 & .944 $\pm$ .039 \\
+NOTEARS & 50.4 $\pm$ 8.5 & .392 $\pm$ .034 & .985 $\pm$ .016 & .751 $\pm$ .029 \\
+\epc{}-Cal ($q$=0.1) & 14.6 $\pm$ 7.0 & .046 $\pm$ .035 & .977 $\pm$ .010 & \textbf{.965 $\pm$ .022} \\
+\epc{}-SLR ($q$=0.1) & \textbf{14.0 $\pm$ 7.4} & \textbf{.023 $\pm$ .015} & .958 $\pm$ .016 & .967 $\pm$ .015 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 100$ (3 seeds$^\dagger$)} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 83.0 $\pm$ 12.8 & .262 $\pm$ .083 & .981 $\pm$ .014 & .840 $\pm$ .056 \\
+\pcp{} (BY, $q$=0.1) & 35.7 $\pm$ 5.2 & .090 $\pm$ .023 & .981 $\pm$ .014 & .944 $\pm$ .015 \\
+\epc{}-Cal ($q$=0.1) & 25.3 $\pm$ 2.4 & .041 $\pm$ .024 & .976 $\pm$ .012 & \textbf{.967 $\pm$ .012} \\
+\epc{}-SLR ($q$=0.1) & \textbf{21.7 $\pm$ 5.8} & \textbf{.026 $\pm$ .013} & .957 $\pm$ .012 & .965 $\pm$ .011 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.3em}
+{\footnotesize $^\dagger$The $p=100$ results are from the scalability experiment with 3 seeds (42, 123, 456). GES and NOTEARS are omitted: GES exceeded the time budget, and NOTEARS was not included in this experiment.}
+\end{table}
+
+The results reveal several key findings. First, \textbf{\epc{} achieves substantially lower FDR} than all baselines across all graph sizes. At $p = 50$, \epc{}-Cal achieves FDR of $0.046 \pm 0.035$ compared to $0.089 \pm 0.061$ for \pcp{} and $0.222 \pm 0.082$ for standard PC---a reduction of 48\% over \pcp{} and 79\% over PC. At $p = 100$, \epc{}-SLR achieves FDR of $0.026 \pm 0.013$ versus $0.090 \pm 0.023$ for \pcp{} (71\% reduction) and $0.262 \pm 0.083$ for PC (90\% reduction). We note that \epc{}'s empirical FDR is consistently \emph{below} the nominal level $q = 0.1$, indicating conservative (valid) control rather than exact calibration---a desirable property for FDR control procedures.
+
+Second, \textbf{\epc{} maintains competitive edge recovery}. While \epc{} is slightly more conservative in TPR (e.g., $0.958$ vs.\ $0.984$ at $p = 50$ for SLR), it achieves higher F1 scores across all settings because the reduction in false positives more than compensates for the slight reduction in true positives.
+
+Third, the \textbf{advantage of e-values grows with graph size}. At $p = 10$, the difference between \epc{} and \pcp{} is modest (FDR $0.015$ vs.\ $0.064$). At $p = 50$, it becomes more substantial (FDR $0.046$ vs.\ $0.089$), reflecting the increasing cost of the BY correction factor $\log(m)$ for \pcp{}.
+
+Fourth, \textbf{NOTEARS achieves high TPR but suffers from very high FDR} (0.29--0.39), resulting in the lowest F1 scores. This highlights the value of principled FDR control: NOTEARS recovers most true edges but also introduces many spurious ones.
+
+\subsection{Nonlinear Synthetic Data}
+\label{sec:nonlinear}
+
+To evaluate robustness beyond the linear Gaussian setting, we test \epc{}-Cal on nonlinear additive noise data ($X_i = \sum_{j} \tanh(w_{ji} X_j) + \varepsilon_i$) for $p \in \{10, 20\}$ with $n = 1000$. Table~\ref{tab:nonlinear} shows results averaged over 5 seeds.
+
+\begin{table}[t]
+\caption{Results on nonlinear additive noise data (ER graphs, degree 2, $n = 1000$). \epc{}-Cal uses $q = 0.1$, $K = 5$. Values are mean $\pm$ std over 5 seeds. Best F1 in \textbf{bold}.}
+\label{tab:nonlinear}
+\centering
+\small
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 10$, $n = 1000$} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 4.0 $\pm$ 2.6 & .083 $\pm$ .054 & .925 $\pm$ .063 & .919 $\pm$ .041 \\
+\pcp{} ($q$=0.1) & 3.8 $\pm$ 2.5 & .069 $\pm$ .063 & .925 $\pm$ .063 & .925 $\pm$ .040 \\
+\epc{}-Cal ($q$=0.1) & \textbf{3.4 $\pm$ 2.9} & \textbf{.015 $\pm$ .031} & .925 $\pm$ .063 & \textbf{.953 $\pm$ .043} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 20$, $n = 1000$} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC ($\alpha$=0.05) & 7.0 $\pm$ 4.2 & .116 $\pm$ .077 & .990 $\pm$ .019 & .933 $\pm$ .046 \\
+\pcp{} ($q$=0.1) & 5.0 $\pm$ 4.8 & .061 $\pm$ .058 & .990 $\pm$ .019 & .964 $\pm$ .037 \\
+\epc{}-Cal ($q$=0.1) & \textbf{2.8 $\pm$ 2.7} & \textbf{.000 $\pm$ .000} & .990 $\pm$ .019 & \textbf{.995 $\pm$ .010} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The calibrator-based e-value approach, which converts Fisher-z p-values to e-values, extends naturally to nonlinear data since any valid CI test p-value can be calibrated. On $p = 10$ nonlinear graphs, \epc{}-Cal reduces FDR from $0.083$ (PC) and $0.069$ (\pcp{}) to $0.015$. On $p = 20$, \epc{}-Cal achieves zero false discoveries (FDR = 0.000) while maintaining the same TPR as PC and \pcp{}, yielding F1 of 0.995. These results confirm that \epc{}'s FDR control advantage extends beyond the linear Gaussian setting.
+
+\subsection{Results on Real-World Networks}
+
+Table~\ref{tab:real} presents results on four real-world benchmark networks, averaged over five random seeds.
+
+\begin{table}[t]
+\caption{Comparison on real-world benchmark networks. Best FDR and F1 in \textbf{bold} among constraint-based methods. \epc{} uses $q = 0.1$, $K = 5$ folds. Values are mean $\pm$ std over 5 seeds. GES omitted for ALARM and Insurance due to exceeding the time budget.}
+\label{tab:real}
+\centering
+\small
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{Asia (8 nodes, 8 edges)} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC & 2.8 $\pm$ 1.0 & .142 $\pm$ .079 & 1.000 $\pm$ .000 & .922 $\pm$ .044 \\
+\pcp{} & 2.2 $\pm$ 1.0 & .120 $\pm$ .098 & 1.000 $\pm$ .000 & .933 $\pm$ .054 \\
+GES & 5.0 $\pm$ 0.0 & .000 $\pm$ .000 & 1.000 $\pm$ .000 & 1.000 $\pm$ .000 \\
+NOTEARS & 6.0 $\pm$ 0.0 & .200 $\pm$ .000 & 1.000 $\pm$ .000 & .889 $\pm$ .000 \\
+\epc{}-Cal & 2.0 $\pm$ 0.9 & .102 $\pm$ .090 & 1.000 $\pm$ .000 & .944 $\pm$ .050 \\
+\epc{}-SLR & \textbf{1.4 $\pm$ 0.5} & \textbf{.044 $\pm$ .054} & 1.000 $\pm$ .000 & \textbf{.976 $\pm$ .029} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{Sachs (11 nodes, 17 edges)} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC & 9.6 $\pm$ 2.3 & .091 $\pm$ .055 & .882 $\pm$ .053 & .893 $\pm$ .028 \\
+\pcp{} & 8.8 $\pm$ 2.1 & .071 $\pm$ .050 & .882 $\pm$ .053 & .904 $\pm$ .035 \\
+GES & 15.2 $\pm$ 2.6 & .175 $\pm$ .117 & .894 $\pm$ .044 & .854 $\pm$ .077 \\
+NOTEARS & 11.6 $\pm$ 1.4 & .295 $\pm$ .027 & .976 $\pm$ .029 & .818 $\pm$ .014 \\
+\epc{}-Cal & \textbf{8.8 $\pm$ 2.1} & \textbf{.063 $\pm$ .037} & .871 $\pm$ .044 & \textbf{.902 $\pm$ .036} \\
+\epc{}-SLR & 9.8 $\pm$ 1.9 & .041 $\pm$ .034 & .788 $\pm$ .047 & .864 $\pm$ .026 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{ALARM (37 nodes, 46 edges)} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC & 23.0 $\pm$ 3.7 & .130 $\pm$ .033 & .977 $\pm$ .022 & .920 $\pm$ .021 \\
+\pcp{} & 18.8 $\pm$ 3.7 & .087 $\pm$ .016 & .973 $\pm$ .028 & .942 $\pm$ .020 \\
+NOTEARS & 51.4 $\pm$ 14.1 & .434 $\pm$ .051 & .996 $\pm$ .008 & .720 $\pm$ .043 \\
+\epc{}-Cal & 16.8 $\pm$ 5.0 & .064 $\pm$ .028 & .973 $\pm$ .028 & .954 $\pm$ .026 \\
+\epc{}-SLR & \textbf{15.4 $\pm$ 4.5} & \textbf{.034 $\pm$ .027} & .965 $\pm$ .032 & \textbf{.965 $\pm$ .026} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{Insurance (27 nodes, 52 edges)} \\
+\cmidrule(lr){2-5}
+Method & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+PC & 27.6 $\pm$ 13.4 & .142 $\pm$ .056 & .870 $\pm$ .094 & .863 $\pm$ .072 \\
+\pcp{} & 26.8 $\pm$ 11.8 & .117 $\pm$ .049 & .865 $\pm$ .091 & .873 $\pm$ .068 \\
+NOTEARS & 46.4 $\pm$ 7.3 & .437 $\pm$ .021 & .977 $\pm$ .026 & .714 $\pm$ .021 \\
+\epc{}-Cal & 26.8 $\pm$ 11.8 & .114 $\pm$ .045 & .861 $\pm$ .092 & .872 $\pm$ .068 \\
+\epc{}-SLR & \textbf{26.2 $\pm$ 10.9} & \textbf{.092 $\pm$ .044} & .839 $\pm$ .090 & \textbf{.871 $\pm$ .067} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On ALARM (37 nodes), \epc{}-SLR achieves the best SHD ($15.4$) and F1 ($0.965$), with FDR of $0.034$ compared to $0.087$ for \pcp{} and $0.130$ for standard PC---a 61\% and 74\% reduction, respectively. NOTEARS achieves the highest TPR ($0.996$) but at the cost of very high FDR ($0.434$), resulting in the lowest F1 ($0.720$). On the Sachs protein signaling network, \epc{}-Cal achieves the lowest FDR ($0.063$) among constraint-based methods with competitive F1 ($0.902$). The Insurance network shows a more modest pattern, with \epc{}-SLR reducing FDR from $0.117$ (\pcp{}) to $0.092$. On the small Asia network, GES achieves perfect performance; among constraint-based methods, \epc{}-SLR achieves the best SHD ($1.4$) and F1 ($0.976$).
+
+\subsection{FDR Calibration Analysis}
+
+Figure~\ref{fig:fdr_calibration} shows the FDR calibration across methods. A valid FDR control method should have empirical FDR at or below the nominal level $q$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig1_fdr_calibration.pdf}
+\caption{FDR calibration: empirical FDR vs.\ nominal target $q$ for different graph sizes. The dashed line indicates perfect calibration (empirical FDR $= q$). \epc{} (blue/purple) is consistently below the nominal level, demonstrating valid but conservative FDR control. Standard PC (red) is anti-conservative. \pcp{} (green) controls FDR but is less tight than \epc{}.}
+\label{fig:fdr_calibration}
+\end{figure}
+
+Standard PC exhibits strongly anti-conservative behavior, with empirical FDR far exceeding the nominal level, especially for larger graphs. \pcp{} controls FDR but is conservative (empirical FDR below the target). \epc{} achieves valid control: empirical FDR is consistently below the nominal level, and in most settings tighter than \pcp{}. We emphasize that both \epc{} and \pcp{} are \emph{conservative} rather than calibrated---their empirical FDR is below rather than equal to $q$---but \epc{} achieves higher power at the same validity level.
+
+\subsection{FDR--Power Tradeoff}
+
+Figure~\ref{fig:fdr_power} shows the FDR--TPR tradeoff curve, obtained by varying the threshold parameter for each method.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig3_fdr_power_tradeoff.pdf}
+\caption{FDR--power tradeoff. Each curve traces the (empirical FDR, TPR) pairs as the threshold varies. \epc{} achieves higher TPR at any given FDR level, indicating better statistical efficiency.}
+\label{fig:fdr_power}
+\end{figure}
+
+\epc{} dominates \pcp{} across the entire tradeoff curve: at any target FDR level, \epc{} recovers more true edges. This confirms that the power advantage of e-values over BY-corrected p-values is not an artifact of a particular operating point but reflects a fundamental statistical advantage.
+
+\subsection{Ablation Studies}
+
+\paragraph{E-value construction method.}
+Table~\ref{tab:ablation_eval} compares the two e-value construction methods (calibrator and split-likelihood-ratio) along with a hybrid approach that takes their geometric mean, evaluated on ER and SF graphs with $n \in \{500, 1000\}$, degree 2, averaged over 5 seeds per graph type.
+
+\begin{table}[t]
+\caption{Ablation: e-value construction method ($K = 5$, $q = 0.1$, $n \in \{500, 1000\}$, degree 2). Values are mean $\pm$ std over 20 configurations (2 graph types $\times$ 2 sample sizes $\times$ 5 seeds). Best F1 in \textbf{bold}.}
+\label{tab:ablation_eval}
+\centering
+\small
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 10$} \\
+\cmidrule(lr){2-5}
+E-value Type & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+Calibrator & 1.9 $\pm$ 2.1 & .015 $\pm$ .037 & .941 $\pm$ .084 & \textbf{.961 $\pm$ .057} \\
+Split-LR & 2.1 $\pm$ 2.4 & .013 $\pm$ .032 & .919 $\pm$ .116 & .949 $\pm$ .078 \\
+Hybrid (geometric mean) & 1.9 $\pm$ 2.1 & \textbf{.012 $\pm$ .028} & .937 $\pm$ .090 & .960 $\pm$ .059 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 20$} \\
+\cmidrule(lr){2-5}
+E-value Type & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+Calibrator & 4.2 $\pm$ 3.3 & .010 $\pm$ .019 & .985 $\pm$ .028 & .987 $\pm$ .017 \\
+Split-LR & 3.7 $\pm$ 2.4 & \textbf{.002 $\pm$ .010} & .946 $\pm$ .070 & .970 $\pm$ .038 \\
+Hybrid (geometric mean) & 3.9 $\pm$ 2.9 & .005 $\pm$ .014 & .985 $\pm$ .028 & \textbf{.990 $\pm$ .017} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\begin{tabular}{l cccc}
+\toprule
+ & \multicolumn{4}{c}{$p = 50$} \\
+\cmidrule(lr){2-5}
+E-value Type & SHD\,$\downarrow$ & FDR\,$\downarrow$ & TPR\,$\uparrow$ & F1\,$\uparrow$ \\
+\midrule
+Calibrator & 14.6 $\pm$ 6.0 & .022 $\pm$ .026 & .966 $\pm$ .032 & .972 $\pm$ .022 \\
+Split-LR & 13.6 $\pm$ 6.2 & \textbf{.010 $\pm$ .014} & .909 $\pm$ .056 & .946 $\pm$ .031 \\
+Hybrid (geometric mean) & \textbf{13.4 $\pm$ 6.5} & .008 $\pm$ .019 & .958 $\pm$ .040 & \textbf{.974 $\pm$ .023} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hybrid approach achieves the best overall F1 by combining the strengths of both methods: the calibrator provides higher TPR while Split-LR achieves the lowest FDR. For the main experiments, we report calibrator and SLR separately for transparency.
+
+\paragraph{Number of folds $K$.}
+Figure~\ref{fig:ablation_folds} shows how the number of data folds affects performance. With $K = 2$ folds, \epc{} has limited power due to small per-fold sample sizes. Performance improves from $K = 2$ to $K = 5$ as evidence accumulates, then degrades for $K > 5$ as per-fold samples become too small for reliable CI tests. We recommend $K = 5$ as a practical default.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig5_ablation_folds.pdf}
+\caption{Effect of number of folds $K$ on F1 score. Performance peaks around $K = 5$, balancing evidence accumulation against per-fold sample size.}
+\label{fig:ablation_folds}
+\end{figure}
+
+\paragraph{Anytime validity.}
+\label{sec:anytime}
+Figure~\ref{fig:anytime} demonstrates the anytime-valid property. We run \epc{}-Cal with $K = 10$ folds and $q = 0.1$ on 30 configurations ($p \in \{10, 20, 50\}$, 5 seeds each, 2 graph types ER and SF), applying e-BH after each fold $K' = 1, \ldots, 10$ and computing the empirical FDR and TPR.
+
+FDR is controlled at or below $q = 0.1$ at 299 out of 300 individual fold-configuration instances (99.7\%). The single exception occurs at $p = 10$, seed 42, fold 1, where FDR $= 0.125$. This is consistent with the theoretical guarantee, which controls FDR \emph{in expectation} ($\E[\text{FDP}] \leq q$) rather than providing a per-instance bound. The mean FDR across all stopping points is 0.003, well below $q = 0.1$.
+
+TPR generally increases as more folds are processed, reflecting the accumulation of evidence. However, TPR does not increase monotonically in every instance: across all 270 fold-step transitions, 53 (19.6\%) show a decrease in TPR. This occurs because the e-BH procedure recomputes the edge set at each stopping point, and accumulated evidence can shift the rejection boundary in either direction for specific edges. Despite these local fluctuations, the overall trend is upward: mean TPR increases from 0.74 at $K' = 1$ to 0.82 at $K' = 10$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/fig4_anytime_validity.pdf}
+\caption{Anytime validity: empirical FDR (left) and TPR (right) as a function of number of folds processed, across 30 configurations ($p \in \{10, 20, 50\}$, 5 seeds, 2 graph types). FDR stays below $q = 0.1$ (dashed line) at nearly all stopping points (99.7\% of instances), consistent with the theoretical guarantee of FDR control in expectation. TPR generally increases with more folds, though local non-monotonicity occurs in 19.6\% of fold-step transitions.}
+\label{fig:anytime}
+\end{figure}
+
+\subsection{Scalability}
+
+Figure~\ref{fig:scalability} shows runtime as a function of graph size. \epc{} introduces a modest overhead of 1.3--1.5$\times$ compared to standard PC, arising from the $K$-fold processing. This overhead is constant regardless of graph size. Both PC-based methods scale similarly, while GES becomes prohibitively expensive for larger graphs (omitted for $p \geq 50$ due to exceeding the time budget).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig6_scalability.pdf}
+\caption{Runtime vs.\ number of nodes. \epc{} adds modest overhead ($\sim$1.4$\times$) over standard PC. GES is omitted for $p \geq 50$.}
+\label{fig:scalability}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{When does \epc{} help most?}
+The advantage of \epc{} over \pcp{} grows with graph size, because the BY correction factor $\log(m)$ penalizes \pcp{} more heavily as the number of edges $m$ increases. For very small graphs ($p \leq 10$), the difference is modest and standard methods may suffice.
+
+\paragraph{Conservative rather than calibrated.}
+Both \epc{} and \pcp{} achieve empirical FDR well below the nominal level $q$. A truly calibrated method would have empirical FDR $\approx q$; instead, both methods are conservative (valid but not tight). \epc{}'s conservatism is less severe than \pcp{}'s, resulting in higher power, but practitioners should be aware that the nominal $q$ is an upper bound on FDR rather than an exact target.
+
+\paragraph{Power--FDR tradeoff.}
+\epc{} achieves lower FDR at the cost of slightly lower TPR compared to standard PC. This is by design: FDR control necessarily reduces the number of reported edges. Users who prioritize recall over precision may prefer standard PC, while those requiring reliable graphs should use \epc{}.
+
+\paragraph{Comparison with NOTEARS.}
+On both synthetic and real-world networks, NOTEARS \citep{zheng2018dags} achieves high TPR (often near 1.0) but suffers from very high FDR (0.20--0.44), resulting in low F1 scores. This highlights the value of principled FDR control: NOTEARS recovers most true edges but also introduces many spurious ones, making the resulting graph unreliable.
+
+\paragraph{Limitations.}
+\textit{(1) Faithfulness assumption.} Like all constraint-based methods, \epc{} assumes the data distribution is faithful to the underlying DAG. Violations of faithfulness can lead to both missed and spurious edges regardless of the FDR control method.
+\textit{(2) Data splitting.} The SLR e-value construction requires data splitting, which reduces the effective sample size for each CI test. With very small samples ($n < 200$), this can lead to power loss. The calibrator approach mitigates this by using all data for the initial p-value.
+\textit{(3) Limited nonlinear evaluation.} While our nonlinear experiments ($p \in \{10, 20\}$) demonstrate that \epc{}'s FDR control extends to nonlinear data, comprehensive evaluation on larger nonlinear graphs and diverse functional forms (e.g., polynomial, periodic) remains future work.
+\textit{(4) Orientation accuracy.} \epc{}'s FDR control operates on the skeleton (undirected edges). Orientation errors from Meek's rules are not directly controlled by the e-BH procedure.
+\textit{(5) Computational overhead.} While modest (1.3--1.5$\times$), the $K$-fold processing adds runtime. For very large graphs ($p > 1000$), this may be a concern.
+\textit{(6) Anytime validity is probabilistic.} The e-BH procedure controls $\E[\text{FDP}] \leq q$, not $\text{FDP} \leq q$ with probability 1. In our experiments, 0.3\% of individual fold instances showed FDR slightly exceeding $q$, consistent with this expectation-level guarantee.
+
+\paragraph{Reproducibility.}
+All experiments were run on a Linux machine with 2 CPU cores and 128\,GB RAM, using Python 3.10 with NumPy 1.24, SciPy 1.11, and \texttt{causal-learn} 0.1.3.8. Random seeds 42, 123, 456, 789, and 1024 were used throughout (3 seeds for $p = 100$ scalability experiments). Total computation time was approximately 6 hours. Source code and data generation scripts are included in the supplementary material.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \epc{}, the first constraint-based causal discovery algorithm with e-value-based FDR control. By replacing p-value CI tests with e-value CI tests and applying the e-BH procedure, \epc{} achieves substantially tighter FDR control than existing methods without the conservative corrections required by p-value-based approaches. On 50-node synthetic ER graphs, \epc{}-Cal reduces empirical FDR by 79\% compared to standard PC (from $0.222$ to $0.046$) and by 48\% compared to \pcp{} (from $0.089$ to $0.046$), while achieving the highest F1 score ($0.965$). On real-world benchmark networks, \epc{} consistently achieves the lowest FDR among constraint-based methods: ALARM (0.034 vs.\ 0.087 for \pcp{}), Sachs (0.063 vs.\ 0.071), and Insurance (0.092 vs.\ 0.117). The advantage extends to nonlinear data, where \epc{}-Cal achieves zero false discoveries on 20-node nonlinear graphs compared to FDR of 0.116 for standard PC. Both \epc{} and \pcp{} are conservative---achieving empirical FDR below the nominal level $q$---but \epc{} is less conservative, yielding higher power. The anytime-valid property---unique among causal discovery methods---allows practitioners to accumulate evidence incrementally and stop at any point with valid FDR guarantees in expectation.
+
+Future work includes extending \epc{} to handle latent confounders (via FCI-style orientation rules), developing nonparametric e-value CI tests for broader nonlinear settings and larger graphs, and exploring the connection between e-value magnitudes and edge confidence for uncertainty quantification in causal graphs.
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\end{document}

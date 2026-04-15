@@ -1,0 +1,123 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Lock CPU-Only Reproducible Runtime",
+    "description": "Create one deterministic CPU-only environment for an empirical benchmark of subset aggregation under the actual hardware limits: 2 CPU cores, 128GB RAM, 0 GPUs, and about 8 hours total wall-clock time.",
+    "steps": {
+      "step1": "Use Python 3.11 with CPU-only packages: numpy>=1.26, scipy>=1.12, pandas>=2.2, scikit-learn>=1.4, networkx>=3.2, matplotlib>=3.8, seaborn>=0.13, statsmodels>=0.14, joblib>=1.3, psutil>=5.9, and a causal discovery library that provides PC-Stable, GES or FGES, and CPDAG conversion utilities on CPU. Record exact versions in exp/environment/system_info.json.",
+      "step2": "Export OMP_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, NUMEXPR_NUM_THREADS=1, and VECLIB_MAXIMUM_THREADS=1 before any runs so two concurrent dataset jobs do not oversubscribe the two available CPU cores.",
+      "step3": "Use the same benchmark seeds for every method: dataset seeds {11, 23, 37}; local-bank bootstrap seeds {101, 131}; subset-bank construction seed 509. Set PYTHONHASHSEED and every library RNG at process start.",
+      "step4": "Create directories exp/environment, exp/data, exp/local_bank, exp/baselines, exp/main, exp/ablations, exp/evaluation, figures, tables, and logs. Save every dataset-level output as both JSON metadata and flat CSV summaries.",
+      "step5": "Write a short execution manifest stating gpu_count=0 and cpu_workers=2, and note explicitly that the plan contains no GPU-dependent steps despite the template language about GPU parallelism."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate The Synthetic Benchmark",
+    "description": "Build the full synthetic benchmark that matches the proposal: fixed observed-variable systems with known ground truth, finite-sample stress, and no dependence on real-data availability.",
+    "steps": {
+      "step1": "Generate 48 datasets from the Cartesian product of graph_family in {Erdos-Renyi, scale-free}, regime in {linear-Gaussian, nonlinear-ANM, near-unfaithful linear, mild misspecification}, sample_size in {200, 1000}, and seed in {11, 23, 37}. These 48 datasets define the full reported benchmark.",
+      "step2": "Use p=20 observed variables for every dataset. Sample DAGs with expected degree approximately 2.0, save adjacency matrix, topological order, coefficients, and regime metadata to exp/data/simulated/<dataset_id>/graph.json, and store the generated samples in both raw and standardized form.",
+      "step3": "Instantiate regimes with fixed untuned defaults. Linear-Gaussian uses additive Gaussian noise and edge weights drawn from signed Uniform(0.4, 1.0). Nonlinear-ANM uses additive noise with parent transforms drawn uniformly from {tanh, sine, square}. Near-unfaithful linear uses 20 percent of nonzero coefficients drawn from signed Uniform(0.05, 0.15) and the remainder from signed Uniform(0.4, 1.0). Mild misspecification uses heteroskedastic Gaussian noise plus one randomly chosen nonlinear parent transform per dataset.",
+      "step4": "For each dataset, compute and save the true DAG, the true CPDAG of the full 20-variable system, the true skeleton, and the set of true unshielded colliders. These objects are the targets for all recovery metrics.",
+      "step5": "Create exp/data/benchmark_manifest.csv with columns dataset_id, family, regime, n, p, seed, edge_count, cpdag_edge_count, and density. This manifest is the only source of truth for downstream jobs."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build One Shared Local Subset Bank",
+    "description": "Construct one deterministic bank of local subset CPDAGs per dataset and reuse it across every subset-family method so weighting and merging are the only moving parts.",
+    "steps": {
+      "step1": "For each 20-variable dataset, generate M=20 overlapping subsets of size k=8 using one deterministic greedy coverage heuristic seeded with 509. Enforce that every variable appears in at least 6 subsets and that most variable pairs co-occur at least twice.",
+      "step2": "For each subset, fit B=2 local graphs using row bootstraps with seeds {101, 131}. The local learner is always PC-Stable with Fisher-Z conditional independence tests and fixed alpha=0.01 on standardized data.",
+      "step3": "Save each local result with subset membership, bootstrap seed, learned CPDAG adjacency-orientation encoding, runtime_seconds, and claim counts in exp/local_bank/<dataset_id>/. Do not regenerate this bank for any weighting or merge variant.",
+      "step4": "Extract only explicit symbolic claims from each local CPDAG: adj(i,j), nonadj(i,j), dir(i->j), and coll(i->k<-j). Treat undirected edges as adjacency-only evidence and treat missing orientations as abstentions rather than contradictions.",
+      "step5": "Precompute the overlap map between every pair of local graphs and store the comparable-claim count needed by all compatibility-weight calculations."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Audit Subset Marginalization Before Aggregation",
+    "description": "Quantify how often local subset claims are already wrong relative to the true induced subgraph before interpreting any global aggregation gain.",
+    "steps": {
+      "step1": "For every sampled subset S in every dataset, compute the true induced subgraph G*[S] from the simulation DAG and then compute the exact induced-subgraph CPDAG CPDAG(G*[S]). Save this as exp/local_bank/<dataset_id>/truth_subset_<subset_id>.json.",
+      "step2": "Compare each learned local graph against the corresponding induced-subgraph CPDAG and measure claim validity separately for adjacency, nonadjacency, direction, and collider claims. Also count abstentions so high apparent precision caused by silence can be detected.",
+      "step3": "Aggregate these validity statistics into one subset-distortion table with columns dataset_id, subset_id, claim_type, support_count, error_count, abstain_count, validity_rate, and contradiction_rate. Save dataset-level summaries to exp/evaluation/subset_validity_summary.csv.",
+      "step4": "Define an interpretation gate before running the global comparison. If median direction validity across local graphs is below 0.55 on a regime, describe any downstream orientation improvement in that regime only as empirical denoising under severe subset distortion, not as evidence that local claims transport soundly.",
+      "step5": "Use this audit as a first main figure and table, not as an appendix-only diagnostic. The benchmark must report subset validity before any claim that aggregation helps."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Full-Graph Baselines With Fixed Defaults",
+    "description": "Compare subset aggregation against simple and strong full-graph baselines using pre-registered defaults rather than asymmetric tuning.",
+    "steps": {
+      "step1": "Baseline `PC`: run full-graph PC-Stable on every dataset with Fisher-Z tests and fixed alpha=0.01. This is the simple baseline.",
+      "step2": "Baseline `GES`: run full-graph GES or FGES on the same standardized data with Gaussian BIC score and a fixed penalty discount of 1.0. This is the main strong non-aggregation baseline.",
+      "step3": "Baseline `NOTEARS-L1`: run linear NOTEARS with l1 penalty lambda1=0.1, max_iter=100, and edge threshold 0.3, then convert the learned DAG to its CPDAG before scoring. This provides one additional strong full-graph baseline with a different inductive bias.",
+      "step4": "Baseline `DAGBag-PC`: generate 10 full-graph bootstrap resamples per dataset, fit PC-Stable with alpha=0.01 on each resample, and aggregate edges by bootstrap selection frequency using a fixed inclusion threshold of 0.5 followed by CPDAG projection. This baseline connects the study to classical DAG bagging without depending on subset marginalization.",
+      "step5": "Save all baseline artifacts to exp/baselines/<method>/<dataset_id>/results.json with the final graph, untuned hyperparameters, runtime_seconds, and peak_memory_mb when available."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate Matched Subset Aggregation Variants",
+    "description": "Run the core empirical benchmark on one fixed local bank, varying only weights and merge rules.",
+    "steps": {
+      "step1": "Compute overlap-compatibility scores using only explicit contradictory claims on the overlap of two local graphs. Contradictions are adj versus nonadj, dir(i->j) versus dir(j->i), orientation versus nonadj, and collider versus explicit incompatible triple claim. One-sided abstention never counts as disagreement.",
+      "step2": "Use three pre-registered weighting schemes on every dataset: `Uniform` with w=1 for every local graph, `BootstrapStability` where both local graphs from a subset receive the same weight based on their within-subset agreement score, and `CompatExp` with weight w=exp(-2C_g), where C_g is the mean contradiction rate against overlapping local graphs. Do not tune the decay constant per method or per dataset.",
+      "step3": "Use two pre-registered merge rules on every weighting scheme. `Wilson` accepts a binary claim when the one-sided 90 percent Wilson lower bound computed from weighted support, weighted opposition, and effective sample size n_eff exceeds 0.5. `DetThreshold` accepts a claim when weighted support ratio exceeds 0.6. The same claim ordering and cycle checks apply across all methods.",
+      "step4": "Build six primary subset methods on the full 48-dataset benchmark: `Uniform+Wilson`, `Uniform+DetThreshold`, `BootstrapStability+Wilson`, `BootstrapStability+DetThreshold`, `CompatExp+Wilson`, and `CompatExp+DetThreshold`.",
+      "step5": "For every accepted edge or orientation, enforce acyclicity and CPDAG consistency using a deterministic post-processing pass with cycle checks and Meek closure. Save claim-level support tables alongside the final graph so each decision is auditable."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run Pre-Registered Ablations",
+    "description": "Test whether the observed effects depend on one particular weighting formula, one merger, or one claim family.",
+    "steps": {
+      "step1": "Weight-form ablation on the 24 hard datasets with regime in {near-unfaithful linear, mild misspecification}: replace `CompatExp` by `CompatRank` and `CompatTopHalf` while keeping the same local bank and `DetThreshold` merge. `CompatRank` maps local graphs to linearly spaced weights by compatibility rank. `CompatTopHalf` keeps the 50 percent most compatible local graphs with equal weight and sets the rest to zero.",
+      "step2": "Merger ablation on the full 48 datasets: compare each weighting scheme under `Wilson` and `DetThreshold` directly, with the primary check being whether the sign of the `CompatExp` minus `Uniform` effect survives deterministic merging.",
+      "step3": "Claim-family ablation on the hard 24-dataset slice: rerun `CompatExp+DetThreshold` after removing collider claims from the support tables, then rerun after removing direction claims and using adjacency-only aggregation. This isolates whether any improvement is driven by one fragile claim type.",
+      "step4": "Contradiction-definition ablation on the hard 24-dataset slice: rerun `CompatExp+DetThreshold` with a harsher rule that treats one-sided abstention as weak disagreement. If performance does not worsen, note that the explicit-claims-only contradiction rule may not be essential.",
+      "step5": "Subset-size sensitivity on the hard 24-dataset slice: rebuild the local bank with k=6 and k=10 while keeping M=20 and B=2 fixed, then rerun `Uniform+DetThreshold` and `CompatExp+DetThreshold`. This tests whether the benchmark conclusions are specific to k=8."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Score Recovery, Calibration Proxies, And Cost",
+    "description": "Evaluate all methods with standard structural metrics, subset-validity diagnostics, and compute costs, then compare them using paired tests over the shared 48-dataset benchmark.",
+    "steps": {
+      "step1": "For every synthetic run, compute SHD to the true full CPDAG, skeleton precision, skeleton recall, skeleton F1, orientation precision, orientation recall, false-orientation rate among oriented edges, fraction of recovered adjacencies left undirected, collider precision, collider recall, and graph density.",
+      "step2": "For every subset method, also report local-bank construction time, aggregation-only runtime, number of accepted adjacency claims, number of accepted orientation claims, median weighted support ratio, median weighted opposition, and median n_eff. State explicitly that n_eff is a heuristic overlap-sensitive screen, not a calibrated sample size.",
+      "step3": "Evaluate the targeted subset-validity audit jointly with the main results by correlating per-dataset local validity rates with per-dataset aggregation gains. Report Pearson and Spearman correlations between direction-validity rate and the `CompatExp` minus `Uniform` change in false-orientation rate.",
+      "step4": "Use paired Wilcoxon signed-rank tests over the 48 synthetic datasets for these primary comparisons: `CompatExp+Wilson` versus `Uniform+Wilson`, `CompatExp+DetThreshold` versus `Uniform+DetThreshold`, `CompatExp+DetThreshold` versus `BootstrapStability+DetThreshold`, and `CompatExp+DetThreshold` versus each strong full-graph baseline. Report p-values, median paired differences, and bootstrap percentile confidence intervals over datasets.",
+      "step5": "Apply the pre-registered success criteria from idea.json exactly. Success requires at least a 10 percent reduction in median false-orientation rate for `CompatExp` versus matched `Uniform` on the hard regimes, the same effect direction under `DetThreshold`, parity or better relative to `BootstrapStability`, no evidence that gains come only from producing much sparser or more abstaining graphs, and completion within the runtime budget."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Benchmark Figures And Tables",
+    "description": "Create the paper-ready outputs for a benchmark paper whose main message is empirical utility under caveats, not a novel method claim.",
+    "steps": {
+      "step1": "Create Table 1 summarizing the subset-marginalization audit by regime: adjacency validity, nonadjacency validity, direction validity, collider validity, and abstention rates across local graphs.",
+      "step2": "Create Table 2 with mean, median, and standard deviation of SHD, skeleton F1, orientation precision, false-orientation rate, fraction undirected, runtime_seconds, and peak_memory_mb for `PC`, `GES`, `NOTEARS-L1`, `DAGBag-PC`, `Uniform+Wilson`, `Uniform+DetThreshold`, `BootstrapStability+Wilson`, `BootstrapStability+DetThreshold`, `CompatExp+Wilson`, and `CompatExp+DetThreshold`.",
+      "step3": "Create Figure 1 as regime-wise boxplots of false-orientation rate and SHD, faceted by sample size, with paired points linking `Uniform+DetThreshold` and `CompatExp+DetThreshold` on each dataset.",
+      "step4": "Create Figure 2 as a subset-validity-versus-gain plot: x-axis is local direction-validity rate, y-axis is the `CompatExp` minus `Uniform` change in false-orientation rate, with separate markers for each regime. This figure directly addresses the soundness caveat.",
+      "step5": "Create Figure 3 as the merger-sensitivity and ablation figure showing `Wilson` versus `DetThreshold`, `CompatExp` versus `CompatRank` versus `CompatTopHalf`, and the claim-family ablations on the hard slice.",
+      "step6": "Create Figure 4 as a runtime-versus-quality scatter plot with direct labels for all full-graph baselines and the two main deterministic subset methods. The caption must state that all runs used 2 CPU workers and 0 GPUs."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Schedule Execution Within 8 Hours",
+    "description": "Convert the benchmark into a concrete CPU schedule with caching and a clear fallback path if pilot timing is slower than expected.",
+    "steps": {
+      "step1": "Run a timing pilot on 4 disjoint synthetic datasets, one per selected regime-family pair, using the exact untuned defaults above. The pilot is for runtime estimation only and must not be used for hyperparameter selection or threshold tuning.",
+      "step2": "Execute jobs in this order: environment check, timing pilot, generation of all 48 datasets, construction of all shared local banks, full-graph baselines, six primary subset methods, hard-slice ablations, evaluation, and visualization. Never rebuild a local bank when only weights or merge rules change.",
+      "step3": "Use exactly two concurrent dataset workers and no GPU workers. Within each worker, keep internal math libraries single-threaded. Because gpu_count=0, there is no GPU parallel execution to account for beyond explicitly stating that none is available.",
+      "step4": "Use this conservative wall-clock budget under two-way CPU batching: pilot timing 0.5 hours, dataset generation and truth computation 0.5 hours, local-bank construction 2.2 hours, full-graph baselines 1.8 hours, six primary subset methods 1.2 hours, hard-slice ablations 1.2 hours, evaluation plus plotting 0.5 hours. Total planned time: 7.9 hours.",
+      "step5": "If the pilot projects more than 8 hours, simplify in this order only: reduce DAGBag-PC bootstraps from 10 to 5; reduce subset count M globally from 20 to 16 for every subset-family method and every ablation; drop the k in {6,10} subset-size sensitivity and keep all other ablations. Do not tune thresholds, change seeds, or remove the subset-validity audit."
+    }
+  }
+]

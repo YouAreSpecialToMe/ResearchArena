@@ -1,0 +1,483 @@
+\documentclass[preprint]{article}
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{natbib}
+
+\newcommand{\shapval}{\phi}
+\newcommand{\passset}{\mathcal{S}}
+\newcommand{\allpasses}{\mathcal{P}}
+\newcommand{\valfn}{v}
+
+\title{ShapleyPass: Quantifying Higher-Order Interactions\\ Among Compiler Optimization Passes\\ via Shapley Interaction Indices}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Modern optimizing compilers offer hundreds of transformation passes, yet understanding how these passes interact remains limited to pairwise analysis. We present ShapleyPass, a diagnostic framework that applies Shapley Interaction Indices---a principled tool from cooperative game theory---to decompose the performance contributions of LLVM optimization passes into individual effects, pairwise interactions, and higher-order synergies. Evaluating on 15 PolyBench/C numerical kernels with 20 LLVM passes across 3 random seeds, we find that third-order interactions account for 14.8\% of the total interaction variance on average, confirming that pairwise models miss a meaningful fraction of pass interaction structure. We identify consistently synergistic pass groups (e.g., \texttt{mem2reg}+\texttt{gvn}+\texttt{loop-unroll}, $\shapval{=}+0.078$) and redundant groups (e.g., \texttt{reassociate}+\texttt{early-cse}, $\shapval{=}-0.084$) that are stable across benchmarks (mean cosine similarity 0.95). While a variance-weighted scoring method incorporating interaction information achieves only marginal selection improvement (+0.2 percentage points over individual greedy), the primary contribution is the diagnostic framework itself: ShapleyPass provides the first interpretable, game-theoretic decomposition of compiler pass interactions at arbitrary order, offering actionable insights for compiler developers and a foundation for future interaction-aware optimization algorithms.
+\end{abstract}
+
+\section{Introduction}
+
+Modern optimizing compilers such as LLVM~\citep{lattner2004llvm} offer over 100 optimization passes that transform intermediate representations (IR) to improve code size, execution speed, and energy consumption. The \emph{phase-ordering problem}---selecting which passes to apply and in what order---remains one of the most challenging open problems in compiler optimization. Even restricting to a binary on/off selection among 20 passes yields $2^{20} \approx 10^6$ possible configurations.
+
+Existing approaches to pass selection fall into three categories, each with significant limitations. \emph{Search-based methods} (random search, genetic algorithms, Bayesian optimization) explore the configuration space without understanding \emph{why} certain combinations work~\citep{ashouri2017micomp}. \emph{Learning-based methods}~\citep{deng2025compilerdream, pan2025compilerr1} use machine learning to predict good configurations but treat pass selection as a black box. \emph{Dependence modeling methods}~\citep{gao2024odg, gao2025grouptuner} analyze relationships between passes but are limited to \emph{pairwise} interactions---they model whether pass $A$ enables or disables pass $B$, but cannot capture \emph{higher-order synergies} where passes $A$, $B$, and $C$ together produce effects that no pair achieves.
+
+This limitation to pairwise analysis is critical because compiler passes often exhibit complex multi-way interactions. For example, loop unrolling may create opportunities exploitable only when \emph{both} value numbering \emph{and} dead store elimination are subsequently applied---a three-way synergy invisible to pairwise analysis.
+
+We propose ShapleyPass, a diagnostic framework that applies \emph{Shapley Interaction Indices}~\citep{sundararajan2020shapley}---a principled tool from cooperative game theory---to decompose pass performance contributions into individual effects, pairwise interactions, and higher-order synergies up to order~$k$. The Shapley value uniquely satisfies four desirable axioms (efficiency, symmetry, linearity, null player), and its interaction extension provides a mathematically grounded decomposition of \emph{why} certain pass combinations outperform others.
+
+Our contributions are:
+\begin{itemize}
+    \item We present the first application of Shapley interaction indices to compiler optimization, providing an interpretable, game-theoretic diagnostic framework for analyzing pass interactions at arbitrary order.
+    \item We conduct a systematic empirical study on 15 PolyBench/C benchmarks with 20 LLVM passes, finding that third-order interactions account for 14.8\% of total interaction variance---demonstrating that pairwise models miss meaningful interaction structure.
+    \item We identify specific synergistic and redundant pass groups that are stable across benchmarks and provide actionable diagnostic insights for compiler developers.
+    \item We evaluate interaction-guided pass selection algorithms, finding that while variance-weighted scoring offers marginal improvement (+0.2 percentage points), the primary value lies in diagnostic capabilities, and we characterize estimation noise as the key barrier to algorithmic exploitation.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our framework. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses findings and limitations. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Phase Ordering and Pass Selection.}
+The phase-ordering problem has been studied extensively. \citet{ashouri2017micomp} introduced MiCOMP, which clusters LLVM \texttt{-O3} passes into sub-sequences and uses ML to predict speedups, achieving 90\% of available speedup while exploring $<$0.001\% of the search space. \citet{gao2024odg} proposed modeling pass dependence through an Optimization Dependence Graph (ODG) capturing source-code and pairwise performance dependencies. \citet{gao2025grouptuner} introduced GroupTuner, which applies localized mutations to coherent option groups. All these methods are limited to pairwise or heuristic groupings---our work provides a principled higher-order interaction analysis.
+
+\paragraph{ML-Based Compiler Optimization.}
+\citet{deng2025compilerdream} proposed CompilerDream, a model-based RL approach that learns a ``world model'' of compiler transformations, leading the CompilerGym leaderboard. \citet{pan2025compilerr1} introduced Compiler-R1, an RL-driven LLM framework for compiler auto-tuning, achieving 8.46\% IR reduction over \texttt{-Oz}. \citet{venkatakeerthy2024mlbridge} presented ML-Compiler-Bridge for efficient ML-compiler integration. These approaches treat pass selection as a black box; our work provides an interpretable decomposition of pass contributions.
+
+\paragraph{Shapley Values and Interaction Indices.}
+\citet{sundararajan2020shapley} introduced the Shapley-Taylor Interaction Index, extending Shapley values to attribute predictions to feature interactions up to order $k$. \citet{tsai2023faithshap} proposed Faith-Shap, a faithful Shapley interaction index with improved axiomatic properties. \citet{muschalik2024shapiq} developed shapiq, an open-source Python package unifying algorithms for computing any-order Shapley interactions efficiently. \citet{wever2026hypershap} applied Shapley interactions to hyperparameter optimization. Our work is the first to apply these tools to compiler pass selection.
+
+\paragraph{Compiler Infrastructure.}
+\citet{lattner2004llvm} designed LLVM, which provides the pass infrastructure we build on. \citet{cummins2022compilergym} created CompilerGym, providing RL environments for compiler optimization. \citet{lopes2018future} surveyed future directions for optimizing compilers, identifying the need for better understanding of pass interactions.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Compiler Pass Selection as a Cooperative Game}
+
+We frame compiler pass selection as a \emph{cooperative game} $(\allpasses, \valfn)$ where:
+\begin{itemize}
+    \item $\allpasses = \{p_1, p_2, \ldots, p_K\}$ is the set of $K$ candidate optimization passes (``players'').
+    \item $\valfn: 2^{\allpasses} \to \mathbb{R}$ is the \emph{value function} mapping a subset of passes $\passset \subseteq \allpasses$ to a performance metric.
+\end{itemize}
+
+For a benchmark program $P$ with unoptimized IR instruction count $c_0$, we define:
+\begin{equation}
+    \valfn_P(\passset) = \frac{c_0 - c(\passset)}{c_0}
+\end{equation}
+where $c(\passset)$ is the instruction count after applying the passes in $\passset$ in a fixed canonical order (matching the LLVM \texttt{-O3} pipeline order). This isolates the effect of pass \emph{selection} from pass \emph{ordering}.
+
+\subsection{Shapley Interaction Indices}
+
+The \emph{Shapley value} $\shapval_i$ of pass $p_i$ quantifies its average marginal contribution across all possible coalitions:
+\begin{equation}
+    \shapval_i = \sum_{\passset \subseteq \allpasses \setminus \{p_i\}} \frac{|\passset|!(K - |\passset| - 1)!}{K!} \left[\valfn(\passset \cup \{p_i\}) - \valfn(\passset)\right]
+\end{equation}
+
+The \emph{Shapley-Taylor Interaction Index}~\citep{sundararajan2020shapley} extends this to interactions among groups. For a subset $T \subseteq \allpasses$ with $|T| = k$, the $k$-th order interaction index is:
+\begin{equation}
+    \shapval_T = \sum_{\passset \subseteq \allpasses \setminus T} \frac{|\passset|!(K - |\passset| - k)!}{(K - k + 1)!} \sum_{L \subseteq T} (-1)^{|T| - |L|} \valfn(\passset \cup L)
+\end{equation}
+
+A positive $\shapval_T$ indicates \emph{synergy}---the passes in $T$ together contribute more than the sum of their sub-group contributions. A negative $\shapval_T$ indicates \emph{redundancy}---diminishing returns from combining them.
+
+\subsection{Variance Decomposition}
+
+To quantify the relative importance of each interaction order, we decompose the total interaction variance:
+\begin{equation}
+    \text{SS}_k = \sum_{T \subseteq \allpasses, |T|=k} \shapval_T^2, \qquad
+    \text{frac}_k = \frac{\text{SS}_k}{\sum_{j=1}^{3} \text{SS}_j}
+\end{equation}
+where $\text{frac}_k$ represents the fraction of total interaction variance attributable to order-$k$ interactions.
+
+\subsection{Interaction-Guided Pass Selection}
+
+We evaluate several selection strategies that exploit the computed interaction structure.
+
+\paragraph{Individual Greedy.} Select the top-$n$ passes by decreasing individual Shapley value $\shapval_i$. This ignores all interactions.
+
+\paragraph{Pairwise Greedy.} Starting from the highest-value pass, greedily add the pass maximizing $\shapval_i + \sum_{j \in \passset_{\text{sel}}} \shapval_{\{i,j\}}$.
+
+\paragraph{Interaction Greedy.} Extend pairwise greedy to include third-order terms:
+\begin{equation}
+    \text{score}(p_i | \passset_{\text{sel}}) = \shapval_i + \sum_{j \in \passset_{\text{sel}}} \shapval_{\{i,j\}} + \sum_{\{j,k\} \subseteq \passset_{\text{sel}}} \shapval_{\{i,j,k\}}
+\end{equation}
+
+\paragraph{Variance-Weighted Scoring.} Weight interaction terms by the inverse of their cross-seed variance to down-weight poorly estimated interactions:
+\begin{equation}
+    \text{score}_{\text{vw}}(p_i | \passset_{\text{sel}}) = \shapval_i + \sum_{j \in \passset_{\text{sel}}} w_{\{i,j\}} \shapval_{\{i,j\}} + \sum_{\{j,k\} \subseteq \passset_{\text{sel}}} w_{\{i,j,k\}} \shapval_{\{i,j,k\}}
+\end{equation}
+where $w_T = 1 / (1 + \sigma_T / |\bar{\shapval}_T|)$ and $\sigma_T$ is the standard deviation of $\shapval_T$ across random seeds.
+
+The full procedure is given in Algorithm~\ref{alg:shapleypass}.
+
+\begin{algorithm}[t]
+\caption{ShapleyPass: Interaction Analysis and Guided Pass Selection}
+\label{alg:shapleypass}
+\begin{algorithmic}[1]
+\REQUIRE Benchmark $P$, candidate passes $\allpasses$, budget $n$, seeds $\{s_1, \ldots, s_m\}$
+\STATE Define value function $\valfn_P(\passset)$ for benchmark $P$
+\FOR{each seed $s \in \{s_1, \ldots, s_m\}$}
+    \STATE Compute Shapley interactions $\{\shapval_T^{(s)}\}_{|T| \leq 3}$ using shapiq~\citep{muschalik2024shapiq}
+\ENDFOR
+\STATE Average: $\bar{\shapval}_T \leftarrow \frac{1}{m}\sum_s \shapval_T^{(s)}$; compute $\sigma_T$
+\STATE Compute weights: $w_T \leftarrow 1/(1 + \sigma_T / |\bar{\shapval}_T|)$
+\STATE \textbf{Output 1 (Diagnostic):} interaction maps $\{\bar{\shapval}_T, \sigma_T\}$ for all $T$ at orders 1--3
+\STATE $\passset_{\text{sel}} \leftarrow \emptyset$
+\FOR{$i = 1$ to $n$}
+    \STATE $p^* \leftarrow \arg\max_{p \in \allpasses \setminus \passset_{\text{sel}}} \text{score}_{\text{vw}}(p | \passset_{\text{sel}})$
+    \STATE $\passset_{\text{sel}} \leftarrow \passset_{\text{sel}} \cup \{p^*\}$
+\ENDFOR
+\STATE \textbf{Output 2 (Selection):} selected pass set $\passset_{\text{sel}}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Compiler Infrastructure.} We use LLVM via direct invocation of the \texttt{opt} tool on LLVM IR bitcode files compiled with \texttt{clang -O0 -emit-llvm}.
+
+\paragraph{Benchmarks.} We evaluate on 15 programs from the PolyBench/C suite~\citep{polybench}, covering linear algebra (\texttt{2mm}, \texttt{3mm}, \texttt{gemm}, \texttt{gemver}, \texttt{atax}, \texttt{bicg}, \texttt{symm}, \texttt{cholesky}, \texttt{gramschmidt}), stencil computations (\texttt{adi}, \texttt{fdtd-apml}), data mining (\texttt{correlation}, \texttt{covariance}), solvers (\texttt{durbin}), and multi-kernel (\texttt{doitgen}). We acknowledge that PolyBench programs are structurally similar numerical kernels; see Section~\ref{sec:discussion} for discussion of this limitation.
+
+\paragraph{Pass Selection.} We select $K{=}20$ LLVM optimization passes based on individual marginal contribution screening: \texttt{mem2reg}, \texttt{instcombine}, \texttt{simplifycfg}, \texttt{gvn}, \texttt{licm}, \texttt{loop-unroll}, \texttt{loop-rotate}, \texttt{loop-simplify}, \texttt{indvars}, \texttt{sroa}, \texttt{sccp}, \texttt{dce}, \texttt{adce}, \texttt{reassociate}, \texttt{jump-threading}, \texttt{correlated-propagation}, \texttt{early-cse}, \texttt{tailcallelim}, \texttt{dse}, and \texttt{bdce}.
+
+\paragraph{Performance Metric.} IR instruction count reduction: $(c_0 - c(\passset)) / c_0$, where $c_0$ is the unoptimized (\texttt{-O0}) instruction count. Higher is better ($\uparrow$).
+
+\paragraph{Interaction Computation.} We use the shapiq library~\citep{muschalik2024shapiq} with permutation sampling at max\_order${=}3$ and a budget of 3{,}000 game evaluations per benchmark per seed. We use 3 random seeds (42, 123, 456) and report mean-aggregated Shapley values. All selection methods use these mean-aggregated values, yielding deterministic selections.
+
+\paragraph{Baselines.} We compare against: (1)~LLVM default levels (\texttt{-O1}, \texttt{-O2}, \texttt{-O3}, \texttt{-Os}, \texttt{-Oz}); (2)~random search (300 samples per budget level, best-of-3 seeds); (3)~genetic algorithm (population~50, 20 generations, 3 seeds).
+
+\subsection{Variance Decomposition}
+\label{sec:variance}
+
+Table~\ref{tab:variance} reports the fraction of total interaction variance attributable to each order. Across all 15 benchmarks, order-1 (individual) effects account for 45.4\% of variance, order-2 (pairwise) for 39.7\%, and order-3 (higher-order) for \textbf{14.8\%}. This confirms that pairwise models miss a meaningful fraction of the interaction structure ($\geq$10\% threshold met). The order-3 fraction ranges from 10.3\% (\texttt{correlation}, \texttt{fdtd-apml}) to 17.3\% (\texttt{3mm}), showing consistent though variable contribution.
+
+\begin{table}[t]
+\caption{Variance decomposition by interaction order across 15 PolyBench benchmarks. Values are fractions (\%) of total interaction variance ($\text{SS}_k / \sum_j \text{SS}_j$), reported as mean $\pm$ std across 3 random seeds.}
+\label{tab:variance}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Benchmark & Order-1 (\%) & Order-2 (\%) & Order-3 (\%) \\
+\midrule
+2mm         & 42.6 $\pm$ 2.7 & 40.6 $\pm$ 1.2 & 16.8 $\pm$ 3.6 \\
+3mm         & 41.2 $\pm$ 3.5 & 41.5 $\pm$ 1.1 & 17.3 $\pm$ 4.5 \\
+adi         & 31.8 $\pm$ 4.8 & 55.3 $\pm$ 4.0 & 12.9 $\pm$ 4.7 \\
+atax        & 47.4 $\pm$ 4.1 & 35.7 $\pm$ 0.6 & 16.9 $\pm$ 4.4 \\
+bicg        & 50.0 $\pm$ 7.6 & 34.1 $\pm$ 2.1 & 15.9 $\pm$ 7.0 \\
+cholesky    & 45.2 $\pm$ 4.4 & 39.6 $\pm$ 1.6 & 15.3 $\pm$ 3.8 \\
+correlation & 51.0 $\pm$ 4.3 & 38.7 $\pm$ 2.3 & 10.3 $\pm$ 2.8 \\
+covariance  & 47.2 $\pm$ 3.3 & 36.7 $\pm$ 1.1 & 16.1 $\pm$ 3.8 \\
+doitgen     & 39.6 $\pm$ 3.0 & 43.3 $\pm$ 1.0 & 17.1 $\pm$ 2.0 \\
+durbin      & 55.8 $\pm$ 11.4 & 32.4 $\pm$ 5.9 & 11.8 $\pm$ 6.4 \\
+fdtd-apml   & 48.5 $\pm$ 12.2 & 41.1 $\pm$ 8.1 & 10.4 $\pm$ 4.8 \\
+gemm        & 43.8 $\pm$ 2.6 & 39.1 $\pm$ 1.2 & 17.1 $\pm$ 3.5 \\
+gemver      & 47.1 $\pm$ 9.5 & 36.5 $\pm$ 3.3 & 16.4 $\pm$ 8.7 \\
+gramschmidt & 45.3 $\pm$ 3.5 & 40.8 $\pm$ 1.3 & 13.9 $\pm$ 2.2 \\
+symm        & 44.8 $\pm$ 4.0 & 40.8 $\pm$ 1.5 & 14.5 $\pm$ 2.5 \\
+\midrule
+\textbf{Average} & \textbf{45.4 $\pm$ 5.3} & \textbf{39.7 $\pm$ 5.1} & \textbf{14.8 $\pm$ 2.4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Interaction Structure Analysis}
+
+\paragraph{Top Synergistic and Redundant Pass Groups.}
+Table~\ref{tab:interactions} shows the most prominent pairwise and third-order interactions averaged across all 15 benchmarks. The strongest pairwise synergy is \texttt{mem2reg}+\texttt{gvn} ($\bar{\shapval} = +0.138$), reflecting that \texttt{mem2reg} promotes memory operations to registers, creating opportunities that \texttt{gvn} (global value numbering) can exploit. The strongest redundancy is \texttt{reassociate}+\texttt{early-cse} ($\bar{\shapval} = -0.084$), as both perform overlapping algebraic simplifications.
+
+At order~3, the top synergy is \texttt{mem2reg}+\texttt{gvn}+\texttt{loop-unroll} ($\bar{\shapval} = +0.078$): register promotion followed by value numbering exposes redundant computations that only become visible after loop unrolling duplicates the loop body. The top redundancy triple is \texttt{mem2reg}+\texttt{loop-unroll}+\texttt{early-cse} ($\bar{\shapval} = -0.034$).
+
+\begin{table}[t]
+\caption{Top synergistic and redundant pass interactions, averaged across 15 benchmarks. Positive values indicate synergy (super-additive); negative values indicate redundancy (sub-additive). Std is across benchmarks.}
+\label{tab:interactions}
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Order & Pass Group & Mean $\shapval_T$ & Std \\
+\midrule
+\multicolumn{4}{l}{\emph{Top Synergistic Interactions}} \\
+2 & \texttt{mem2reg} + \texttt{gvn} & +0.138 & 0.069 \\
+2 & \texttt{mem2reg} + \texttt{loop-unroll} & +0.036 & 0.016 \\
+2 & \texttt{gvn} + \texttt{dse} & +0.033 & 0.008 \\
+2 & \texttt{licm} + \texttt{early-cse} & +0.017 & 0.009 \\
+3 & \texttt{mem2reg} + \texttt{gvn} + \texttt{loop-unroll} & +0.078 & 0.022 \\
+3 & \texttt{mem2reg} + \texttt{sroa} + \texttt{dse} & +0.038 & 0.010 \\
+3 & \texttt{dce} + \texttt{reassociate} + \texttt{early-cse} & +0.034 & 0.009 \\
+\midrule
+\multicolumn{4}{l}{\emph{Top Redundant Interactions}} \\
+2 & \texttt{reassociate} + \texttt{early-cse} & $-$0.084 & 0.021 \\
+2 & \texttt{gvn} + \texttt{sroa} & $-$0.060 & 0.012 \\
+2 & \texttt{gvn} + \texttt{loop-unroll} & $-$0.059 & 0.016 \\
+3 & \texttt{mem2reg} + \texttt{loop-unroll} + \texttt{early-cse} & $-$0.034 & 0.010 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Cross-Program Stability.}
+We compute the cosine similarity between each pair of benchmarks using their flattened Shapley interaction vectors (concatenating order-1, 2, and 3 values). The mean pairwise cosine similarity is \textbf{0.95} (range: 0.68--1.00). Figure~\ref{fig:transferability} shows the full similarity matrix. This high similarity likely reflects the structural homogeneity of PolyBench numerical kernels rather than a universal property of pass interactions; we caution against generalizing this stability finding to structurally diverse programs (see Section~\ref{sec:discussion}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/variance_decomposition.pdf}
+\caption{Variance decomposition by interaction order for each benchmark. Order-3 interactions (red) consistently account for 10--17\% of total interaction variance across all 15 PolyBench programs.}
+\label{fig:variance}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/heatmap_2mm.pdf}
+\caption{Pairwise Shapley interaction heatmap for the \texttt{2mm} benchmark. Warm colors indicate synergy; cool colors indicate redundancy. The \texttt{mem2reg}+\texttt{gvn} synergy is the strongest interaction.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Pass Selection Results}
+
+Table~\ref{tab:main} presents the main comparison of all methods at budget $n{=}10$ passes. Key findings:
+
+\textbf{All Shapley-based methods substantially outperform LLVM default levels.} The best Shapley-based method (variance-weighted, 63.0\%) outperforms \texttt{-O3} (37.0\%) by 26 percentage points and \texttt{-Oz} (57.6\%) by 5.4 points. This large gap reflects that LLVM's default levels apply many more passes than needed, some of which increase instruction count (notably \texttt{-O3} on \texttt{doitgen}: $-$87.1\% due to aggressive loop unrolling).
+
+\textbf{Search-based methods are strong baselines.} Random search (63.2\%) and genetic algorithm (63.3\%) slightly outperform all Shapley-based methods, benefiting from direct evaluation rather than greedy exploitation of interaction estimates.
+
+\textbf{Variance-weighted scoring provides marginal improvement over individual greedy.} The variance-weighted method (63.0\%) improves over individual greedy (62.8\%) by 0.2 percentage points and over pairwise greedy (62.5\%) by 0.5 points, winning on 4 of 15 benchmarks (tying on 9). The na\"ive interaction greedy that directly uses order-3 terms \emph{hurts} performance (60.8\%), as noisy higher-order estimates introduce errors that outweigh their informational value.
+
+\begin{table}[t]
+\caption{IR instruction count reduction (\%) at budget $n{=}10$ passes across 15 PolyBench benchmarks. $\uparrow$: higher is better. Best overall in \textbf{bold}. Shapley-based methods use mean-aggregated values across 3 seeds (deterministic selections). Search methods: mean across 3 seeds.}
+\label{tab:main}
+\centering
+\footnotesize
+\begin{tabular}{l|ccccc|cc|cccc}
+\toprule
+ & \multicolumn{5}{c|}{LLVM Levels} & \multicolumn{2}{c|}{Search} & \multicolumn{4}{c}{Shapley-Based} \\
+Benchmark & -O1 & -O2 & -O3 & -Os & -Oz & Rand. & GA & Indiv. & Pair. & Inter. & Var.-Wt. \\
+\midrule
+2mm      & 53.1 & 50.4 & 50.4 & 50.4 & 53.3 & 62.6 & 62.6 & 62.6 & 62.6 & 59.6 & 62.6 \\
+3mm      & 56.3 & 54.0 & 54.0 & 54.0 & 56.1 & 64.2 & 64.2 & 64.2 & 64.2 & 61.4 & 64.2 \\
+adi      & 55.0 & 39.0 & 39.0 & 39.0 & 61.1 & 63.2 & 63.4 & 61.2 & 62.7 & 59.9 & 62.7 \\
+atax     & 46.0 & 42.9 & 42.9 & 42.9 & 49.7 & 60.8 & 60.8 & 60.8 & 59.0 & 57.6 & 60.8 \\
+bicg     & 52.6 & 55.4 & 55.4 & 55.4 & 56.6 & 62.4 & 62.4 & 62.4 & 60.8 & 61.8 & 62.4 \\
+cholesky & 31.9 & 9.3 & 6.7 & 9.3 & 58.8 & 58.6 & 58.6 & 58.6 & 57.2 & 56.0 & 58.6 \\
+correl.  & 53.7 & 55.9 & 55.9 & 55.9 & 58.9 & 60.7 & 61.4 & 60.5 & 61.4 & 59.1 & 61.4 \\
+covar.   & 44.6 & 40.1 & 40.1 & 40.1 & 50.5 & 59.6 & 59.7 & 59.3 & 57.7 & 59.3 & 59.3 \\
+doitgen  & 38.3 & 25.9 &$-$87.1& 25.9 & 57.9 & 63.0 & 63.0 & 62.8 & 61.3 & 59.5 & \textbf{63.0} \\
+durbin   & 47.3 & 44.0 & 44.0 & 44.0 & 63.4 & 65.8 & \textbf{66.0} & 64.8 & 65.6 & 65.6 & 64.6 \\
+fdtd-a.  & 74.5 & 67.5 & 66.7 & 67.5 & 76.1 & 76.2 & \textbf{76.3} & \textbf{76.3} & 75.3 & 73.3 & \textbf{76.3} \\
+gemm     & 46.7 & 46.1 & 46.1 & 46.1 & 52.0 & 60.6 & 60.6 & 60.6 & 60.6 & 57.2 & 60.6 \\
+gemver   & 55.9 & 46.4 & 46.4 & 46.4 & 59.3 & \textbf{67.0} & \textbf{67.0} & 66.2 & 65.9 & 64.8 & 66.2 \\
+gramsch. & 51.0 & 46.1 & 43.6 & 46.1 & 51.0 & 60.1 & \textbf{60.2} & 59.7 & \textbf{60.2} & 57.2 & \textbf{60.2} \\
+symm     & 55.1 & 50.4 & 50.4 & 50.4 & 59.2 & 62.6 & 62.6 & 62.6 & 62.6 & 59.8 & 62.6 \\
+\midrule
+\textbf{Avg.} & 50.8 & 44.9 & 37.0 & 44.9 & 57.6 & 63.2 & \textbf{63.3} & 62.8 & 62.5 & 60.8 & 63.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Studies}
+
+\paragraph{Interaction Order Ablation.}
+Figure~\ref{fig:ablation_order} shows pass selection performance using order-1 only, order-1+2, and order-1+2+3 across different pass budgets. Adding pairwise interactions improves selection at budget $n{=}8$ but can hurt at larger budgets where the greedy scoring becomes less reliable. Adding order-3 interactions via the na\"ive greedy further degrades performance, motivating the variance-weighted approach.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/ablation_order.pdf}
+\caption{Average pass selection performance (IR reduction \%) vs.\ pass budget for different interaction orders used in greedy selection.}
+\label{fig:ablation_order}
+\end{figure}
+
+\paragraph{Seed Sensitivity Analysis.}
+Since mean-aggregated Shapley values across 3 seeds produce a deterministic selection, we analyze sensitivity to seed choice by comparing the full 3-seed selection against each of the 3 possible 2-seed-pair selections at budget $n{=}10$. On average, \textbf{2.0 out of 10} selected passes change when a different seed pair is used (range: 1--3 across benchmarks). All 15 benchmarks exhibit at least one pass change with some seed pair, indicating moderate sensitivity. However, core passes (\texttt{mem2reg}, \texttt{gvn}, \texttt{sroa}, \texttt{dce}, \texttt{early-cse}, \texttt{dse}) are selected in \emph{all} seed configurations across all 15 benchmarks (Table~\ref{tab:seed_stability}), suggesting that the most important passes are robustly identified while marginal passes near the selection boundary are sensitive to sampling noise.
+
+\begin{table}[t]
+\caption{Seed stability of pass selection. Passes selected across all 15 benchmarks and all seed configurations (3-seed mean and all 2-seed pairs) at budget $n{=}10$.}
+\label{tab:seed_stability}
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Pass & Selected in $N$/15 benchmarks \\
+\midrule
+\texttt{mem2reg}, \texttt{sroa}, \texttt{gvn}, \texttt{dce}, \texttt{early-cse}, \texttt{dse} & 15/15 \\
+\texttt{instcombine}, \texttt{jump-threading} & 14/15 \\
+\texttt{adce} & 13/15 \\
+\texttt{simplifycfg} & 12/15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Number of Candidate Passes ($K$).}
+We evaluate $K \in \{10, 15, 20\}$ on 5 representative benchmarks. Selection performance improves from $K{=}10$ to $K{=}15$ as more useful passes become available, with diminishing returns from $K{=}15$ to $K{=}20$ as additional passes contribute little individually and increase estimation noise (Figure~\ref{fig:ablation_K}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/ablation_K.pdf}
+\caption{Effect of the number of candidate passes $K$ on interaction-guided selection performance (budget $n{=}10$).}
+\label{fig:ablation_K}
+\end{figure}
+
+\subsection{Transferability Analysis}
+
+We test whether interaction patterns computed on one program can benefit selection for similar programs via leave-one-out transfer within hierarchical clusters (defined by cosine similarity of interaction vectors). The 15 benchmarks cluster into three groups: a large cluster of 13 programs and two singleton clusters (\texttt{adi} and \texttt{fdtd-apml}). For the 13 non-singleton benchmarks, transferred selections achieve \textbf{99.0\%} of oracle (program-specific) selection performance on average. Including the two singleton benchmarks---which receive transfer ratio 0.0 since there are no same-cluster neighbors to transfer from---the overall average is 85.8\%. The high transfer success within the main cluster reflects both the utility of interaction-based similarity and the structural homogeneity of PolyBench; validation on a more diverse suite is needed to separate these effects.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/transferability.pdf}
+\caption{Cosine similarity matrix of Shapley interaction vectors across 15 benchmarks. The high mean similarity (0.95) reflects PolyBench structural homogeneity.}
+\label{fig:transferability}
+\end{figure}
+
+\subsection{Computational Cost Analysis}
+\label{sec:cost}
+
+Table~\ref{tab:cost} compares the computational costs of ShapleyPass against the search-based baselines. Each value function evaluation (applying a pass subset to IR and counting instructions) takes approximately 32\,ms.
+
+\begin{table}[t]
+\caption{Computational cost comparison. All methods use the same per-evaluation cost ($\approx$32\,ms). ShapleyPass computation time includes all 3 seeds.}
+\label{tab:cost}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Evaluations & Wall Time & Avg.\ Reduction (\%) \\
+\midrule
+Shapley ($K{=}20$, order 1--3) & 3{,}000 $\times$ 3 seeds & $\approx$288\,s/benchmark & 63.0 (var.-wt.) \\
+Random Search (best of 300) & 300 $\times$ 3 seeds & $\approx$29\,s/benchmark & 63.2 \\
+Genetic Algorithm & 1{,}000 $\times$ 3 seeds & $\approx$96\,s/benchmark & 63.3 \\
+\midrule
+Shapley ($K{=}10$) & 3{,}000 $\times$ 3 seeds & $\approx$65\,s/benchmark & --- \\
+Shapley ($K{=}15$) & 3{,}000 $\times$ 3 seeds & $\approx$205\,s/benchmark & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Shapley computation uses 9{,}000 total evaluations (3{,}000 per seed $\times$ 3 seeds) compared to 900 for random search and 3{,}000 for the genetic algorithm. Despite this $3{-}10\times$ cost advantage, the search-based methods achieve slightly better optimization performance. The cost gap widens with $K$: increasing from $K{=}10$ (65\,s) to $K{=}20$ (288\,s) triples computation time per benchmark while the additional passes contribute diminishing marginal value to selection.
+
+The key cost-benefit tradeoff is that ShapleyPass pays a computational premium for \emph{interpretability}. The search-based methods find good configurations but provide no insight into \emph{why} they work. ShapleyPass produces a complete interaction map (1{,}350 interaction terms for $K{=}20$) that identifies synergistic and redundant pass groups, enables cross-program transferability, and provides actionable diagnostics for compiler developers. Whether this interpretability justifies the 3--10$\times$ cost depends on the use case: for one-off optimization, direct search is preferable; for understanding pass interactions to inform compiler design, ShapleyPass provides unique value.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Diagnostic Value vs.\ Optimization Performance.}
+The primary value of ShapleyPass lies in its \emph{diagnostic} capabilities rather than direct selection improvement. The variance-weighted method achieves only +0.2 percentage points over individual greedy (63.0\% vs.\ 62.8\%), and the na\"ive interaction greedy \emph{hurts} performance by 2 points. This gap between \emph{measuring} interactions and \emph{exploiting} them algorithmically suggests that greedy algorithms are insufficiently sophisticated. More principled exploitation methods---such as integer linear programming or combinatorial optimization over the interaction graph---may be needed to translate interaction information into practical selection gains, and we highlight this as an important open problem.
+
+\paragraph{Benchmark Homogeneity.}
+Our evaluation is limited to 15 PolyBench/C numerical kernels, all sharing similar computational patterns (nested loops over dense arrays). The originally planned cBench suite (23 diverse programs spanning signal processing, cryptography, and text processing) was not used due to infrastructure constraints. The high cross-benchmark cosine similarity (0.95) likely reflects this homogeneity rather than universal pass interaction properties. On a diverse benchmark suite, we would expect: (1)~lower cross-program similarity, (2)~different interaction patterns for structurally different programs, and (3)~potentially different conclusions about transferability. Validation on cBench, SPEC CPU, or mixed suites is needed.
+
+\paragraph{Aggregate Variance vs.\ Individual Significance.}
+A central tension in our results is that order-3 interactions account for 14.8\% of interaction variance in aggregate, yet \textbf{zero} individual order-3 interactions (0 of 17{,}100 = $\binom{20}{3} \times 15$ triples tested) achieve statistical significance at the $2\sigma$ threshold across seeds. This is not a contradiction---it is analogous to the distinction between explained variance and coefficient significance in regression: a model can explain substantial variance through many weak predictors, none of which are individually significant.
+
+With 3{,}000 game evaluations spread across $\binom{20}{1} + \binom{20}{2} + \binom{20}{3} = 1{,}350$ interaction terms, each third-order term is estimated from a small effective sample. The estimation noise for individual triples exceeds their signal, even though the \emph{sum of squared} interactions is demonstrably nonzero. This has a direct practical consequence: the greedy selection algorithm must evaluate individual interaction terms to make decisions, so noisy individual estimates lead to suboptimal selections even when the aggregate signal is real.
+
+For practitioners, this means that the 14.8\% order-3 variance should be interpreted as evidence that the underlying pass interaction landscape has genuine higher-order structure, but that this structure cannot be reliably resolved at the per-triple level with moderate computational budgets. Increasing the evaluation budget by $10{-}100\times$ might yield individually significant triples, enabling algorithmic exploitation---but at proportionally higher cost. The variance-weighted approach partially mitigates this by down-weighting noisy terms, but as it effectively discards most higher-order information, it reduces to near-individual-greedy behavior (63.0\% vs.\ 62.8\%).
+
+\paragraph{Fixed Pass Ordering.}
+We fix pass application order to the LLVM \texttt{-O3} pipeline order, isolating pass \emph{selection} from pass \emph{ordering}. In practice, ordering significantly affects outcomes. Extending ShapleyPass to model ordering effects is an important future direction.
+
+\paragraph{Scalability.}
+Computing Shapley interactions at order 3 for 20 passes involves $O(K^3)$ terms. Scaling to LLVM's full $\sim$100 passes would require restricting to lower orders, more aggressive approximation, or a hierarchical approach computing interactions between pass groups.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented ShapleyPass, the first application of Shapley interaction indices to compiler optimization pass selection. Our framework provides a principled, interpretable decomposition of how compiler passes interact at arbitrary order. On 15 PolyBench/C benchmarks with 20 LLVM passes, we found that third-order interactions account for 14.8\% of total interaction variance, demonstrating that pairwise models---used by prior work such as ODG~\citep{gao2024odg}---miss a meaningful fraction of pass interaction structure. We identified consistently synergistic groups (e.g., \texttt{mem2reg}+\texttt{gvn}+\texttt{loop-unroll}) and redundant groups (e.g., \texttt{reassociate}+\texttt{early-cse}) providing actionable insights for compiler developers.
+
+While practical selection improvement from interaction-aware algorithms is marginal (+0.2pp) and search-based methods with 3--10$\times$ lower computational cost achieve comparable or better optimization, the diagnostic framework is the primary contribution. The computational cost analysis shows that ShapleyPass's value lies in interpretability rather than optimization efficiency: it produces interaction maps that direct search cannot. Future work should: (1)~validate on diverse benchmarks (cBench, SPEC CPU) to test generalizability beyond PolyBench; (2)~explore ILP or combinatorial optimization to better exploit interaction structure, addressing the greedy algorithm's inability to leverage noisy higher-order terms; (3)~increase estimation budgets to resolve individual third-order interactions, bridging the gap between aggregate significance (14.8\% variance) and per-triple reliability (0\% individually significant); (4)~extend to model pass ordering effects; and (5)~investigate whether discovered interaction patterns can guide the design of new composite optimization passes.
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{14}
+
+\bibitem[Ashouri et~al.(2017)]{ashouri2017micomp}
+A.~H. Ashouri, A.~Bignoli, G.~Palermo, C.~Silvano, S.~Kulkarni, and J.~Cavazos.
+\newblock {MiCOMP}: Mitigating the compiler phase-ordering problem using optimization sub-sequences and machine learning.
+\newblock \emph{ACM Transactions on Architecture and Code Optimization}, 14(3):Article 29, 2017.
+
+\bibitem[Cummins et~al.(2022)]{cummins2022compilergym}
+C.~Cummins, B.~Wasti, J.~Guo, B.~Cui, J.~Ansel, S.~Gomez, S.~Jain, J.~Liu, O.~Teytaud, B.~Steiner, Y.~Tian, and H.~Leather.
+\newblock {CompilerGym}: Robust, performant compiler optimization environments for {AI} research.
+\newblock In \emph{Proceedings of the IEEE/ACM International Symposium on Code Generation and Optimization (CGO)}, 2022.
+
+\bibitem[Deng et~al.(2025)]{deng2025compilerdream}
+C.~Deng, J.~Wu, N.~Feng, J.~Wang, and M.~Long.
+\newblock {CompilerDream}: Learning a compiler world model for general code optimization.
+\newblock In \emph{Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD)}, 2025.
+
+\bibitem[Gao et~al.(2024)]{gao2024odg}
+B.~Gao, M.~Yao, Z.~Wang, D.~Liu, D.~Li, X.~Chen, and Y.~Guo.
+\newblock Efficient compiler optimization by modeling passes dependence.
+\newblock \emph{CCF Transactions on High Performance Computing}, 6:197--211, 2024.
+
+\bibitem[Gao et~al.(2025)]{gao2025grouptuner}
+B.~Gao, M.~Yao, Z.~Wang, D.~Liu, D.~Li, X.~Chen, and Y.~Guo.
+\newblock {GroupTuner}: Efficient group-aware compiler auto-tuning.
+\newblock In \emph{Proceedings of the 26th ACM SIGPLAN/SIGBED International Conference on Languages, Compilers, and Tools for Embedded Systems (LCTES)}, 2025.
+
+\bibitem[Lattner and Adve(2004)]{lattner2004llvm}
+C.~Lattner and V.~Adve.
+\newblock {LLVM}: A compilation framework for lifelong program analysis \& transformation.
+\newblock In \emph{Proceedings of the International Symposium on Code Generation and Optimization (CGO)}, 2004.
+
+\bibitem[Lopes and Regehr(2018)]{lopes2018future}
+N.~P. Lopes and J.~Regehr.
+\newblock Future directions for optimizing compilers.
+\newblock \emph{arXiv preprint arXiv:1809.02161}, 2018.
+
+\bibitem[Muschalik et~al.(2024)]{muschalik2024shapiq}
+M.~Muschalik, H.~Baniecki, F.~Fumagalli, P.~Kolpaczki, B.~Hammer, and E.~H\"ullermeier.
+\newblock shapiq: {S}hapley interactions for machine learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, Datasets and Benchmarks Track, 2024.
+
+\bibitem[Pan et~al.(2025)]{pan2025compilerr1}
+H.~Pan, H.~Lin, H.~Luo, Y.~Liu, K.~Yao, L.~Zhang, M.~Xing, and Y.~Wu.
+\newblock {Compiler-R1}: Towards agentic compiler auto-tuning with reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2025.
+
+\bibitem[Pouchet(2012)]{polybench}
+L.-N. Pouchet.
+\newblock {PolyBench/C}: The polyhedral benchmark suite.
+\newblock \url{http://web.cse.ohio-state.edu/~pouchet.2/software/polybench/}, 2012.
+
+\bibitem[Sundararajan et~al.(2020)]{sundararajan2020shapley}
+M.~Sundararajan, K.~Dhamdhere, and A.~Agarwal.
+\newblock The {S}hapley {T}aylor interaction index.
+\newblock In \emph{Proceedings of the 37th International Conference on Machine Learning (ICML)}, 2020.
+
+\bibitem[Tsai et~al.(2023)]{tsai2023faithshap}
+C.-P. Tsai, C.-K. Yeh, and P.~Ravikumar.
+\newblock {Faith-Shap}: The faithful {S}hapley interaction index.
+\newblock \emph{Journal of Machine Learning Research}, 24(94):1--42, 2023.
+
+\bibitem[VenkataKeerthy et~al.(2024)]{venkatakeerthy2024mlbridge}
+S.~VenkataKeerthy, S.~Jain, U.~Kalvakuntla, P.~S. Gorantla, R.~S. Chitale, E.~Brevdo, A.~Cohen, M.~Trofin, and R.~Upadrasta.
+\newblock The next 700 {ML}-enabled compiler optimizations.
+\newblock In \emph{Proceedings of the 33rd ACM SIGPLAN International Conference on Compiler Construction (CC)}, 2024.
+
+\bibitem[Wever et~al.(2026)]{wever2026hypershap}
+M.~Wever, M.~Muschalik, F.~Fumagalli, and M.~Lindauer.
+\newblock {HyperSHAP}: {S}hapley values and interactions for explaining hyperparameter optimization.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)}, 2026.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,451 @@
+\documentclass[10pt]{article}
+
+\PassOptionsToPackage{numbers}{natbib}
+\usepackage[final]{neurips_2024}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{url}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\title{When Do Path-Dependent Setup Costs Matter in Sequential Causal Design?}
+\author{Anonymous Author(s)}
+\date{}
+
+\newcommand{\Horient}{H_{\mathrm{orient}}}
+\newcommand{\VB}{V_B}
+\newcommand{\AUEC}{\mathrm{AUEC}}
+\newcommand{\Jlambda}{J_\lambda}
+\newcommand{\Nsw}{N_{\mathrm{sw}}}
+
+\newtheorem{proposition}{Proposition}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Sequential causal design is usually written with additive intervention costs, but many laboratory platforms also incur setup overhead when the intervention family changes across rounds. We study that question in a deliberately narrow surrogate benchmark: given a fixed skeleton, maintain a posterior over its acyclic orientations and choose hard or soft singleton interventions under a finite budget to reduce terminal orientation entropy. Our first contribution is a finite-horizon characterization for scalar switching penalties, showing that switching costs can change the preferred policy only by changing feasibility or by overturning a sufficiently small additive-value advantage of a higher-switch policy. Our second contribution is an auditable pilot study tied directly to the workspace artifacts in \texttt{exp/}. The evidence is intentionally narrow: Erd\H{o}s--R\'enyi graphs, seed $11$, budget $14$, and oracle skeletons for the main and ablation slices. In the six-run approximate-posterior main slice, all three planners tie at \(\AUEC \approx 5.17\times 10^{-6}\) in both $S2$ and $S3$. In the twelve-run exact $d{=}8$ slice, the horizon-2 switching-aware and additive planners again tie, while exact dynamic programming and the myopic rule reach \(V_B \approx 2.31\) and \(\AUEC \approx 27.35\) in $S3$. The posterior audit fails its predefined thresholds, with total-variation error \(0.186\) and first-action agreement \(0.00\), so the correct reading is a theorem-plus-pilot note rather than a broad empirical claim.
+\end{abstract}
+
+\section{Introduction}
+Cost-aware causal intervention design has largely modeled the cost of a sequence as the sum of per-action costs \citep{kocaoglu2017cost,ghassami2018budgeted,lindgren2018experimental,agrawal2019abcdstrategy}. That abstraction omits a common operational constraint: changing intervention family can consume extra budget through assay reconfiguration, reagent preparation, or platform setup. Such costs are path-dependent, so the value of an action depends on both the posterior state and the previously chosen family.
+
+This paper studies that issue in a narrow, CPU-feasible surrogate rather than in a full causal-design pipeline. We start from a fixed skeleton, maintain a posterior over its acyclic orientations, and plan hard or soft singleton interventions to reduce terminal orientation entropy under a fixed budget. The paper does not claim a new general causal BED framework. Its goal is to isolate when family-switching costs can change a finite-budget policy once the objective is written in budget-aligned form.
+
+The workspace artifacts support only a small empirical slice, so the manuscript is positioned accordingly. The evidence covers Erd\H{o}s--R\'enyi graphs, the strong-soft regime, seed $11$, budget $14$, switching regimes $S2$ and $S3$, and oracle skeletons for the main and ablation slices. The posterior audit also shows that the approximate posterior is not yet reliable enough for broad empirical claims. The main value of the paper is therefore the combination of a clean structural proposition and a fully auditable pilot.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.1em]
+  \item We formalize a switching-cost-sensitive orientation-planning surrogate for sequential causal design under a fixed budget.
+  \item We prove a finite-horizon proposition for scalar switching penalties: switching costs can alter the optimizer only through feasibility changes or sufficiently small additive-value gaps.
+  \item We report an auditable pilot tied directly to \texttt{exp/main\_benchmark/results.json}, \texttt{exp/exact\_validation/results.json}, \texttt{exp/audits/results.json}, and \texttt{exp/ablations/results.json}.
+  \item We make the empirical limits explicit: one graph family, one seed, budget $14$, unresolved learned-skeleton auditing, and a posterior approximation that fails its own audit thresholds.
+\end{itemize}
+
+Section~\ref{sec:related} positions the paper relative to causal intervention design and sequential Bayesian design. Section~\ref{sec:method} defines the surrogate problem and proposition. Section~\ref{sec:experiments} reports the pilot artifacts. Section~\ref{sec:discussion} discusses what the current evidence does and does not establish.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Additive-cost causal intervention design.}
+\citet{kocaoglu2017cost}, \citet{ghassami2018budgeted}, and \citet{lindgren2018experimental} study causal graph learning with explicit intervention costs. They are the closest precursors on the cost side: the objective is budget-aware, but the sequence cost is additive rather than path-dependent. Their results motivate our budgeted viewpoint, while our paper isolates the extra effect introduced by switching across intervention families.
+
+\paragraph{Budgeted Bayesian design for causal discovery.}
+\citet{agrawal2019abcdstrategy} formulate Bayesian budgeted experimental design for targeted causal structure discovery in an arXiv preprint. More recent arXiv-only papers by \citet{elahi2024adaptive} and \citet{zhou2024sample} study adaptive online design and posterior maintenance for causal graphs under interventions. These papers are closer to the posterior-maintenance side of our setup than the additive-cost literature, but none of them ask whether path-dependent setup cost changes the preferred finite-budget sequence.
+
+\paragraph{Sequential and non-myopic causal BED.}
+\citet{annadani2023differentiable} and \citet{zhang2025goaloriented} are also currently available as arXiv preprints and already cover richer sequential causal BED formulations than the one studied here. Our contribution is therefore narrower than a new sequential design framework: we hold the target and surrogate problem fixed and ask when a path-dependent setup term can change the policy.
+
+\paragraph{Adaptive intervention design around orientation.}
+\citet{zhang2022active} and \citet{elrefaey2025from} are recent arXiv preprints on adaptive intervention design from an orientation-centric starting point. They are close in spirit to our perspective, but they do not analyze family-switching setup costs under a hard finite budget.
+
+\paragraph{Variable-cost sequential design outside causal discovery.}
+\citet{zheng2020sequential} show that variable cost structures can alter sequential Bayesian experimental design decisions, and \citet{pricopie2024setup} study setup-switching cost in Bayesian optimization. These papers motivate why path dependence is a meaningful cost model, but they do not settle whether the same issue matters for causal orientation planning.
+
+\paragraph{Positioning.}
+Relative to the literature above, the paper makes a modest claim. It is not a new general causal-design algorithm. It is a characterization result plus a pilot audit for a fixed-skeleton orientation surrogate, aimed at separating switching-cost effects from planner quality, posterior approximation, and skeleton quality.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Orientation-Planning Surrogate}
+Let $\hat{S}$ be a fixed skeleton. The posterior state is a weighted set of acyclic orientations of $\hat{S}$. For each undirected edge $\{u,v\}\in\hat{S}$, let $p_t(u\rightarrow v)$ be the posterior direction probability after round $t$. The skeleton-conditional orientation entropy is
+\begin{equation}
+\Horient(t)=\sum_{\{u,v\}\in\hat{S}} h\!\left(p_t(u\rightarrow v)\right),
+\qquad
+h(p)=-p\log p-(1-p)\log(1-p).
+\end{equation}
+
+An action $a_t=(i_t,f_t,n_t)$ chooses target node $i_t$, family $f_t\in\{\texttt{hard},\texttt{soft}\}$, and batch size $n_t\in\{25,50\}$. The executed cost is
+\begin{equation}
+C(a_t \mid a_{t-1})=
+c_{\mathrm{exec}}(f_t)+c_{\mathrm{sample}}(f_t,n_t)+c_{\mathrm{sw}}(f_{t-1},f_t).
+\end{equation}
+For a policy $\pi$, the primary value is the fixed-budget terminal entropy reduction
+\begin{equation}
+\VB(\pi)=\mathbb{E}\!\left[\Horient(0)-\Horient(T_\pi)\right],
+\end{equation}
+and we also report
+\begin{equation}
+\AUEC(\pi)=\int_0^B \Horient(b)\,db,
+\end{equation}
+the area under remaining entropy versus spent budget, so smaller $\AUEC$ is better.
+
+The implemented posterior is an orientation-particle approximation over a fixed skeleton, not a full CPDAG-consistent DAG posterior. That restriction is central to the interpretation of the experiments.
+
+\subsection{When Scalar Switching Penalties Can Matter}
+The structural claim in this paper is limited to scalar switching penalties. That includes symmetric binary-family transition matrices of the form
+\[
+\begin{bmatrix}
+0 & \lambda \\
+\lambda & 0
+\end{bmatrix},
+\]
+such as regime $S2$. It does not cover asymmetric matrices such as
+\[
+S3=
+\begin{bmatrix}
+0 & 1 \\
+3 & 0
+\end{bmatrix},
+\]
+where the surcharge depends on switch direction.
+
+Write total policy cost as
+\begin{equation}
+C(\pi;\lambda)=C_{\mathrm{add}}(\pi)+\lambda \Nsw(\pi),
+\end{equation}
+where $\Nsw(\pi)$ is the number of family switches, and let $V_0(\pi)$ denote the value of $\pi$ under the same posterior dynamics with $\lambda=0$.
+
+\begin{proposition}[Scalar switching penalties]
+\label{prop:scalar}
+Consider a finite policy class $\Pi$, budget $B$, and scalar switching penalty $\lambda\ge 0$.
+\begin{enumerate}[leftmargin=1.1em]
+  \item Under the penalized objective $\Jlambda(\pi)=V_0(\pi)-\lambda\Nsw(\pi)$, a higher-switch policy $\pi_1$ can be ranked below a lower-switch policy $\pi_2$ only if
+  \begin{equation}
+  0<V_0(\pi_1)-V_0(\pi_2)\le
+  \lambda\bigl(\Nsw(\pi_1)-\Nsw(\pi_2)\bigr).
+  \end{equation}
+  \item Under the hard-budget objective $\VB$, switching costs can change the optimizer only if either:
+  \begin{enumerate}[leftmargin=1.1em]
+    \item a previously optimal additive-cost policy becomes infeasible because $C_{\mathrm{add}}(\pi)+\lambda\Nsw(\pi)>B$; or
+    \item two jointly feasible policies satisfy the gap condition in part (1).
+  \end{enumerate}
+\end{enumerate}
+Therefore, if every higher-switch competitor is either infeasible or has additive-value advantage strictly larger than its maximum switching surcharge, the budgeted optimizer is invariant to $\lambda$.
+\end{proposition}
+
+\paragraph{Interpretation.}
+The proposition isolates only two mechanisms: feasibility changes and small additive-value gaps. It predicts broad invariance regions when the additive winner already dominates by more than any switching surcharge or when switching has no effect on feasibility.
+
+\paragraph{Scope relative to the experiments.}
+The symmetric regime $S2$ directly instantiates Proposition~\ref{prop:scalar}. The asymmetric regime $S3$ is retained only as a practical stress test and is not used as direct evidence for the proposition.
+
+\subsection{Implemented Planners}
+All methods share the same action space and posterior backend within a comparison table. The pilot evaluates:
+\begin{itemize}[leftmargin=1.1em]
+  \item \textbf{Myopic budgeted gain}: choose the feasible action with largest one-step expected entropy reduction.
+  \item \textbf{Horizon-2 additive-cost}: a two-step search that ignores switching cost while planning but pays the true execution cost.
+  \item \textbf{Proposed H=2 switching-aware}: a two-step search over posterior state, previous family, and remaining budget under the true path-dependent cost.
+  \item \textbf{Exact finite-horizon budgeted DP}: an exact baseline on the exact $d{=}8$ slice.
+  \item \textbf{Random feasible} and \textbf{Ratio-objective selector}: diagnostic baselines used only in the exact slice.
+\end{itemize}
+
+The saved approximate-slice artifacts use the configuration embedded in \texttt{exp/main\_benchmark/results.json} and \texttt{exp/ablations/results.json}: particle count $96$, $16$ rollout simulations per candidate sequence, top-$K=5$ search pruning, and horizon cap $T_{\max}=8$. The exact slice uses the configuration embedded in \texttt{exp/exact\_validation/results.json}: exact posterior mode, one decision round, one rollout, top-$K=1$, and budget $B=14$. All reported runs in this paper come from the completed pilot subset rather than the full planned seed grid stored in those configs.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Scope and Artifact Map}
+Every reported number in this paper comes from the JSON artifacts under \texttt{exp/}. The four empirical sources are:
+\begin{itemize}[leftmargin=1.1em]
+  \item \texttt{exp/main\_benchmark/results.json},
+  \item \texttt{exp/exact\_validation/results.json},
+  \item \texttt{exp/audits/results.json},
+  \item \texttt{exp/ablations/results.json}.
+\end{itemize}
+
+The pilot covers only Erd\H{o}s--R\'enyi graphs, the strong-soft intervention regime, seed $11$, budget $14$, and switching regimes $S2$ and $S3$. The main and ablation slices use oracle skeletons and approximate posterior mode. The exact validation slice uses $d=8$ and exact posterior mode. This scope is far smaller than the original plan and should be read as a pilot.
+
+The embedded configs in the saved artifacts retain larger planned seed lists and budget grids, but the emitted pilot outputs reported here are the completed subset: six main-benchmark runs, twelve exact-validation runs, ten ablation runs, and one posterior/skeleton audit bundle. This distinction matters because the paper should be read as reporting completed artifacts, not aspirational settings.
+
+\subsection{Main Pilot: A Near-Complete Invariance Case}
+The main benchmark artifact contains six runs, all labeled \texttt{invariant} in \texttt{regime\_counts}. Table~\ref{tab:main} reports the exact group summaries from \texttt{exp/main\_benchmark/results.json}. All three planners tie on both \texttt{v\_b\_mean} and \texttt{AUEC\_mean} in both switching regimes.
+
+\begin{table}[t]
+\caption{Main pilot results from \texttt{exp/main\_benchmark/results.json}. Higher \texttt{v\_b\_mean} is better and lower \texttt{AUEC\_mean} is better.}
+\label{tab:main}
+\centering
+\scriptsize
+\begin{tabular}{lcccc}
+\toprule
+Method & Regime & \texttt{v\_b\_mean} & \texttt{AUEC\_mean} & \texttt{n} \\
+\midrule
+Myopic budgeted gain & S2 & \texttt{0.0} & \texttt{5.1701371920588265e-06} & \texttt{1} \\
+Horizon-2 additive-cost & S2 & \texttt{0.0} & \texttt{5.1701371920588265e-06} & \texttt{1} \\
+Proposed H=2 switching-aware & S2 & \texttt{0.0} & \texttt{5.1701371920588265e-06} & \texttt{1} \\
+Myopic budgeted gain & S3 & \texttt{0.0} & \texttt{5.170137215486933e-06} & \texttt{1} \\
+Horizon-2 additive-cost & S3 & \texttt{0.0} & \texttt{5.170137215486933e-06} & \texttt{1} \\
+Proposed H=2 switching-aware & S3 & \texttt{0.0} & \texttt{5.170137215486933e-06} & \texttt{1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is a genuine invariant regime, but it is also a weak test. In these instances the remaining orientation entropy is already extremely close to zero, so the pilot offers little room for switching-aware planning to change the outcome.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_main_auec.pdf}
+\caption{Main pilot \texttt{AUEC} comparison generated from the six group summaries in \texttt{exp/main\_benchmark/results.json} at node count $15$, budget $14$, seed $11$, and switch regimes $S2$ and $S3$. The three planners are visually indistinguishable because all recorded \texttt{AUEC\_mean} values are approximately \(5.17\times 10^{-6}\).}
+\label{fig:main}
+\end{figure}
+
+\subsection{Exact Validation: Planner Quality Can Dominate}
+The exact $d{=}8$ slice is more informative. It contains twelve runs: six \texttt{value\_crossover} summaries in symmetric regime $S2$ and six \texttt{invariant} summaries in asymmetric regime $S3$. Table~\ref{tab:exact} reports the exact group summaries from \texttt{exp/exact\_validation/results.json}; the artifact does not record exact state-space cardinalities, so no such counts are claimed here.
+
+Two observations matter. First, in the symmetric regime $S2$, the horizon-2 switching-aware planner, the horizon-2 additive planner, and exact dynamic programming all tie at \texttt{v\_b\_mean} \texttt{0.5769890050375448}. Second, in the asymmetric regime $S3$, the horizon-2 switching-aware and additive planners again tie at \texttt{v\_b\_mean} \texttt{1.9879114255005237}, while the myopic policy and exact DP both reach \texttt{2.3051295810162964}. The implication is narrow but important: in the explored asymmetric stress test, search quality matters more than explicitly modeling switching in a shallow horizon-2 planner.
+
+\begin{table*}[t]
+\caption{Exact $d{=}8$ validation from \texttt{exp/exact\_validation/results.json}. Higher \texttt{v\_b\_mean} is better and lower \texttt{AUEC\_mean} is better.}
+\label{tab:exact}
+\centering
+\scriptsize
+\begin{tabular}{lcccc}
+\toprule
+Method & Regime & \texttt{v\_b\_mean} & \texttt{AUEC\_mean} & \texttt{n} \\
+\midrule
+Random feasible & S2 & \texttt{0.7855935514437675} & \texttt{36.525464651519684} & \texttt{1} \\
+Myopic budgeted gain & S2 & \texttt{0.5769890050375448} & \texttt{39.289474891402136} & \texttt{1} \\
+Horizon-2 additive-cost & S2 & \texttt{0.5769890050375448} & \texttt{39.289474891402136} & \texttt{1} \\
+Ratio-objective selector & S2 & \texttt{0.8062345122379231} & \texttt{36.25197192099712} & \texttt{1} \\
+Proposed H=2 switching-aware & S2 & \texttt{0.5769890050375448} & \texttt{39.289474891402136} & \texttt{1} \\
+Exact finite-horizon budgeted DP & S2 & \texttt{0.5769890050375448} & \texttt{39.289474891402136} & \texttt{1} \\
+\midrule
+Random feasible & S3 & \texttt{0.998822842490422} & \texttt{44.6547307492272} & \texttt{1} \\
+Myopic budgeted gain & S3 & \texttt{2.3051295810162964} & \texttt{27.346166463759367} & \texttt{1} \\
+Horizon-2 additive-cost & S3 & \texttt{1.9879114255005237} & \texttt{31.549307024343353} & \texttt{1} \\
+Ratio-objective selector & S3 & \texttt{1.9879114255005237} & \texttt{31.549307024343353} & \texttt{1} \\
+Proposed H=2 switching-aware & S3 & \texttt{1.9879114255005237} & \texttt{31.549307024343353} & \texttt{1} \\
+Exact finite-horizon budgeted DP & S3 & \texttt{2.3051295810162964} & \texttt{27.346166463759367} & \texttt{1} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_exact_vb.pdf}
+\caption{Exact-posterior terminal-value comparison generated from the twelve summaries in \texttt{exp/exact\_validation/results.json} for $d=8$, budget $14$, and switch regimes $S2$ and $S3$. In the asymmetric stress test $S3$, exact dynamic programming and the myopic rule attain \texttt{v\_b\_mean} \texttt{2.3051295810162964}, above the two horizon-2 planners at \texttt{1.9879114255005237}.}
+\label{fig:exact}
+\end{figure}
+
+\subsection{Posterior and Skeleton Audits}
+The audits sharply limit what can be claimed from the approximate-posterior slices. Table~\ref{tab:audit} copies the exact values from \texttt{exp/audits/results.json}. The posterior approximation fails both predefined thresholds: \texttt{tv\_error\_mean} is \texttt{0.1857407331329765}, above the threshold \texttt{0.05}, and \texttt{first\_action\_agreement\_exact\_mean} is \texttt{0.0}, below the threshold \texttt{0.85}. The learned-versus-oracle skeleton audit is marked \texttt{unresolved\_in\_pilot}. These audit failures are the main reason the manuscript is positioned as a pilot note.
+
+\begin{table}[t]
+\caption{Audit results copied from \texttt{exp/audits/results.json}.}
+\label{tab:audit}
+\centering
+\scriptsize
+\begin{tabular}{p{0.43\linewidth}p{0.24\linewidth}p{0.17\linewidth}}
+\toprule
+Field & Exact value & Interpretation \\
+\midrule
+\shortstack[l]{\texttt{posterior\_audit.}\\\texttt{tv\_error\_mean}} & \texttt{0.1857407331329765} & fails TV threshold \\
+\shortstack[l]{\texttt{posterior\_audit.}\\\texttt{dag\_kl\_mean}} & \texttt{2.1377415336812007} & diagnostic only \\
+\shortstack[l]{\texttt{posterior\_audit.}\\\texttt{first\_action\_agreement\_exact\_mean}} & \texttt{0.0} & fails agreement threshold \\
+\shortstack[l]{\texttt{skeleton\_audit.}\\\texttt{status}} & \texttt{unresolved\_in\_pilot} & not completed \\
+\shortstack[l]{\texttt{skeleton\_audit.}\\\texttt{threshold\_failure}} & \texttt{true} & treated as failed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_audit_summary.pdf}
+\caption{Audit summary generated from \texttt{exp/audits/results.json}. It summarizes one pilot audit bundle over Erd\H{o}s--R\'enyi, strong-soft, seed $11$, and switch regimes $S2$ and $S3$. The posterior audit fails both predefined thresholds, and the skeleton audit remains unresolved in the pilot.}
+\label{fig:audit}
+\end{figure}
+
+\subsection{Pooled Ablation Artifact}
+The ablation artifact currently exposes six auditable group summaries and four paired-comparison aggregates. It does not expose unique group-summary rows for \texttt{ablation\_c} and \texttt{ablation\_d}, even though the generation script assigns those tags internally. Instead, the saved \texttt{group\_summaries} pool three tags under the shared method label \texttt{Proposed H=2 switching-aware}. Concretely, the released row with \texttt{n=3} in each switching regime is pooled across \texttt{proposed}, \texttt{ablation\_c}, and \texttt{ablation\_d}; it should therefore not be interpreted as a clean summary of the proposed method alone.
+
+The reduced ablation result is simple but limited: the directly auditable singleton rows for the additive-cost ablation and the myopic switching-aware ablation are nearly indistinguishable in both $S2$ and $S3$, and the pooled \texttt{n=3} rows sit on top of them numerically. This is consistent with the rest of the pilot, but it does not isolate the contribution of each ablated component.
+
+\begin{table*}[t]
+\caption{Released ablation summaries from \texttt{exp/ablations/results.json}. Higher \texttt{v\_b\_mean} is better and lower \texttt{AUEC\_mean} is better. The rows labeled \texttt{Proposed H=2 switching-aware} with \texttt{n=3} are pooled artifact rows spanning internal tags \texttt{proposed}, \texttt{ablation\_c}, and \texttt{ablation\_d}; they are included for transparency, not as a clean per-component ablation summary.}
+\label{tab:ablation}
+\centering
+\scriptsize
+\begin{tabular}{lcccc}
+\toprule
+Method & Regime & \texttt{v\_b\_mean} & \texttt{AUEC\_mean} & \texttt{n} \\
+\midrule
+Ablation B: myopic switching-aware & S2 & \texttt{-0.0036242486899587265} & \texttt{0.04394642823440327} & \texttt{1} \\
+Horizon-2 additive-cost & S2 & \texttt{-0.0036242486899587265} & \texttt{0.04394642823440327} & \texttt{1} \\
+Proposed H=2 switching-aware & S2 & \texttt{-0.003624248689958727} & \texttt{0.04394642823440328} & \texttt{3} \\
+Ablation B: myopic switching-aware & S3 & \texttt{1.6734361953199854e-15} & \texttt{5.170137164084552e-06} & \texttt{1} \\
+Horizon-2 additive-cost & S3 & \texttt{1.6734361953199854e-15} & \texttt{5.170137164084552e-06} & \texttt{1} \\
+Proposed H=2 switching-aware & S3 & \texttt{1.1156241302133236e-15} & \texttt{5.170137170806187e-06} & \texttt{3} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_ablation_auec.pdf}
+\caption{Ablation \texttt{AUEC} summary figure generated from \texttt{exp/ablations/results.json} for budget $14$, seed $11$, and switch regimes $S2$ and $S3$. The released rows are nearly indistinguishable, but the plotted \texttt{Proposed H=2 switching-aware} series is pooled across three internal ablation tags in the saved artifact.}
+\label{fig:ablation}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The paper supports two modest conclusions. First, Proposition~\ref{prop:scalar} cleanly identifies the only mechanisms by which scalar switching penalties can matter: feasibility changes and small additive-value gaps. Second, the pilot contains artifact-backed invariant cases. In the main approximate-posterior slice, all three planners tie exactly in both switching regimes. In the exact $d{=}8$ slice, the proposed and additive horizon-2 planners again tie, while exact DP outperforms both in the asymmetric stress test $S3$.
+
+The limitations are substantial.
+\begin{itemize}[leftmargin=1.1em]
+  \item The empirical evidence is extremely narrow: one graph family, one seed, budget $14$, and oracle skeletons for the main and ablation slices.
+  \item The posterior approximation fails its own audit thresholds, so approximate-posterior conclusions can only be qualitative.
+  \item The learned-skeleton audit is unresolved, so the current paper does not establish robustness to skeleton-estimation error.
+  \item The exact validation does not show an advantage for the horizon-2 switching-aware planner over the matched horizon-2 additive planner.
+  \item The ablation artifact supports only a reduced table of directly auditable rows.
+\end{itemize}
+
+Taken together, these points argue for a narrow interpretation. The current workspace supports a careful theorem-plus-pilot manuscript about a fixed-skeleton orientation surrogate. It does not yet support a broad claim about switching-aware sequential causal design in general.
+
+\section{Conclusion}
+This paper studies when path-dependent setup costs matter in sequential causal design under a fixed budget. The main theoretical result is a scalar-penalty proposition: switching costs can change the optimizer only through feasibility changes or sufficiently small additive-value gaps. The empirical evidence is deliberately conservative. In the six-run main pilot, all three planners tie with \(\AUEC \approx 5.17\times 10^{-6}\). In the exact $d{=}8$ slice, the horizon-2 switching-aware and additive planners again tie, while exact dynamic programming reaches \(V_B \approx 2.31\) and \(\AUEC \approx 27.35\) in the asymmetric stress test $S3$. Because the posterior audit fails, the skeleton audit is unresolved, and the ablation artifact pools multiple internal tags, the correct conclusion is narrow: the workspace supports an auditable theorem-plus-pilot note, not a submission-ready broad empirical benchmark.
+
+\appendix
+
+\section{Proof Sketch for Proposition~\ref{prop:scalar}}
+For two policies $\pi_1$ and $\pi_2$ with $\Nsw(\pi_1)>\Nsw(\pi_2)$,
+\begin{equation}
+\Jlambda(\pi_1)\ge \Jlambda(\pi_2)
+\iff
+V_0(\pi_1)-V_0(\pi_2)\ge
+\lambda\bigl(\Nsw(\pi_1)-\Nsw(\pi_2)\bigr).
+\end{equation}
+Therefore, if $\pi_1$ is preferred at $\lambda=0$ but not at $\lambda>0$, its additive-value advantage must lie in the interval given by part (1) of Proposition~\ref{prop:scalar}.
+
+For the hard-budget problem, define
+\begin{equation}
+\Pi_B(\lambda)=\left\{\pi\in\Pi:
+C_{\mathrm{add}}(\pi)+\lambda\Nsw(\pi)\le B
+\right\}.
+\end{equation}
+If the optimizer changes between $\lambda=0$ and $\lambda>0$, then either the previous optimizer leaves $\Pi_B(\lambda)$, which is the feasibility mechanism, or both policies remain feasible and the change is a ranking reversal inside $\Pi_B(\lambda)$, which reduces to part (1). No third mechanism exists under the scalar penalty model.
+
+\section{Reproducibility Appendix}
+\paragraph{Artifact paths.}
+The manuscript uses:
+\begin{itemize}[leftmargin=1.1em]
+  \item \texttt{exp/main\_benchmark/results.json},
+  \item \texttt{exp/exact\_validation/results.json},
+  \item \texttt{exp/audits/results.json},
+  \item \texttt{exp/ablations/results.json},
+  \item figures under \texttt{figures/}.
+\end{itemize}
+
+\paragraph{Implemented pilot configuration.}
+The main and ablation slices use oracle skeletons, approximate posterior mode, particle count $96$, $16$ rollouts, top-$K=5$, horizon cap $T_{\max}=8$, budget $14$, strong-soft interventions, seed $11$, and switching regimes $S2$ and $S3$. The exact slice uses oracle skeletons, exact posterior mode, one rollout, top-$K=1$, exact-search horizon $1$, budget $14$, and one decision round. The saved exact-validation artifact does not record exact state-space cardinalities, so none are claimed in this paper.
+
+\paragraph{Ablation audit note.}
+The generation script \texttt{exp/run\_focused\_stage3.py} assigns internal tags \texttt{proposed}, \texttt{ablation\_a}, \texttt{ablation\_b}, \texttt{ablation\_c}, and \texttt{ablation\_d}, but the saved \texttt{exp/ablations/results.json} \texttt{group\_summaries} collapse \texttt{proposed}, \texttt{ablation\_c}, and \texttt{ablation\_d} into pooled rows under the shared method label \texttt{Proposed H=2 switching-aware}. Table~\ref{tab:ablation} reports those released rows with that caveat made explicit.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{12}
+
+\bibitem[Agrawal et~al.(2019)Agrawal, Squires, Yang, Shanmugam, and
+  Uhler]{agrawal2019abcdstrategy}
+Raj Agrawal, Chandler Squires, Karren Yang, Karthik Shanmugam, and Caroline
+  Uhler.
+\newblock {ABCD-Strategy: Budgeted Experimental Design for Targeted Causal
+  Structure Discovery}.
+\newblock arXiv preprint arXiv:1902.10347, 2019.
+
+\bibitem[Annadani et~al.(2023)Annadani, Tigas, Ivanova, Jesson, Gal, Foster,
+  and Bauer]{annadani2023differentiable}
+Yashas Annadani, Panagiotis Tigas, Desi~R. Ivanova, Andrew Jesson, Yarin Gal,
+  Adam Foster, and Stefan Bauer.
+\newblock {Differentiable Multi-Target Causal Bayesian Experimental Design}.
+\newblock arXiv preprint arXiv:2302.10607, 2023.
+
+\bibitem[Elahi et~al.(2024)Elahi, Wei, Kocaoglu, and Ghasemi]{elahi2024adaptive}
+Muhammad~Qasim Elahi, Lai Wei, Murat Kocaoglu, and Mahsa Ghasemi.
+\newblock {Adaptive Online Experimental Design for Causal Discovery}.
+\newblock arXiv preprint arXiv:2405.11548, 2024.
+
+\bibitem[Elrefaey and Pan(2025)]{elrefaey2025from}
+Abdelmonem Elrefaey and Rong Pan.
+\newblock {From Observation to Orientation: an Adaptive Integer Programming
+  Approach to Intervention Design}.
+\newblock arXiv preprint arXiv:2504.03122, 2025.
+
+\bibitem[Ghassami et~al.(2018)Ghassami, Salehkaleybar, Kiyavash, and
+  Bareinboim]{ghassami2018budgeted}
+AmirEmad Ghassami, Saber Salehkaleybar, Negar Kiyavash, and Elias Bareinboim.
+\newblock {Budgeted Experiment Design for Causal Structure Learning}.
+\newblock In {\em Proceedings of the 35th International Conference on Machine
+  Learning}, pages 1724--1733, 2018.
+
+\bibitem[Kocaoglu et~al.(2017)Kocaoglu, Dimakis, and
+  Vishwanath]{kocaoglu2017cost}
+Murat Kocaoglu, Alexandros~G. Dimakis, and Sriram Vishwanath.
+\newblock {Cost-Optimal Learning of Causal Graphs}.
+\newblock In {\em Proceedings of the 34th International Conference on Machine
+  Learning}, pages 1875--1884, 2017.
+
+\bibitem[Lindgren et~al.(2018)Lindgren, Kocaoglu, Dimakis, and
+  Vishwanath]{lindgren2018experimental}
+Erik~M. Lindgren, Murat Kocaoglu, Alexandros~G. Dimakis, and Sriram
+  Vishwanath.
+\newblock {Experimental Design for Cost-Aware Learning of Causal Graphs}.
+\newblock arXiv preprint arXiv:1810.11867, 2018.
+
+\bibitem[Pricopie et~al.(2024)Pricopie, Allmendinger, Lopez-Ibanez, Fare,
+  Benatan, and Knowles]{pricopie2024setup}
+Stefan Pricopie, Richard Allmendinger, Manuel Lopez-Ibanez, Clyde Fare, Matt
+  Benatan, and Joshua Knowles.
+\newblock {Bayesian Optimization with Setup Switching Cost}.
+\newblock In {\em Proceedings of the Genetic and Evolutionary Computation
+  Conference Companion}, pages 103--104, 2024.
+
+\bibitem[Zhang et~al.(2022)Zhang, Cammarata, Squires, Sapsis, and
+  Uhler]{zhang2022active}
+Jiaqi Zhang, Louis Cammarata, Chandler Squires, Themistoklis~P. Sapsis, and
+  Caroline Uhler.
+\newblock {Active Learning for Optimal Intervention Design in Causal Models}.
+\newblock arXiv preprint arXiv:2209.04744, 2022.
+
+\bibitem[Zhang et~al.(2025)Zhang, Dong, Liu, and Huan]{zhang2025goaloriented}
+Zheyu Zhang, Jiayuan Dong, Jie Liu, and Xun Huan.
+\newblock {Goal-Oriented Sequential Bayesian Experimental Design for Causal
+  Learning}.
+\newblock arXiv preprint arXiv:2507.07359, 2025.
+
+\bibitem[Zheng et~al.(2020)Zheng, Hayden, Pacheco, and Fisher]{zheng2020sequential}
+Sue Zheng, David~S. Hayden, Jason Pacheco, and John~W. Fisher~III.
+\newblock {Sequential Bayesian Experimental Design with Variable Cost
+  Structure}.
+\newblock In {\em Advances in Neural Information Processing Systems}, 2020.
+
+\bibitem[Zhou et~al.(2024)Zhou, Elahi, and Kocaoglu]{zhou2024sample}
+Zihan Zhou, Muhammad~Qasim Elahi, and Murat Kocaoglu.
+\newblock {Sample Efficient Bayesian Learning of Causal Graphs from
+  Interventions}.
+\newblock arXiv preprint arXiv:2410.20089, 2024.
+
+\end{thebibliography}
+
+\end{document}

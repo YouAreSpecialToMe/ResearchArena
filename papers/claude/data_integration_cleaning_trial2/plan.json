@@ -1,0 +1,192 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and configure environment",
+    "description": "Set up Python environment with all libraries needed for entity resolution pipeline experiments (blocking, matching, clustering, evaluation).",
+    "steps": {
+      "step1": "Install core dependencies: pip install pandas numpy scikit-learn py_entitymatching recordlinkage jellyfish python-Levenshtein fuzzywuzzy matplotlib seaborn scipy networkx sentence-transformers dedupe",
+      "step2": "Create project directory structure: src/ (source code), src/blocking/ (blocking methods), src/matching/ (matching methods), src/clustering/ (clustering methods), src/evaluation/ (metrics), src/pipeline/ (end-to-end pipeline runner), src/degradation/ (controlled stage degradation), src/epm/ (error propagation model), data/ (datasets), results/ (experiment outputs), figures/ (plots)",
+      "step3": "Create config.py with experiment constants: RANDOM_SEEDS = [42, 123, 456], DATASETS = ['dblp_acm', 'dblp_scholar', 'amazon_google', 'walmart_amazon', 'abt_buy', 'fodors_zagats'], BLOCKING_METHODS = ['standard', 'sorted_neighborhood', 'token_blocking'], MATCHING_METHODS = ['rule_based', 'random_forest', 'dedupe_active', 'sbert_embedding'], CLUSTERING_METHODS = ['connected_components', 'center', 'merge_center'], DEGRADATION_LEVELS = [0.05, 0.10, 0.20, 0.30, 0.50]",
+      "step4": "Verify all imports work by running a short test script that imports all required modules and confirms sentence-transformers can load paraphrase-MiniLM-L6-v2 (a small 22M parameter model suitable for CPU)."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare all 6 ER benchmark datasets",
+    "description": "Download 6 ER benchmark datasets from the Magellan/DeepMatcher repository spanning structured, dirty, and textual categories. Standardize formats and compute dataset statistics.",
+    "steps": {
+      "step1": "Download datasets from the DeepMatcher/Magellan benchmark repository (https://github.com/anhaidgroup/deepmatcher/blob/master/Datasets.md). All 6 datasets: (1) DBLP-ACM (2,616 + 2,294 records, 2,224 matches, structured), (2) DBLP-Scholar (2,616 + 64,263 records, 5,347 matches, structured), (3) Amazon-Google (1,363 + 3,226 records, 1,300 matches, structured), (4) Walmart-Amazon (2,554 + 22,074 records, 1,154 matches, dirty), (5) Abt-Buy (1,081 + 1,092 records, 1,097 matches, textual), (6) Fodors-Zagats (533 + 331 records, 112 matches, structured). Each has tableA.csv, tableB.csv, and train/valid/test labeled pairs.",
+      "step2": "Load each dataset and standardize column names. For each dataset, identify: (a) primary text attribute(s) for blocking keys (e.g., title for bibliographic, name for products/restaurants), (b) all matchable attributes, (c) ground truth matches from labeled pairs. Store metadata in data/dataset_info.json.",
+      "step3": "Apply basic standardization to each dataset: lowercase, strip whitespace, normalize unicode. Save as data/{dataset}/tableA_clean.csv and tableB_clean.csv. These serve as the canonical input for all experiments.",
+      "step4": "Compute baseline statistics for each dataset: number of records per source, number of attributes, number of ground truth matches, match-to-pair ratio (difficulty indicator), average attribute string lengths, fraction of missing values. Save to data/statistics.json. Categorize each dataset by difficulty: easy (DBLP-ACM, Fodors-Zagats), medium (Amazon-Google, Abt-Buy), hard (DBLP-Scholar, Walmart-Amazon).",
+      "step5": "Pre-compute Sentence-BERT embeddings for all records across all 6 datasets using paraphrase-MiniLM-L6-v2 model. Concatenate all text attributes per record into a single string, encode, and save embeddings as numpy arrays: data/{dataset}/embeddings_A.npy, data/{dataset}/embeddings_B.npy. Estimated time: ~15 minutes total on CPU."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement blocking methods",
+    "description": "Implement 3 blocking methods that generate candidate record pairs, covering standard approaches of varying aggressiveness.",
+    "steps": {
+      "step1": "Implement standard blocking (src/blocking/standard.py): Partition records by blocking key value (e.g., first 3 characters of title, or first word of name attribute). Only pairs sharing the same blocking key are candidates. Parameters: blocking_key_attr, key_function (first_n_chars, first_word, soundex). Return candidate pairs as set of (idA, idB) tuples, along with pairs_completeness (PC) and reduction_ratio (RR).",
+      "step2": "Implement sorted neighborhood blocking (src/blocking/sorted_neighborhood.py): Sort all records from both tables by blocking key value (concatenated text attributes). Use a sliding window of size W to generate candidate pairs. Only records within the same window are candidates. Parameters: window_size (default W=5), key_attr. Return candidate pairs with PC and RR.",
+      "step3": "Implement token blocking with meta-blocking (src/blocking/token_blocking.py): Index all records by individual tokens from text attributes. For each token, generate all pairs of records (one from each table) sharing that token. Apply meta-blocking pruning: weight each pair by the number of shared tokens, discard pairs with weight below a threshold (tuned per dataset). Parameters: min_shared_tokens (default 1), prune_threshold (default 0.0). Return candidate pairs with PC and RR.",
+      "step4": "Create unified blocking interface (src/blocking/blocker.py): run_blocking(method, tableA, tableB, params) -> (candidate_pairs, PC, RR). Each method returns a consistent format. Verify on all 6 datasets that at least one blocking method achieves PC > 0.8."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement matching methods spanning the methodology spectrum",
+    "description": "Implement 4 matching methods: rule-based (simple baseline), classical ML (strong baseline), active learning, and embedding-based (lightweight DL). This addresses the feedback to include a DL-based method and active learning (Dedupe).",
+    "steps": {
+      "step1": "Implement rule-based matcher (src/matching/rule_based.py): Given candidate pairs, compute similarity features per pair: Jaccard on tokens, normalized edit distance, TF-IDF cosine similarity for each attribute. Classify as match if weighted average similarity > threshold (default 0.5, tuned on validation set via grid search [0.3, 0.4, 0.5, 0.6, 0.7]). Return predicted matches with scores.",
+      "step2": "Implement random forest matcher (src/matching/random_forest.py): Given candidate pairs, compute feature vector per pair: Jaccard, edit distance, cosine similarity, token overlap ratio, numeric difference (if applicable) per attribute. Train RandomForestClassifier(n_estimators=100, random_state=seed) on training pairs. Predict on test candidates. Return matches with probabilities. Use py_entitymatching feature generation where applicable.",
+      "step3": "Implement active learning matcher via Dedupe library (src/matching/dedupe_matcher.py): Use dedupe library's Fellegi-Sunter model with active learning simulation. Since we have ground truth, simulate the active learning oracle by providing labels for the most uncertain pairs. Configure: num_training_pairs=200, recall_weight=1.5. Return predicted matches with confidence scores. This addresses the feedback to restore the dropped Active Learning method.",
+      "step4": "Implement Sentence-BERT embedding matcher (src/matching/sbert_matcher.py): Using pre-computed SBERT embeddings (paraphrase-MiniLM-L6-v2, 384-dim), compute cosine similarity between record pairs. Classify as match if similarity > threshold (tuned on validation set via grid search [0.4, 0.5, 0.6, 0.7, 0.8]). This is a lightweight transformer-based method that runs on CPU, addressing the feedback to include at least one DL-based ER method. The model has 22M parameters and processes records in <1 second per batch.",
+      "step5": "Create unified matching interface (src/matching/matcher.py): run_matching(method, candidate_pairs, tableA, tableB, train_pairs, valid_pairs, seed) -> (predicted_matches, matching_precision, matching_recall, matching_F1). All methods return consistent format with per-pair scores."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement clustering methods",
+    "description": "Implement 3 clustering methods that group matched record pairs into entity clusters, covering different strategies for handling transitive closure.",
+    "steps": {
+      "step1": "Implement connected components clustering (src/clustering/connected_components.py): Build a graph where nodes are records and edges are predicted matches. Find connected components using networkx or union-find. Each connected component is an entity cluster. This maximally exploits transitivity but is vulnerable to false-positive chains. Return clusters as list of record-id sets.",
+      "step2": "Implement center clustering (src/clustering/center.py): For each connected component, select the record with highest average similarity to other records as center. Assign each record to the cluster whose center it has highest similarity with. Re-compute centers iteratively until convergence (max 10 iterations). This is more conservative than connected components -- it can split over-merged components. Parameters: max_iterations=10, similarity_threshold=0.3.",
+      "step3": "Implement merge-center clustering (src/clustering/merge_center.py): Start with each record in its own cluster. Iteratively merge the two most-similar clusters (by average linkage) if their similarity exceeds a threshold. Stop when no more merges exceed the threshold. Parameters: merge_threshold (tuned on validation set). This is intermediate between connected components and center clustering.",
+      "step4": "Create unified clustering interface (src/clustering/clusterer.py): run_clustering(method, predicted_matches, records, params) -> (clusters, cluster_precision, cluster_recall, cluster_F1). Cluster metrics computed against ground truth entity groups: cluster_precision = fraction of within-cluster pairs that are true matches, cluster_recall = fraction of true match pairs that are co-clustered.",
+      "step5": "Implement end-to-end pipeline wrapper (src/pipeline/pipeline.py): run_pipeline(blocking_method, matching_method, clustering_method, tableA, tableB, ground_truth, seed) -> dict with per-stage metrics (PC, RR, MP, MR, MF1, CP, CR, CF1) and end-to-end metrics (e2e_precision, e2e_recall, e2e_F1). This wrapper is used by all subsequent experiments."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 1: Baseline per-stage quality measurement",
+    "description": "Run the full ER pipeline on all 6 datasets with all method combinations (3 blocking x 4 matching x 3 clustering = 36 configurations per dataset). Record per-stage and end-to-end quality metrics. This establishes the baseline quality profile for the Error Propagation Model.",
+    "steps": {
+      "step1": "Run all 36 pipeline configurations on each of the 6 datasets with 3 random seeds: 6 datasets x 36 configs x 3 seeds = 648 runs. For each run, record: (a) Blocking: pairs_completeness (PC), reduction_ratio (RR), num_candidates; (b) Matching: precision, recall, F1 (conditional on candidate set); (c) Clustering: cluster_precision, cluster_recall, cluster_F1; (d) End-to-end: e2e_precision, e2e_recall, e2e_F1 (pairwise). Save each run's results to results/exp1/{dataset}_{blocking}_{matching}_{clustering}_{seed}.json.",
+      "step2": "Parallelize using multiprocessing.Pool(2). Organize runs so that large datasets (DBLP-Scholar, Walmart-Amazon) are interleaved with small ones to balance load. Estimated runtime: small datasets (~5 sec/run), medium (~15 sec/run), large (~45 sec/run). Weighted average ~15 sec/run. 648 x 15 / 2 = ~81 min.",
+      "step3": "Aggregate results into a summary table: for each (dataset, blocking, matching, clustering), compute mean and std of all metrics across 3 seeds. Save to results/exp1_summary.csv. Identify the best pipeline configuration per dataset (highest mean e2e_F1).",
+      "step4": "Compute correlation matrix between per-stage metrics and end-to-end F1 across all configurations. Specifically: Pearson correlation of (PC, MF1, CF1) with e2e_F1. This gives a preliminary view of which stage most strongly predicts end-to-end quality.",
+      "step5": "Verify the hard recall bound: for every run, confirm that e2e_recall <= PC (within floating-point tolerance). Count any violations. This validates the theoretical guarantee from the proposal."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Controlled stage degradation",
+    "description": "For each pipeline stage independently, artificially degrade its quality while keeping other stages at their best configuration. This produces error amplification curves showing how per-stage degradation maps to end-to-end quality loss.",
+    "steps": {
+      "step1": "For each dataset, select the best pipeline configuration from Experiment 1 (highest mean e2e_F1). This serves as the 'optimal' baseline for degradation experiments.",
+      "step2": "Implement blocking degradation (src/degradation/degrade_blocking.py): Given the candidate set from optimal blocking, randomly remove x% of true positive pairs (pairs that are both candidates and true matches). This simulates reduced pairs completeness. Levels: x in {5, 10, 20, 30, 50}.",
+      "step3": "Implement matching degradation (src/degradation/degrade_matching.py): Given optimal matching predictions, randomly flip x% of correct decisions: (a) flip true positives to false negatives, and (b) flip true negatives to false positives, in equal proportion. Levels: x in {5, 10, 20, 30, 50}. Also implement separate FP-only and FN-only degradation to study asymmetric effects.",
+      "step4": "Implement clustering degradation (src/degradation/degrade_clustering.py): Given optimal clusters, randomly (a) split x% of correct clusters into two halves (simulating under-merging), or (b) merge x% of adjacent clusters (simulating over-merging). Run both split-only and merge-only variants. Levels: x in {5, 10, 20, 30, 50}.",
+      "step5": "Run degradation experiments: 6 datasets x 3 stages x 5 levels x 3 seeds = 270 base runs. Plus separate FP/FN matching degradation (6 x 2 x 5 x 3 = 180 runs) and split/merge clustering degradation (6 x 2 x 5 x 3 = 180 runs). Total: 630 runs. Each run is fast (just applying degradation to cached optimal pipeline results and re-evaluating). Estimated time: ~15 min.",
+      "step6": "Compute error amplification curves: for each (dataset, stage), plot e2e_F1 vs. degradation_level. Compute the slope (EAF) at each point: EAF_s(x) = -d(e2e_F1)/d(degradation_level) at level x. Save curves and EAFs to results/exp2_degradation.json.",
+      "step7": "Analyze asymmetric propagation: Compare blocking degradation slopes to matching/clustering degradation slopes. Compute the ratio EAF_blocking / EAF_matching at each degradation level. Test the hypothesis that blocking errors have higher EAFs on harder datasets (DBLP-Scholar, Walmart-Amazon) while matching errors dominate on easier datasets (DBLP-ACM, Fodors-Zagats)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Error Propagation Model (EPM) validation",
+    "description": "Derive and validate the formal EPM that predicts end-to-end F1 from per-stage metrics. Compare analytical predictions against actual measurements from Experiments 1 and 2.",
+    "steps": {
+      "step1": "Implement the EPM (src/epm/propagation_model.py): Define closed-form expressions: (a) e2e_recall = PC * MR * CR_adj, where CR_adj is the cluster recall adjusted for transitive closure effects. Estimate CR_adj empirically as a function of matching recall and false-positive density. (b) e2e_precision = f(MP, CP, graph_topology). Model precision as a function of matching precision and the fraction of false positives that form connected components with true matches. (c) e2e_F1 = 2 * e2e_precision * e2e_recall / (e2e_precision + e2e_recall).",
+      "step2": "Fit the EPM parameters using Experiment 1 data. Use 70% of the 648 configurations for fitting and 30% for validation. The model has at most 3-5 free parameters (coefficients for the transitive closure adjustment and false-positive topology factor). Fit using least-squares regression with scipy.optimize.minimize.",
+      "step3": "Validate the EPM: On the held-out 30% of configurations from Experiment 1, compute: (a) RMSE between predicted and actual e2e_F1, (b) R^2 (coefficient of determination), (c) Mean Absolute Error (MAE). Target: R^2 >= 0.85. Also validate on ALL Experiment 2 degradation results (these were not used for fitting). Save predictions vs actuals to results/exp3_epm_validation.json.",
+      "step4": "Analyze residuals: identify configurations where the EPM predictions are poorest. Investigate whether failures correlate with specific datasets, methods, or extreme operating points. This informs model limitations.",
+      "step5": "Cross-validate the EPM using leave-one-dataset-out: fit on 5 datasets, predict on the 6th. Repeat for all 6 folds. Report R^2 per fold and average. This addresses the transferability concern from the feedback -- does the EPM generalize across domains? Save to results/exp3_cross_validation.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 4: Bottleneck identification and analysis",
+    "description": "Compute Error Amplification Factors (EAFs) for each stage on each dataset using both analytical and empirical methods. Analyze how the bottleneck stage varies with dataset characteristics.",
+    "steps": {
+      "step1": "Compute empirical EAFs from Experiment 2 degradation curves: For each (dataset, stage), EAF_empirical = average absolute slope of the e2e_F1 vs. degradation curve across all degradation levels. Normalize so that EAFs sum to 1 per dataset for comparability. Higher EAF = higher sensitivity = bigger bottleneck.",
+      "step2": "Compute analytical EAFs from the EPM: Using the fitted EPM from Experiment 3, compute partial derivatives dF1_e2e/dPC, dF1_e2e/dMF1, dF1_e2e/dCF1 analytically (or via numerical differentiation with step size 0.01). Evaluate at the optimal operating point for each dataset.",
+      "step3": "Compare analytical vs empirical EAFs: For each (dataset, stage), compute relative error = |EAF_analytical - EAF_empirical| / EAF_empirical. Target: relative error < 15% on average. Save comparison to results/exp4_eaf_comparison.json.",
+      "step4": "Bottleneck analysis by dataset difficulty: Group datasets by difficulty (easy: DBLP-ACM, Fodors-Zagats; medium: Amazon-Google, Abt-Buy; hard: DBLP-Scholar, Walmart-Amazon). For each group, report which stage has the highest EAF. Test hypothesis: easy datasets have matching as bottleneck (blocking recall is near-perfect), hard datasets have blocking as bottleneck.",
+      "step5": "Method-specific bottleneck analysis: For each matching method, compute EAFs separately. Test whether the bottleneck stage differs across methods -- e.g., does the stronger SBERT matcher shift the bottleneck away from matching toward blocking or clustering?",
+      "step6": "Comparison with Thirumuruganathan et al. (2019) perspective: Implement a brief analysis that tests whether the cleaning recommendations from their 'Effective and Efficient Data Cleaning for Entity Matching' framework align with or differ from our EAF-based bottleneck identification. Specifically, they recommend cleaning strategies based on matching-stage analysis alone; our EAFs additionally capture blocking and clustering effects. Document cases where pipeline-aware analysis gives different recommendations than matching-only analysis. Save to results/exp4_thirumuruganathan_comparison.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 5: Stage-Optimal Allocation (SOA) validation",
+    "description": "Compare three improvement strategies (uniform, bottleneck-first, SOA) to validate that the SOA algorithm efficiently allocates improvement effort. This is framed as an empirical validation of a practical heuristic, not a novel algorithm.",
+    "steps": {
+      "step1": "Implement the SOA algorithm (src/epm/soa.py): Given the fitted EPM, current per-stage quality metrics, and a total improvement budget B, use projected gradient ascent to find optimal quality increments (dPC, dMF1, dCF1) that maximize predicted e2e_F1 subject to sum of improvement costs <= B. Improvement costs are modeled as linear (cost = alpha_s * dQ_s where alpha_s is per-stage cost). Run for 100 iterations with learning rate 0.01.",
+      "step2": "Implement baseline allocation strategies: (a) Uniform: distribute budget equally across 3 stages, each stage gets B/3 improvement. (b) Bottleneck-first: allocate all budget B to the stage with highest EAF. (c) SOA: use the gradient-based optimizer from step1.",
+      "step3": "Simulate improvement: For each dataset, start from a degraded baseline (30% degradation at each stage). Given a budget B in {0.2, 0.4, 0.6, 0.8, 1.0} (fraction of total possible improvement), each strategy allocates the budget across stages. Simulate the improvement by interpolating between degraded and optimal quality at each stage according to the allocated budget fraction. Compute resulting e2e_F1.",
+      "step4": "Run allocation experiments: 6 datasets x 3 strategies x 5 budget levels x 3 seeds = 270 configurations. For each, record: allocated budget per stage, predicted e2e_F1, actual e2e_F1 (by actually running the pipeline with interpolated degradation), improvement efficiency = delta_F1 / budget. Estimated time: ~20 min (degradation runs are fast).",
+      "step5": "Evaluate: Compute mean F1 improvement per unit budget for each strategy, averaged across datasets. Test hypothesis: SOA achieves 1.5-3x higher efficiency than uniform allocation on >= 4/6 datasets. Compute statistical significance via paired t-tests across seeds. Save to results/exp5_soa_validation.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: EPM and EAF components",
+    "description": "Ablate each novel component of the PipeER framework to understand its contribution. Tests whether each component (transitive closure modeling, topology-aware precision, stage interactions) is necessary.",
+    "steps": {
+      "step1": "Define ablation variants of the EPM: (a) EPM-NoTransitive: Remove the transitive closure adjustment CR_adj, use CR directly. Tests whether modeling clustering's recovery of missed matches matters. (b) EPM-NoTopology: Remove false-positive topology factor from precision model, use MP directly as e2e_precision proxy. Tests whether modeling how FP structure affects clustering matters. (c) EPM-Linear: Replace the non-linear EPM with a simple linear model: e2e_F1 = a*PC + b*MF1 + c*CF1 + d. Tests whether non-linearity is important. (d) EPM-Multiplicative: Use simple product model: e2e_F1 = PC * MF1 * CF1 (normalized). Tests whether the interaction terms add value beyond a simple multiplicative baseline.",
+      "step2": "For each ablation, refit on the same 70% training data from Experiment 3 and evaluate on the 30% validation set. Compare R^2, RMSE, and MAE against the full EPM. Also evaluate on Experiment 2 degradation data.",
+      "step3": "EAF ablation: Compute EAFs from each ablated model and compare to empirical EAFs. Does the full model's EAFs align better with empirical EAFs than the ablated versions?",
+      "step4": "SOA ablation: Run the SOA allocation using each ablated EPM and compare F1 improvement efficiency to the full model. Does a simpler model give nearly equivalent allocation recommendations?",
+      "step5": "Summarize: Rank components by their contribution to EPM accuracy and SOA effectiveness. Report which components are essential vs. marginal. Save to results/ablation_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Transferability analysis: leave-one-dataset-out and cross-domain validation",
+    "description": "Test whether the EPM and EAFs generalize across domains and dataset characteristics. This directly addresses the feedback concern about transferability of the sensitivity analysis.",
+    "steps": {
+      "step1": "Leave-one-dataset-out EPM validation: For each of the 6 datasets, fit the EPM on data from the other 5 datasets and predict on the held-out dataset. Report R^2, RMSE per fold. Compare to within-dataset R^2 from Experiment 3. If cross-domain R^2 drops significantly (> 0.15), investigate which datasets are outliers.",
+      "step2": "Leave-one-dataset-out EAF stability: For each held-out dataset, compute EAFs from the cross-fitted EPM and compare to the EAFs computed from within-dataset fitting. Report correlation and rank agreement (Kendall's tau) between the bottleneck rankings.",
+      "step3": "Cross-domain SOA: Use the cross-fitted EPM to run SOA on the held-out dataset. Compare F1 improvement to within-dataset SOA. If cross-domain SOA degrades by < 10% relative to within-dataset SOA, the framework transfers well.",
+      "step4": "Dataset characteristic analysis: Correlate transferability (per-fold R^2 drop) with dataset characteristics: size, difficulty (match-to-pair ratio), category (structured/dirty/textual). Identify which dataset properties predict transfer difficulty.",
+      "step5": "Save all transferability results to results/transferability_analysis.json. This experiment is critical for the paper's practical relevance -- if the EPM only works when fit on the same dataset, its utility is limited."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate all success criteria and compile results",
+    "description": "Systematically evaluate all primary and secondary success criteria from the proposal. Report honestly, including any negative results.",
+    "steps": {
+      "step1": "Primary criteria: (a) EPM R^2 >= 0.85 across all datasets -- check from Experiment 3; (b) EAFs differ by at least 2x between highest and lowest stages on >= 4/6 datasets -- check from Experiment 4; (c) SOA outperforms uniform allocation by >= 20% in efficiency on >= 4/6 datasets -- check from Experiment 5.",
+      "step2": "Secondary criteria: (a) Hard recall bound R_e2e <= PC confirmed on all datasets -- check from Experiment 1; (b) Bottleneck stage predictably shifts with dataset difficulty -- check from Experiment 4; (c) Analytical and empirical EAFs agree within 15% -- check from Experiment 4.",
+      "step3": "Negative result checks: (a) Are per-stage qualities approximately independent? Check correlation matrix from Experiment 1. (b) Does the EPM fail (R^2 < 0.5)? (c) Are EAFs approximately equal (no bottleneck structure)? Report honestly.",
+      "step4": "Framing assessment: The EPM is a formal model with empirical validation. The SOA is a straightforward greedy/gradient heuristic. The paper's primary contribution is the empirical analysis of error propagation across ER pipeline stages, grounded in a formal model. Frame contributions honestly: the main value is the systematic empirical study and the practical framework, not algorithmic novelty.",
+      "step5": "Compile all results into structured tables: (a) Table 1: Per-dataset best pipeline configuration and metrics; (b) Table 2: EPM validation (R^2, RMSE per dataset, cross-validated); (c) Table 3: EAFs per stage per dataset (empirical and analytical); (d) Table 4: SOA vs baselines at each budget level; (e) Table 5: Ablation results; (f) Table 6: Transferability (leave-one-dataset-out). Save as CSV in results/tables/."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate publication-quality figures",
+    "description": "Create all figures for the paper. Use consistent styling with matplotlib/seaborn, colorblind-friendly palettes, font size 12.",
+    "steps": {
+      "step1": "Figure 1 -- Pipeline architecture diagram: Schematic showing the 3-stage ER pipeline (blocking -> matching -> clustering) with error flow arrows. Annotate with key insight: blocking errors are irrecoverable, matching FNs can be recovered by clustering transitivity, matching FPs can be amplified by clustering. Create programmatically using matplotlib patches/arrows. Save as figures/fig1_pipeline_schematic.pdf.",
+      "step2": "Figure 2 -- Error amplification curves: 3 subplots (one per stage). X-axis: degradation level (0-50%), Y-axis: e2e_F1. One line per dataset, colored by difficulty category. Show mean across seeds with shaded +-1 std bands. Annotate slopes (EAFs). Save as figures/fig2_amplification_curves.pdf.",
+      "step3": "Figure 3 -- EPM validation scatter plot: Scatter plot of predicted vs actual e2e_F1 across all configurations. Color points by dataset. Add diagonal y=x line. Report R^2 in legend. Separate panels for training vs validation splits. Save as figures/fig3_epm_validation.pdf.",
+      "step4": "Figure 4 -- EAF comparison heatmap: Heatmap with datasets on Y-axis, stages on X-axis. Cell color = normalized EAF. Annotate cells with EAF values. Show both empirical (left panel) and analytical (right panel) EAFs side by side. Save as figures/fig4_eaf_heatmap.pdf.",
+      "step5": "Figure 5 -- SOA budget-quality tradeoff: Line plot showing e2e_F1 vs budget fraction for Uniform, Bottleneck-first, and SOA strategies. One subplot per dataset (2x3 grid). Include dashed horizontal lines for optimal (no degradation) and degraded (30% degradation) baselines. Save as figures/fig5_soa_budget.pdf.",
+      "step6": "Figure 6 -- Ablation results: Grouped bar chart showing R^2 of full EPM vs each ablated variant, per dataset. Include a second panel showing SOA efficiency (F1/budget) for each variant. Save as figures/fig6_ablation.pdf.",
+      "step7": "Figure 7 -- Transferability: Bar chart showing leave-one-dataset-out R^2 per held-out dataset, with within-dataset R^2 for comparison. Highlight datasets where transfer is poor. Save as figures/fig7_transferability.pdf.",
+      "step8": "Use consistent styling throughout: plt.style.use('seaborn-v0_8-paper'), colorblind-safe palette (tab10 or colorbrewer Set2), figure width 3.5 inches (single column) or 7 inches (double column), font size 11-12, tight_layout. Save all figures as both PDF (for paper) and PNG (for quick viewing)."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime estimation and feasibility check",
+    "description": "Verify that the full experiment plan fits within the 8-hour budget on 2 CPU cores.",
+    "steps": {
+      "step1": "Environment setup: ~15 min (package installation, directory creation)",
+      "step2": "Data preparation: ~30 min (download 6 datasets, preprocessing, SBERT embedding pre-computation)",
+      "step3": "Experiment 1 (full pipeline baseline): 648 runs. Estimated: small datasets (DBLP-ACM, Fodors-Zagats, Abt-Buy) ~5 sec/run, medium (Amazon-Google) ~15 sec/run, large (DBLP-Scholar, Walmart-Amazon) ~45 sec/run. Total wall time with 2 cores: ~90 min.",
+      "step4": "Experiment 2 (degradation): 630 runs, but each only involves degrading cached results and re-evaluating metrics (no full pipeline reruns needed for most). Estimated: ~20 min.",
+      "step5": "Experiment 3 (EPM fitting + validation): Analytical computation, negligible. Cross-validation adds 6 refitting rounds. Estimated: ~10 min.",
+      "step6": "Experiment 4 (EAF computation + bottleneck analysis): Analytical, ~5 min. Thirumuruganathan comparison: ~15 min for analysis code.",
+      "step7": "Experiment 5 (SOA validation): 270 runs with interpolated degradation, fast. Estimated: ~20 min.",
+      "step8": "Ablation study: 4 EPM variants x refit + evaluate. Estimated: ~15 min.",
+      "step9": "Transferability analysis: 6-fold cross-validation, mostly reusing computed data. Estimated: ~20 min.",
+      "step10": "Visualization: ~30 min for all 7+ figures.",
+      "step11": "Total estimated: ~4.5 hours with parallelization on 2 cores. Buffer for unexpected issues: ~3.5 hours. Well within the 8-hour constraint. If Experiment 1 takes longer than expected on DBLP-Scholar (largest dataset), can reduce to 2 seeds for that dataset only."
+    }
+  }
+]

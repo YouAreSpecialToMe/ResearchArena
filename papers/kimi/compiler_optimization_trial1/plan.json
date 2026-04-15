@@ -1,0 +1,241 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Configure the Python virtual environment with all required packages for LLVM bitcode processing, ML training, and benchmark execution. Install LLVM toolchain for generating bitcode from C benchmarks.",
+    "steps": {
+      "step1": "Activate virtual environment: source .venv/bin/activate",
+      "step2": "Install Python dependencies: pip install xgboost==2.0.3 scikit-learn==1.4.0 numpy==1.26.0 pandas==2.1.4 matplotlib==3.8.2 seaborn==0.13.0 llvmlite==0.41.1",
+      "step3": "Verify LLVM installation: clang --version (should be 14+ for bitcode support)",
+      "step4": "Create directory structure: mkdir -p data/{raw,processed,results} models figures benchmarks",
+      "step5": "Set random seed environment variable: export EXPERIMENT_SEED=42"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Benchmark Suite",
+    "description": "Acquire PolyBench benchmark suite and prepare synthetic microbenchmarks. These benchmarks will provide diverse structure access patterns for feature extraction and model evaluation.",
+    "steps": {
+      "step1": "Download PolyBench/C 4.2.1 from https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1 to benchmarks/polybench/",
+      "step2": "Select 15 representative kernels with structure usage: gemm, syrk, syr2k, gemver, gesummv, 2mm, 3mm, doitgen, cholesky, lu, fdtd-2d, jacobi-2d, seidel-2d, heat-3d, nussinov",
+      "step3": "Create synthetic microbenchmarks with known optimal layouts in benchmarks/synthetic/: (a) hot/cold field separation, (b) array-of-structs vs struct-of-arrays, (c) linked list traversal patterns, (d) tree node access patterns",
+      "step4": "For each benchmark, create 3 data size variants (SMALL, MEDIUM, LARGE) to test scalability",
+      "step5": "Compile all benchmarks to LLVM bitcode (.bc) using: clang -O0 -emit-llvm -c -o output.bc input.c",
+      "step6": "Generate ground truth labels by manually analyzing each benchmark's optimal layout (based on known access patterns)",
+      "step7": "Split benchmarks into train (70%, 14 benchmarks) and test (30%, 6 benchmarks) sets with stratification by benchmark type"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Extract Static Features from LLVM IR",
+    "description": "Implement feature extraction pipeline using llvmlite to parse LLVM bitcode and extract static features representing structure access patterns, loop characteristics, and context information.",
+    "steps": {
+      "step1": "Implement structural feature extraction: number of fields, field sizes, total struct size, field type categories (pointer/primitive/nested), alignment requirements",
+      "step2": "Implement access pattern feature extraction: loop nesting depth at access sites, number of access sites per field, control flow dominance relationships, pointer arithmetic patterns, field access co-occurrence within loops",
+      "step3": "Implement context feature extraction: estimated function hotness (using Wu & Larus-style static heuristics), memory allocation patterns, loop trip count estimates where available",
+      "step4": "Process all 20 benchmarks and extract features for each struct definition, storing as CSV with columns: benchmark_name, struct_id, field_id, feature_1...feature_N, optimal_layout_label",
+      "step5": "Generate feature statistics: count total features extracted, report missing values, compute feature correlation matrix",
+      "step6": "Save processed features to data/processed/features.csv and data/processed/labels.csv"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate Static Heuristics Baseline",
+    "description": "Implement simple static heuristics adapted from Ball & Larus for data layout decisions. This serves as the 'simple' baseline representing traditional compiler approaches without ML.",
+    "steps": {
+      "step1": "Implement heuristic: 'Fields accessed in deeply nested loops are hot' - score = max_loop_nesting_depth",
+      "step2": "Implement heuristic: 'Fields with frequent accesses are hot' - score = number_of_access_sites",
+      "step3": "Implement heuristic: 'Fields accessed together should be grouped' - compute field co-occurrence score",
+      "step4": "Combine heuristics using weighted voting with equal weights (0.33, 0.33, 0.34)",
+      "step5": "Run predictions on test set for 3 random seeds (42, 123, 456) - seeds affect tie-breaking",
+      "step6": "Evaluate prediction accuracy: precision, recall, F1-score for profitable layout identification",
+      "step7": "Record results to data/results/baseline_heuristics.csv with columns: seed, precision, recall, f1_score, accuracy"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate Profile-Guided Upper Bound",
+    "description": "Simulate profile-guided optimization by using the ground truth labels as 'perfect' predictions. This establishes an upper bound on achievable accuracy with perfect runtime information.",
+    "steps": {
+      "step1": "Use ground truth labels as predictions (simulating perfect profile information)",
+      "step2": "Evaluate on test set - this represents 100% accuracy achievable with perfect profiling",
+      "step3": "Calculate metrics: precision=1.0, recall=1.0, f1_score=1.0 (by definition, using perfect labels)",
+      "step4": "Use this as reference for computing 'accuracy within X% of profile-guided' metric",
+      "step5": "Save reference metrics to data/results/baseline_profile_guided.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train LayoutLearner XGBoost Model",
+    "description": "Train the main XGBoost model for predicting profitable layout transformations. Use 5-fold cross-validation on training set, then evaluate on held-out test set.",
+    "steps": {
+      "step1": "Load training data: data/processed/features.csv and data/processed/labels.csv",
+      "step2": "Define XGBoost hyperparameters: n_estimators=100, max_depth=6, learning_rate=0.1, objective='binary:logistic', eval_metric='auc',
+      "step3": "Train model with 5-fold cross-validation on training set, tracking AUC and accuracy per fold",
+      "step4": "Perform hyperparameter tuning with grid search: max_depth in [4, 6, 8], learning_rate in [0.05, 0.1, 0.2]",
+      "step5": "Select best model based on cross-validation AUC",
+      "step6": "Train final model on full training set with best hyperparameters",
+      "step7": "Save trained model to models/layout_learner_xgboost.json",
+      "step8": "Record training time and model size"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate LayoutLearner on Test Set",
+    "description": "Evaluate the trained LayoutLearner model on the held-out test benchmarks for 3 random seeds to measure prediction accuracy and consistency.",
+    "steps": {
+      "step1": "Set random seed: 42, load model from models/layout_learner_xgboost.json",
+      "step2": "Generate predictions on test set, compute: precision, recall, F1-score, ROC-AUC, accuracy",
+      "step3": "Repeat for seed 123 and seed 456",
+      "step4": "Compute mean and standard deviation across 3 seeds for each metric",
+      "step5": "Calculate 'accuracy within 20% of profile-guided' metric: (LayoutLearner_F1 / Profile_Guided_F1) >= 0.8",
+      "step6": "Per-benchmark analysis: identify which benchmarks were predicted correctly vs incorrectly",
+      "step7": "Save results to data/results/layoutlearner_main_results.json with structure: {seeds: [{seed: 42, precision: X, recall: Y, ...}], mean: {...}, std: {...}}"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Feature Categories",
+    "description": "Conduct ablation study to measure contribution of each feature category (structural, access pattern, context). Remove one category at a time and measure performance drop.",
+    "steps": {
+      "step1": "Ablation 1: Train model without structural features (field counts, sizes, types) - keep access + context",
+      "step2": "Ablation 2: Train model without access pattern features (loop depth, access sites) - keep structural + context",
+      "step3": "Ablation 3: Train model without context features (estimated hotness) - keep structural + access",
+      "step4": "For each ablation, train with same hyperparameters as main experiment, evaluate on test set with 3 seeds",
+      "step5": "Compute performance drop relative to full model for each ablation",
+      "step6": "Identify which feature category contributes most to prediction accuracy",
+      "step7": "Save ablation results to data/results/ablation_features.csv with columns: ablation_type, mean_precision, mean_recall, mean_f1, performance_drop_pct"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Model Complexity",
+    "description": "Study the effect of model complexity on performance and inference time. Test simpler (decision tree) and more complex (deeper XGBoost) variants.",
+    "steps": {
+      "step1": "Simple baseline: Single Decision Tree (max_depth=10, no ensemble)",
+      "step2": "Medium complexity: XGBoost with n_estimators=50, max_depth=4",
+      "step3": "High complexity: XGBoost with n_estimators=200, max_depth=10",
+      "step4": "For each variant, train on full training set, evaluate on test set with 3 seeds",
+      "step5": "Measure inference time per prediction (microseconds) for each model",
+      "step6": "Plot accuracy vs inference time trade-off curve",
+      "step7": "Save results to data/results/ablation_model_complexity.csv"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Cross-Benchmark Generalization Analysis",
+    "description": "Test model generalization across different benchmark types by training on one category and testing on another.",
+    "steps": {
+      "step1": "Train on PolyBench only, test on synthetic benchmarks",
+      "step2": "Train on synthetic only, test on PolyBench",
+      "step3": "Compare generalization performance to mixed training (main experiment)",
+      "step4": "Identify which benchmark types are hardest to generalize to",
+      "step5": "Save results to data/results/cross_benchmark_generalization.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to validate that LayoutLearner improvements over baselines are significant and not due to random chance.",
+    "steps": {
+      "step1": "Collect per-seed results for LayoutLearner (3 seeds), Static Heuristics (3 seeds)",
+      "step2": "Perform paired t-test comparing LayoutLearner vs Static Heuristics F1-scores",
+      "step3": "Compute 95% confidence intervals for mean performance difference",
+      "step4": "Check if LayoutLearner achieves >2% improvement over -O3 equivalent (simulated by comparing to random baseline)",
+      "step5": "Record p-values and effect sizes (Cohen's d)",
+      "step6": "Save statistical test results to data/results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compilation-Time Overhead Analysis",
+    "description": "Measure the overhead of feature extraction and model inference to verify it remains below 5% threshold.",
+    "steps": {
+      "step1": "Measure baseline compilation time: parse LLVM bitcode without feature extraction (10 runs, average)",
+      "step2": "Measure feature extraction time for each benchmark (10 runs, average)",
+      "step3": "Measure model inference time: time for XGBoost to predict on extracted features (1000 predictions, average)",
+      "step4": "Calculate total overhead: (feature_time + inference_time) / baseline_time * 100%",
+      "step5": "Verify overhead < 5% for all benchmarks",
+      "step6": "Save timing results to data/results/compilation_overhead.csv with columns: benchmark, baseline_time_ms, feature_time_ms, inference_time_ms, total_overhead_pct"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Validation",
+    "description": "Validate hypothesis against predefined success criteria and determine if results confirm or refute the hypothesis.",
+    "steps": {
+      "step1": "Criterion 1: Check if LayoutLearner achieves within 20% of profile-guided performance. Compute: (LayoutLearner_F1 / 1.0) >= 0.8. Record: PASS/FAIL",
+      "step2": "Criterion 2: Check if compilation-time overhead < 5%. Use results from overhead analysis. Record: PASS/FAIL",
+      "step3": "Criterion 3: Check if profitable transformations identified on >= 40% of benchmarks. Compute: count_correct / total_benchmarks >= 0.4. Record: PASS/FAIL",
+      "step4": "Criterion 4: Check if LayoutLearner outperforms Static Heuristics baseline. Compute: LayoutLearner_F1 > Heuristics_F1. Record: PASS/FAIL",
+      "step5": "Overall hypothesis: CONFIRMED if at least 3 of 4 criteria pass, PARTIALLY_CONFIRMED if 2 pass, REFUTED if <=1 passes",
+      "step6": "Save validation results to data/results/success_criteria.json with detailed breakdown"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Feature Importance Visualization",
+    "description": "Create visualization showing which features contribute most to LayoutLearner's predictions.",
+    "steps": {
+      "step1": "Extract feature importances from trained XGBoost model using model.feature_importances_",
+      "step2": "Sort features by importance (gain) and select top 15",
+      "step3": "Create horizontal bar plot: x-axis=importance score, y-axis=feature name",
+      "step4": "Color-code by feature category: structural=blue, access pattern=orange, context=green",
+      "step5": "Add title 'LayoutLearner: Top 15 Feature Importances' and save to figures/feature_importance.pdf (300 DPI)",
+      "step6": "Also save SHAP summary plot if shap library is available"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Performance Comparison Plots",
+    "description": "Create bar charts comparing LayoutLearner against baselines across all metrics.",
+    "steps": {
+      "step1": "Create grouped bar chart comparing: LayoutLearner, Static Heuristics, Random Baseline (simulated) across Precision, Recall, F1",
+      "step2": "Add error bars showing standard deviation across 3 seeds",
+      "step3": "Add horizontal dashed line at y=0.8 representing 'within 20% of perfect' threshold",
+      "step4": "Save to figures/performance_comparison.pdf",
+      "step5": "Create ablation study bar chart showing performance drop when removing each feature category",
+      "step6": "Save to figures/ablation_study.pdf"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate ROC Curves and Confusion Matrix",
+    "description": "Create ROC curves for LayoutLearner and baselines, plus confusion matrix for error analysis.",
+    "steps": {
+      "step1": "Plot ROC curves for LayoutLearner (mean across 3 seeds) and Static Heuristics",
+      "step2": "Add AUC scores to legend",
+      "step3": "Add diagonal reference line (random classifier)",
+      "step4": "Save to figures/roc_curves.pdf",
+      "step5": "Create confusion matrix heatmap for LayoutLearner predictions (aggregated across all seeds)",
+      "step6": "Add counts and percentage labels to each cell",
+      "step7": "Save to figures/confusion_matrix.pdf"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Overhead and Timing Visualization",
+    "description": "Visualize compilation-time overhead analysis results.",
+    "steps": {
+      "step1": "Create stacked bar chart showing: baseline time, feature extraction time, inference time per benchmark",
+      "step2": "Add 5% overhead threshold line",
+      "step3": "Save to figures/compilation_overhead.pdf",
+      "step4": "Create scatter plot: x-axis=number of struct fields, y-axis=inference time (microseconds)",
+      "step5": "Add trend line to show scaling behavior",
+      "step6": "Save to figures/inference_scaling.pdf"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Results Table",
+    "description": "Create LaTeX-formatted table summarizing all key results for paper inclusion.",
+    "steps": {
+      "step1": "Create table with rows: LayoutLearner, Static Heuristics, Profile-Guided (upper bound)",
+      "step2": "Columns: Precision, Recall, F1-Score, Inference Time (us), Overhead (%)",
+      "step3": "Add ± std for metrics across 3 seeds",
+      "step4": "Highlight best non-oracle results in bold",
+      "step5": "Save LaTeX code to figures/results_table.tex",
+      "step6": "Also save as CSV for easy reference: figures/results_table.csv"
+    }
+  }
+]

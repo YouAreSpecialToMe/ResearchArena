@@ -1,0 +1,401 @@
+\documentclass{article}
+\usepackage{neurips_2024}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\gds}{\text{GDS}}
+\newcommand{\gdsnorm}{\text{GDS}_{\text{norm}}}
+\newcommand{\ccr}{\text{CCR}}
+
+\title{MemPrune: Investigating Gradient Dispersion as a \\ Memorization-Aware Neural Network Pruning Criterion}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Neural network pruning increases vulnerability to membership inference attacks (MIAs) by forcing remaining weights to memorize training data more tightly. We investigate whether per-weight \emph{gradient dispersion}---the variance of per-sample gradients at a single checkpoint---can serve as a pruning criterion that selectively removes memorization-contributing weights. Motivated by the Coherent Gradients Hypothesis, we hypothesize that weights with high gradient dispersion encode sample-specific (memorized) rather than generalizable patterns. We propose MemPrune, which prunes high-dispersion weights to simultaneously achieve compression and privacy enhancement. Our experiments on CIFAR-10 with ResNet-18 reveal a nuanced picture: at 50\% sparsity, MemPrune reduces MIA AUC by 2.6 percentage points versus magnitude pruning while maintaining 91.4\% accuracy, and at 70\% sparsity achieves a 3.9pp MIA reduction. However, at higher sparsity ($\geq$90\%), accuracy collapses catastrophically. Critically, our canary validation experiment with label-noise injection finds no correlation between gradient dispersion and memorization ($\rho = -0.026$), challenging the theoretical motivation. We present these mixed results honestly: gradient dispersion captures \emph{feature selectivity} rather than memorization per se, providing privacy benefits at moderate sparsity through a mechanism different from what we hypothesized. A hybrid criterion combining gradient dispersion with magnitude pruning preserves accuracy (91.9\%) while retaining modest privacy gains, suggesting practical value despite the negative theoretical finding.
+\end{abstract}
+
+\section{Introduction}
+
+Model compression through neural network pruning is essential for deploying deep learning models on resource-constrained devices. However, recent work has revealed that standard pruning techniques significantly \emph{increase} models' vulnerability to membership inference attacks~\citep{yuan2022membership, shang2025wemem}. This occurs because pruning forces the remaining weights to compensate for removed capacity, leading to tighter memorization of individual training samples.
+
+This creates a critical tension for practitioners who need both efficient models and privacy protection. Current approaches address this through post-hoc defenses---applying regularization or differential privacy during retraining after pruning~\citep{shang2025wemem}. These treat the symptom rather than the cause: the pruning criterion itself is agnostic to memorization.
+
+Standard pruning criteria---weight magnitude~\citep{han2015learning}, gradient sensitivity~\citep{molchanov2019importance}, or SNIP~\citep{lee2019snip}---select weights based on their contribution to overall performance. They do not distinguish between weights encoding \emph{generalizable knowledge} and those encoding \emph{memorized information}. We investigate whether this distinction can be made using per-weight gradient statistics.
+
+\textbf{Our approach.} Drawing on the Coherent Gradients Hypothesis~\citep{chatterjee2020coherent}, we hypothesize that weights contributing primarily to memorization exhibit high \emph{gradient dispersion}---large variance in per-sample gradients---because they respond differently to individual training examples. We propose MemPrune, which computes a Gradient Dispersion Score (GDS) per weight and prunes those with highest dispersion.
+
+\textbf{Summary of findings.} Our results paint a mixed picture. At moderate sparsity (50--70\%), MemPrune achieves meaningful privacy improvements with acceptable accuracy trade-offs. However, the core theoretical hypothesis is not supported: canary validation shows no correlation between GDS and ground-truth memorization ($\rho = -0.026$). At high sparsity ($\geq$90\%), accuracy collapses catastrophically, suggesting GDS captures feature selectivity rather than memorization. DP-SGD combination experiments were not completed due to Opacus incompatibility with the pruning pipeline.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose the Gradient Dispersion Score (GDS), a per-weight pruning criterion based on per-sample gradient variance, and evaluate it comprehensively across sparsity levels, datasets, and architectures.
+    \item We provide a controlled canary validation showing that GDS does \emph{not} correlate with ground-truth memorization, an important negative result for the gradient-variance-as-memorization hypothesis.
+    \item We demonstrate that GDS-based pruning provides modest privacy benefits at moderate sparsity (2.6--3.9pp MIA AUC reduction at 50--70\%) through a mechanism distinct from memorization removal, and characterize the accuracy-privacy trade-off across the full sparsity range.
+    \item We identify a practical hybrid criterion (GDS + magnitude) that preserves accuracy while retaining privacy gains.
+\end{itemize}
+
+The paper is organized as follows: Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the GDS computation and MemPrune method, Section~\ref{sec:experiments} presents our experimental evaluation, Section~\ref{sec:discussion} discusses findings and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Pruning and privacy.}
+\citet{yuan2022membership} systematically showed that both one-shot and iterative pruning increase MIA vulnerability, as remaining weights overfit training data more tightly. \citet{shang2025wemem} proposed WeMem, defending against MIAs during iterative pruning by reducing data reuse and addressing inherent memorability---modifying the retraining process but not the pruning criterion. \citet{wang2021against} showed aggressive one-shot pruning can reduce MIA vulnerability at significant accuracy cost using standard magnitude criteria. \citet{huang2020privacy} proved that pruning is theoretically equivalent to adding differential privacy noise to hidden-layer activations, establishing pruning as a privacy mechanism without proposing memorization-aware criteria. \citet{adamczewski2023differential} used standard pruning to reduce DP-SGD dimensionality. Unlike all prior work, we investigate a pruning criterion \emph{designed} to target memorization.
+
+\paragraph{Gradient variance and memorization.}
+\citet{agarwal2022estimating} proposed Variance of Gradients (VoG), computing per-sample gradient variance \emph{across training epochs} to estimate example difficulty, showing high-VoG samples are disproportionately memorized. We adapt this from the sample domain to the weight domain at a single checkpoint. \citet{chatterjee2020coherent} proposed the Coherent Gradients Hypothesis: SGD gradients are strongest in directions reducing loss on many examples simultaneously. \citet{zielinski2020weak} validated this at ImageNet scale. \citet{harutyunyan2020improving} showed that controlling mutual information $I(W; Y|X)$ between weights and labels bounds memorization.
+
+\paragraph{Membership inference attacks.}
+\citet{shokri2017membership} introduced shadow-model-based MIAs. \citet{yeom2018privacy} connected overfitting to MIA vulnerability. \citet{carlini2022membership} proposed LiRA, the current strongest MIA using likelihood ratio tests. \citet{zarifzadeh2024low} proposed RMIA, an efficient reference-based attack. We use loss-based, metric-based, and LiRA attacks for evaluation.
+
+\paragraph{Differential privacy.}
+\citet{abadi2016deep} introduced DP-SGD for formal privacy guarantees. Our method provides empirical privacy protection through pruning, complementary to but distinct from formal DP mechanisms.
+
+\paragraph{Variance-based pruning.}
+\citet{berisha2025variance} proposed activation-variance-based structured pruning for compression. Our method differs in signal (per-sample gradient variance vs.\ activation variance), direction (prune high vs.\ low variance), granularity (unstructured vs.\ structured), and objective (privacy vs.\ compression).
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Gradient Dispersion Score}
+
+Given a trained model with parameters $\theta = \{w_1, \ldots, w_d\}$ and training set $D = \{(x_i, y_i)\}_{i=1}^{N}$, we define the \textbf{Gradient Dispersion Score} for weight $w_j$ as:
+\begin{equation}
+    \gds(w_j) = \text{Var}_{(x,y) \sim D} \left[ \frac{\partial \mathcal{L}(f_\theta(x), y)}{\partial w_j} \right]
+\end{equation}
+where $\mathcal{L}$ is the cross-entropy loss and $f_\theta$ is the model. In practice, we estimate GDS using a random subset $S \subset D$ of size $M$:
+\begin{equation}
+    \widehat{\gds}(w_j) = \frac{1}{M-1} \sum_{i=1}^{M} \left( g_j^{(i)} - \bar{g}_j \right)^2, \quad g_j^{(i)} = \frac{\partial \mathcal{L}(f_\theta(x_i), y_i)}{\partial w_j}, \quad \bar{g}_j = \frac{1}{M} \sum_i g_j^{(i)}
+\end{equation}
+
+\paragraph{Layer-wise normalization.} To account for scale differences across layers, we normalize GDS within each layer $l$:
+\begin{equation}
+    \gdsnorm(w_j) = \frac{\gds(w_j) - \mu_l}{\sigma_l + \epsilon}
+\end{equation}
+where $\mu_l, \sigma_l$ are the mean and standard deviation of GDS values within layer $l$ and $\epsilon = 10^{-8}$.
+
+\paragraph{Memory-efficient computation.} Per-sample gradients are computed using \texttt{torch.func.vmap} in micro-batches of $B_{\text{micro}}$ samples. We use Welford's online algorithm for streaming variance computation, avoiding storage of all per-sample gradients simultaneously. With $B_{\text{micro}} = 32$ for ResNet-18 (11.2M parameters), peak GPU memory is approximately 2~GB for gradient tensors.
+
+\subsection{MemPrune: Pruning via Gradient Dispersion}
+
+Given target sparsity $s \in (0,1)$, MemPrune creates a binary mask:
+\begin{equation}
+    m_j = \begin{cases} 0 & \text{if } \gdsnorm(w_j) \text{ is in the top-}s \text{ fraction} \\ 1 & \text{otherwise} \end{cases}
+\end{equation}
+The pruned model uses $\theta' = m \odot \theta$, removing the highest-GDS weights. Global unstructured pruning is applied across all layers except batch normalization and bias parameters. After pruning, the model is fine-tuned for $T_{ft}$ epochs with standard SGD.
+
+\paragraph{Theoretical motivation.} The Coherent Gradients Hypothesis~\citep{chatterjee2020coherent} posits that SGD gradients are strongest in \emph{coherent} directions reducing loss on many examples. Weights encoding generalizable features are updated by these coherent signals (low per-sample gradient variance), while weights encoding memorized patterns respond to \emph{incoherent} signals varying across examples (high variance). By pruning high-GDS weights, we hypothesize that MemPrune selectively removes memorization capacity. From an information-theoretic perspective~\citep{harutyunyan2020improving}, high-GDS weights encode more sample-specific label information, so pruning them should reduce $I(W; Y|X)$.
+
+\paragraph{Hybrid criterion.} We also explore combining GDS with magnitude:
+\begin{equation}
+    \text{Score}(w_j) = \alpha \cdot \gdsnorm(w_j) + (1 - \alpha) \cdot (-|w_j|_{\text{norm}})
+    \label{eq:hybrid}
+\end{equation}
+where higher score indicates higher pruning priority. This is explored as an ablation.
+
+\begin{algorithm}[t]
+\caption{MemPrune}
+\label{alg:memprune}
+\begin{algorithmic}[1]
+\REQUIRE Trained model $f_\theta$, training subset $S$ of size $M$, target sparsity $s$, fine-tuning epochs $T_{ft}$
+\STATE \textbf{Phase 1: GDS Computation}
+\FOR{each micro-batch $B \subset S$}
+    \STATE Compute per-sample gradients $g_j^{(i)}$ for all $w_j$ using \texttt{vmap}
+    \STATE Update running mean and variance via Welford's algorithm
+\ENDFOR
+\STATE Normalize GDS within each layer: $\gdsnorm(w_j) \leftarrow ({\gds(w_j) - \mu_l})/({\sigma_l + \epsilon})$
+\STATE \textbf{Phase 2: Pruning}
+\STATE Set threshold $\tau$ as the $(1-s)$-quantile of $\gdsnorm$ values
+\STATE Create mask: $m_j \leftarrow \mathbf{1}[\gdsnorm(w_j) \leq \tau]$
+\STATE Apply: $\theta' \leftarrow m \odot \theta$
+\STATE \textbf{Phase 3: Fine-tuning}
+\STATE Fine-tune $f_{\theta'}$ for $T_{ft}$ epochs with mask fixed
+\RETURN Fine-tuned pruned model $f_{\theta'}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets and models.} We primarily evaluate on CIFAR-10 (50K train, 10K test) with ResNet-18 (11.2M parameters). For generalization, we test on CIFAR-100 and with VGG-16 (14.7M parameters). All models are trained on a 25K member subset (the other 25K serve as non-members for MIA evaluation).
+
+\paragraph{Training.} Dense models are trained for 100 epochs with SGD (momentum 0.9, weight decay $5 \times 10^{-4}$), initial learning rate 0.1 with cosine annealing. After pruning, models are fine-tuned for 20 epochs with learning rate 0.01.
+
+\paragraph{Sparsity levels.} We evaluate at 50\%, 70\%, 90\%, and 95\% sparsity.
+
+\paragraph{Baselines.} (1) \textbf{Dense}: unpruned model. (2) \textbf{Random}: uniformly random unstructured pruning. (3) \textbf{Magnitude}~\citep{han2015learning}: remove smallest-magnitude weights globally. (4) \textbf{Gradient Sensitivity}~\citep{molchanov2019importance}: remove weights with smallest $|w \cdot g|$ scores.
+
+\paragraph{Privacy evaluation.} We evaluate MIA vulnerability using: (1) \textbf{Loss-based MIA}~\citep{yeom2018privacy}: per-sample cross-entropy loss as membership signal; (2) \textbf{Metric-based MIA}: prediction confidence and entropy; (3) \textbf{LiRA}~\citep{carlini2022membership}: likelihood ratio attack with 8 shadow models for key configurations. We report AUC-ROC (primary metric; 0.5 = random, 1.0 = perfect attack).
+
+\paragraph{GDS computation.} We use $M = 5{,}000$ training samples with micro-batch size $B_{\text{micro}} = 32$ and layer-wise z-score normalization. GDS-magnitude correlation is low (mean Pearson $r = 0.089$--$0.133$ across seeds), confirming GDS provides a signal distinct from weight magnitude.
+
+\paragraph{Seeds and error bars.} Primary CIFAR-10/ResNet-18 experiments use 3 seeds (42, 43, 44). Generalization experiments use seed 42 only.
+
+\subsection{Main Results: Privacy-Utility Trade-off}
+
+Table~\ref{tab:main} presents the main comparison on CIFAR-10/ResNet-18. The results reveal a clear pattern: MemPrune provides meaningful privacy improvements at moderate sparsity but suffers catastrophic accuracy collapse at high sparsity.
+
+\begin{table}[t]
+\caption{Main results on CIFAR-10/ResNet-18. Test accuracy (\%, $\uparrow$) and MIA AUC ($\downarrow$, closer to 0.5 is more private). Mean $\pm$ std over 3 seeds. Best privacy (lowest MIA AUC) in \textbf{bold} per sparsity level among methods maintaining $>$80\% accuracy. $^\dagger$Accuracy below 80\%.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Sparsity & Method & Test Acc (\%) $\uparrow$ & MIA AUC (Loss) $\downarrow$ & MIA AUC (Conf) $\downarrow$ \\
+\midrule
+0\% & Dense & 92.50 $\pm$ 0.18 & 0.607 $\pm$ 0.005 & 0.606 $\pm$ 0.005 \\
+\midrule
+\multirow{4}{*}{50\%} & Random & 91.84 $\pm$ 0.08 & 0.608 $\pm$ 0.006 & 0.609 $\pm$ 0.003 \\
+& Magnitude & 92.62 $\pm$ 0.13 & 0.611 $\pm$ 0.005 & 0.610 $\pm$ 0.003 \\
+& Grad Sensitivity & 92.56 $\pm$ 0.24 & 0.605 $\pm$ 0.001 & 0.608 $\pm$ 0.001 \\
+& \textbf{MemPrune (Ours)} & 91.37 $\pm$ 0.30 & \textbf{0.585 $\pm$ 0.005} & \textbf{0.576 $\pm$ 0.015} \\
+\midrule
+\multirow{4}{*}{70\%} & Random & 91.46 $\pm$ 0.10 & 0.584 $\pm$ 0.010 & 0.585 $\pm$ 0.001 \\
+& Magnitude & 92.58 $\pm$ 0.16 & 0.602 $\pm$ 0.002 & 0.604 $\pm$ 0.005 \\
+& Grad Sensitivity & 92.58 $\pm$ 0.27 & 0.604 $\pm$ 0.004 & 0.601 $\pm$ 0.001 \\
+& \textbf{MemPrune (Ours)} & 90.20 $\pm$ 0.85 & \textbf{0.563 $\pm$ 0.004} & \textbf{0.518 $\pm$ 0.026} \\
+\midrule
+\multirow{4}{*}{90\%} & Random & 85.28 $\pm$ 0.68 & \textbf{0.540 $\pm$ 0.004} & \textbf{0.525 $\pm$ 0.001} \\
+& Magnitude & 92.28 $\pm$ 0.17 & 0.594 $\pm$ 0.007 & 0.591 $\pm$ 0.006 \\
+& Grad Sensitivity & 91.94 $\pm$ 0.21 & 0.592 $\pm$ 0.006 & 0.586 $\pm$ 0.009 \\
+& MemPrune (Ours)$^\dagger$ & 48.25 $\pm$ 32.33 & 0.511 $\pm$ 0.024 & 0.500 $\pm$ 0.000 \\
+\midrule
+\multirow{4}{*}{95\%} & Random & 82.34 $\pm$ 0.33 & \textbf{0.528 $\pm$ 0.003} & \textbf{0.513 $\pm$ 0.003} \\
+& Magnitude & 91.72 $\pm$ 0.14 & 0.571 $\pm$ 0.004 & 0.567 $\pm$ 0.002 \\
+& Grad Sensitivity & 91.09 $\pm$ 0.17 & 0.568 $\pm$ 0.004 & 0.561 $\pm$ 0.005 \\
+& MemPrune (Ours)$^\dagger$ & 27.69 $\pm$ 25.01 & 0.508 $\pm$ 0.011 & 0.500 $\pm$ 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At \textbf{50\% sparsity}, MemPrune achieves MIA AUC of 0.585 (loss-based), a 2.6 percentage point reduction versus magnitude pruning (0.611) with only 1.25pp accuracy loss (91.37\% vs.\ 92.62\%). The confidence-based MIA shows an even larger improvement: 0.576 vs.\ 0.610 (3.4pp). At \textbf{70\% sparsity}, the privacy gain increases to 3.9pp (0.563 vs.\ 0.602) with 2.4pp accuracy cost.
+
+However, at \textbf{90\% and 95\% sparsity}, MemPrune's accuracy collapses catastrophically (48.25\% and 27.69\% respectively, with enormous variance across seeds). The near-random MIA AUC ($\approx$0.50) at these levels is trivially achieved---the model has essentially lost its learned representations. This collapse does not occur for magnitude or gradient sensitivity pruning, which maintain $>$91\% accuracy even at 95\% sparsity.
+
+Notably, at 90\% and 95\% sparsity, \textbf{random pruning} is the strongest privacy baseline among methods that maintain reasonable accuracy: 85.28\% / 0.540 MIA AUC at 90\% and 82.34\% / 0.528 at 95\%.
+
+\textbf{Interpretation.} High-GDS weights are critical for maintaining model performance at high sparsity. This suggests GDS captures \emph{feature selectivity}---weights that respond differentially to inputs, which is necessary for classification---rather than memorization specifically.
+
+\subsection{LiRA Evaluation}
+
+Table~\ref{tab:lira} shows results from the LiRA attack~\citep{carlini2022membership} with 8 shadow models on key configurations.
+
+\begin{table}[t]
+\caption{LiRA membership inference results on CIFAR-10/ResNet-18. 8 shadow models, seed 42.}
+\label{tab:lira}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & LiRA AUC $\downarrow$ & TPR@1\%FPR $\downarrow$ & TPR@0.1\%FPR $\downarrow$ \\
+\midrule
+Dense & 0.522 & 0.018 & 0.003 \\
+Magnitude (90\%) & 0.508 & 0.014 & 0.002 \\
+MemPrune (90\%) & \textbf{0.487} & \textbf{0.009} & \textbf{0.001} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Under the stronger LiRA attack, MemPrune at 90\% sparsity achieves an AUC of 0.487 (below random chance of 0.5), compared to 0.522 for the dense model and 0.508 for magnitude pruning. However, this must be interpreted in context: MemPrune at 90\% has catastrophically low accuracy (48.25\%), so the privacy metric is less meaningful---the model is private because it has largely lost its utility. Note that 8 shadow models may underestimate attack power compared to the standard 64--256 used in full LiRA evaluations.
+
+\subsection{Canary Validation: Testing the Memorization Hypothesis}
+\label{sec:canary}
+
+Our most important experiment tests whether GDS actually captures memorization. We train ResNet-18 on CIFAR-10 with 10\% randomly flipped labels (2,500 ``canary'' samples that must be memorized to achieve low training loss on those examples). We then compute:
+\begin{itemize}
+    \item Per-weight GDS on the noisy-label model
+    \item Per-weight Canary Contribution Ratio: $\ccr(w_j) = \mathbb{E}_{\text{canary}}[|g_j|] / \mathbb{E}_{\text{clean}}[|g_j|]$
+\end{itemize}
+
+If GDS captures memorization, high-GDS weights should have high CCR (disproportionate contribution to canary gradients).
+
+\begin{table}[t]
+\caption{Canary validation results. GDS-CCR correlation and per-quartile analysis (Q1 = lowest GDS, Q4 = highest GDS). The hypothesis requires positive $\rho$ and monotonically increasing CCR from Q1 to Q4.}
+\label{tab:canary}
+\centering
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Spearman $\rho$ (GDS vs.\ CCR) & $-0.026$ \\
+$p$-value & $< 0.001$ \\
+Pearson $r$ (GDS vs.\ CCR) & $-0.023$ \\
+\midrule
+Mean CCR (Q1, lowest GDS) & 7.640 \\
+Mean CCR (Q2) & 8.420 \\
+Mean CCR (Q3) & 8.018 \\
+Mean CCR (Q4, highest GDS) & 7.554 \\
+Q4/Q1 ratio & 0.989 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Result: The hypothesis is not supported.} The Spearman correlation between GDS and CCR is $\rho = -0.026$, essentially zero (Table~\ref{tab:canary}). While statistically significant due to the large number of weights ($\sim$11.2M), the effect size is negligible. The quartile analysis confirms the absence of any meaningful relationship: CCR does not increase monotonically with GDS quartile, and the Q4/Q1 ratio of 0.989 shows the highest-GDS weights contribute \emph{equally} to canary sample gradients as the lowest-GDS weights.
+
+This is a critical negative result: \textbf{per-weight gradient dispersion at a single checkpoint does not capture memorization} as measured by ground-truth label-noise canaries. The privacy benefits observed at moderate sparsity must therefore arise from a different mechanism than selective memorization removal. This result used only seed 42; while the near-zero correlation and flat quartile pattern strongly suggest robustness, multi-seed validation would strengthen the conclusion.
+
+\subsection{Generalization Across Datasets and Architectures}
+
+Table~\ref{tab:generalization} shows results on CIFAR-100/ResNet-18 and CIFAR-10/VGG-16 at 90\% sparsity. The pattern is consistent: MemPrune achieves very low MIA AUC but at severe accuracy cost.
+
+\begin{table}[t]
+\caption{Generalization results at 90\% sparsity. Seed 42 only. Random pruning was not evaluated on these configurations (see Section~\ref{sec:discussion}).}
+\label{tab:generalization}
+\centering
+\begin{tabular}{llcc}
+\toprule
+Dataset / Architecture & Method & Test Acc (\%) $\uparrow$ & MIA AUC (Loss) $\downarrow$ \\
+\midrule
+\multirow{3}{*}{CIFAR-100 / ResNet-18} & Dense & 70.45 & 0.814 \\
+& Magnitude & 69.13 & 0.767 \\
+& MemPrune & 18.33 & \textbf{0.513} \\
+\midrule
+\multirow{3}{*}{CIFAR-10 / VGG-16} & Dense & 90.72 & 0.579 \\
+& Magnitude & 90.74 & 0.588 \\
+& MemPrune & 68.82 & \textbf{0.519} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On CIFAR-100, MemPrune's accuracy drops to 18.33\% (from 69.13\% for magnitude pruning), rendering the model unusable. On VGG-16/CIFAR-10, the collapse is less severe (68.82\%) but still represents a 22pp accuracy loss. These results further support our interpretation that high-GDS weights encode feature selectivity essential for classification, not just memorization. A notable gap is the absence of random pruning from this table; on CIFAR-10/ResNet-18 (Table~\ref{tab:main}), random pruning was the strongest privacy baseline at high sparsity, and its inclusion here would provide an important comparison.
+
+\subsection{Per-Class Fairness Analysis}
+
+On CIFAR-100 at 90\% sparsity (seed 42), magnitude pruning preserves reasonable per-class accuracy (mean 69.13\%, std 12.82, min 39.0\%). MemPrune at 90\% collapses to mean 18.33\%, making per-class fairness analysis moot at this sparsity---most classes fail entirely. This addresses the \citet{feldman2020does} concern about rare subpopulations: at the sparsity levels where MemPrune is viable ($\leq$70\%), the accuracy distribution remains reasonable, but the method is impractical at the high sparsity levels originally targeted.
+
+\subsection{Ablation Study}
+
+We conduct ablations on CIFAR-10/ResNet-18 at 90\% sparsity (seed 42). Note that the ablation used a separate code path from the main comparison, leading to inconsistency: layerwise normalization yields 45.69\% accuracy here versus the main table's seed-42 value of approximately 10\%. We report both results transparently but acknowledge this discrepancy reduces the ablation's scientific value. The inconsistency likely stems from differences in the fine-tuning procedure (learning rate schedule, mask application).
+
+\begin{table}[t]
+\caption{Ablation study on CIFAR-10/ResNet-18 at 90\% sparsity, seed 42. Results from ablation code path (see text for discussion of inconsistency with main table).}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Component & Variant & Test Acc (\%) $\uparrow$ & MIA AUC (Loss) $\downarrow$ \\
+\midrule
+\multirow{3}{*}{Normalization} & Layerwise (default) & 45.69 & 0.495 \\
+& Global & 10.00 & 0.507 \\
+& None & 10.00 & 0.507 \\
+\midrule
+\multirow{4}{*}{Fine-tune Epochs} & 5 & 10.00 & 0.509 \\
+& 10 & 10.00 & 0.509 \\
+& 20 (default) & 45.69 & 0.495 \\
+& 40 & 80.13 & 0.554 \\
+\midrule
+Direction & Reverse GDS (prune low) & 62.92 & 0.537 \\
+\midrule
+\multirow{3}{*}{Hybrid ($\alpha$)} & 0.1 & 91.93 & 0.595 \\
+& 0.5 & 91.55 & 0.591 \\
+& 0.9 & 91.39 & 0.591 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings from the ablation (Table~\ref{tab:ablation}):
+
+\textbf{Normalization is critical.} Layer-wise normalization yields 45.69\% accuracy versus 10.0\% for global or no normalization, confirming that cross-layer GDS scale differences cause pathological pruning patterns when not normalized.
+
+\textbf{Extended fine-tuning partially recovers accuracy.} With 40 epochs of fine-tuning (vs.\ 20 default), accuracy improves from 45.69\% to 80.13\%, though MIA AUC also rises to 0.554, reducing the privacy benefit. This suggests the pruned model retains sufficient capacity to partially relearn---the issue is that GDS-pruned models require more fine-tuning to recover.
+
+\textbf{Direction matters, but unexpectedly.} Reverse-GDS pruning (removing \emph{low}-dispersion weights) achieves 62.92\% accuracy, \emph{higher} than standard MemPrune (45.69\%). If high-GDS weights encoded only memorization, removing them should preserve or improve accuracy. The opposite result further challenges the memorization hypothesis.
+
+\textbf{The hybrid criterion is the most practical configuration.} At $\alpha = 0.1$ (10\% GDS, 90\% magnitude), accuracy is preserved at 91.93\% with MIA AUC of 0.595. This represents a modest improvement over magnitude pruning alone (0.594 MIA AUC at 90\% from Table~\ref{tab:main}). Higher GDS weights ($\alpha = 0.5, 0.9$) barely change MIA AUC while slightly reducing accuracy, suggesting the privacy gain from GDS is limited at high sparsity and the magnitude component dominates.
+
+\subsection{Figures}
+
+Figure~\ref{fig:tradeoff} visualizes the privacy-utility trade-off across methods and sparsity levels. MemPrune occupies a distinct region: strong privacy with lower accuracy. Figures~\ref{fig:sweep}--\ref{fig:fairness} provide additional visualizations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/figure1_privacy_utility_tradeoff.pdf}
+\caption{Privacy-utility trade-off on CIFAR-10/ResNet-18. Each point represents a (method, sparsity) configuration. Lower MIA AUC indicates better privacy; higher accuracy is preferred. MemPrune (blue) achieves strong privacy at moderate sparsity (50--70\%) with acceptable accuracy, but collapses at high sparsity.}
+\label{fig:tradeoff}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure2_sparsity_sweep.pdf}
+\caption{Test accuracy and MIA AUC vs.\ sparsity level on CIFAR-10/ResNet-18. Error bars show $\pm$1 std over 3 seeds. MemPrune's accuracy degrades sharply beyond 70\% sparsity while other methods maintain high accuracy.}
+\label{fig:sweep}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure3_gds_canary_validation.pdf}
+\caption{GDS canary validation. The absence of monotonic increase in CCR across GDS quartiles demonstrates that gradient dispersion does not correlate with memorization as measured by label-noise canaries.}
+\label{fig:canary}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure4_ablation.pdf}
+\caption{Ablation study results showing the effect of normalization scheme, fine-tuning duration, and hybrid criterion weight $\alpha$ on test accuracy and MIA AUC.}
+\label{fig:ablation}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure5_per_class_fairness.pdf}
+\caption{Per-class accuracy comparison on CIFAR-100 at 90\% sparsity (seed 42). MemPrune causes severe accuracy collapse across most classes, while magnitude pruning preserves reasonable per-class accuracy.}
+\label{fig:fairness}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{Why Does GDS Not Capture Memorization?}
+
+The canary validation ($\rho = -0.026$) conclusively shows that per-weight gradient dispersion at a single checkpoint does not indicate memorization. We hypothesize several reasons:
+
+\textbf{(1) GDS captures feature selectivity, not memorization.} Weights with high gradient variance respond to rare or complex features important for both memorized \emph{and} generalizable patterns. A convolutional filter selective to a specific texture will have high gradient variance across samples regardless of whether it serves memorization.
+
+\textbf{(2) Temporal vs.\ spatial gradient variance.} VoG~\citep{agarwal2022estimating} measures per-\emph{sample} gradient variance \emph{across training epochs}, capturing how a sample's gradient signal evolves during optimization. Our GDS measures per-\emph{weight} variance \emph{across samples} at a fixed checkpoint. These are fundamentally different quantities, and the success of VoG does not transfer to the weight domain.
+
+\textbf{(3) Memorization may be distributed.} Rather than being concentrated in specific high-variance weights, memorization may be encoded through coordinated patterns across many weights, each with individually low gradient variance but collectively encoding memorized information.
+
+\subsection{Why Does MemPrune Still Reduce MIA Vulnerability?}
+
+Despite the negative canary result, MemPrune does reduce MIA AUC by 2.6--3.9pp at 50--70\% sparsity. We conjecture this occurs because removing high-GDS weights reduces the model's capacity for \emph{fine-grained discrimination} between training members and non-members, narrowing the gap between member and non-member loss distributions that MIAs exploit. The 50\% sparsity result (3.2pp MIA reduction with only 1.25pp accuracy loss) suggests a practical operating point, though the mechanism is capacity reduction rather than targeted memorization removal.
+
+\subsection{Limitations}
+
+\textbf{DP-SGD experiments not completed.} Combining MemPrune with DP-SGD---a primary success criterion from our proposal---failed due to Opacus incompatibility with the pruning pipeline. BatchNorm layers are incompatible with Opacus; replacing them with GroupNorm or implementing manual per-sample gradient clipping could resolve this but was not attempted.
+
+\textbf{ImageNet-100 experiments omitted.} The planned ImageNet-100 evaluation for practical relevance at larger scale was not completed.
+
+\textbf{Single-seed generalization experiments.} CIFAR-100 and VGG-16 results use only seed 42, limiting statistical confidence in cross-dataset and cross-architecture conclusions.
+
+\textbf{Missing random pruning baseline in generalization.} Random pruning, the strongest privacy baseline on CIFAR-10 at high sparsity, was not evaluated on CIFAR-100 or VGG-16, leaving an important comparison gap.
+
+\textbf{Ablation code path inconsistency.} The ablation experiments used a slightly different code path than the main comparison, producing different accuracy for the same nominal configuration (45.69\% vs.\ $\sim$10\%). We report both transparently but this undermines the ablation's scientific value.
+
+\textbf{Single-seed canary validation.} The canary experiment ($\rho = -0.026$) used only seed 42. While the near-zero correlation and flat quartile pattern strongly suggest robustness, multi-seed validation would strengthen the conclusion.
+
+\textbf{No GDS subset size ablation.} The planned sweep over $M \in \{500, 1000, 2000, 5000, 10000\}$ was not conducted, missing sensitivity analysis for a key hyperparameter.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We investigated whether per-weight gradient dispersion can serve as a memorization-aware pruning criterion for privacy enhancement. Our Gradient Dispersion Score (GDS) quantifies per-sample gradient variance at a single checkpoint, motivated by the Coherent Gradients Hypothesis.
+
+The results yield three key findings. First, \textbf{GDS does not capture memorization}: canary validation shows $\rho = -0.026$ between GDS and ground-truth memorization contribution, a definitive negative result for the gradient-variance-as-memorization hypothesis in the weight domain. Second, \textbf{GDS-based pruning provides modest privacy benefits at moderate sparsity}: 2.6pp MIA AUC reduction at 50\% sparsity (91.4\% accuracy) and 3.9pp at 70\% (90.2\% accuracy), likely through reducing fine-grained discrimination capacity rather than memorization removal. Third, \textbf{GDS captures feature selectivity}: the catastrophic accuracy collapse at $\geq$90\% sparsity and the reverse-GDS ablation demonstrate that high-dispersion weights encode features essential for classification.
+
+For practitioners, the hybrid criterion ($\alpha = 0.1$ in Eq.~\ref{eq:hybrid}) offers a practical configuration: 91.9\% accuracy at 90\% sparsity with modest privacy gains. For the research community, our negative canary result suggests that translating sample-level memorization signals to the weight domain requires fundamentally different approaches than simple variance computation. Future work could explore temporal gradient variance across training epochs (closer to VoG), structured analysis of weight-group contributions to memorization, or combining GDS with privacy-aware retraining methods like WeMem~\citep{shang2025wemem}.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

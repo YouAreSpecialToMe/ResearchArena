@@ -1,0 +1,258 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python environment and project structure",
+    "description": "Install all required packages and create project directory structure. All computation is CPU-based, no GPU needed.",
+    "steps": {
+      "step1": "Verify Python version (>=3.9) with `python3 --version`.",
+      "step2": "Install core packages: `pip install numpy pandas scipy networkx matplotlib seaborn scikit-learn tqdm requests`.",
+      "step3": "Create project directory structure: `mkdir -p src data/raw data/dirty data/ground_truth data/constraints results figures logs tests`.",
+      "step4": "Create `src/config.py` with global constants: SEEDS = [42, 123, 456], ERROR_RATES = [0.05, 0.10], EPSILON_VALUES = [0.001, 0.005, 0.01, 0.02, 0.05], CONSTRAINT_COUNTS = [5, 10, 20, 30, 50], OVERLAP_RATIOS = [0.0, 0.25, 0.50, 0.75, 1.0], TAX_SUBSAMPLE_SIZES = [10000, 25000, 50000, 100000, 200000], EXPERIMENT_TIMEOUT_S = 1800.",
+      "step5": "Create `src/constraints.py` defining constraint data structures: class FD(lhs: set[str], rhs: set[str]) with get_mod_attrs() returning rhs and get_ref_attrs() returning lhs|rhs; class DC(predicates: list[Predicate]) with get_mod_attrs() and get_ref_attrs() both returning all predicate attributes; class CFD(fd: FD, pattern: dict) extending FD with conditional pattern matching.",
+      "step6": "Create `src/utils.py` with: set_seed(seed), Timer context manager, JSON/CSV I/O helpers, violation counting function count_violations(df, constraints) -> dict mapping constraint_id to violation count.",
+      "step7": "Verify setup: import all modules, create a trivial 10-row DataFrame, define one FD, verify get_mod_attrs()/get_ref_attrs() return correct sets and violation counting works."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download actual benchmark datasets from canonical public repositories",
+    "description": "Obtain the REAL Hospital, Tax, Flights, and Beers benchmark datasets from their canonical open-source repositories. This directly addresses reviewer feedback: we use the actual datasets from HoloClean, BART, and REIN repositories, NOT synthetic mimics. This is critical for credible comparison with prior work.",
+    "steps": {
+      "step1": "Download Hospital dataset from HoloClean's GitHub repository: `wget https://raw.githubusercontent.com/HoloClean/holoclean/master/testdata/hospital.csv` and the constraint file `wget https://raw.githubusercontent.com/HoloClean/holoclean/master/testdata/hospital_constraints.txt`. Expected: ~1,000 tuples, 19 attributes (ProviderNumber, HospitalName, Address, City, State, ZipCode, CountyName, PhoneNumber, HospitalType, HospitalOwner, EmergencyService, Condition, MeasureCode, MeasureName, Score, Sample, Stateavg). This dataset contains native errors that serve as ground truth.",
+      "step2": "Download Tax dataset from the BART project repository: clone `https://github.com/dbunibas/BART` and locate the Tax dataset under the test data directory. Tax has ~200K tuples with 15 attributes (tid, fname, lname, gender, areacode, phone, city, state, zip, maritalstatus, haschild, salary, rate, singleexemp, marriedexemp). If the raw data is not directly in the BART repo, check the BART paper's referenced data sources or generate using BART's Tax schema generator (which produces the canonical Tax data, not a mimic).",
+      "step3": "Download Flights dataset: check HoloClean's test data directory for flights data (`https://github.com/HoloClean/holoclean/tree/master/testdata`). If not present, check the REIN benchmark repository (`https://github.com/mohamedyd/REIN-Benchmark`) or the original data fusion datasets. Flights has ~2,400 tuples with 7 attributes (flight_id, source, scheduled_dep, actual_dep, scheduled_arr, actual_arr, gate). This dataset exhibits data fusion challenges with conflicting values across sources.",
+      "step4": "Download Beers dataset from the REIN benchmark: `git clone https://github.com/mohamedyd/REIN-Benchmark` and extract the Beers dataset. Beers has ~2,400 tuples with 11 attributes.",
+      "step5": "Fallback procedures if canonical sources are unavailable: (a) For Hospital -- also try `https://github.com/HoloClean/holoclean/tree/master/testdata` alternate paths or cached copies in other data cleaning repos. (b) For Tax -- use BART's data generator with canonical Tax schema to produce a 50K-tuple version (this IS the standard Tax benchmark generation procedure). (c) For Flights -- construct from Bureau of Transportation Statistics public data following HoloClean's documented schema. (d) For Beers -- try Kaggle's craft beers dataset as the original source.",
+      "step6": "Run data profiling for each downloaded dataset: count rows, columns, data types, missing values, unique values per column, detect any pre-existing errors. Save profiling reports to `data/raw/profiling_{dataset}.json`.",
+      "step7": "Save all raw datasets to `data/raw/{hospital,tax,flights,beers}.csv`."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Define and validate constraint sets for each real dataset",
+    "description": "For each real dataset, define the heterogeneous constraint set from canonical constraint files and prior literature. The constraint definitions come from the datasets' associated publications, not our invention.",
+    "steps": {
+      "step1": "Hospital constraints: Parse hospital_constraints.txt from HoloClean repo to extract denial constraints (these are the canonical DCs used in HoloClean's evaluation). Add well-documented FDs from prior work (Chu et al. 2013, Rekatsinas et al. 2017): {ProviderNumber -> HospitalName, Address, City, State, ZipCode, CountyName, PhoneNumber, HospitalType, HospitalOwner, EmergencyService}, {ZipCode -> City, State}, {MeasureCode -> MeasureName}, {ProviderNumber, MeasureCode -> Score}. Add 1-2 CFDs if supported by the data (e.g., State-specific hospital type patterns). Target: 8-12 FDs, 2-3 CFDs, 5-8 DCs. Save to `data/constraints/hospital_constraints.json`.",
+      "step2": "Tax constraints: Use documented FDs from Fan et al. and BART's constraint files: {zip -> city, state}, {areacode -> state}, {city, state -> zip}, {salary, maritalstatus -> rate}. Use DCs from BART: salary ordering constraints (singleexemp <= salary), rate consistency. Add CFDs: conditional rate constraints by filing status. Target: 6-10 FDs, 2-3 CFDs, 4-6 DCs. Save to `data/constraints/tax_constraints.json`.",
+      "step3": "Flights constraints: Define FDs from HoloClean's evaluation: {flight_id, source -> scheduled_dep, actual_dep, scheduled_arr, actual_arr}, {flight_id -> gate}. Define DCs: temporal consistency (actual_arr > actual_dep, scheduled_arr > scheduled_dep). Add CFDs for source-specific patterns. Target: 4-6 FDs, 1-2 CFDs, 3-4 DCs. Save to `data/constraints/flights_constraints.json`.",
+      "step4": "Beers constraints: Define FDs: {brewery_id -> brewery_name, city, state}, {beer_id -> beer_name, style}. Define DCs: abv >= 0 AND abv <= 100. Target: 4-6 FDs, 1-2 CFDs, 2-3 DCs. Save to `data/constraints/beers_constraints.json`.",
+      "step5": "Validate all constraints against the raw data: count violations per constraint on the unmodified data. For Hospital (which has native errors), the violation count is the ground truth error count. For other datasets, minimal violations confirm the constraints are appropriate.",
+      "step6": "Report constraint validation statistics in `data/constraints/validation_report.json`: per-dataset count of FDs, CFDs, DCs, total violation count, violation rate."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Error injection and ground truth preparation",
+    "description": "Inject controlled errors into datasets for systematic evaluation using BART-style error injection. Hospital uses both native errors and injected errors for comprehensive evaluation.",
+    "steps": {
+      "step1": "Implement `src/error_injection.py` with inject_errors(clean_df, constraints, error_rate, seed) -> (dirty_df, error_mask). For each constraint: select error_rate fraction of relevant tuples, modify cells in Mod(constraint) attributes to create violations. For FDs: change RHS to a random different domain value. For DCs: modify predicate attributes to violate the DC. Record ground truth: error_mask[row, col] = True if cell was corrupted, original_values[(row, col)] = original value.",
+      "step2": "Hospital ground truth: For the native errors in Hospital, identify erroneous cells by cross-referencing duplicate ProviderNumber entries with inconsistent attribute values. The majority value within each ProviderNumber group is treated as correct. Additionally inject controlled errors at 5% and 10% rates with seeds [42, 123, 456]. Save 7 versions: native, {5%,10%} x 3 seeds.",
+      "step3": "Tax: If the full 200K dataset is available, subsample to 50K for main experiments (full 200K reserved for scalability test in Experiment 3). Inject errors at 5% and 10% with 3 seeds. Save 6 dirty versions.",
+      "step4": "Flights (~2,400 tuples): Inject errors at 5% and 10% with 3 seeds. Include value errors (wrong times) and inconsistency errors (arrival before departure). Save 6 dirty versions.",
+      "step5": "Beers (~2,400 tuples): Inject errors at 5% and 10% with 3 seeds. Save 6 dirty versions.",
+      "step6": "Save all dirty datasets to `data/dirty/{dataset}_{error_rate}pct_seed{seed}.csv`, ground truth to `data/ground_truth/{dataset}_{error_rate}pct_seed{seed}.json` (mapping (row,col) -> original_value), error masks to `data/ground_truth/{dataset}_{error_rate}pct_seed{seed}_mask.csv`.",
+      "step7": "Verify error injection: for each dirty dataset, count violations per constraint and confirm error rate matches target within 1% tolerance."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic datasets for controlled scalability experiments",
+    "description": "Create synthetic datasets with precisely controlled constraint interaction structure for systematic scalability evaluation. These complement real datasets by allowing controlled variation of CIG density.",
+    "steps": {
+      "step1": "Implement `src/synthetic_generator.py` with class SyntheticDataGenerator(n_tuples, n_attrs, n_constraints, overlap_ratio, error_rate, seed). overlap_ratio controls attribute sharing between constraints: 0.0 = disjoint attributes (sparse CIG), 1.0 = maximally shared (dense CIG).",
+      "step2": "Constraint generation: Partition attributes into groups. Each FD maps LHS (1-2 attrs) to RHS (1-2 attrs). Each DC involves 2-4 attributes. overlap_ratio controls cross-group sharing. Split constraints ~60% FDs, ~40% DCs.",
+      "step3": "Clean data generation: Use deterministic hash-based mapping for FD satisfaction, rejection sampling for DC satisfaction. Domain sizes: 10-50 distinct values per categorical attr, realistic numeric ranges.",
+      "step4": "Generate scalability datasets: (a) Constraint count scaling: 10K tuples, 20 attrs, overlap=0.3, error_rate=0.05, n_constraints in {5, 10, 20, 30, 50}, seed=42. (b) Overlap/density scaling: 10K tuples, 20 attrs, 20 constraints, error_rate=0.05, overlap in {0.0, 0.25, 0.50, 0.75, 1.0}, seed=42. (c) Dataset size scaling: 20 attrs, 14 constraints, overlap=0.3, error_rate=0.05, n_tuples in {10K, 25K, 50K, 100K, 200K}, seed=42.",
+      "step5": "Save all synthetic datasets to `data/synthetic/` with clean CSV, dirty CSV, error mask, and constraints JSON."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement CRIS framework core components",
+    "description": "Implement the three-level repair safety analysis, CIG construction, graph-based decomposition, and repair scheduling -- the core algorithmic contributions of the paper.",
+    "steps": {
+      "step1": "Implement single-constraint repair algorithms in `src/repair_algorithms.py`: (a) repair_fd(df, fd, tiebreak='lexicographic') -> (repaired_df, changes): group by LHS, resolve RHS conflicts by majority vote, break ties lexicographically for deterministic unique repairs (required for decomposition equivalence guarantee). (b) repair_cfd(df, cfd) -> (repaired_df, changes): filter to pattern-matching tuples, apply FD repair on subset. (c) repair_dc(df, dc, strategy='minimal') -> (repaired_df, changes): for each violation pair, find minimal cell change satisfying the DC predicate, use domain frequency for tie-breaking.",
+      "step2": "Implement three-level safety analysis in `src/safety_analysis.py`: (a) structural_safety(c1, c2) -> bool: True if Mod(c1) ∩ Ref(c2) = {} (O(1) per pair, set intersection). (b) predicate_safety(c1, c2) -> bool: for overlapping attributes, check predicate entailment (e.g., c1 sets A>0, c2 requires A>-10 => safe). Implement for equality, inequality, range, set membership predicates. (c) data_dependent_safety(c1, c2, df, sample_size=1000, epsilon=0.01) -> (bool, float, float): sample tuples, simulate c1's repair on sample, count new c2 violations. Compute one-sided 95% binomial confidence interval upper bound on interference rate. Return (upper_bound < epsilon, interference_rate, upper_bound).",
+      "step3": "Implement CIG construction in `src/cig.py`: class ConstraintInteractionGraph(constraints, df, safety_level=3, epsilon=0.01). build() iterates over all ordered pairs (c_i, c_j), applies safety levels in order with early exit. Creates NetworkX DiGraph: edge (i,j) means repairing c_i may violate c_j. Edge weight = empirical interference rate (Level 3) or 1.0 (Levels 1-2 unsafe). get_stats() returns n_nodes, n_edges, density, n_safe_per_level, construction_time.",
+      "step4": "Implement graph decomposition in `src/decomposition.py`: (a) find_independent_components(cig) -> list[list[int]]: weakly connected components. (b) topological_schedule(subgraph) -> list[int]: reverse topological order for DAG components. (c) handle_cycles(subgraph) -> (dag_order, residual_edges): approximate minimum-weight feedback arc set via greedy heuristic, break cycles, return ordering + removed edges. (d) full_decomposition(cig) -> RepairSchedule dataclass.",
+      "step5": "Implement CRIS pipeline in `src/cris.py`: class CRIS(constraints, safety_level=3, epsilon=0.01). repair(dirty_df) -> (repaired_df, repair_log): (1) build CIG, (2) decompose, (3) repair each component following schedule, (4) for residual edges from cycle-breaking, run verification pass (check for new violations, apply targeted repairs). repair_log tracks: cig_time, decomposition_time, per_component_repair_time, verification_time, total_changes, cascade_count, final_violations.",
+      "step6": "Write unit tests in `tests/test_core.py`: (a) structural_safety correctly classifies 3 safe and 3 unsafe pairs, (b) CIG for a 4-constraint set produces expected edges, (c) decomposition of a known graph yields correct components, (d) FD repair fixes known violations in a 20-row dataset, (e) full CRIS pipeline produces valid repairs on a 50-row test case. Run all tests."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement baseline repair methods",
+    "description": "Implement four baselines plus attempt to run actual HoloClean. The Greedy-Holistic baseline is clearly labeled as our own implementation, NOT HoloClean. This addresses reviewer feedback about distinguishing our proxy from the actual HoloClean system.",
+    "steps": {
+      "step1": "Implement `src/baselines.py` with common interface: each class has repair(dirty_df, constraints) -> (repaired_df, repair_log).",
+      "step2": "SequentialIndependent: apply repairs sequentially in type order: FDs first, then CFDs, then DCs. Track cascade_count after each step (new violations of already-repaired constraints).",
+      "step3": "ReverseIndependent: reverse order: DCs first, then CFDs, then FDs. Same cascade tracking.",
+      "step4": "GreedyHolistic: greedy joint optimizer considering all constraints simultaneously. For each cell involved in violations, score by total violation count across all constraints. Select the value (from observed domain) that resolves the maximum violations. Iterate until convergence or max_iterations=100. IMPORTANT: all code, logs, and results clearly label this as 'Greedy-Holistic' and include a note that it is NOT HoloClean but a simplified greedy proxy.",
+      "step5": "Attempt to run actual HoloClean on Hospital dataset: (a) Clone https://github.com/HoloClean/holoclean. (b) Check dependencies -- HoloClean requires PostgreSQL and PyTorch. If PostgreSQL is available or can be installed, set up HoloClean and run on Hospital with its native constraints. (c) Allocate 30 minutes for this attempt. If setup fails (e.g., PostgreSQL unavailable, dependency conflicts), document the specific failure reason in results/holoclean_attempt.log and proceed without HoloClean. In the paper, we will note: 'We attempted to run HoloClean but [specific reason]. We use Greedy-Holistic as a proxy baseline, which is a simpler greedy approach distinct from HoloClean's probabilistic inference.'",
+      "step6": "CRIS-Structural: CRIS with safety_level=1 (structural safety only). Serves as ablation.",
+      "step7": "Verify all baselines on a small 100-tuple test dataset with 3 FDs and 2 DCs."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 1: Constraint interaction sparsity in real datasets",
+    "description": "Compute the CIG for each real dataset's constraint set. Measure the fraction of constraint pairs safe at each level. This validates the core hypothesis that real-world constraint sets exhibit structural sparsity. Uses the ACTUAL benchmark datasets, not synthetic mimics.",
+    "steps": {
+      "step1": "For each dataset (Hospital, Tax-50K, Flights, Beers), load the constraint set and the clean data.",
+      "step2": "Construct the CIG at three cumulative levels: Level 1 only (structural), Level 1+2 (+ predicate-aware), Level 1+2+3 (+ data-dependent with epsilon=0.01). For Level 3, run with all 3 seeds since it involves sampling.",
+      "step3": "Record per-dataset: total_constraint_pairs = n*(n-1), safe_at_L1, additionally_safe_at_L2, additionally_safe_at_L3, remaining_unsafe, CIG_edge_density = unsafe / total.",
+      "step4": "Record decomposition statistics for the full CIG (Level 1+2+3): n_weakly_connected_components, component_sizes, n_acyclic_components, n_cyclic_components, feedback_arc_set_size.",
+      "step5": "Measure CIG construction time at each level to quantify analysis overhead.",
+      "step6": "Save results to `results/exp1_sparsity.json`. Expected: >60% structural safety, >80% total safety. Hospital and Tax should produce at least 2 independent components in the CIG.",
+      "step7": "Runtime estimate: 4 datasets x 3 levels x (3 seeds for L3) = ~36 CIG constructions. Each <30s. Total: ~20 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Repair quality comparison on real and synthetic datasets",
+    "description": "Compare repair F1 of CRIS against all baselines across 4 real datasets and 3 synthetic datasets. Primary quality evaluation with 3 seeds for statistical rigor.",
+    "steps": {
+      "step1": "Define 6 methods: (M1) Sequential-Independent, (M2) Reverse-Independent, (M3) Greedy-Holistic, (M4) CRIS-Structural (Level 1), (M5) CRIS-Full (all 3 levels), (M6) HoloClean (Hospital only, if available).",
+      "step2": "Implement `src/evaluation.py` with evaluate_repair(clean_df, dirty_df, repaired_df, error_mask) -> dict with: precision = correctly_changed / total_changed, recall = correctly_changed / total_errors, F1, runtime_s, cascade_count, final_violation_count.",
+      "step3": "Run M1-M5 on all 4 real datasets (Hospital, Tax-50K, Flights, Beers) x 2 error rates (5%, 10%) x 3 seeds (42, 123, 456). For Hospital native errors, run with seed-independent ground truth. Total: 5 methods x (4 datasets x 2 rates x 3 seeds + 1 native) = ~125 runs.",
+      "step4": "Run M1-M5 on 3 synthetic datasets (sparse/moderate/dense overlap at 10K tuples, 14 constraints) x 3 seeds. Total: 5 x 3 x 3 = 45 runs.",
+      "step5": "If HoloClean is available, run on Hospital (native errors + 5% + 10%, 3 seeds each). Total: up to 7 additional runs.",
+      "step6": "For each run, compute precision, recall, F1, runtime, cascade_count. Aggregate: mean +/- std across 3 seeds per (dataset, error_rate, method).",
+      "step7": "Save raw results to `results/exp2_quality_raw.json` and aggregated summary to `results/exp2_quality_summary.json`.",
+      "step8": "Runtime estimate: ~170 runs. Small datasets (Hospital ~1K, Flights ~2.4K, Beers ~2.4K): <30s each. Tax-50K: ~2 min each. Synthetic 10K: ~1 min each. Total: ~170 min raw. With caching of single-constraint repairs: ~100 min."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Runtime scalability",
+    "description": "Measure how CRIS runtime scales with dataset size and constraint count vs baselines. Uses Tax subsamples for size scaling and synthetic data for constraint count scaling.",
+    "steps": {
+      "step1": "Dataset size scaling: Subsample Tax at {10K, 25K, 50K, 100K, 200K} tuples (if full Tax available; otherwise use synthetic data at these sizes with overlap=0.3). Run CRIS-Full, Greedy-Holistic, Sequential-Independent. Seed=42, 5% error rate. Record total runtime and breakdown (CIG construction, decomposition, repair, verification).",
+      "step2": "Constraint count scaling: Synthetic datasets with 10K tuples, constraint counts {5, 10, 20, 30, 50}, overlap=0.3, 5% error rate, seed=42. Run CRIS-Full, Greedy-Holistic, Sequential-Independent. Record runtime and CIG density at each count.",
+      "step3": "Compute speedup ratios: Greedy-Holistic_time / CRIS_time for each configuration. Report CIG analysis overhead as fraction of total CRIS time.",
+      "step4": "Set 30-minute timeout per run. Record 'timeout' if exceeded.",
+      "step5": "Save results to `results/exp3_scalability.json`. Expected: CRIS speedup grows with constraint count; CRIS scales near-linearly with dataset size.",
+      "step6": "Runtime estimate: Size scaling: 5 sizes x 3 methods = 15 runs (up to 5 min for 200K). Constraint scaling: 5 counts x 3 methods = 15 runs (~3 min each). Total: ~60-90 min."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 4: Decomposition structure analysis",
+    "description": "Analyze the CIG structure for each real dataset: number of components, DAG properties, cycle presence. Visualize the CIG to illustrate the decomposition.",
+    "steps": {
+      "step1": "For each real dataset (Hospital, Tax, Flights, Beers), extract the CIG from Experiment 1.",
+      "step2": "Report per dataset: n_weakly_connected_components, component_sizes, whether each component is acyclic, for cyclic components: cycle count and feedback arc set size, longest path in DAG components.",
+      "step3": "Compute theoretical maximum speedup from parallelization: K independent components of equal size => ~K-fold speedup. Compare to actual observed speedup from Experiment 2.",
+      "step4": "Save to `results/exp4_decomposition.json`.",
+      "step5": "Runtime: purely analytical on precomputed CIGs, <5 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 5: Cascade analysis",
+    "description": "Count new constraint violations introduced at each repair step. Demonstrates CRIS's safety-aware scheduling reduces cascading violations vs naive sequential approaches.",
+    "steps": {
+      "step1": "Instrument all repair methods to log violation state after each constraint's repair: for each constraint c_i in the schedule, after repairing c_i, count violations of ALL other constraints. Record new_violations_introduced[step_i] = violations not present before this step.",
+      "step2": "Run Sequential-Independent, Reverse-Independent, and CRIS-Full on all 4 real datasets (10% error rate, seed=42). Record full cascade logs.",
+      "step3": "Compute: total_cascades = sum of new violations across all steps, max_single_cascade, number of repair steps that introduced >0 new violations.",
+      "step4": "Save to `results/exp5_cascades.json`. Expected: CRIS has 30-50% fewer total cascades than Sequential-Independent.",
+      "step5": "Runtime: 12 runs (3 methods x 4 datasets) x ~2 min = ~24 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 6: Safety level ablation study",
+    "description": "Compare CRIS at each safety level (L1 only, L1+2, L1+2+3) to measure the incremental benefit of finer safety analysis. Ablation for the three-level hierarchy, a core novel component.",
+    "steps": {
+      "step1": "Run CRIS at 3 safety levels on all 4 real datasets (10% error rate, 3 seeds). Total: 3 levels x 4 datasets x 3 seeds = 36 runs.",
+      "step2": "For each variant, record: n_safe_pairs, n_CIG_edges, n_components, F1, runtime, cascade_count.",
+      "step3": "Compute marginal benefit of each level: additional safe pairs found, F1 improvement, runtime change (analysis overhead vs repair savings).",
+      "step4": "Save to `results/exp6_ablation.json`. Expected: L1 captures >70% of safe pairs, L2 adds ~15%, L3 adds ~10%.",
+      "step5": "Runtime: 36 runs x ~1 min = ~36 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 7: Epsilon sensitivity analysis",
+    "description": "Evaluate CRIS-Full with epsilon in {0.001, 0.005, 0.01, 0.02, 0.05} on Hospital and Tax. Validates the default epsilon=0.01 choice and characterizes the precision-recall trade-off. Directly addresses reviewer feedback requiring empirical/theoretical justification of the safety threshold.",
+    "steps": {
+      "step1": "Run CRIS-Full on Hospital and Tax-50K (10% error rate, 3 seeds) with each epsilon in {0.001, 0.005, 0.01, 0.02, 0.05}. Total: 2 datasets x 5 epsilon x 3 seeds = 30 runs.",
+      "step2": "For each epsilon, record: (a) number of Level-3 safe pairs (pairs declared safe by data-dependent analysis that were unsafe at L1+L2), (b) total CIG edges, (c) number of independent components, (d) repair F1, (e) cascade count, (f) number of verification rounds for cyclic components.",
+      "step3": "Analyze the trade-off: smaller epsilon => more conservative decomposition (denser CIG, higher quality, less speedup). Larger epsilon => more aggressive (sparser CIG, more speedup, potential quality loss).",
+      "step4": "Compute theoretical justification: for each epsilon, compute the expected false-safe rate using the binomial CI formula. For sample size s and observed interference rate p_hat, the 95% CI upper bound is p_hat + 1.96*sqrt(p_hat*(1-p_hat)/s). Report expected false-safe classifications and their impact on F1.",
+      "step5": "Identify the elbow point where F1 degradation exceeds 1%. Validate that epsilon=0.01 is at or near this elbow.",
+      "step6": "Save to `results/exp7_epsilon.json`. Expected: F1 degrades <1% from epsilon=0.001 to 0.01, then more sharply beyond 0.02.",
+      "step7": "Runtime: 30 runs x ~1.5 min = ~45 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 8: Decomposition equivalence verification",
+    "description": "Empirically verify the formal guarantee that decomposed repair yields the same result as monolithic repair when the CIG is acyclic and individual repairs produce unique minimum-change solutions. Provides empirical support for the proof sketch in the proposal, addressing reviewer feedback.",
+    "steps": {
+      "step1": "Identify cases with acyclic CIGs: (a) check if any real dataset's CIG is fully acyclic, (b) if not, identify the largest acyclic subgraph within each real dataset's CIG, (c) generate 3 synthetic datasets (6 constraints each) with known acyclic CIG structures of varying complexity (chain, tree, forest).",
+      "step2": "For each acyclic case: (a) run CRIS decomposed repair using the topological schedule, (b) run monolithic repair: iterate over all constraints jointly until convergence, resolving violations greedily. Both use the same deterministic lexicographic tie-breaking rule.",
+      "step3": "Compare outputs cell-by-cell. Under the theorem's conditions, outputs should be identical. Compute: fraction of cells matching, fraction differing, and for each differing cell, classify the cause (tie-breaking ambiguity, multi-step interaction, non-uniqueness of minimum repair).",
+      "step4": "For cases where outputs differ despite acyclic CIG, verify whether the uniqueness condition (unique minimum-change repair per constraint) was violated. Report the frequency of non-unique repairs.",
+      "step5": "Run on 3 synthetic datasets x 3 seeds + any real acyclic cases. Total: ~12-15 runs.",
+      "step6": "Save to `results/exp8_equivalence.json`. Expected: 100% cell agreement when uniqueness holds; any disagreements attributable to tie-breaking in non-unique cases.",
+      "step7": "Runtime: ~15 min."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical significance testing and success criteria evaluation",
+    "description": "Apply rigorous statistical tests to confirm significance of results. Evaluate each success criterion from the proposal.",
+    "steps": {
+      "step1": "For each (dataset, error_rate) pair, compute paired t-test (or Wilcoxon signed-rank if n<20) between CRIS-Full F1 and each baseline F1 across 3 seeds. Report p-values with Bonferroni correction.",
+      "step2": "Compute effect sizes: Cohen's d for F1 differences between CRIS-Full and each baseline.",
+      "step3": "Evaluate all 6 success criteria from idea.json: (SC1) CIG produces >=2 independent components on all 4 real datasets. (SC2) CRIS F1 within 5% of strongest holistic baseline on Hospital, Tax, Flights, Beers. (SC3) >=2x runtime speedup on constraint sets >15 constraints. (SC4) Structural safety identifies >60% of pairs as safe. (SC5) CRIS has fewer cascades than Sequential-Independent. (SC6) Epsilon sensitivity: <1% F1 degradation from epsilon=0.001 to 0.01.",
+      "step4": "For each criterion: report target value, actual measured value, PASS/FAIL, dataset-level details.",
+      "step5": "Document any negative or surprising results honestly. If a criterion fails, analyze why.",
+      "step6": "Save to `results/exp9_statistics.json` and `results/success_criteria.json`."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate all paper figures and tables",
+    "description": "Create publication-quality figures and tables. All use matplotlib with consistent styling: font size 12, colorblind-friendly palette, saved as PDF (vector) and PNG (300 DPI).",
+    "steps": {
+      "step1": "Implement `src/visualization.py` with consistent styling: sns.set_style('whitegrid'), figsize=(7,4) for single-column, (14,5) for double-column. Color scheme: CRIS-Full=#2196F3, CRIS-Structural=#90CAF9, Greedy-Holistic=#FF9800, Sequential=#F44336, Reverse=#E91E63.",
+      "step2": "Figure 1 -- CIG Visualization: Network graph of Hospital CIG showing constraint nodes colored by type (FD=blue, CFD=green, DC=red), interference edges with width proportional to weight, independent components highlighted. Save as `figures/fig1_cig_visualization.pdf`.",
+      "step3": "Figure 2 -- Interaction Sparsity: Stacked bar chart per dataset showing fraction of pairs safe at each level (L1, L2, L3) and remaining unsafe. Horizontal reference line at 60%. Save as `figures/fig2_sparsity.pdf`.",
+      "step4": "Figure 3 -- Repair Quality: Grouped bar chart with F1 (mean +/- std) for all methods across all 4 real datasets at 10% error rate. Error bars from 3 seeds. Save as `figures/fig3_quality.pdf`.",
+      "step5": "Figure 4 -- Runtime Scalability: Two subplots. Left: runtime vs dataset size (Tax subsamples). Right: runtime vs constraint count (synthetic). Log y-axis, lines for CRIS-Full, Greedy-Holistic, Sequential. Save as `figures/fig4_scalability.pdf`.",
+      "step6": "Figure 5 -- Cascade Analysis: Line plot of cumulative new violations vs repair step for Sequential, Reverse, CRIS on Hospital (10% error). Save as `figures/fig5_cascades.pdf`.",
+      "step7": "Figure 6 -- Safety Level Ablation: Grouped bar chart showing F1 and number of safe pairs at each level across datasets. Save as `figures/fig6_ablation.pdf`.",
+      "step8": "Figure 7 -- Epsilon Sensitivity: Dual-axis plot. X-axis: epsilon. Left y-axis: F1. Right y-axis: CIG edges. Lines for Hospital and Tax. Vertical dashed line at epsilon=0.01. Save as `figures/fig7_epsilon.pdf`.",
+      "step9": "Table 1 -- Main Results: LaTeX table. Rows = methods, columns = datasets. Cells = F1 (mean +/- std). Bold best, underline second-best. Include runtime column. Save as `figures/table1_main_results.tex`.",
+      "step10": "Table 2 -- CIG Statistics: Columns = Dataset, #Constraints, #Pairs, L1-Safe%, L2-Safe%, L3-Safe%, #Components, Has-Cycles. Save as `figures/table2_cig_stats.tex`.",
+      "step11": "Table 3 -- Success Criteria: Columns = Criterion, Target, Measured, Pass/Fail. Save as `figures/table3_success_criteria.tex`.",
+      "step12": "Table 4 -- Decomposition Equivalence: Columns = Dataset, CIG-Type, #Constraints, Cell-Agreement%, Non-Unique-Repairs%. Save as `figures/table4_equivalence.tex`.",
+      "step13": "Runtime: <10 minutes for all visualization."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compile final results and reproducibility notes",
+    "description": "Aggregate all results, document any deviations from plan, verify reproducibility.",
+    "steps": {
+      "step1": "Compile all experiment results into `results/all_results.json` with structured format.",
+      "step2": "Verify consistency: F1 values in [0,1], runtimes positive, cascade counts non-negative.",
+      "step3": "Create `results/reproducibility_notes.md` documenting: (a) exact dataset versions and URLs used, (b) any datasets that required fallback sources and why, (c) whether HoloClean was successfully run -- if not, the specific failure reason, (d) any deviations from the plan, (e) total runtime consumed.",
+      "step4": "Sanity check: re-run CRIS-Full on Hospital (10%, seed=42), verify result matches.",
+      "step5": "Total experiment runtime budget: Environment setup + data prep: 0.5h. Exp 1 (sparsity): 0.3h. Exp 2 (quality): 1.7h. Exp 3 (scalability): 1.5h. Exp 4 (decomposition): 0.1h. Exp 5 (cascades): 0.4h. Exp 6 (ablation): 0.6h. Exp 7 (epsilon): 0.8h. Exp 8 (equivalence): 0.3h. Stats + Viz: 0.3h. Buffer: 1.5h. TOTAL: ~8.0h."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime budget and execution order",
+    "description": "Consolidated runtime analysis confirming all experiments fit within the 8-hour CPU-only budget with 2 cores.",
+    "steps": {
+      "step1": "Phase-by-phase estimates (wall-clock with 2-core parallelism): (1) Setup + data download/prep: 0.5h. (2) Exp 1 sparsity: 0.3h. (3) Exp 2 quality: 1.7h. (4) Exp 3 scalability + Exp 4 decomposition (parallel): 1.5h. (5) Exp 5 cascades + Exp 6 ablation (parallel): 0.6h. (6) Exp 7 epsilon + Exp 8 equivalence (parallel): 0.8h. (7) Stats + visualization: 0.3h. Total: ~5.7h with parallelization + 2.3h buffer.",
+      "step2": "Execution dependencies: Exp 1 must complete before Exp 2-8 (CIG provides structural info). Exp 2 is independent of Exp 3-8. Exps 3-8 are mostly independent of each other.",
+      "step3": "Contingency: (a) If Tax download fails, use synthetic data at 50K tuples with Tax-like schema. (b) If any dataset unavailable, proceed with remaining datasets (minimum 3 of 4 needed). (c) If Exp 2 exceeds budget, reduce to 2 seeds. (d) If scalability experiments slow, cap at 100K tuples. (e) HoloClean attempt capped at 30 min regardless.",
+      "step4": "Caching optimizations: (a) Single-constraint repair results cached and reused across methods (same dirty data + constraint = same repair). (b) Structural and predicate safety cached across seeds (deterministic). (c) Only data-dependent safety varies by seed."
+    }
+  }
+]

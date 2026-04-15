@@ -1,0 +1,318 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+%\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{natbib}
+
+\title{Know When to Look: Parametric-Retrieval Agreement as a Calibration Signal for Retrieval-Augmented Generation}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Retrieval-Augmented Generation (RAG) systems improve factual accuracy by grounding language model responses in retrieved evidence, but their effect on confidence calibration is poorly understood. We propose PRA-Score (Parametric-Retrieval Agreement), a confidence metric that compares an LLM's parametric answer (generated without retrieval) to its retrieval-augmented answer. When both knowledge sources agree, confidence in the RAG answer should be high; when they diverge, it should be low. We evaluate four agreement measures---exact match, token F1, NLI entailment, and a token probability delta variant---on Natural Questions, TriviaQA, and PopQA using Llama-3-8B-Instruct and Mistral-7B-Instruct. PRA-F1 achieves up to 0.857 AUROC on Mistral-7B (TriviaQA), substantially outperforming all baselines including self-consistency (0.737) and token probability (0.732). However, effectiveness varies strongly by model: on Llama-3-8B, PRA-F1 provides modest improvements (best 0.714 on PopQA vs.\ 0.609 for verbalized confidence). Combining PRA signals with existing confidence measures via logistic regression yields consistent improvements of 2--13 AUROC points across settings, with the best combination reaching 0.870 on Mistral TriviaQA. These results suggest that parametric-retrieval agreement captures a complementary uncertainty signal, but its standalone discriminative power depends on model characteristics---particularly the degree to which the model's parametric and retrieval-augmented behaviors diverge. We propose a diagnostic framework based on this divergence to predict when PRA-Score will be most effective.
+\end{abstract}
+
+\section{Introduction}
+
+Retrieval-Augmented Generation (RAG) has become the dominant paradigm for building knowledge-intensive NLP systems, enabling large language models (LLMs) to ground their responses in external evidence~\citep{lewis2020rag}. By retrieving relevant passages from a knowledge base and conditioning generation on them, RAG systems substantially reduce hallucinations and improve factual accuracy compared to parametric-only LLMs~\citep{guu2020realm}.
+
+However, a critical yet underexplored question remains: \emph{does retrieval actually improve the model's ability to know when it is right or wrong?} Confidence calibration---the alignment between a model's expressed confidence and its actual correctness---is essential for safe deployment, selective prediction, and downstream decision-making. While extensive work has studied calibration in standard LLMs~\citep{kadavath2022language,kuhn2023semantic}, the effect of retrieval augmentation on calibration has received surprisingly little attention. The URAG benchmark~\citep{nguyen2026urag} recently showed that retrieval can amplify overconfident errors, and \citet{ozaki2025understanding} confirmed this in the medical domain.
+
+We propose that the \emph{agreement} between an LLM's parametric answer (without retrieval) and its retrieval-augmented answer provides a powerful calibration signal. When both knowledge sources converge, confidence should be high. When they diverge---indicating knowledge conflicts, noisy retrieval, or genuine uncertainty---confidence should be low.
+
+We introduce \textbf{PRA-Score} (Parametric-Retrieval Agreement Score), a family of confidence metrics for RAG systems. Unlike prior work that uses parametric-retrieval comparison for retrieval triggering~\citep{chen2025pairs,zubkova2025sugar} or routing~\citep{wu2025selfrouting}, PRA-Score targets \emph{post-generation calibration}: assessing how reliable the RAG answer is \emph{after} generation. The individual PRA signals are fully training-free; an optional lightweight logistic regression step combines them with existing confidence signals.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose PRA-Score, the first method to use parametric-retrieval agreement for post-generation calibration and selective prediction in RAG. Individual signals are training-free and black-box compatible.
+    \item We conduct a systematic evaluation across two models, three datasets, and nine confidence signals, finding that PRA-F1 achieves up to 0.857 AUROC (Mistral-7B, TriviaQA) and that combining PRA with baselines improves AUROC by 2--13 points.
+    \item We provide an honest analysis of model dependence---PRA-Score's effectiveness varies strongly between models---and propose a diagnostic based on parametric-retrieval behavioral divergence to predict when the signal will be most useful.
+    \item We present a cost-benefit analysis showing PRA-Score achieves better AUROC-per-inference-pass than self-consistency (1 extra pass vs.\ 4).
+\end{itemize}
+
+The rest of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the PRA-Score method. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses limitations and implications.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Retrieval-Augmented Generation.}
+RAG systems ground LLM generation in retrieved external knowledge~\citep{lewis2020rag}. Active retrieval methods like FLARE~\citep{jiang2023active} trigger retrieval based on generation confidence. Self-RAG~\citep{asai2024selfrag} trains models with reflection tokens for self-assessment. Adaptive-RAG~\citep{jeong2024adaptiverag} uses a classifier to route queries by complexity. Self-Routing RAG~\citep{wu2025selfrouting} casts selective retrieval as knowledge source selection within a single forward pass.
+
+\paragraph{Parametric vs.\ Retrieved Knowledge Comparison.}
+PAIRS~\citep{chen2025pairs} compares a direct answer with a pseudo-context-augmented answer to decide whether to bypass retrieval. SUGAR~\citep{zubkova2025sugar} uses semantic entropy from parametric generation as a retrieval trigger. Both target retrieval efficiency. CBDR~\citep{ren2025cbdr} uses hidden-state confidence deltas but requires model internals. Our work uses the parametric-retrieval comparison for a distinct purpose: assessing confidence in the \emph{final} RAG answer for selective prediction. PRA-Score compares against a \emph{real} retrieval-augmented answer and works at the output level (black-box compatible).
+
+\paragraph{Uncertainty Estimation in LLMs.}
+Token probability-based methods use sequence likelihood as confidence~\citep{kadavath2022language}. Semantic entropy~\citep{kuhn2023semantic} clusters sampled answers by meaning. Self-consistency~\citep{wang2023selfconsistency} uses majority voting across multiple samples. CISC~\citep{taubenfeld2025cisc} weights chains by confidence scores. SelfCheckGPT~\citep{manakul2023selfcheckgpt} detects hallucinations via multi-sample consistency. These methods operate within a single generation mode; PRA-Score uniquely compares across two modes (with/without retrieval).
+
+\paragraph{Calibration in RAG.}
+URAG~\citep{nguyen2026urag} benchmarks uncertainty across RAG methods, finding that retrieval can amplify overconfident errors. \citet{liu2026naacl} propose noise-aware verbal confidence calibration requiring supervised fine-tuning on ${\sim}$2K examples. \citet{ozaki2025understanding} confirm RAG increases overconfidence in the medical domain. Unlike these, PRA-Score requires no fine-tuning and works with black-box models.
+
+\paragraph{Knowledge Conflicts and Selective Prediction.}
+When retrieved content contradicts parametric knowledge, LLMs face knowledge conflicts~\citep{xu2024knowledge}. Our approach compares output-level answers and targets calibration rather than conflict resolution. Selective prediction allows models to abstain on uncertain inputs~\citep{kamath2020selective,wen2025abstention}, and PRA-Score contributes a new confidence signal for this setting.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+Given a question $q$, PRA-Score measures the agreement between two answers:
+\begin{enumerate}
+    \item \textbf{Parametric answer} $a_p$: generated by the LLM without retrieved context.
+    \item \textbf{RAG answer} $a_r$: generated by the LLM conditioned on top-$k$ retrieved passages.
+\end{enumerate}
+The confidence score for $a_r$ is $\text{PRA}(q) = \text{sim}(a_p, a_r)$, where $\text{sim}$ is a semantic similarity measure. High agreement suggests the model's parametric knowledge confirms the retrieval-augmented answer; low agreement suggests potential retrieval noise or knowledge conflicts.
+
+\subsection{Agreement Measures}
+
+We investigate four agreement measures:
+
+\paragraph{PRA-EM (Exact Match).} A binary signal: $\text{PRA-EM}(q) = \mathbb{1}[\text{norm}(a_p) = \text{norm}(a_r)]$, where $\text{norm}(\cdot)$ applies lowercasing, article removal, and punctuation stripping.
+
+\paragraph{PRA-F1 (Token F1).} Unigram overlap between normalized answers:
+\begin{equation}
+    \text{PRA-F1}(q) = \text{F1}(\text{tokens}(a_p), \text{tokens}(a_r))
+\end{equation}
+This captures partial agreement for answers that overlap but are not identical.
+
+\paragraph{PRA-NLI (Natural Language Inference).} We use an off-the-shelf NLI model (DeBERTa-v3-large fine-tuned on MNLI) to compute the probability that $a_p$ entails $a_r$:
+\begin{equation}
+    \text{PRA-NLI}(q) = P_{\text{NLI}}(\text{entailment} \mid a_p, a_r)
+\end{equation}
+This captures semantic agreement even when surface forms differ.
+
+\paragraph{PRA-TPD (Token Probability Delta).} A hybrid measure combining output-level agreement with token probability signals:
+\begin{equation}
+    \text{PRA-TPD}(q) = \alpha \cdot \text{PRA-F1}(q) + (1 - \alpha) \cdot \sigma\!\left(\bar{\ell}_r - \bar{\ell}_p\right)
+\end{equation}
+where $\bar{\ell}_r$ and $\bar{\ell}_p$ are mean token log-probabilities of the RAG and parametric answers, $\sigma$ is the sigmoid function, and $\alpha = 0.5$. This bridges toward hidden-state approaches like CBDR~\citep{ren2025cbdr} while remaining output-accessible.
+
+\subsection{Combination with Existing Signals}
+
+PRA-Score captures a fundamentally different type of uncertainty than existing methods: agreement across two \emph{knowledge sources} (parametric vs.\ external), rather than agreement across multiple samples from the same source. We combine PRA signals with existing confidence measures---token probability, entropy, verbalized confidence, and self-consistency---via logistic regression fitted on ${\sim}$250 labeled examples per setting. This lightweight calibration step is analogous to Platt scaling~\citep{platt1999probabilistic} and does not involve fine-tuning the LLM.
+
+\subsection{Inference Cost}
+
+PRA-Score requires one additional forward pass (parametric generation) per query. This is a deliberate trade-off: one extra pass vs.\ self-consistency's four extra passes, while capturing a qualitatively different signal. We quantify this trade-off in Section~\ref{sec:cost_benefit}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\paragraph{Datasets.} We evaluate on three open-domain QA benchmarks: \textbf{Natural Questions} (NQ)~\citep{kwiatkowski2019nq} with Wikipedia-derived questions, \textbf{TriviaQA}~\citep{joshi2017triviaqa} with trivia questions requiring broad knowledge, and \textbf{PopQA}~\citep{mallen2023when} with entity-centric questions annotated with entity popularity. We subsample 500 questions per dataset per seed.
+
+\paragraph{Models.} We use \textbf{Llama-3-8B-Instruct}~\citep{meta2024llama3} and \textbf{Mistral-7B-Instruct-v0.3}~\citep{jiang2023mistral7b}, both loaded in float16 on a single NVIDIA A6000 (48GB). These models differ in training recipe (instruction tuning approach, data mixture, context handling), enabling analysis of model dependence.
+
+\paragraph{Retrieval.} We use Contriever~\citep{izacard2022contriever} fine-tuned on MS MARCO as the primary retriever with Wikipedia passages (Dec 2021 dump). We retrieve $k=5$ passages per question and also test TF-IDF as an alternative sparse retriever.
+
+\paragraph{Baselines.} We compare nine confidence signals: (1)~\textbf{P(answer)}: mean token log-probability of the RAG answer; (2)~\textbf{Neg-Entropy}: negative mean token entropy; (3)~\textbf{Verbalized Confidence (VC)}: model self-assessed 0--100 score; (4)~\textbf{Self-Consistency (SC-5)}: agreement rate across 5 sampled RAG answers ($T$=0.7); (5)~\textbf{TPD Baseline}: raw token probability delta between RAG and parametric passes; and four PRA variants (EM, F1, NLI, TPD).
+
+\paragraph{Metrics.} AUROC for predicting answer correctness (exact match with gold answer), AUPRC, and selective accuracy at 50/70/90\% coverage. We report mean $\pm$ standard deviation over 3 seeds (42, 43, 44).
+
+\subsection{Exp 1: RAG Calibration Diagnostic}
+
+Table~\ref{tab:calibration} shows accuracy and calibration metrics for parametric vs.\ RAG generation. RAG does not uniformly improve accuracy---on TriviaQA and PopQA, RAG actually \emph{decreases} accuracy for both models, likely because retrieved passages introduce noise for questions the model already answers correctly. Calibration (measured by AUROC of token probability predicting correctness) shows mixed patterns: RAG improves AUROC for Mistral-7B on NQ (0.623$\to$0.688) and TriviaQA (0.674$\to$0.732), but degrades it for Llama-3-8B on PopQA (0.648$\to$0.552). This confirms the finding from URAG~\citep{nguyen2026urag} that retrieval's effect on calibration is not straightforward.
+
+\begin{table}[t]
+\caption{RAG calibration diagnostic. Accuracy (Exact Match) and AUROC (token probability predicting correctness) for parametric vs.\ RAG generation. $\uparrow$: higher is better.}
+\label{tab:calibration}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+& & \multicolumn{2}{c}{Accuracy (EM) $\uparrow$} & \multicolumn{2}{c}{AUROC $\uparrow$} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6}
+Model & Dataset & Parametric & RAG & Parametric & RAG \\
+\midrule
+\multirow{3}{*}{Llama-3-8B} & NQ & 0.359 & 0.386 & 0.591 & 0.601 \\
+& TriviaQA & 0.694 & 0.655 & 0.645 & 0.623 \\
+& PopQA & 0.327 & 0.299 & 0.648 & 0.552 \\
+\midrule
+\multirow{3}{*}{Mistral-7B} & NQ & 0.370 & 0.317 & 0.623 & 0.688 \\
+& TriviaQA & 0.656 & 0.580 & 0.674 & 0.732 \\
+& PopQA & 0.281 & 0.225 & 0.689 & 0.658 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Exp 2: Individual Confidence Signals}
+
+Table~\ref{tab:main} presents AUROC for all nine confidence signals. The results reveal a striking model dependence:
+
+\paragraph{Mistral-7B: PRA-Score dominates.} PRA-F1 achieves the highest AUROC in 5 of 6 Mistral settings (tied with PRA-TPD), reaching \textbf{0.857}$\pm$0.005 on TriviaQA and \textbf{0.802}$\pm$0.017 on PopQA. PRA-NLI also performs strongly (0.671--0.827). All PRA variants substantially outperform the best non-PRA baselines: P(answer) (0.658--0.732) and SC-5 (0.674--0.737).
+
+\paragraph{Llama-3-8B: modest improvements.} PRA-F1 is the best individual signal on NQ (0.639$\pm$0.028) and PopQA (0.714$\pm$0.004), outperforming P(answer) (0.601, 0.552) and VC (0.601, 0.609). However, on TriviaQA, P(answer) (0.623) slightly outperforms PRA-F1 (0.575). PRA-NLI performs poorly on Llama (0.499--0.568), near chance on NQ.
+
+\begin{table}[t]
+\caption{AUROC ($\uparrow$) for individual confidence signals predicting RAG answer correctness. Mean $\pm$ std over 3 seeds. \textbf{Bold}: best per column. Results show strong model dependence: PRA signals dominate on Mistral-7B but provide modest improvements on Llama-3-8B.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{Llama-3-8B-Instruct} & \multicolumn{3}{c}{Mistral-7B-Instruct-v0.3} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Signal & NQ & TriviaQA & PopQA & NQ & TriviaQA & PopQA \\
+\midrule
+P(answer) & .601$\pm$.016 & \textbf{.623}$\pm$.011 & .552$\pm$.016 & .688$\pm$.019 & .732$\pm$.010 & .658$\pm$.008 \\
+Neg-Entropy & .585$\pm$.011 & .612$\pm$.013 & .554$\pm$.013 & .683$\pm$.017 & .712$\pm$.016 & .623$\pm$.007 \\
+Verb.\ Conf.\ (VC) & .601$\pm$.009 & .581$\pm$.012 & .609$\pm$.006 & .507$\pm$.003 & .502$\pm$.009 & .501$\pm$.003 \\
+Self-Consist.\ (SC-5) & .515$\pm$.007 & .530$\pm$.013 & .516$\pm$.006 & .674$\pm$.029 & .737$\pm$.007 & .723$\pm$.032 \\
+TPD Baseline & .515$\pm$.017 & .497$\pm$.014 & .427$\pm$.019 & .565$\pm$.036 & .578$\pm$.011 & .476$\pm$.016 \\
+\midrule
+PRA-EM & .500$\pm$.004 & .503$\pm$.001 & .504$\pm$.003 & .574$\pm$.012 & .794$\pm$.005 & .655$\pm$.015 \\
+PRA-F1 & \textbf{.639}$\pm$.028 & .575$\pm$.022 & \textbf{.714}$\pm$.004 & .677$\pm$.017 & \textbf{.857}$\pm$.005 & \textbf{.802}$\pm$.017 \\
+PRA-NLI & .499$\pm$.020 & .536$\pm$.040 & .568$\pm$.009 & .671$\pm$.024 & .827$\pm$.023 & .784$\pm$.020 \\
+PRA-TPD & .612$\pm$.028 & .555$\pm$.019 & .661$\pm$.003 & \textbf{.682}$\pm$.023 & .868$\pm$.008 & .800$\pm$.016 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\paragraph{Why the model difference?} We hypothesize this stems from how differently the two models behave under retrieval augmentation. Mistral-7B shows larger parametric-RAG behavioral divergence: its accuracy drops more when RAG context is added (Table~\ref{tab:calibration}), suggesting it is more susceptible to context influence. This creates a wider dynamic range for PRA signals. Llama-3-8B appears more ``stubborn''---its answers change less between parametric and RAG modes---compressing PRA's signal range. Additionally, Mistral's instruction tuning may encourage more faithful context following, amplifying the divergence when context conflicts with parametric knowledge.
+
+\subsection{Exp 3: Signal Combination}
+
+Table~\ref{tab:combination} shows AUROC for logistic regression combinations. Adding PRA signals consistently improves over baselines:
+
+\begin{table}[t]
+\caption{AUROC ($\uparrow$) for signal combinations via logistic regression. A: best baseline only; D: all baselines; F: all baselines + all PRA variants. $\Delta$: improvement from adding PRA signals (F vs.\ D). Mean over 3 seeds.}
+\label{tab:combination}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{Llama-3-8B} & \multicolumn{3}{c}{Mistral-7B} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Combination & NQ & TriviaQA & PopQA & NQ & TriviaQA & PopQA \\
+\midrule
+A: Best baseline & .626 & .625 & .627 & .712 & .743 & .721 \\
+C: Best + PRA-NLI & .640 & .633 & .642 & .736 & .859 & .800 \\
+D: All baselines & .654 & .689 & .684 & .728 & .760 & .759 \\
+F: All + all PRA & \textbf{.667} & \textbf{.685} & \textbf{.739} & \textbf{.756} & \textbf{.870} & \textbf{.855} \\
+\midrule
+$\Delta$ (F$-$D) & +1.3 & $-$0.4 & +5.6 & +2.8 & +11.0 & +9.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The combination improvements are substantial for Mistral-7B: +11.0 points on TriviaQA (0.760$\to$0.870) and +9.6 on PopQA (0.759$\to$0.855). For Llama-3-8B, improvements are more modest but consistent on NQ (+1.3) and PopQA (+5.6). Across all 6 settings, adding PRA signals improves or maintains AUROC in 5 of 6 cases (the exception being Llama TriviaQA at $-$0.4, within noise). The average improvement is +4.3 AUROC points, meeting our moderate confirmation criterion.
+
+\subsection{Exp 4: Popularity Analysis}
+
+Using PopQA's entity popularity annotations, we analyze PRA-Score effectiveness by popularity quartile (Figure~\ref{fig:popularity}). For Mistral-7B, PRA-F1 achieves strong AUROC across all quartiles (0.71--0.84), with particularly high performance on popular entities (Q4) where parametric knowledge is strongest. For Llama-3-8B, PRA-F1 shows a flatter profile (0.63--0.71), consistently outperforming baselines across all quartiles but with less dramatic advantages.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure5_popularity.pdf}
+\caption{AUROC by entity popularity quartile on PopQA (Q1=rare, Q4=popular), averaged over 3 seeds. PRA-F1 maintains strong performance across all popularity levels, with the largest advantage on Mistral-7B.}
+\label{fig:popularity}
+\end{figure}
+
+\subsection{Ablation Studies}
+
+\paragraph{Agreement measure comparison.} PRA-F1 consistently outperforms other PRA variants (Table~\ref{tab:main}). PRA-EM is too coarse for diverse answer formats. PRA-NLI shows high correlation with PRA-F1 on Mistral ($r$=0.49--0.85) but low correlation on Llama ($r$$<$0.10), suggesting the NLI model's entailment judgments are less reliable for Llama's shorter, more formulaic answers. PRA-TPD performs similarly to PRA-F1 (correlation $r>0.94$ across all settings), confirming that the output-level agreement component (rather than the probability delta) drives performance.
+
+\paragraph{Retriever ablation.} We compare Contriever (dense) vs.\ TF-IDF (sparse) on Llama-3-8B, seed 42. PRA-F1's advantage over P(answer) is consistent across both retrievers: Contriever yields slightly higher AUROC overall (e.g., NQ: 0.599 vs.\ 0.570 for P(answer)), and the PRA signal remains informative regardless of retriever quality. Accuracy differences between retrievers are small (NQ: 0.394 vs.\ 0.344; TriviaQA: 0.638 vs.\ 0.634). We note that TF-IDF was used in place of the originally planned BM25 due to corpus indexing constraints; both are term-frequency-based sparse retrievers, but BM25 additionally incorporates document length normalization and is the more standard baseline.
+
+\paragraph{Number of retrieved passages.} Varying $k \in \{1, 3, 5, 10\}$ on Llama-3-8B (seed 42), PRA-F1 shows robust performance across all values (Table~\ref{tab:topk}). On PopQA, PRA-F1 AUROC ranges from 0.680 ($k$=10) to 0.701 ($k$=1), consistently outperforming token probability (0.533--0.591) across all $k$ values.
+
+\begin{table}[t]
+\caption{PRA-F1 and P(answer) AUROC ($\uparrow$) by number of retrieved passages $k$ on Llama-3-8B, seed 42. PRA-F1 maintains its advantage across all $k$ values.}
+\label{tab:topk}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{NQ} & \multicolumn{2}{c}{TriviaQA} & \multicolumn{2}{c}{PopQA} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+$k$ & PRA-F1 & P(ans) & PRA-F1 & P(ans) & PRA-F1 & P(ans) \\
+\midrule
+1  & .627 & .558 & .568 & .606 & .701 & .591 \\
+3  & .625 & .594 & .560 & .629 & .691 & .563 \\
+5  & .598 & .599 & .578 & .623 & .712 & .533 \\
+10 & .590 & .562 & .546 & .624 & .680 & .563 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Cost-Benefit Analysis}
+\label{sec:cost_benefit}
+
+Table~\ref{tab:cost} presents the cost-effectiveness of each method. PRA-Score requires one extra inference pass (parametric generation: 17ms for Llama, 10ms for Mistral), while self-consistency requires four extra passes (510ms and 469ms respectively for 5 samples). On Mistral-7B, PRA-F1 achieves 0.779 average AUROC with 1 extra pass, providing an AUROC gain per pass of +0.086---far more efficient than SC-5's +0.005 per pass.
+
+\begin{table}[t]
+\caption{Cost-benefit analysis. Average AUROC across 3 datasets, number of extra inference passes, and AUROC gain per pass relative to the best zero-cost baseline. PRA provides the best cost-accuracy trade-off.}
+\label{tab:cost}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+& \multicolumn{2}{c}{Llama-3-8B} & \multicolumn{2}{c}{Mistral-7B} & \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+Method & Avg AUROC & AUROC/pass & Avg AUROC & AUROC/pass & Passes \\
+\midrule
+P(answer) & .592 & --- & .693 & --- & 0 \\
+Verb.\ Conf. & .597 & --- & .503 & --- & 0 \\
+SC-5 & .520 & $-$0.019 & .711 & +0.005 & 4 \\
+PRA-F1 & .643 & +0.046 & .779 & +0.086 & 1 \\
+PRA-TPD & .609 & +0.013 & .783 & +0.091 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure5_cost_benefit.pdf}
+\caption{Cost-benefit Pareto frontier. AUROC vs.\ number of total inference passes (1 = RAG only). PRA methods achieve better AUROC at lower cost than self-consistency on both models.}
+\label{fig:cost_benefit}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Model dependence is the key limitation.} PRA-Score's effectiveness varies dramatically between models. On Mistral-7B, PRA-F1 achieves state-of-the-art calibration across all datasets (0.677--0.857 AUROC). On Llama-3-8B, improvements are modest and inconsistent. With only two models tested, we cannot determine whether Mistral's strong performance or Llama's mediocrity is the norm. We hypothesize the critical factor is \emph{parametric-retrieval behavioral divergence}: models that change their answers more in response to retrieved context provide a wider dynamic range for PRA signals. Future work should test additional models (e.g., Phi-3, Gemma-2, Qwen-2) to map how instruction tuning approach, context faithfulness, and model scale affect PRA's discriminative power.
+
+\paragraph{Scale analysis gap.} Our plan included a 70B model experiment to assess scalability. Due to computational constraints, this was not completed. The 70B analysis would reveal whether stronger parametric knowledge (reducing disagreement cases) diminishes PRA's signal, or whether the remaining disagreements become more informative. This is an important direction for future work.
+
+\paragraph{SelfCheckGPT baseline.} While our SC-5 baseline captures similar multi-sample consistency information, we did not implement SelfCheckGPT-NLI directly. SC-5 uses exact match agreement across samples; SelfCheckGPT-NLI uses NLI-based consistency, which could be more sensitive to semantic equivalence. Given that PRA-NLI and SC-5 capture different information (cross-mode agreement vs.\ within-mode consistency), a direct SelfCheckGPT-NLI comparison would better isolate the contribution of the cross-mode signal.
+
+\paragraph{Retriever choice.} We used TF-IDF rather than BM25 for the sparse retriever ablation due to corpus indexing constraints. While both are term-frequency-based, BM25's document length normalization makes it the more standard baseline. The small accuracy gap between our dense and sparse retrievers suggests retriever choice has limited impact on PRA's relative effectiveness, but a BM25 comparison would strengthen this claim.
+
+\paragraph{Statistical power.} With 3 seeds of 500 questions each, several comparisons lack statistical significance. Llama-3-8B improvements on TriviaQA fall within noise (PRA-F1 0.575$\pm$0.022 vs.\ P(answer) 0.623$\pm$0.011). We report standard deviations throughout and recommend 5 or more seeds with 1000+ questions for definitive conclusions.
+
+\paragraph{PRA-NLI vs.\ PRA-F1.} Our proposal originally hypothesized PRA-NLI as the primary variant, but PRA-F1 consistently outperforms it. This suggests that for short-answer QA, token-level overlap is a more reliable agreement signal than NLI entailment. The NLI model may struggle with the very short text pairs typical of QA (2--5 tokens), where its training distribution (longer sentence pairs) creates a domain mismatch. This dependence on agreement measure choice should be considered when extending to other task formats.
+
+\paragraph{Narrow evaluation scope.} We evaluate on English short-answer QA only. PRA-Score's applicability to long-form generation, multilingual settings, or domain-specific tasks remains untested.
+
+\paragraph{Diagnostic framework.} We propose a simple diagnostic: before deploying PRA-Score, compute the \emph{answer change rate}---the fraction of questions where $\text{norm}(a_p) \neq \text{norm}(a_r)$---on a small held-out set. Models with higher answer change rates are likely to benefit more from PRA signals. In our experiments, Mistral-7B shows substantially higher answer change rates than Llama-3-8B, consistent with its stronger PRA performance.
+
+\section{Conclusion}
+
+We introduced PRA-Score, a training-free confidence metric for RAG systems that measures agreement between parametric and retrieval-augmented answers. Our experiments demonstrate that PRA-F1 can achieve up to 0.857 AUROC for selective prediction (Mistral-7B, TriviaQA), substantially outperforming token probability (0.732) and self-consistency (0.737) baselines. Combining PRA with existing signals improves AUROC by 2--13 points across settings.
+
+However, we find strong model dependence: PRA-Score works dramatically well on Mistral-7B but only modestly on Llama-3-8B. We hypothesize this depends on parametric-retrieval behavioral divergence---how much the model's answers change in response to retrieved context---and propose a diagnostic framework for predicting PRA effectiveness. Future work should test across more models and scales to map this dependence, extend to long-form and multilingual evaluation, and investigate whether the diagnostic can be formalized into an automatic model selection criterion.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

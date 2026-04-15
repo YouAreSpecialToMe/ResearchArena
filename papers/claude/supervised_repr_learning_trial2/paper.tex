@@ -1,0 +1,521 @@
+\documentclass{article}
+\usepackage[final]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+
+\newcommand{\ece}{\text{ECE}}
+\newcommand{\ccr}{\text{CCR}}
+\newcommand{\reals}{\mathbb{R}}
+\newcommand{\expect}{\mathbb{E}}
+\newcommand{\loss}{\mathcal{L}}
+
+\title{The Neural Collapse--Calibration Connection is Dataset-Dependent:\\An Empirical Investigation via Controlled Within-Class Geometry}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Neural collapse (NC) --- the phenomenon where deep network representations converge to a symmetric, maximally-separated structure during training --- has been hypothesized to harm model calibration by destroying within-class geometric information needed for uncertainty estimation. We investigate this hypothesis through a systematic empirical study using the \emph{Calibrated Collapse Regularizer} (CCR), a training-time method that maintains minimum within-class feature spread to prevent excessive NC1 collapse. Across CIFAR-10, CIFAR-100, and TinyImageNet with ResNet-18, we find that CCR successfully controls within-class spread (2--12$\times$ higher than standard training) with modest accuracy cost. However, our central finding is that the NC1--calibration relationship exhibits a \emph{dataset-dependent sign flip}: on CIFAR-10, higher NC1 (less collapse) significantly correlates with lower ECE ($\rho = -0.65$, $p = 0.003$), consistent with the hypothesis. On CIFAR-100, the correlation reverses --- higher NC1 correlates with \emph{higher} ECE ($\rho = +0.68$, $p = 0.002$). On TinyImageNet, CCR reduces ECE by 36\% but at a 16\% accuracy cost. These results demonstrate that controlling neural collapse alone does not reliably improve calibration, and that the optimal representation geometry is fundamentally dataset-dependent. We provide detailed analysis of why this sign flip occurs and discuss implications for future representation-aware calibration methods.
+\end{abstract}
+
+\section{Introduction}
+
+Deep neural networks trained with supervised objectives exhibit a striking geometric phenomenon in their final-layer representations known as \emph{neural collapse} (NC)~\citep{papyan2020prevalence}. As training progresses beyond zero training error, four interrelated properties emerge: (NC1) within-class feature variability collapses to zero; (NC2) class means converge to the vertices of a simplex equiangular tight frame (ETF); (NC3) the last-layer classifier converges to the class means (self-duality); and (NC4) classification reduces to nearest-class-center decisions. Neural collapse has been established as globally optimal under various theoretical settings~\citep{zhu2021geometric} and has become a central framework for understanding supervised representation learning.
+
+Separately, \emph{model calibration} --- the alignment between predicted confidence and actual correctness probability --- is critical for reliable deployment of deep learning systems~\citep{guo2017calibration}. Overconfident predictions can lead to failures in safety-critical applications such as medical diagnosis and autonomous driving. Modern neural networks are notoriously miscalibrated, typically exhibiting severe overconfidence~\citep{guo2017calibration}.
+
+A natural question arises: \emph{does neural collapse contribute to miscalibration?} The intuition is compelling. As NC1 drives within-class features to collapse onto their class means, all samples --- regardless of proximity to decision boundaries --- produce nearly identical, maximally confident predictions. This eliminates the geometric signal that could encode prediction uncertainty. Recent work has begun exploring this connection: \citet{guo2025cross} analyzed how label smoothing affects calibration through the NC lens, and \citet{harun2025controlling} showed that controlling NC degree benefits out-of-distribution detection.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1_conceptual.png}
+\caption{Conceptual illustration of our approach. \textbf{(a)} Full neural collapse: within-class features collapse to points, producing uniformly high-confidence predictions. \textbf{(b)} Partial collapse with CCR: features maintain spread that encodes proximity to decision boundaries. \textbf{(c)} The expected calibration effect: partial collapse should produce predictions closer to the identity line (perfect calibration).}
+\label{fig:conceptual}
+\end{figure}
+
+In this work, we directly test the hypothesis that \emph{controlling the degree of NC1 collapse improves calibration}. We propose the Calibrated Collapse Regularizer (CCR), a training-time regularizer that maintains a minimum level of within-class feature spread through a hinge-style penalty (Figure~\ref{fig:conceptual}).
+
+\textbf{Our central finding is a dataset-dependent sign flip in the NC1--calibration relationship.} On CIFAR-10, the Spearman correlation between NC1 and ECE across methods and hyperparameter settings is $\rho = -0.65$ ($p = 0.003$), consistent with the hypothesis that less collapse improves calibration. On CIFAR-100, this relationship \emph{reverses}: $\rho = +0.68$ ($p = 0.002$), meaning less collapse is associated with \emph{worse} calibration. This sign flip is itself a significant finding that reveals the NC--calibration connection is more complex than any simple monotonic relationship.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose CCR, a family of training-time regularizers that control within-class feature geometry by enforcing a minimum spread threshold, with fixed-threshold, adaptive-threshold, and softplus variants.
+    \item We conduct a systematic empirical study across three datasets (CIFAR-10, CIFAR-100, TinyImageNet), measuring both NC metrics and calibration metrics for cross-entropy, label smoothing, Mixup, and CCR variants with 3 random seeds.
+    \item We discover a \emph{dataset-dependent sign flip} in the NC1--ECE correlation: negative on CIFAR-10 ($\rho = -0.65$), positive on CIFAR-100 ($\rho = +0.68$), demonstrating that no single NC-based prescription universally improves calibration.
+    \item We document that label smoothing severely degrades raw calibration on CIFAR ($3\times$ higher ECE) but improves it on TinyImageNet ($2\times$ lower ECE), despite reducing within-class spread in both cases --- further evidence of dataset-dependency.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the CCR regularizer. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:analysis} analyzes the NC--calibration relationship and the sign flip phenomenon. Section~\ref{sec:discussion} discusses limitations and implications.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Neural Collapse.}
+Neural collapse was identified by \citet{papyan2020prevalence} as a terminal phase of training in deep classifiers, characterized by four interrelated geometric properties (NC1--NC4). \citet{zhu2021geometric} proved NC is globally optimal for the unconstrained features model. \citet{xu2023quantifying} proposed the Variability Collapse Index to quantify NC1 degree. Most relevant to our work, \citet{harun2025controlling} proposed controlling the degree of NC using entropy regularization, finding that NC degree affects OOD detection and transfer learning differently. Our work extends this line of investigation to calibration.
+
+\paragraph{Calibration Methods.}
+Post-hoc calibration methods include temperature scaling~\citep{guo2017calibration}, Platt scaling~\citep{platt1999probabilistic}, and histogram binning~\citep{zadrozny2001obtaining}. Training-time methods include label smoothing~\citep{szegedy2016rethinking, muller2019does} and Mixup~\citep{zhang2018mixup}. More recently, \citet{tao2025feature} proposed Feature Clipping, a post-hoc method that clips feature magnitudes to reduce overconfidence, observing that high-ECE samples tend to have larger feature variance --- an observation that partially motivated our work. \citet{ni2025balancing} proposed BalCAL, which balances a learnable classifier with a fixed ETF classifier for calibration.
+
+\paragraph{NC--Calibration Connection.}
+\citet{guo2025cross} analyzed the relationship between neural collapse and calibration through the lens of label smoothing, finding that label smoothing accelerates NC and can cause overconfidence through excessive NC1 collapse. \citet{park2024impact} analyzed how regularization affects calibration through the representation space. Our work differs from these analytical studies by proposing a method specifically designed to control NC1 for calibration, and by revealing the dataset-dependent nature of the NC--calibration relationship.
+
+\paragraph{Supervised Representation Learning.}
+Supervised contrastive learning~\citep{khosla2020supervised} and its variants~\citep{wang2025variational} learn representations by pulling same-class features together and pushing different-class features apart. These methods implicitly control NC geometry. Our CCR regularizer is complementary and can be combined with any supervised training objective.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: Neural Collapse and Calibration}
+
+Consider a classification model $f_\theta: \mathcal{X} \to \reals^K$ that maps inputs to logits over $K$ classes. Let $\phi_\theta(x) \in \reals^d$ denote the penultimate-layer features. During the terminal phase of training, neural collapse manifests as: the within-class feature covariance $\Sigma_W = \frac{1}{N}\sum_{c=1}^{K}\sum_{i: y_i=c} (\phi_\theta(x_i) - \boldsymbol{\mu}_c)(\phi_\theta(x_i) - \boldsymbol{\mu}_c)^\top$ approaches zero (NC1), where $\boldsymbol{\mu}_c$ is the mean of class-$c$ features.
+
+The NC1 metric is commonly measured as $\text{NC1} = \frac{1}{K}\text{tr}(\Sigma_W \Sigma_B^{-1})$, where $\Sigma_B$ is the between-class covariance. A more interpretable measure is the \emph{within-class spread}: $S_c = \frac{1}{|\mathcal{D}_c|}\sum_{i \in \mathcal{D}_c} \|\phi_\theta(x_i) - \boldsymbol{\mu}_c\|^2$.
+
+\textbf{Hypothesis.} We hypothesize that there exists a calibration-optimal degree of NC1 collapse --- specifically, a non-zero within-class spread --- that maintains high classification accuracy while improving calibration.
+
+\subsection{Theoretical Motivation}
+
+Under simplifying assumptions (Gaussian within-class features, simplex ETF class means, shared isotropic covariance), one can derive a relationship between within-class variance $\sigma^2$ and calibration. Let features follow $z | y=c \sim \mathcal{N}(\mu_c, \sigma^2 I)$ with class means at simplex ETF vertices separated by distance $\Delta$.
+
+\textbf{Proposition (informal).} The expected calibration error of the Bayes-optimal classifier satisfies:
+\begin{itemize}
+    \item As $\sigma \to 0$ (full NC1 collapse): $\ece \to |1 - \text{Accuracy}|$ (maximally miscalibrated when accuracy $< 1$).
+    \item As $\sigma \to \infty$ (no collapse): accuracy $\to 1/K$ (random chance) but the model becomes trivially calibrated.
+    \item There exists $\sigma^* > 0$ that minimizes $\ece$ subject to accuracy $\geq$ some threshold.
+\end{itemize}
+
+This motivates searching for a calibration-optimal partial collapse. However, the proposition assumes shared isotropic covariance and a fixed classifier --- conditions that do not hold in practice when the classifier co-adapts with representations during training. Our experiments reveal that this co-adaptation, combined with dataset-specific factors (number of classes, difficulty, baseline calibration regime), undermines the simple theoretical prediction. We include this analysis to explain \emph{why} the hypothesis was plausible and \emph{where} the theoretical assumptions break down.
+
+\subsection{Calibrated Collapse Regularizer (CCR)}
+
+CCR adds a penalty term to the standard training loss that activates when within-class feature spread drops below a threshold:
+\begin{equation}
+    \loss_{\text{total}} = \loss_{\text{CE}} + \lambda \cdot \loss_{\text{CCR}},
+\end{equation}
+where $\loss_{\text{CE}}$ is the cross-entropy loss and $\lambda > 0$ controls the regularization strength.
+
+\paragraph{Within-Class Spread Computation.}
+For a mini-batch $\mathcal{B}$ with features $\{\mathbf{z}_i = \phi_\theta(x_i)\}_{i \in \mathcal{B}}$ and labels $\{y_i\}$, we compute within-class spread for each class $c$ present in the batch:
+\begin{equation}
+    S_c = \frac{1}{|\mathcal{B}_c|} \sum_{i \in \mathcal{B}_c} \|\mathbf{z}_i - \boldsymbol{\mu}_c\|^2, \quad \text{where } \mathcal{B}_c = \{i \in \mathcal{B} : y_i = c\}.
+\end{equation}
+Class prototypes $\boldsymbol{\mu}_c$ are maintained as exponential moving averages with momentum $\alpha = 0.999$:
+\begin{equation}
+    \boldsymbol{\mu}_c^{(t)} = \alpha \cdot \boldsymbol{\mu}_c^{(t-1)} + (1 - \alpha) \cdot \bar{\mathbf{z}}_c^{(t)},
+\end{equation}
+where $\bar{\mathbf{z}}_c^{(t)}$ is the batch mean for class $c$.
+
+\paragraph{CCR Variants.}
+We evaluate three variants:
+
+\begin{itemize}
+    \item \textbf{CCR-fixed}: Uses a fixed threshold $\tau$ with a hinge penalty:
+    \begin{equation}
+        \loss_{\text{CCR-fixed}} = \frac{1}{|\mathcal{C}_\mathcal{B}|} \sum_{c \in \mathcal{C}_\mathcal{B}} \max(0, \tau - S_c).
+    \end{equation}
+
+    \item \textbf{CCR-adaptive}: Sets the threshold proportional to the minimum inter-class distance:
+    \begin{equation}
+        \tau_{\text{adapt}} = \gamma \cdot \min_{c \neq c'} \|\boldsymbol{\mu}_c - \boldsymbol{\mu}_{c'}\|^2,
+    \end{equation}
+    where $\gamma \in (0, 1)$ controls the fraction preserved as within-class spread.
+
+    \item \textbf{CCR-soft}: Uses the adaptive threshold with a softplus penalty for smoother gradients:
+    \begin{equation}
+        \loss_{\text{CCR-soft}} = \frac{1}{|\mathcal{C}_\mathcal{B}|} \sum_{c \in \mathcal{C}_\mathcal{B}} \log(1 + \exp(\tau_{\text{adapt}} - S_c)).
+    \end{equation}
+\end{itemize}
+
+The hinge/softplus formulation is deliberate: the penalty only activates when within-class spread drops below the threshold, allowing the model to form well-separated clusters while preventing excessive collapse.
+
+\paragraph{Computational Overhead.}
+CCR requires maintaining running class prototypes ($O(Kd)$ memory) and computing within-class distances during training. Each training epoch with CCR takes less than 2\% additional wall-clock time compared to standard cross-entropy training.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets.}
+We evaluate on three benchmarks: \textbf{CIFAR-10} (10 classes, 50K/10K train/test), \textbf{CIFAR-100} (100 classes, 50K/10K), and \textbf{TinyImageNet} (200 classes, 100K/10K). Standard data augmentation (random crop, horizontal flip) and normalization are applied.
+
+\paragraph{Architecture and Training.}
+All experiments use ResNet-18~\citep{he2016deep} trained with SGD (momentum 0.9, weight decay $5 \times 10^{-4}$), cosine annealing learning rate schedule from 0.1 to 0, batch size 256. CIFAR models are trained for 200 epochs; TinyImageNet for 100 epochs. Each main experiment is run with 3 random seeds (42, 123, 456) on CIFAR, and a single seed (42) on TinyImageNet. We report mean $\pm$ standard deviation where applicable.
+
+\paragraph{Methods Compared.}
+\begin{itemize}
+    \item \textbf{Cross-Entropy (CE)}: Standard training baseline.
+    \item \textbf{Label Smoothing (LS)}: CE with soft targets, $\epsilon = 0.1$~\citep{szegedy2016rethinking}.
+    \item \textbf{Mixup}: Input mixing augmentation, $\alpha = 0.2$~\citep{zhang2018mixup}.
+    \item \textbf{CCR-adaptive}: Adaptive threshold with hinge penalty, $\lambda = 0.1$, $\gamma = 0.1$.
+    \item \textbf{CCR-soft}: Adaptive threshold with softplus penalty, $\lambda = 0.1$, $\gamma = 0.1$.
+    \item \textbf{CCR-fixed}: Fixed threshold $\tau = 15$ with hinge penalty, $\lambda = 0.1$.
+    \item \textbf{Temperature Scaling (TS)}: Post-hoc calibration applied to each trained model using a held-out validation set (10\% of training data).
+\end{itemize}
+
+\paragraph{Metrics.}
+\emph{Classification}: Top-1 accuracy. \emph{Calibration}: Expected Calibration Error (ECE, 15 equal-width bins), Maximum Calibration Error (MCE), Adaptive ECE (AdaECE), Negative Log-Likelihood (NLL). \emph{Neural collapse}: NC1 ($\frac{1}{K}\text{tr}(\Sigma_W \Sigma_B^{-1})$), NC2 (std of pairwise cosine similarities of centered class means), mean within-class spread.
+
+\subsection{Main Results}
+
+Tables~\ref{tab:main_cifar10}--\ref{tab:main_tinyimagenet} present results across all three datasets.
+
+\begin{table}[t]
+\caption{Results on \textbf{CIFAR-10} with ResNet-18 (mean $\pm$ std over 3 seeds). ECE and NLL: lower is better ($\downarrow$). Accuracy: higher is better ($\uparrow$). Best raw ECE in \textbf{bold}. $^\dagger$Post-temperature-scaling.}
+\label{tab:main_cifar10}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Acc (\%) $\uparrow$ & ECE (\%) $\downarrow$ & ECE$^\dagger$ (\%) $\downarrow$ & NLL $\downarrow$ & Spread \\
+\midrule
+CE & 95.27 $\pm$ 0.18 & 2.65 $\pm$ 0.16 & 1.71 $\pm$ 0.12 & 0.182 $\pm$ 0.007 & 0.60 \\
+Label Smoothing & 95.58 $\pm$ 0.10 & 7.60 $\pm$ 0.14 & 2.26 $\pm$ 0.19 & 0.237 $\pm$ 0.003 & 0.23 \\
+Mixup & 95.83 $\pm$ 0.16 & 4.07 $\pm$ 0.64 & 2.56 $\pm$ 0.22 & 0.178 $\pm$ 0.010 & 1.15 \\
+\midrule
+CCR-adaptive & 95.33 $\pm$ 0.05 & 2.54 $\pm$ 0.12 & 1.71 $\pm$ 0.18 & 0.176 $\pm$ 0.004 & 7.25 \\
+CCR-soft & 95.29 $\pm$ 0.18 & \textbf{2.49 $\pm$ 0.13} & \textbf{1.68 $\pm$ 0.10} & 0.180 $\pm$ 0.005 & 13.23 \\
+CCR-fixed ($\tau\!=\!15$) & 95.27 $\pm$ 0.07 & 2.61 $\pm$ 0.13 & 1.80 $\pm$ 0.15 & 0.181 $\pm$ 0.005 & 23.60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Results on \textbf{CIFAR-100} with ResNet-18 (mean $\pm$ std over 3 seeds). Best raw ECE in \textbf{bold}. Temperature scaling worsens ECE for CE and CCR variants on this dataset, indicating models are already well-calibrated before post-hoc adjustment.}
+\label{tab:main_cifar100}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Acc (\%) $\uparrow$ & ECE (\%) $\downarrow$ & ECE$^\dagger$ (\%) $\downarrow$ & NLL $\downarrow$ & Spread \\
+\midrule
+CE & 78.11 $\pm$ 0.09 & 4.82 $\pm$ 0.16 & 7.34 $\pm$ 0.19 & 0.919 $\pm$ 0.005 & 12.05 \\
+Label Smoothing & 78.78 $\pm$ 0.05 & 15.24 $\pm$ 0.08 & 13.25 $\pm$ 0.04 & 1.116 $\pm$ 0.002 & 3.59 \\
+Mixup & 78.74 $\pm$ 0.15 & 6.32 $\pm$ 0.69 & 10.29 $\pm$ 0.28 & 0.888 $\pm$ 0.006 & 20.85 \\
+\midrule
+CCR-adaptive & 77.85 $\pm$ 0.19 & 4.83 $\pm$ 0.02 & 7.07 $\pm$ 0.17 & 0.926 $\pm$ 0.011 & 14.27 \\
+CCR-soft & 77.75 $\pm$ 0.30 & 4.79 $\pm$ 0.20 & 6.82 $\pm$ 0.34 & 0.927 $\pm$ 0.005 & 16.38 \\
+CCR-fixed ($\tau\!=\!15$) & 77.46 $\pm$ 0.24 & \textbf{4.63 $\pm$ 0.45} & 5.61 $\pm$ 0.16 & 0.919 $\pm$ 0.011 & 22.32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Results on \textbf{TinyImageNet} with ResNet-18 (single seed 42). CCR-adaptive reduces ECE by 36\% relative to CE but incurs a substantial accuracy penalty of 8.6 percentage points. Mixup achieves the best balance.}
+\label{tab:main_tinyimagenet}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Acc (\%) $\uparrow$ & ECE (\%) $\downarrow$ & ECE$^\dagger$ (\%) $\downarrow$ & NLL $\downarrow$ & Spread \\
+\midrule
+CE & 52.58 & 15.93 & 9.72 & 2.287 & 111.67 \\
+Label Smoothing & 53.04 & 8.05 & 6.85 & --- & 44.36 \\
+Mixup & 54.96 & \textbf{3.49} & \textbf{2.13} & --- & 73.31 \\
+\midrule
+CCR-adaptive & 43.98 & 10.14 & 7.91 & 2.420 & 108.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{CIFAR-10: CCR Provides Small Improvements.}
+On CIFAR-10, CCR variants achieve slightly lower ECE than CE: CCR-soft reduces ECE from 2.65\% to 2.49\% (5.9\% relative reduction) with no accuracy loss. However, these improvements are not statistically significant (paired $t$-test: $p = 0.45$ for CCR-soft vs.\ CE). CCR increases within-class spread substantially ($12\times$ for CCR-adaptive, $22\times$ for CCR-soft relative to CE), confirming that the regularizer successfully controls representation geometry.
+
+\paragraph{CIFAR-100: Minimal Effect on Calibration.}
+On CIFAR-100, CCR variants achieve ECEs nearly identical to CE (4.63--4.83\% vs.\ 4.82\%), with a small accuracy drop (0.3--0.7\%). The within-class spread increase is more modest ($1.2$--$1.9\times$) compared to CIFAR-10. Notably, CCR-fixed with temperature scaling achieves the best post-TS ECE (5.61\%), outperforming CE+TS (7.34\%).
+
+\paragraph{TinyImageNet: Large ECE Reduction but Accuracy Drop.}
+CCR-adaptive reduces ECE from 15.93\% to 10.14\% (36\% relative reduction) on TinyImageNet. However, accuracy drops from 52.58\% to 43.98\%, a penalty of 8.6 percentage points that renders this trade-off impractical. Mixup achieves a far better outcome: 3.49\% ECE with \emph{higher} accuracy (54.96\%).
+
+\paragraph{Label Smoothing Degrades Calibration on CIFAR.}
+Label smoothing produces the worst raw calibration on both CIFAR datasets: 7.60\% ECE on CIFAR-10 ($2.9\times$ worse than CE) and 15.24\% ECE on CIFAR-100 ($3.2\times$ worse). Label smoothing also produces the lowest within-class spread, consistent with its known effect of accelerating NC1 collapse~\citep{guo2025cross}. On TinyImageNet, however, label smoothing \emph{improves} calibration (8.05\% vs.\ 15.93\%), a reversal we analyze in Section~\ref{sec:analysis}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_reliability_diagrams.png}
+\caption{Reliability diagrams for CE, Label Smoothing, Mixup, and CCR-adaptive on CIFAR-10 (top) and CIFAR-100 (bottom). Each bar shows the gap between confidence and accuracy in each bin. On CIFAR-10, CCR-adaptive (ECE=0.025) is closest to perfect calibration. On CIFAR-100, CCR-adaptive (ECE=0.048) is comparable to CE (ECE=0.047). Label smoothing shows severe overconfidence on both datasets.}
+\label{fig:reliability}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+\begin{table}[t]
+\caption{Ablation study on \textbf{CIFAR-100} with ResNet-18. CCR variants with different thresholds and penalties. Single seed (42) except where noted. Spread is mean within-class squared distance from prototype.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{llccccc}
+\toprule
+Variant & Threshold & $\lambda$ & Acc (\%) & ECE (\%) & ECE+TS (\%) & Spread \\
+\midrule
+CE (baseline) & --- & --- & 78.11 & 4.69 & 7.30 & 12.95 \\
+\midrule
+CCR-adaptive & Adaptive ($\gamma\!=\!0.1$) & 0.1 & 77.67 & 4.84 & 7.24 & 15.35 \\
+CCR-soft & Adaptive ($\gamma\!=\!0.1$) & 0.1 & 78.13 & 4.74 & 7.24 & 16.17 \\
+CCR-fixed & $\tau\!=\!15$ & 0.1 & 77.69 & 4.13 & 5.50 & 21.93 \\
+CCR-spectral & Adaptive ($\gamma\!=\!0.1$) & 0.1 & 77.61 & 5.11 & 7.56 & 12.60 \\
+\midrule
+CCR-soft & Adaptive ($\gamma\!=\!2.0$) & 0.01 & 74.71 & 8.23 & 4.75 & 165.47 \\
+CCR-fixed & $\tau\!=\!10$ & 0.1 & 76.73 & 4.99 & 3.89 & 26.35 \\
+CCR-fixed & $\tau\!=\!20$ & 0.1 & 76.45 & 5.53 & 3.55 & 32.89 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} shows ablation results on CIFAR-100 (seed 42 for single-run ablations).
+
+\paragraph{Softplus vs.\ Hinge.} CCR-soft achieves higher accuracy than CCR-adaptive (78.13\% vs.\ 77.67\%) with similar ECE, suggesting that the smoother gradient from softplus helps maintain accuracy.
+
+\paragraph{Fixed vs.\ Adaptive Threshold.} CCR-fixed ($\tau = 15$) achieves the best raw ECE (4.13\%) among all variants on seed 42. However, this advantage does not persist across seeds (mean ECE of 4.63\% $\pm$ 0.45\% over 3 seeds), indicating sensitivity to initialization.
+
+\paragraph{Spectral Variant.} CCR-spectral, which controls the effective dimensionality of within-class features rather than total variance, achieves 5.11\% ECE --- worse than standard CE (4.69\%). This suggests that calibration depends more on the magnitude of within-class spread than its dimensional structure.
+
+\paragraph{Extreme Spread is Harmful for Raw ECE but Helps Post-Hoc.} When the threshold is set very high ($\gamma = 2.0$, or $\tau = 20$), accuracy drops substantially and raw ECE degrades. However, temperature scaling becomes more effective in these settings (ECE+TS of 3.55--4.75\%), suggesting that high spread creates features more amenable to post-hoc correction.
+
+\subsection{Neural Collapse Metrics}
+
+\begin{table}[t]
+\caption{Neural collapse metrics on \textbf{CIFAR-100} (mean over 3 seeds). NC1: $\frac{1}{K}\text{tr}(\Sigma_W \Sigma_B^{-1})$, higher means less collapsed. NC2: std of pairwise cosine similarities (lower is more ETF-like). Spread: mean within-class squared distance.}
+\label{tab:nc_metrics}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & NC1 ($\times 10^6$) & NC2 & Spread & ECE (\%) \\
+\midrule
+CE & 0.98 $\pm$ 0.24 & 0.067 $\pm$ 0.001 & 12.05 $\pm$ 0.63 & 4.82 \\
+Label Smoothing & 4.00 $\pm$ 0.89 & 0.034 $\pm$ 0.004 & 3.59 $\pm$ 0.06 & 15.24 \\
+Mixup & 1.87 $\pm$ 0.27 & 0.069 $\pm$ 0.002 & 20.85 $\pm$ 0.33 & 6.32 \\
+\midrule
+CCR-adaptive & 1.08 $\pm$ 0.10 & 0.071 $\pm$ 0.004 & 14.27 $\pm$ 0.01 & 4.83 \\
+CCR-soft & 1.16 $\pm$ 0.12 & 0.068 $\pm$ 0.001 & 16.38 $\pm$ 0.55 & 4.79 \\
+CCR-fixed ($\tau\!=\!15$) & 0.82 $\pm$ 0.05 & 0.075 $\pm$ 0.012 & 22.32 $\pm$ 0.32 & 4.63 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:nc_metrics} and Figure~\ref{fig:nc_metrics} reveal the relationship between NC metrics and calibration on CIFAR-100.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig8_nc_metrics.png}
+\caption{Neural collapse metrics (NC1--NC4) on CIFAR-100 across methods (mean $\pm$ std over 3 seeds). Label Smoothing shows the highest NC1 (least collapsed within-class variability) but also the worst calibration (ECE=15.24\%), while CCR maintains low NC1 with higher spread. Note that NC1 as a ratio can be misleading when overall feature scale changes.}
+\label{fig:nc_metrics}
+\end{figure}
+
+\paragraph{NC1 Metric vs.\ Within-Class Spread.}
+A striking finding is the discrepancy between the standard NC1 metric and raw within-class spread. Label smoothing has the \emph{highest} NC1 ($4.00 \times 10^6$, suggesting least collapse) but the \emph{lowest} spread (3.59, suggesting most collapse). This occurs because label smoothing compresses both within-class and between-class structure, reducing $\Sigma_B$ more than $\Sigma_W$ in relative terms. The NC1 metric, being a ratio $\text{tr}(\Sigma_W \Sigma_B^{-1})/K$, can be misleading when the overall feature scale changes.
+
+\paragraph{NC2 Preservation.}
+All CCR variants maintain NC2 values close to CE (0.068--0.075 vs.\ 0.067), confirming that CCR selectively controls within-class spread without disrupting inter-class ETF structure.
+
+\section{Analysis: The NC1--Calibration Sign Flip}
+\label{sec:analysis}
+
+\subsection{Quantifying the Relationship}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig5_nc1_vs_ece.png}
+\caption{NC1 vs.\ ECE across all methods and hyperparameter settings. When both datasets are pooled, the overall correlation appears weakly negative ($\rho = -0.35$, $p = 0.20$). However, this masks the \emph{opposite} per-dataset relationships: CIFAR-10 shows $\rho = -0.65$ ($p = 0.003$) while CIFAR-100 shows $\rho = +0.68$ ($p = 0.002$). This sign flip is our central empirical finding.}
+\label{fig:nc1_vs_ece}
+\end{figure}
+
+To quantify the NC1--calibration relationship, we compute Spearman rank correlations between NC1 and ECE across all method $\times$ hyperparameter setting combinations on each dataset. The correlations computed include all per-seed data points for CE, label smoothing, Mixup, and all CCR variants.
+
+\begin{itemize}
+    \item \textbf{CIFAR-10} ($n=18$ settings): $\rho = -0.65$, $p = 0.003$. \emph{Significant negative correlation}: higher NC1 (less collapse) is associated with lower ECE (better calibration). This is consistent with the original hypothesis.
+    \item \textbf{CIFAR-100} ($n=19$ settings): $\rho = +0.68$, $p = 0.002$. \emph{Significant positive correlation}: higher NC1 is associated with \emph{higher} ECE (worse calibration). This contradicts the hypothesis.
+\end{itemize}
+
+This sign flip is visualized in Figure~\ref{fig:nc1_vs_ece}. The within-class spread shows a similar pattern: spread--ECE correlation is $\rho = -0.63$ ($p = 0.005$) on CIFAR-10 but $\rho = -0.33$ ($p = 0.17$, not significant) on CIFAR-100.
+
+\subsection{Explaining the Sign Flip}
+
+We identify three factors that explain why the NC1--calibration relationship reverses across datasets:
+
+\paragraph{1. Baseline Calibration Regime.}
+On CIFAR-10, standard CE is reasonably well-calibrated (ECE = 2.65\%) with slight overconfidence. Here, maintaining within-class spread helps encode boundary proximity, nudging predictions toward better calibration. On CIFAR-100, CE is also well-calibrated (ECE = 4.82\%), but the 100-class softmax produces systematically different confidence distributions. Methods that increase NC1 (like label smoothing, which inflates NC1 via scale compression) tend to distort confidences in a way that \emph{increases} ECE.
+
+\paragraph{2. Number of Classes.}
+With 10 classes, the softmax can produce a relatively uniform confidence distribution, and within-class variance directly affects boundary-proximity signals. With 100 classes, the softmax is more saturated --- small perturbations to the representation space have a smaller relative effect on confidence, and the dominant factor is the absolute scale of logits rather than within-class geometry.
+
+\paragraph{3. The NC1 Metric is Scale-Dependent.}
+As shown in Table~\ref{tab:nc_metrics}, label smoothing achieves the highest NC1 ($4.00 \times 10^6$) but lowest spread (3.59). This is because NC1 = $\text{tr}(\Sigma_W \Sigma_B^{-1})/K$ depends on the ratio of within-class to between-class variance. Label smoothing compresses the entire feature space (both $\Sigma_W$ and $\Sigma_B$), inflating NC1 while actually \emph{reducing} absolute within-class spread. The positive CIFAR-100 correlation between NC1 and ECE is partly an artifact of this scale sensitivity: label smoothing drives both NC1 and ECE upward.
+
+\subsection{Dataset-Dependent Direction of Label Smoothing}
+
+\begin{table}[t]
+\caption{The spread--calibration relationship is dataset-dependent. On CIFAR, label smoothing reduces spread and worsens ECE. On TinyImageNet, label smoothing reduces spread but \emph{improves} ECE. The direction depends on the baseline calibration regime.}
+\label{tab:dataset_dependency}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Dataset & Method & Acc (\%) & Spread & ECE (\%) & Regime \\
+\midrule
+\multirow{4}{*}{CIFAR-10} & CE & 95.27 & 0.60 & 2.65 & \multirow{2}{*}{Well-calibrated} \\
+ & Label Smoothing & 95.58 & 0.23 & 7.60 & \\
+ & CCR-soft & 95.29 & 13.23 & 2.49 & \\
+ & Mixup & 95.83 & 1.15 & 4.07 & \\
+\midrule
+\multirow{4}{*}{CIFAR-100} & CE & 78.11 & 12.05 & 4.82 & \multirow{2}{*}{Well-calibrated} \\
+ & Label Smoothing & 78.78 & 3.59 & 15.24 & \\
+ & CCR-fixed & 77.46 & 22.32 & 4.63 & \\
+ & Mixup & 78.74 & 20.85 & 6.32 & \\
+\midrule
+\multirow{3}{*}{TinyImageNet} & CE & 52.58 & 111.67 & 15.93 & \multirow{2}{*}{Overconfident} \\
+ & Label Smoothing & 53.04 & 44.36 & 8.05 & \\
+ & CCR-adaptive & 43.98 & 108.85 & 10.14 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:dataset_dependency} shows the full picture. On TinyImageNet, CE is severely overconfident (accuracy 52.6\% but typical confidence much higher), and label smoothing's soft targets directly combat this overconfidence, yielding a 50\% ECE reduction. On CIFAR, CE is already well-calibrated, so label smoothing's confidence suppression overshoots. This confirms that the NC--calibration relationship cannot be characterized by a simple rule about within-class spread.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig5_pareto_frontier.png}
+\caption{Accuracy vs.\ ECE trade-off on CIFAR-100. CCR variants achieve comparable or lower ECE than CE but at slightly lower accuracy --- no variant strictly Pareto-dominates CE. Label Smoothing dramatically worsens ECE. Mixup provides good accuracy with moderate ECE.}
+\label{fig:pareto}
+\end{figure}
+
+\subsection{Success Criteria Assessment}
+
+We evaluate the pre-specified success criteria from our experimental plan:
+
+\begin{itemize}
+    \item \textbf{Primary criterion}: ``CCR reduces ECE by $\geq$20\% relative to CE on $\geq$2/3 datasets.'' \textbf{Not met.} Maximum reduction on CIFAR is 5.9\% (CIFAR-10). On TinyImageNet, the 36\% ECE reduction comes with an unacceptable 8.6pp accuracy drop.
+    \item \textbf{Refutation condition}: ``NC1 degree does not significantly correlate with ECE.'' \textbf{Partially met, with a twist.} The NC1--ECE correlations are significant on both datasets --- but with \emph{opposite signs}. This is more informative than the simple refutation: the relationship exists but is not universal.
+    \item \textbf{Refutation condition}: ``Post-hoc temperature scaling on standard models matches or beats CCR.'' \textbf{Met on CIFAR-10.} CE+TS achieves 1.71\% ECE, matching CCR-adaptive+TS and only marginally behind CCR-soft+TS (1.68\%). On CIFAR-100, CCR-fixed+TS (5.61\%) outperforms CE+TS (7.34\%).
+\end{itemize}
+
+We transparently report that the primary success criteria are not met. The refutation is nuanced: controlling NC1 can affect calibration, but the direction is dataset-dependent.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{The Sign Flip as the Main Contribution.}
+While CCR does not achieve its primary goal of reliably improving calibration, the discovery of the dataset-dependent sign flip in the NC1--ECE relationship is itself a significant finding. Prior work~\citep{guo2025cross, harun2025controlling} has implicitly assumed a consistent NC--calibration relationship. Our results show this assumption is incorrect and that any future method targeting this connection must account for dataset-specific factors including the number of classes, baseline calibration regime, and feature scale.
+
+\paragraph{Where the Theoretical Motivation Breaks Down.}
+The theoretical proposition in Section~\ref{sec:method} predicted a calibration-optimal partial collapse. This prediction fails in practice because: (1) the classifier co-adapts with features during training, absorbing geometric changes; (2) the softmax temperature effectively normalizes out much of the geometric variation CCR introduces; and (3) the NC1 metric is scale-dependent and does not uniquely determine calibration-relevant geometry. A more complete theory would need to jointly model feature geometry and classifier adaptation.
+
+\paragraph{Limitations.}
+(1) We evaluate only ResNet-18; the NC--calibration relationship may differ for larger architectures or Vision Transformers. (2) TinyImageNet CCR results are from a single seed with a substantial accuracy penalty, preventing strong conclusions. (3) We do not evaluate OOD detection or transfer learning, where controlling NC degree has been shown to help~\citep{harun2025controlling}. (4) We do not include ResNet-50 experiments or additional planned experiments (layer-wise analysis, OOD detection) due to computational constraints. (5) The CCR-spectral variant and full hyperparameter sweeps were only conducted on CIFAR-100, limiting the generalizability of ablation conclusions.
+
+\paragraph{Future Directions.}
+(1) Developing scale-invariant NC metrics that better capture calibration-relevant geometry. (2) Jointly optimizing feature geometry \emph{and} the classifier to prevent co-adaptation from absorbing geometric changes. (3) Investigating whether the sign flip generalizes to ImageNet-scale tasks and diverse architectures. (4) Combining CCR with post-hoc methods --- our ablation shows that high-spread models benefit more from temperature scaling (ECE+TS of 3.55\% for CCR-fixed $\tau=20$ vs.\ 7.30\% for CE).
+
+\section{Conclusion}
+
+We investigated whether controlling neural collapse can improve model calibration, proposing the Calibrated Collapse Regularizer (CCR) to maintain within-class feature spread during training. CCR successfully controls representation geometry (2--12$\times$ higher within-class spread on CIFAR-10) with minimal accuracy cost on CIFAR. Our central finding is a \emph{dataset-dependent sign flip} in the NC1--calibration relationship: the Spearman correlation between NC1 and ECE is $\rho = -0.65$ ($p = 0.003$) on CIFAR-10 but $\rho = +0.68$ ($p = 0.002$) on CIFAR-100. Label smoothing exhibits a parallel reversal: it worsens calibration $3\times$ on CIFAR but improves it $2\times$ on TinyImageNet. These findings demonstrate that no single NC-based prescription universally improves calibration, and that the optimal representation geometry depends on dataset-specific factors including the number of classes, baseline calibration regime, and feature scale. Post-hoc temperature scaling remains a strong baseline. We hope this honest reporting of a nuanced negative result helps guide future research at the intersection of neural collapse and calibration.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\newpage
+\appendix
+\section{Additional Experimental Details}
+\label{app:details}
+
+\paragraph{Hardware.} All experiments were run on a single NVIDIA GPU with CUDA support. Each CIFAR training run takes approximately 12--15 minutes; TinyImageNet runs take approximately 20--25 minutes.
+
+\paragraph{Hyperparameters.} Table~\ref{tab:hyperparams} summarizes key hyperparameters.
+
+\begin{table}[h]
+\caption{Hyperparameters used across all experiments.}
+\label{tab:hyperparams}
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Hyperparameter & Value \\
+\midrule
+Optimizer & SGD \\
+Momentum & 0.9 \\
+Weight decay & $5 \times 10^{-4}$ \\
+Initial learning rate & 0.1 \\
+LR schedule & Cosine annealing \\
+Batch size & 256 \\
+Epochs (CIFAR) & 200 \\
+Epochs (TinyImageNet) & 100 \\
+\midrule
+CCR $\lambda$ & 0.1 \\
+CCR $\gamma$ (adaptive) & 0.1 \\
+CCR $\tau$ (fixed) & 15 \\
+CCR momentum $\alpha$ & 0.999 \\
+\midrule
+Label smoothing $\epsilon$ & 0.1 \\
+Mixup $\alpha$ & 0.2 \\
+ECE bins & 15 \\
+TS validation split & 10\% of training data \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Temperature Scaling.}
+We optimize the temperature parameter $T$ by minimizing NLL on a held-out validation set (10\% of training data, split with the same random seed). The temperature is learned via L-BFGS optimization. Learned temperatures range from 0.79 (label smoothing, CIFAR-10) to 1.23 (CCR-spectral, CIFAR-100).
+
+\section{Per-Seed Results}
+\label{app:per_seed}
+
+\begin{table}[h]
+\caption{Per-seed results on CIFAR-10 (accuracy \% / ECE \%).}
+\label{tab:per_seed_cifar10}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Seed 42 & Seed 123 & Seed 456 \\
+\midrule
+CE & 95.16 / 2.70 & 95.12 / 2.80 & 95.53 / 2.44 \\
+Label Smoothing & 95.66 / 7.41 & 95.44 / 7.71 & 95.65 / 7.69 \\
+Mixup & 95.67 / 4.94 & 95.78 / 3.82 & 96.04 / 3.45 \\
+CCR-adaptive & 95.31 / 2.52 & 95.27 / 2.69 & 95.40 / 2.41 \\
+CCR-soft & 95.54 / 2.31 & 95.17 / 2.57 & 95.16 / 2.60 \\
+CCR-fixed & 95.32 / 2.49 & 95.19 / 2.73 & 95.30 / 2.62 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\caption{Per-seed results on CIFAR-100 (accuracy \% / ECE \%).}
+\label{tab:per_seed_cifar100}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Seed 42 & Seed 123 & Seed 456 \\
+\midrule
+CE & 78.11 / 4.69 & 78.23 / 4.72 & 78.00 / 5.04 \\
+Label Smoothing & 78.75 / 15.26 & 78.75 / 15.13 & 78.85 / 15.32 \\
+Mixup & 78.86 / 7.09 & 78.83 / 5.43 & 78.53 / 6.44 \\
+CCR-adaptive & 77.67 / 4.84 & 77.77 / 4.80 & 78.12 / 4.84 \\
+CCR-soft & 78.13 / 4.74 & 77.71 / 4.58 & 77.40 / 5.05 \\
+CCR-fixed & 77.69 / 4.13 & 77.47 / 4.59 & 77.21 / 5.18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

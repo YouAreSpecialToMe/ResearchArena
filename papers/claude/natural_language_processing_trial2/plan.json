@@ -1,0 +1,253 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for model inference, evaluation, and visualization.",
+    "steps": {
+      "step1": "Install core packages: pip install torch transformers accelerate bitsandbytes sentencepiece protobuf",
+      "step2": "Install evaluation packages: pip install scikit-learn scipy numpy pandas matplotlib seaborn",
+      "step3": "Install NLP utilities: pip install nltk rouge-score datasets",
+      "step4": "Verify GPU availability: run torch.cuda.is_available(), check device name is RTX A6000 with 48GB VRAM",
+      "step5": "Create directory structure: exp/ with subdirectories data/, results/, figures/, shared/",
+      "step6": "Set global random seeds: 42, 123, 456 for reproducibility across all experiments"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess evaluation datasets",
+    "description": "Prepare the three evaluation benchmarks. We subsample to keep compute feasible while maintaining statistical power: 100 entities from FActScore, 50 prompts from LongFact (diverse topics), and 200 questions from TruthfulQA. This yields ~600-800 total claims per model, enough for reliable AUC estimates.",
+    "steps": {
+      "step1": "Download FActScore biography dataset: use the datasets library to load 'factscore/factscore' or download from the FActScore GitHub repo. Select 100 entities stratified by popularity (rare/medium/popular). Store entity names and ground-truth atomic facts.",
+      "step2": "Download LongFact dataset: clone from the LongFact GitHub repo or load via datasets. Select 50 prompts covering diverse topics (science, history, geography, culture, technology). Store prompts and any available reference answers.",
+      "step3": "Download TruthfulQA dataset: load 'truthful_qa' from HuggingFace datasets (generation split). Select 200 questions. Store questions, best answers, and correct/incorrect answer labels.",
+      "step4": "Create a unified data format: JSON files with fields {id, source, prompt, reference_facts (if available), category}. Save as data/factscore_subset.json, data/longfact_subset.json, data/truthfulqa_subset.json.",
+      "step5": "Compute and log dataset statistics: number of prompts, expected claim counts, topic distribution. Save as data/dataset_stats.json."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate model outputs and decompose into atomic claims",
+    "description": "For each of the 3 models, generate long-form text for FActScore and LongFact prompts, and answers for TruthfulQA. Then decompose all outputs into atomic claims. Use the same model for generation and claim decomposition to keep the pipeline self-contained. Process one model at a time to fit in GPU memory.",
+    "steps": {
+      "step1": "For each model (Llama-3.1-8B-Instruct, Mistral-7B-Instruct-v0.3, Qwen2.5-7B-Instruct), load in float16 on GPU.",
+      "step2": "Generate FActScore biographies: prompt 'Tell me a bio of {entity}' with max_new_tokens=256, temperature=0.7, top_p=0.9. Generate for all 100 entities. Save raw outputs.",
+      "step3": "Generate LongFact answers: use the original LongFact prompts with max_new_tokens=512, temperature=0.7, top_p=0.9. Generate for all 50 prompts. Save raw outputs.",
+      "step4": "Generate TruthfulQA answers: prompt each question with max_new_tokens=128, temperature=0.7, top_p=0.9. Generate for all 200 questions. Save raw outputs.",
+      "step5": "Decompose all outputs into atomic claims using the same model with a structured FActScore-style prompt: 'Break the following text into independent atomic facts. Each fact should be a single, self-contained sentence. Output one fact per line.' Batch process with temperature=0.",
+      "step6": "Apply deduplication and filtering: remove trivially short claims (<5 words), merge near-duplicates. Target ~200-300 claims per dataset per model.",
+      "step7": "Save claims as data/claims_{model}_{dataset}.json with fields {claim_id, claim_text, source_text, entity/prompt_id}.",
+      "step8": "Estimated time: ~30 min generation + ~20 min decomposition per model = ~2.5 hours total for 3 models."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create ground-truth factuality labels",
+    "description": "Label each atomic claim as factual or hallucinated. For FActScore, match against provided reference facts. For TruthfulQA, use the provided correctness labels. For LongFact, use a combination of reference matching and the model's own logprob signal as a proxy (since full external verification is infeasible within compute budget).",
+    "steps": {
+      "step1": "FActScore labeling: for each claim, compute token-level overlap (ROUGE-1, ROUGE-L) with reference atomic facts. Claims with ROUGE-L > 0.6 to any reference fact are labeled 'factual'; claims with ROUGE-L < 0.3 to all reference facts are labeled 'hallucinated'; ambiguous claims (0.3-0.6) are excluded. This gives cleaner binary labels.",
+      "step2": "TruthfulQA labeling: use the provided truthful/untruthful labels. For generated answers, check if the answer aligns with the 'best_answer' (factual) or 'incorrect_answers' (hallucinated) using semantic similarity.",
+      "step3": "LongFact labeling: use Wikipedia-based verification. For each claim, search Wikipedia (offline dump or API) and compute entailment score. As a practical alternative within compute constraints, use a simple NLI approach: load a small NLI model (deberta-v3-base-mnli-fever-anli, ~400MB) on CPU and check entailment between claim and top Wikipedia passage.",
+      "step4": "Save labeled claims as data/labeled_claims_{model}_{dataset}.json with fields {claim_id, claim_text, label (0=factual, 1=hallucinated), confidence_in_label}.",
+      "step5": "Report label distribution per dataset per model. Target: ~30-50% hallucinated claims (typical for 7-8B models on factual tasks). If distribution is too skewed, adjust labeling thresholds.",
+      "step6": "Estimated time: ~30 min total (NLI model is small and runs on CPU in parallel with GPU tasks)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SpecCheck: Specificity ladder generation",
+    "description": "For each atomic claim, generate K=3 abstracted versions (4 levels total: original, approximate, categorical, abstract). This is the core novel component. Use the same LLM that generated the claim to create the ladder, ensuring self-consistency.",
+    "steps": {
+      "step1": "Design the specificity ladder prompt with few-shot examples covering diverse claim types (numerical, temporal, entity, categorical). The prompt template: 'Given the following factual claim, rewrite it at three levels of decreasing specificity:\nLevel 0 (Original): {claim}\nLevel 1 (Approximate): Replace exact values with ranges or approximate terms.\nLevel 2 (Category): Replace specific instances with their general category.\nLevel 3 (Abstract): The most general true version of this claim.\n\nExamples:\n[3-4 diverse few-shot examples]\n\nClaim: {claim}\nLevel 1:'",
+      "step2": "For each model, load the model and process all claims. Use temperature=0 for deterministic ladder generation. Batch claims in groups of 8 for efficiency.",
+      "step3": "Parse the output to extract claims at each level. Apply validation: check that each level is shorter or uses more general language than the previous. Flag and re-generate any invalid ladders (e.g., where a more abstract version adds new specific information).",
+      "step4": "For claims with clear numerical values (dates, quantities, percentages), also generate template-based ladders as a fallback: e.g., '1921' → 'early 1920s' → '1920s' → '20th century'.",
+      "step5": "Save specificity ladders as data/ladders_{model}_{dataset}.json with fields {claim_id, levels: [{level, text}]}.",
+      "step6": "Compute ladder quality statistics: average text length per level, vocabulary overlap between adjacent levels, percentage of claims with valid monotonically-generalizing ladders.",
+      "step7": "Estimated time: ~20 min per model per dataset = ~3 hours total for 3 models × 3 datasets, but overlaps with confidence estimation step."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SpecCheck: Multi-granularity confidence estimation (logprob-based)",
+    "description": "Estimate the model's confidence in each claim at each specificity level using log-probabilities. This is the primary (efficient) confidence estimation method. For each claim version, convert to a yes/no question, run a single forward pass, and extract P(Yes) vs P(No) from the logits.",
+    "steps": {
+      "step1": "For each claim version c_k, construct a yes/no prompt: 'Is the following statement true? \"{c_k}\" Answer with Yes or No.' Use consistent formatting across all models.",
+      "step2": "Run a single forward pass per prompt. Extract the logit for 'Yes' and 'No' tokens at the first generated position. Compute confidence as softmax([logit_Yes, logit_No])[0], i.e., P(Yes).",
+      "step3": "Handle tokenization differences across models: for each model, identify the exact token IDs for 'Yes'/'No' (and variants like 'yes'/'no', ' Yes'/' No'). Sum probabilities across variants.",
+      "step4": "Process all claims for all levels in batched inference (batch_size=32) to maximize GPU utilization.",
+      "step5": "Save confidence estimates as results/confidence_logprob_{model}_{dataset}.json with fields {claim_id, confidences: [conf_level0, conf_level1, conf_level2, conf_level3]}.",
+      "step6": "Estimated time: ~10 min per model per dataset = ~1.5 hours total. This is the fastest confidence method."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SpecCheck: Compute monotonicity and SpecCheck scores",
+    "description": "Given the confidence sequences, compute the monotonicity score, SpecCheck score, and Hallucination Granularity Index for each claim. This is the detection step.",
+    "steps": {
+      "step1": "For each claim with confidence sequence [conf(c_0), conf(c_1), conf(c_2), conf(c_3)], compute: (a) Monotonicity score M = (1/3) * sum(1[conf(c_k) >= conf(c_{k-1})] for k=1,2,3), (b) SpecCheck score S = 1 - M + alpha * (conf(c_3) - conf(c_0)) with alpha=0.5 (tune later), (c) Hallucination Granularity Index k* = smallest k such that conf(c_k) > conf(c_0) + delta, with delta=0.1.",
+      "step2": "Also compute alternative scoring variants: (a) Max violation: max(conf(c_{k-1}) - conf(c_k)) for any adjacent pair, (b) Weighted monotonicity: weight violations at more specific levels higher, (c) Confidence gap only: conf(c_3) - conf(c_0).",
+      "step3": "Save all scores as results/speccheck_scores_{model}_{dataset}.json with fields {claim_id, monotonicity_score, speccheck_score, granularity_index, alternative_scores}.",
+      "step4": "Estimated time: <1 min (purely computational, no GPU needed)."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Random baseline",
+    "description": "Assign random hallucination scores to each claim. This is the simplest baseline to verify that our metrics and evaluation pipeline work correctly and to set a performance floor.",
+    "steps": {
+      "step1": "For each claim, generate a random score from Uniform(0, 1) using each of the 3 random seeds (42, 123, 456).",
+      "step2": "Save as results/baseline_random_{model}_{dataset}_seed{seed}.json.",
+      "step3": "Expected AUC-ROC ≈ 0.50, AUC-PR ≈ prevalence of hallucinated claims."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Verbalized confidence",
+    "description": "Ask the model to rate its own confidence in each claim on a 0-100 scale. This is a simple but commonly used baseline that tests whether the model's self-reported confidence is informative.",
+    "steps": {
+      "step1": "For each atomic claim, prompt the model: 'Rate your confidence that the following statement is true on a scale of 0 to 100, where 0 means certainly false and 100 means certainly true. Only output the number.\nStatement: \"{claim}\"'",
+      "step2": "Parse the numerical output. Handle edge cases: if the model outputs non-numeric text, retry with stricter prompt or assign default of 50.",
+      "step3": "Invert the score for hallucination detection: hallucination_score = 1 - (verbalized_confidence / 100).",
+      "step4": "Run for all 3 models on all 3 datasets. Batch with batch_size=32.",
+      "step5": "Save as results/baseline_verbalized_{model}_{dataset}.json.",
+      "step6": "Estimated time: ~5 min per model per dataset = ~45 min total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3: Logprob confidence (single-level)",
+    "description": "Use the log-probability of the original claim (level 0 only) as a confidence score. This is the standard logprob baseline and is equivalent to SpecCheck with K=0 (no specificity ladder). It isolates the contribution of the multi-granularity component.",
+    "steps": {
+      "step1": "For each atomic claim, compute the average token log-probability under the model. Prompt: feed the claim as a continuation and extract per-token logprobs.",
+      "step2": "Also compute the yes/no logprob confidence (same as SpecCheck level 0): this is already computed in the SpecCheck pipeline, so simply extract conf(c_0).",
+      "step3": "Compute hallucination score as 1 - normalized_logprob (invert so higher = more likely hallucinated).",
+      "step4": "Save as results/baseline_logprob_{model}_{dataset}.json.",
+      "step5": "Estimated time: ~5 min per model per dataset (reuses SpecCheck level-0 data, plus ~5 min for token-level logprobs) = ~45 min total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 4: SelfCheckGPT (sampling consistency)",
+    "description": "Implement SelfCheckGPT-style hallucination detection: sample multiple alternative responses and check if each claim is supported across samples. This is the strongest baseline—a well-known, effective method.",
+    "steps": {
+      "step1": "For each prompt (entity/question), generate N=5 alternative responses from the model at temperature=1.0, top_p=0.95. Use the same generation parameters across all models.",
+      "step2": "For each atomic claim from the original response, check whether it is supported by each alternative response. Use NLI-based checking: prompt the model with 'Does the following passage support the claim \"{claim}\"? Answer Yes or No.\nPassage: {alternative_response}'",
+      "step3": "Compute the SelfCheckGPT score as 1 - (fraction of alternative responses that support the claim). Higher score = more likely hallucinated.",
+      "step4": "Run for all 3 models on all 3 datasets.",
+      "step5": "Save as results/baseline_selfcheck_{model}_{dataset}.json.",
+      "step6": "Estimated time: Generating 5 alternative responses per prompt × 350 prompts = 1750 generations, plus NLI checks. ~30 min generation + ~20 min NLI per model = ~2.5 hours total for 3 models. This is the most expensive baseline."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Ladder depth (K=1,2,3,4)",
+    "description": "Test how many specificity levels are needed. Run SpecCheck with K=1 (original + 1 abstract), K=2, K=3 (default), and K=4 levels. Hypothesis: K=3 is the sweet spot; K=1 loses signal, K=4 has diminishing returns.",
+    "steps": {
+      "step1": "For K=1: use only levels 0 and 3 (original and most abstract). Recompute monotonicity score as binary (does conf increase?).",
+      "step2": "For K=2: use levels 0, 2, 3. Recompute monotonicity score over 2 transitions.",
+      "step3": "For K=3: this is the default (levels 0, 1, 2, 3). Already computed in the main experiment.",
+      "step4": "For K=4: generate an additional level between 0 and 1 (e.g., 'slightly less specific'). Only run on 1 model (Llama-3.1-8B) and 1 dataset (FActScore) to save compute.",
+      "step5": "Evaluate each variant with AUC-ROC and AUC-PR. Plot detection performance vs. K.",
+      "step6": "Save as results/ablation_ladder_depth_{model}_{dataset}.json.",
+      "step7": "Estimated time: K=4 generation ~15 min. All other variants reuse existing data. Total ~20 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Confidence estimation method (sampling vs logprob)",
+    "description": "Compare sampling-based confidence estimation against logprob-based. Run on 1 model (Llama-3.1-8B) and 1 dataset (FActScore) with N=5, 10, 20 samples to assess the quality-efficiency tradeoff.",
+    "steps": {
+      "step1": "For sampling-based confidence: for each claim at each level, generate N responses to the yes/no question at temperature=0.8. Compute confidence as fraction of 'Yes' responses.",
+      "step2": "Run with N=5, N=10, N=20 samples. For N=20, only run on a subset of 100 claims to save time.",
+      "step3": "Compare AUC-ROC/AUC-PR of sampling-based vs logprob-based SpecCheck. Also compare the raw confidence values (correlation between methods).",
+      "step4": "Report wall-clock time for each method to quantify the efficiency gap.",
+      "step5": "Save as results/ablation_confidence_method_{model}_{dataset}.json.",
+      "step6": "Estimated time: N=5 × 4 levels × ~250 claims = 5000 inferences (~15 min). N=10 = ~30 min. N=20 on 100 claims = ~25 min. Total ~70 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Claim type analysis",
+    "description": "Categorize claims by type and evaluate SpecCheck's detection performance per category. Hypothesis: SpecCheck excels on claims with clear specificity structure (numerical, temporal) and is competitive on others.",
+    "steps": {
+      "step1": "Categorize each claim into types: (a) Numerical (contains dates, quantities, percentages), (b) Temporal (time-related but not exact numbers, e.g., 'during the Renaissance'), (c) Entity-specific (mentions specific people, places, organizations), (d) Relational (describes relationships between entities), (e) Categorical/General (general properties or categories). Use regex patterns for numerical/temporal; use the LLM for the rest.",
+      "step2": "Compute per-category AUC-ROC and AUC-PR for SpecCheck and all baselines.",
+      "step3": "Compute per-category monotonicity violation rates for factual vs hallucinated claims.",
+      "step4": "Save as results/analysis_claim_types_{model}_{dataset}.json.",
+      "step5": "Estimated time: ~10 min (categorization) + reuses existing scores."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: SpecCheck + baselines combination",
+    "description": "Test whether SpecCheck provides complementary signal by combining it with baselines in a simple logistic regression. Use 5-fold cross-validation to avoid overfitting.",
+    "steps": {
+      "step1": "Create feature vectors for each claim: [speccheck_score, selfcheck_score, verbalized_confidence, logprob_confidence]. Also include subsets.",
+      "step2": "Train logistic regression with 5-fold cross-validation. Report mean and std of AUC-ROC and AUC-PR across folds.",
+      "step3": "Compare: (a) each method alone, (b) SelfCheck + Verbalized + Logprob (all baselines), (c) all baselines + SpecCheck, (d) SpecCheck + SelfCheck only.",
+      "step4": "Report feature importance (logistic regression coefficients) to assess how much SpecCheck contributes.",
+      "step5": "Run on all 3 models and all 3 datasets. Use seeds 42, 123, 456 for the cross-validation splits.",
+      "step6": "Save as results/analysis_combination_{model}_{dataset}.json.",
+      "step7": "Estimated time: <5 min (logistic regression is fast, all features already computed)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 5: SpecCheck score variant comparison",
+    "description": "Compare different ways of aggregating the confidence sequence into a hallucination score. Tests robustness of the monotonicity-based approach.",
+    "steps": {
+      "step1": "Evaluate 4 scoring variants already computed: (a) SpecCheck score (default with alpha=0.5), (b) Pure monotonicity score (alpha=0), (c) Max violation score, (d) Confidence gap only (conf(c_3) - conf(c_0)).",
+      "step2": "Also sweep alpha in {0, 0.25, 0.5, 0.75, 1.0} for the SpecCheck score formula.",
+      "step3": "Report AUC-ROC and AUC-PR for each variant on all models and datasets.",
+      "step4": "Save as results/ablation_score_variants_{model}_{dataset}.json.",
+      "step5": "Estimated time: <2 min (reuses existing confidence data)."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Run statistical significance tests and evaluate all success criteria from the proposal. Use 3 random seeds for all stochastic components and report mean ± std.",
+    "steps": {
+      "step1": "For each model-dataset pair, compute AUC-ROC and AUC-PR for SpecCheck and all baselines using 3 random seeds. The seeds affect: (a) sampling in SelfCheckGPT, (b) random baseline, (c) cross-validation splits in combination experiments.",
+      "step2": "Run paired bootstrap test (10000 bootstrap samples) comparing SpecCheck AUC-PR against each baseline. Report p-values and 95% confidence intervals.",
+      "step3": "Evaluate success criterion 1: SpecCheck achieves significantly higher AUC-PR than SelfCheckGPT on ≥2/3 benchmarks (p < 0.05).",
+      "step4": "Evaluate success criterion 2: compute the fraction of verified-true claims with monotonic confidence. Target: >85%.",
+      "step5": "Evaluate success criterion 3: compute the fraction of hallucinated claims with monotonicity violations. Target: >40%.",
+      "step6": "Evaluate success criterion 4: for claims with identified granularity index, manually inspect 50 random cases to assess whether the index correctly identifies the level of fabrication. Report accuracy.",
+      "step7": "Compute Expected Calibration Error (ECE) with 10 bins for SpecCheck and baselines.",
+      "step8": "Compute Pearson and Spearman correlation between SpecCheck scores and ground-truth factuality.",
+      "step9": "Save all results as results/evaluation_statistics.json.",
+      "step10": "Estimated time: ~5 min for statistical tests."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for the paper. All figures use consistent styling: font size 12, colorblind-friendly palette, PDF output for LaTeX.",
+    "steps": {
+      "step1": "Figure 1 (Method Overview): Create a schematic diagram showing the SpecCheck pipeline: claim → specificity ladder → confidence estimation → monotonicity check. Use matplotlib with annotations showing example confidence values at each level for a true claim (monotonic) vs hallucinated claim (non-monotonic).",
+      "step2": "Figure 2 (Main Results): Bar chart comparing AUC-PR of SpecCheck vs all baselines across 3 datasets, grouped by model. Include error bars from 3 seeds. Also create a companion table (Table 1) with AUC-ROC, AUC-PR, and 95% CI for all methods.",
+      "step3": "Figure 3 (Monotonicity Analysis): Two-panel figure. Left: histogram of monotonicity scores for factual vs hallucinated claims (all models pooled). Right: confidence profile plots showing average confidence at each specificity level for factual vs hallucinated claims.",
+      "step4": "Figure 4 (Claim Type Analysis): Grouped bar chart showing AUC-PR per claim type for SpecCheck and SelfCheckGPT. Highlight claim types where SpecCheck has the largest advantage.",
+      "step5": "Figure 5 (Ablation Studies): 2×2 subplot. (a) AUC-PR vs ladder depth K, (b) AUC-PR vs number of samples N (sampling-based), (c) AUC-PR for different score variants, (d) AUC-PR for combination experiments.",
+      "step6": "Figure 6 (Hallucination Granularity): Example specificity ladders for 3-4 real claims (mix of true and hallucinated) with confidence values annotated. Show how the granularity index identifies where hallucination occurs.",
+      "step7": "Table 2 (Detailed Results): Full results table with AUC-ROC, AUC-PR, ECE, and correlation for all model-dataset-method combinations.",
+      "step8": "Table 3 (Combination Results): AUC-PR for individual methods vs combinations, showing that SpecCheck adds complementary signal.",
+      "step9": "Save all figures as figures/figure_{N}_{name}.pdf and figures/figure_{N}_{name}.png. Save tables as figures/table_{N}_{name}.tex (LaTeX format).",
+      "step10": "Estimated time: ~15 min for all figures."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate supplementary analysis plots",
+    "description": "Additional visualizations for deeper analysis and potential supplementary material.",
+    "steps": {
+      "step1": "Per-model comparison: 3×3 heatmap of AUC-PR (rows=models, columns=datasets) for SpecCheck and best baseline.",
+      "step2": "Confidence calibration plot: reliability diagram (predicted confidence vs actual accuracy) for SpecCheck and baselines.",
+      "step3": "Ladder quality analysis: distribution of ladder lengths, vocabulary overlap between levels, and examples of good vs bad ladders.",
+      "step4": "ROC curves: per-dataset ROC curves overlaying all methods for visual comparison.",
+      "step5": "Save all supplementary figures as figures/supp_{name}.pdf and .png.",
+      "step6": "Estimated time: ~10 min."
+    }
+  }
+]

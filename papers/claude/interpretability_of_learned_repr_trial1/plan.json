@@ -1,0 +1,148 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for SAE training, model loading, and analysis. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: pip install torch transformers datasets wandb einops jaxtyping typeguard scipy scikit-learn matplotlib seaborn tqdm",
+      "step2": "Install SAE training library: pip install sae-lens (or clone and install from https://github.com/jbloomAI/SAELens if needed for custom TopK SAE support)",
+      "step3": "Verify GPU: run a script that prints torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_memory",
+      "step4": "Verify model loading: load GPT-2 Small and confirm it fits in GPU memory with room for SAE training (~8GB model + ~8GB SAE overhead = ~16GB, well within 48GB)",
+      "step5": "Create project directory structure: experiments/{sae_training,feature_matching,causal_ablation,subspace_analysis,visualization}, results/, figures/"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess training and evaluation data",
+    "description": "Prepare tokenized datasets for SAE training (collecting model activations) and for evaluation (causal ablation tasks). We use 50M tokens per SAE for training (reduced from 100M to fit time budget) and 5M tokens for evaluation.",
+    "steps": {
+      "step1": "Download OpenWebText subset for GPT-2 SAE training: use datasets library to load 'openwebtext', tokenize with GPT-2 tokenizer, create a shuffled buffer of 50M tokens, save to disk as memory-mapped arrays",
+      "step2": "Download The Pile subset for Pythia SAE training: use datasets library to load 'EleutherAI/pile-deduped-pythia-random-sampled' or 'monology/pile-uncopyrighted', tokenize with Pythia tokenizer (NeoXTokenizer), create 50M token buffer, save to disk",
+      "step3": "Create held-out evaluation sets: reserve 5M tokens from each distribution (not overlapping with training data) for computing feature activations during alignment and causal analysis",
+      "step4": "Prepare causal evaluation datasets: (a) IOI dataset - generate 2000 examples of indirect object identification prompts using template 'When [name1] and [name2] went to [place], [name2] gave [object] to ___' with diverse names; (b) Greater-Than dataset - generate 2000 examples like 'The war lasted from [year] to [year+delta]___' ; (c) Subject-verb agreement - generate 2000 examples with intervening prepositional phrases like 'The keys to the cabinet ___'",
+      "step5": "Compute and log dataset statistics: total tokens, vocabulary overlap between OpenWebText and Pile subsets, sequence length distribution. Save metadata to results/data_stats.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train multi-seed SAEs on three language models",
+    "description": "Train TopK SAEs with 5 random seeds on GPT-2 Small (layer 6), Pythia-160M (layer 6), and Pythia-410M (layer 12) residual stream activations. This is the foundation for all subsequent analyses. Estimated time: ~4.5 hours sequential on 1 GPU.",
+    "steps": {
+      "step1": "Define SAE architecture: TopK SAE with dictionary_size=16384, k=64 (active features per input). Encoder: Linear(d_model, 16384) + TopK selection. Decoder: Linear(16384, d_model) with unit-norm decoder columns. Loss = MSE reconstruction + auxiliary dead-feature loss.",
+      "step2": "Define training hyperparameters: Adam optimizer, lr=3e-4 with cosine decay to 1e-5, batch_size=4096 tokens, total steps=12207 (50M tokens / 4096 batch size). No weight decay on encoder, optional L2=1e-5 on decoder for stability. Warmup: 1000 steps linear.",
+      "step3": "Train GPT-2 Small SAEs (5 seeds): For seeds [42, 123, 456, 789, 1024], load GPT-2 Small, hook into layer 6 residual stream (d_model=768), stream training data through model to collect activations, train SAE. Save each trained SAE to experiments/sae_training/gpt2_small_layer6_seed{seed}.pt along with training loss curves. Estimated: ~15 min per SAE = 75 min total.",
+      "step4": "Train Pythia-160M SAEs (5 seeds): Same procedure on EleutherAI/pythia-160m, layer 6 residual stream (d_model=768), using Pile data. Seeds [42, 123, 456, 789, 1024]. Save to experiments/sae_training/pythia160m_layer6_seed{seed}.pt. Estimated: ~15 min per SAE = 75 min total.",
+      "step5": "Train Pythia-410M SAEs (5 seeds): Same procedure on EleutherAI/pythia-410m, layer 12 residual stream (d_model=1024, so dictionary_size=16384 gives expansion factor ~16x). Using Pile data. Seeds [42, 123, 456, 789, 1024]. Save to experiments/sae_training/pythia410m_layer12_seed{seed}.pt. Estimated: ~20 min per SAE = 100 min total.",
+      "step6": "Log training metrics for all 15 SAEs: final MSE loss, L0 sparsity (mean number of active features), explained variance, dead feature fraction. Save to results/sae_training_metrics.json. Verify all SAEs achieved comparable reconstruction quality (within 10% MSE of each other per model).",
+      "step7": "Collect activation datasets: For each of the 15 SAEs, run the held-out evaluation set (5M tokens) through the model+SAE and save the sparse activation matrix (which features fire, with what magnitude) for 50K randomly sampled token positions. Save to experiments/sae_training/activations_{model}_seed{seed}.npz."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute seed stability and convergence scores",
+    "description": "For each model, compute pairwise feature alignment across all 10 seed pairs (C(5,2)=10) using decoder cosine similarity and activation correlation. Derive a convergence score for each feature. Estimated time: ~20 min.",
+    "steps": {
+      "step1": "For each model, load all 5 SAE decoder weight matrices (shape: [16384, d_model]). Normalize decoder vectors to unit norm.",
+      "step2": "Compute pairwise decoder cosine similarity matrices: For each of 10 seed pairs, compute the 16384x16384 cosine similarity matrix between decoder vectors. Use batched matrix multiplication for efficiency (process in chunks of 1024 to avoid OOM). This gives the raw matching scores.",
+      "step3": "Apply Hungarian algorithm for optimal 1-1 matching: For each seed pair, use scipy.optimize.linear_sum_assignment on the negative cosine similarity matrix to find the optimal 1-1 feature alignment. Record the matched pairs and their cosine similarities.",
+      "step4": "Compute activation correlation for matched pairs: For each Hungarian-matched feature pair across seeds, compute Pearson correlation of their activation vectors over the 50K evaluation tokens. This provides a second alignment signal beyond decoder geometry.",
+      "step5": "Compute convergence score for each feature: For seed s0 (reference seed=42), a feature f_i gets convergence_score = mean over other 4 seeds of max(cosine_sim(f_i, best_match_in_seed_j)). Also compute a stricter version: fraction of seeds where best match has cosine_sim > 0.8. Sweep thresholds tau in [0.7, 0.8, 0.9] and report distribution of convergence scores.",
+      "step6": "Classify features as 'core' vs 'peripheral': Using tau=0.8 and requiring match in at least 4 of 5 seeds, label each feature. Report the fraction of core features per model (expect ~25-35% based on Paulo & Belrose, 2025). Save all convergence scores and classifications to results/convergence_scores_{model}.json.",
+      "step7": "Validate convergence score is robust to reference seed choice: Repeat convergence score computation using each of the 5 seeds as reference. Compute rank correlation (Spearman rho) of convergence scores across reference seed choices. Expect rho > 0.9, indicating the score is not an artifact of seed choice."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Measure cross-model feature universality",
+    "description": "Align SAE features across the three models (GPT-2 Small, Pythia-160M, Pythia-410M) using activation correlation on shared text. Compute cross-model alignment scores. Estimated time: ~20 min.",
+    "steps": {
+      "step1": "Prepare shared evaluation corpus: Select 10K text sequences from a common source (e.g., Wikipedia or a Pile subset) that were NOT used for SAE training. Tokenize with each model's tokenizer separately.",
+      "step2": "Collect SAE activations on shared corpus: For each model (using seed=42 SAE as representative), run the shared corpus through model+SAE and record feature activations. Align sequences at the token level using character-level offset mapping to handle tokenizer differences.",
+      "step3": "Compute cross-model feature correlation: For each pair of models (3 pairs), compute the 16384x16384 Pearson correlation matrix between SAE feature activations. Use batched computation (chunks of 512 features) to manage memory.",
+      "step4": "Compute cross-model alignment score: For each feature in each model, its cross-model alignment score = mean of its top-1 absolute correlation with a feature in each other model. This gives a per-feature universality score.",
+      "step5": "Test core hypothesis - seed stability predicts universality: Compute Spearman rank correlation between convergence_score and cross_model_alignment_score for each model. Test statistical significance (p-value). Primary success criterion: rho > 0.2, p < 0.01.",
+      "step6": "Repeat cross-model alignment using all 5 seeds per model: For robustness, compute cross-model alignment using each seed's SAE and verify the correlation between convergence score and universality holds regardless of which SAE is used for cross-model comparison. Save to results/cross_model_alignment_{model}.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal importance assessment via zero-ablation",
+    "description": "Measure the causal importance of individual SAE features by zero-ablating them and measuring KL divergence between original and perturbed output distributions. Compare core vs. peripheral feature importance. Estimated time: ~1 hour.",
+    "steps": {
+      "step1": "Implement zero-ablation pipeline: For a given SAE feature index i, hook into the model at the SAE layer, reconstruct activations with feature i zeroed out, and continue the forward pass. Measure KL divergence between original logits and ablated logits, averaged over evaluation tokens.",
+      "step2": "Evaluate on general language modeling: For each model (seed=42 SAE), ablate each of the 16384 features individually on 2000 random evaluation tokens. Record mean KL divergence per feature. Use batched ablation (ablate 64 features in parallel across the batch dimension) for efficiency. Estimated: ~20 min per model.",
+      "step3": "Evaluate on targeted tasks: For each model and task (IOI, Greater-Than, Subject-Verb Agreement), ablate each feature and measure task-specific accuracy change. For IOI: measure probability of correct indirect object name. For Greater-Than: measure probability of valid year completion. For SVA: measure probability of correct verb number. Use 500 examples per task. Estimated: ~5 min per model-task combination.",
+      "step4": "Compare core vs. peripheral causal importance: Compute mean KL divergence for core features vs. peripheral features. Run Mann-Whitney U test for statistical significance. Compute Cohen's d effect size. Primary success criterion: Cohen's d > 0.3.",
+      "step5": "Test convergence score as predictor: Compute Spearman correlation between convergence_score and causal_importance (KL divergence). Compare against baseline predictors: (a) random partition, (b) activation frequency (mean activation rate over eval set), (c) decoder norm (L2 norm of decoder vector). Report AUC-ROC for each predictor classifying 'high importance' features (top 20%). Success criterion: convergence score AUC > random baseline AUC on 2 of 3 models.",
+      "step6": "Save all causal importance results to results/causal_importance_{model}.json including per-feature KL divergence, task-specific metrics, and statistical test results."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Subspace analysis of convergent core vs. variable periphery",
+    "description": "Analyze whether the variable periphery collectively spans a consistent subspace across seeds, and whether the periphery carries information not captured by the core alone. This tests whether peripheral features represent arbitrary decompositions of a genuine complementary subspace.",
+    "steps": {
+      "step1": "Extract core and peripheral decoder subspaces: For each model and seed, separate the decoder weight matrix into core features (rows corresponding to core indices) and peripheral features. Compute SVD of each to get the principal subspace.",
+      "step2": "Measure peripheral subspace consistency across seeds: For each pair of seeds, compute principal angles between their peripheral decoder subspaces (using top-k singular vectors capturing 90% of variance). Compare to a null distribution: randomly partition features into 'core' and 'peripheral' of the same sizes and compute principal angles. Use 100 random partitions for the null. Success criterion: mean principal angle for true periphery < 5th percentile of null distribution.",
+      "step3": "Measure core subspace consistency: Same analysis for core subspaces. Expect core subspaces to be even more consistent than peripheral subspaces across seeds.",
+      "step4": "Reconstruction quality analysis: For each model (seed=42 SAE), compute reconstruction using (a) all features, (b) core features only, (c) peripheral features only, (d) random subset of same size as core. Measure MSE and explained variance on 5000 eval tokens. Core alone should reconstruct better than same-size random subset. Core + peripheral should be better than core alone (showing periphery carries real info).",
+      "step5": "Analyze feature properties: Compare core vs. peripheral features on: (a) mean activation frequency, (b) mean activation magnitude, (c) decoder norm, (d) encoder-decoder alignment (cosine sim between corresponding encoder and decoder vectors), (e) number of 'dead' features (never activate). Save to results/feature_properties_{model}.json.",
+      "step6": "Test multi-dimensional feature hypothesis: For peripheral features that are unstable across seeds, check if groups of ~2-4 peripheral features from different seeds span similar 2D-4D subspaces (using principal angles). This tests whether some peripheral features are different 1D projections of the same multi-dimensional concept (motivated by Engels et al., 2025)."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline feature quality predictors",
+    "description": "Implement and evaluate baseline methods for predicting feature quality, to fairly compare against convergence score. We need at least 2 meaningful baselines (one simple, one stronger).",
+    "steps": {
+      "step1": "Random baseline: Randomly assign features to 'high quality' and 'low quality' bins of the same sizes as core/peripheral split. Repeat 1000 times and compute mean performance for predicting causal importance and cross-model universality. This establishes chance-level performance.",
+      "step2": "Activation frequency baseline (simple): For each feature, compute mean activation frequency (fraction of tokens where feature is active) on eval set. Use this as a quality score. Compute Spearman correlation with causal importance and universality. Compute AUC-ROC for predicting high-importance features.",
+      "step3": "Decoder norm baseline (simple): For each feature, use L2 norm of its decoder vector as quality score. Same evaluation as step 2.",
+      "step4": "Activation magnitude baseline (moderate): For each feature, compute mean activation magnitude (over tokens where it activates). Same evaluation.",
+      "step5": "Combined baseline (strong): Train a simple logistic regression using [activation_frequency, decoder_norm, mean_activation_magnitude, encoder_decoder_alignment] to predict high causal importance. Use 5-fold cross-validation to avoid overfitting. This is the strong baseline that convergence score must outperform to demonstrate added value beyond simple feature statistics.",
+      "step6": "Save all baseline results to results/baseline_comparison_{model}.json. Create a comparison table showing: baseline name, Spearman rho with causal importance, Spearman rho with universality, AUC-ROC for importance prediction."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies on convergence score methodology",
+    "description": "Systematically ablate components of the convergence score computation to understand what drives its effectiveness. Each ablation removes or modifies one aspect of the methodology.",
+    "steps": {
+      "step1": "Ablation 1 - Number of seeds: Compute convergence scores using 2, 3, 4, and 5 seeds. Measure how correlation with causal importance and universality changes. This tells us the minimum number of seeds needed for a reliable convergence score.",
+      "step2": "Ablation 2 - Matching method: Compare (a) Hungarian matching (optimal 1-1) vs. (b) greedy matching (assign best available match sequentially) vs. (c) top-1 matching (allow many-to-one). Measure impact on convergence score quality.",
+      "step3": "Ablation 3 - Similarity metric: Compare (a) decoder cosine similarity only, (b) activation correlation only, (c) combined (average of both). This determines whether geometric or functional similarity is more informative.",
+      "step4": "Ablation 4 - Threshold sensitivity: Vary the core/peripheral threshold tau across [0.5, 0.6, 0.7, 0.8, 0.9, 0.95] with fixed M_min=4. Plot the fraction of core features and the effect size (Cohen's d) of core vs. peripheral causal importance difference as a function of tau. Identify the optimal threshold.",
+      "step5": "Ablation 5 - SAE architecture: Train 5 additional SAEs per model using ReLU activation (instead of TopK) with L1 penalty tuned to achieve similar sparsity (L0 ~ 64). Compute convergence scores for ReLU SAEs and compare to TopK. Does the convergent core phenomenon hold for both architectures? This addresses the secondary success criterion.",
+      "step6": "Save ablation results to results/ablation_{ablation_name}.json. Create summary table showing which ablation has the biggest impact on convergence score effectiveness."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Consolidate all results and formally test all success criteria with appropriate statistical methods. Compute confidence intervals and effect sizes.",
+    "steps": {
+      "step1": "Primary criterion 1 - Seed stability correlates with universality: For each model, compute Spearman rho between convergence_score and cross_model_alignment_score. Compute 95% bootstrap confidence intervals (10000 resamples). Report p-values. Aggregate across models using Fisher's method. Success: rho > 0.2, p < 0.01 on at least 2 of 3 models.",
+      "step2": "Primary criterion 2 - Core features more causally important: For each model, run Mann-Whitney U test comparing KL divergence distributions of core vs. peripheral features. Compute Cohen's d effect size with 95% CI. Success: Cohen's d > 0.3 on at least 2 of 3 models.",
+      "step3": "Primary criterion 3 - Convergence score beats random baseline: For each model, compute AUC-ROC of convergence score vs. random baseline for predicting top-20% causal importance features. Use DeLong test for statistical comparison of AUCs. Success: convergence score AUC significantly higher on at least 2 of 3 models.",
+      "step4": "Secondary criterion 1 - Convergence predicts universality beyond baselines: Compare convergence score against activation frequency and decoder norm baselines for predicting cross-model universality. Report delta-AUC.",
+      "step5": "Secondary criterion 2 - Peripheral subspace consistency: Permutation test comparing true peripheral principal angles to null distribution. Report p-value and effect size.",
+      "step6": "Compile results summary table: Create results/summary_table.json with all statistical tests, effect sizes, confidence intervals, and pass/fail for each criterion. This table will be directly used in the paper."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper-quality figures",
+    "description": "Create all figures needed for the paper. Use matplotlib with publication-quality settings (fontsize=12, dpi=300, tight_layout). Estimated time: ~30 min.",
+    "steps": {
+      "step1": "Figure 1 - Convergence score distribution: For each model, plot histogram of convergence scores across all 16384 features, with vertical lines at tau thresholds. Show the bimodal distribution (if present) separating core and peripheral features. Save as figures/fig1_convergence_distribution.pdf.",
+      "step2": "Figure 2 - Seed stability vs. cross-model universality scatter plot: For each model, scatter plot of convergence_score (x) vs. cross_model_alignment_score (y) for all features. Color by core/peripheral. Include Spearman rho and regression line. 3 subplots (one per model). Save as figures/fig2_stability_vs_universality.pdf.",
+      "step3": "Figure 3 - Causal importance comparison: (a) Violin plots or box plots comparing KL divergence distributions of core vs. peripheral features for each model. (b) Bar chart comparing mean causal importance across baselines (random, activation freq, decoder norm, convergence score) for each model. Save as figures/fig3_causal_importance.pdf.",
+      "step4": "Figure 4 - ROC curves: For each model, plot ROC curves for predicting high-importance features using convergence score vs. all baselines. Include AUC values in legend. Save as figures/fig4_roc_curves.pdf.",
+      "step5": "Figure 5 - Subspace analysis: (a) Principal angle comparison between core/peripheral subspaces across seeds vs. null distribution. (b) Reconstruction quality bar chart (all features vs. core only vs. peripheral only vs. random subset). Save as figures/fig5_subspace_analysis.pdf.",
+      "step6": "Figure 6 - Ablation results: (a) Line plot of convergence score effectiveness (Spearman rho with importance) vs. number of seeds. (b) Grouped bar chart comparing matching methods. (c) Heatmap of core fraction vs. tau threshold. Save as figures/fig6_ablations.pdf.",
+      "step7": "Figure 7 - Feature examples: For the top-5 most core and top-5 most peripheral features (by convergence score) in GPT-2 Small, show: (a) top-10 activating tokens/contexts, (b) decoder vector cosine similarity across seeds (heatmap). This provides qualitative evidence for what core vs. peripheral features look like. Save as figures/fig7_feature_examples.pdf.",
+      "step8": "Table 1 - Main results summary: Create a LaTeX-formatted table with rows = models, columns = (core fraction, rho(convergence, universality), Cohen's d(core vs peripheral importance), AUC-ROC convergence, AUC-ROC best baseline). Save as figures/table1_main_results.tex.",
+      "step9": "Table 2 - Ablation results: LaTeX table summarizing ablation experiments. Save as figures/table2_ablations.tex."
+    }
+  }
+]

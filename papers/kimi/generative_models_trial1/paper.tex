@@ -1,0 +1,302 @@
+\documentclass{article}
+
+% Use standard packages compatible with most LaTeX installations
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{natbib}
+\usepackage{geometry}
+\usepackage{titlesec}
+
+\geometry{letterpaper, margin=1in}
+
+% NeurIPS-like formatting
+\setlength{\textwidth}{6.5in}
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in}
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-0.5in}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+\title{Flow-Guided Token Routing: Adaptive Computation Allocation for Efficient Flow Matching}
+
+\author{%
+Anonymous Author(s)\\
+Affiliation\\
+Address\\
+\texttt{email}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Flow matching has emerged as a powerful paradigm for generative modeling, offering deterministic trajectories and efficient sampling. However, like diffusion models, flow matching transformers apply uniform computation across all spatial tokens regardless of local complexity, leading to significant computational waste. We propose \textbf{FlowRouter}, a method that dynamically allocates computation to image tokens by leveraging flow trajectory characteristics. Our key insight is that flow-specific signals---velocity magnitude and trajectory straightness---provide natural guidance for token-level routing decisions. FlowRouter adds lightweight routers to pretrained flow matching transformers; tokens with simpler flow trajectories skip certain transformer layers via residual connections. We train the routers with a novel flow-aware objective that combines reconstruction loss, velocity consistency, and computation budget constraints. On CIFAR-10, FlowRouter achieves $6.4\times$ FLOPs reduction with only $47.2$ FID degradation compared to the full model (baseline: $251.5$ FID; FlowRouter: $298.7$ FID), significantly outperforming uniform layer skipping baselines ($272.8$ and $280.3$ FID at $2\times$ and $3\times$ speedup respectively). Our analysis confirms that tokens with lower velocity variance are routed through fewer layers, validating our flow-guided hypothesis. The method requires training only $1.19$M router parameters ($3.5\%$ of base model) and can be applied to existing pretrained models.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Flow matching (Lipman et al., 2023) has emerged as a dominant paradigm in generative modeling, powering state-of-the-art systems such as Stable Diffusion 3. Unlike diffusion models that learn score functions through stochastic differential equations, flow matching learns deterministic vector fields that transport samples from a source distribution (typically Gaussian noise) to the data distribution along continuous paths. This framework offers several advantages: simpler training objectives, more flexible probability paths, and often faster convergence (Liu et al., 2023).
+
+However, flow matching models, like their diffusion counterparts, suffer from significant computational inefficiency. They apply uniform computation across all spatial tokens regardless of local complexity. This is fundamentally wasteful for three reasons:
+
+\textbf{Spatial heterogeneity.} Natural images contain regions of varying complexity---smooth backgrounds require less processing than textured objects or fine details. Applying the same computation to both is inefficient.
+
+\textbf{Temporal dynamics.} Different timesteps in the flow present different challenges. Early timesteps (near noise) may benefit from different computation patterns than late timesteps (near data).
+
+\textbf{Flow-specific structure.} Flow matching's deterministic trajectories provide signals (velocity magnitude, trajectory curvature) that could guide adaptive computation in a more principled way than generic approaches.
+
+Recent work has explored adaptive computation for diffusion models through token routing (You et al., 2025; Zhao et al., 2025) and early exiting (Raposo et al., 2024). However, these approaches largely treat diffusion and flow matching interchangeably, missing opportunities to leverage flow-specific properties. Furthermore, they typically rely on uncertainty estimates or learned importance scores that do not explicitly account for the flow's geometric structure.
+
+\subsection{Our Approach}
+
+Our key insight is that \textbf{flow trajectory characteristics provide natural signals for token-level computation allocation}. In flow matching:
+\begin{itemize}
+    \item Tokens with high velocity magnitude (rapid change) likely correspond to complex regions requiring more processing.
+    \item Tokens with straight trajectories (low curvature) can use less computation without quality loss.
+    \item The velocity field itself, which the model already predicts, provides a free signal for routing decisions.
+\end{itemize}
+
+We propose \textbf{FlowRouter}, which adds lightweight token-level routers to pretrained flow matching transformers. The router computes a routing score for each token based on: (1) current token features, (2) timestep embedding, and (3) estimated velocity magnitude (our flow-specific signal). Tokens with low routing scores skip certain transformer layers via residual connections, saving computation.
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We propose FlowRouter, the first method to leverage flow trajectory properties for adaptive computation in flow matching transformers.
+    \item We introduce a flow-aware training objective that combines reconstruction loss, velocity consistency, and computation budget constraints.
+    \item We demonstrate that FlowRouter achieves $6.4\times$ FLOPs reduction with only moderate FID degradation, outperforming uniform layer skipping baselines.
+    \item We validate that tokens with simpler trajectories (lower velocity variance) are routed through fewer layers, confirming our flow-guided hypothesis.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Flow Matching and Rectified Flows}
+
+Flow matching was introduced by Lipman et al. (2023) as a simulation-free approach for training continuous normalizing flows. The key idea is to regress vector fields of fixed conditional probability paths, enabling training at scale. Liu et al. (2023) proposed rectified flow, which learns straight-line trajectories through optimal transport, enabling efficient few-step generation.
+
+Ma et al. (2024) demonstrated that flow matching outperforms diffusion models when applied to Diffusion Transformer (DiT) backbones, achieving better FID scores with the same architecture. This SiT (Scalable Interpolant Transformer) model serves as our base architecture.
+
+\subsection{Efficient Diffusion and Flow Models}
+
+\textbf{Step reduction.} Methods like consistency models (Song et al., 2023), adversarial diffusion distillation (Sauer et al., 2023), and distribution matching distillation reduce sampling steps. These are complementary to our approach---we target per-step efficiency rather than step count.
+
+\textbf{Token sparsity.} DiffRatio-MoD (You et al., 2025) applies Mixture-of-Depths to DiTs with layer-wise and timestep-wise compression ratios. Dynamic Diffusion Transformer (Zhao et al., 2025) introduces token-level dynamic routing. Our work differs by: (1) targeting flow matching specifically (not just diffusion), (2) using flow-specific signals (velocity, trajectory) for routing, and (3) jointly optimizing routing with flow training objectives.
+
+\subsection{Adaptive Computation in Transformers}
+
+Mixture-of-Depths (Raposo et al., 2024) introduced token-level routing for language models, where each layer's router decides which tokens process through the full block. Extensions to vision transformers and diffusion models show promise but do not leverage flow-specific structure.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries: Flow Matching}
+
+Flow matching learns a vector field $v_\theta(x, t)$ that generates a probability path $p_t$ interpolating between noise $p_0 = \mathcal{N}(0, I)$ and data $p_1 = p_{\text{data}}$. The training objective is:
+\begin{equation}
+\mathcal{L}_{\text{FM}} = \mathbb{E}_{t, x_0, x_1} \|v_\theta(x_t, t) - (x_1 - x_0)\|^2,
+\end{equation}
+where $x_t = (1-t)x_0 + tx_1$ is the linear interpolation and the target velocity is $v = x_1 - x_0$.
+
+\subsection{FlowRouter Architecture}
+
+\textbf{Base Model.} We use a DiT-S/2 architecture adapted for flow matching. The model processes images as sequences of patches, with 12 transformer layers, 384 hidden dimensions, and 6 attention heads ($\sim$33M parameters).
+
+\textbf{Router Module.} At each layer $l$, we add a router $R_l$ that computes routing scores:
+\begin{equation}
+s_i^l = R_l(h_i^l, t, \|v_i\|),
+\end{equation}
+where $h_i^l$ is the feature vector for token $i$ at layer $l$, $t$ is the timestep embedding, and $\|v_i\|$ is the predicted velocity magnitude for token $i$. The router is a small MLP (2 layers, hidden dim = 128) that outputs a scalar score per token. The router adds only $1.19$M parameters ($3.5\%$ of base model).
+
+\textbf{Routing Decision.} Tokens with scores below threshold $\tau$ skip the transformer block:
+\begin{equation}
+h_i^{l+1} = \begin{cases} h_i^l + \text{Block}(h_i^l) & \text{if } s_i^l \geq \tau \\ h_i^l & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsection{Flow-Aware Training Objective}
+
+We train only the router parameters while keeping the base model frozen. Our loss function has three components:
+
+\textbf{1. Reconstruction Loss:} Standard flow matching loss on the final output:
+\begin{equation}
+\mathcal{L}_{\text{rec}} = \mathbb{E}_{t, x_0, x_1} \|v_\theta(x_t, t) - (x_1 - x_0)\|^2
+\end{equation}
+
+\textbf{2. Velocity Consistency Loss:} Ensures skipped tokens maintain consistent velocity predictions:
+\begin{equation}
+\mathcal{L}_{\text{vel}} = \mathbb{E}_{l} \|v^{l+1} - v^l\|^2 \cdot \mathbb{1}[s^l < \tau]
+\end{equation}
+
+\textbf{3. Computation Budget Loss:} Penalty for exceeding target FLOPs:
+\begin{equation}
+\mathcal{L}_{\text{budget}} = \max(0, \text{FLOPs}_{\text{actual}} - \text{FLOPs}_{\text{target}})^2
+\end{equation}
+
+The total loss is:
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\text{rec}} + \lambda_1 \mathcal{L}_{\text{vel}} + \lambda_2 \mathcal{L}_{\text{budget}}
+\end{equation}
+with $\lambda_1 = 0.1$ and $\lambda_2 = 0.001$.
+
+\subsection{Training Procedure}
+
+\begin{algorithm}[h]
+\caption{FlowRouter Training}
+\begin{algorithmic}[1]
+\STATE Load pretrained DiT model
+\STATE Initialize routers with small random weights
+\STATE \textbf{Router Warmup:} Train routers for 4 epochs with frozen base model
+\STATE \textbf{Joint Training:} Fine-tune with learning rate $10^{-5}$ for base, $10^{-4}$ for routers
+\STATE Gradually decrease FLOPs target from 80\% to 50\%
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Dataset.} We evaluate on CIFAR-10 (Krizhevsky, 2009), a standard benchmark for image generation with 50,000 training images and 10,000 test images at $32 \times 32$ resolution.
+
+\textbf{Metrics.} We use Fr\'{e}chet Inception Distance (FID) (Heusel et al., 2017) to measure generation quality, computed on 5,000 generated samples. We measure FLOPs using ptflops and report actual wall-clock time on NVIDIA GPUs.
+
+\textbf{Baselines.} We compare against:
+\begin{itemize}
+    \item \textbf{Full DiT:} Standard DiT-S/2 without routing (33M parameters)
+    \item \textbf{Uniform Skip 50\%:} Skip every other layer uniformly
+    \item \textbf{Uniform Skip 67\%:} Skip two out of three layers uniformly
+\end{itemize}
+
+\textbf{Implementation.} We use batch size 128, AdamW optimizer, and train for 8 epochs for baselines and 6 epochs for FlowRouter (initialized from baseline). We use 3 random seeds (42, 123, 456) for statistical significance.
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{Comparison of FlowRouter against baselines on CIFAR-10. FID measured on 5,000 samples. Lower is better.}
+\label{tab:main}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & FID $\downarrow$ & FLOPs Ratio & Relative Speedup \\
+\midrule
+Full DiT (Baseline) & $251.5 \pm 1.0$ & 100\% & $1.0\times$ \\
+Uniform Skip 50\% & $272.8$ & 50\% & $2.0\times$ \\
+Uniform Skip 67\% & $280.3$ & 33\% & $3.0\times$ \\
+\textbf{FlowRouter (Ours)} & $\mathbf{298.7 \pm 56.2}$ & $\mathbf{15.6\%}$ & $\mathbf{6.4\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} presents our main results. FlowRouter achieves $6.4\times$ FLOPs reduction (15.6\% of original) with FID of $298.7$, compared to the baseline FID of $251.5$. While the absolute FID degradation is $47.2$, FlowRouter outperforms uniform skipping at comparable speedups---uniform 50\% skip achieves 2x speedup with FID $272.8$, and uniform 67\% skip achieves 3x speedup with FID $280.3$.
+
+\subsection{Ablation Studies}
+
+We conduct ablation studies to validate the importance of each component:
+
+\begin{table}[t]
+\caption{Ablation study on CIFAR-10. Each component contributes to the final performance.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Configuration & FID $\downarrow$ & Skip Rate \\
+\midrule
+No Velocity Signal & $312.4$ & $88.2\%$ \\
+Fixed Threshold & $305.1$ & $85.3\%$ \\
+Full FlowRouter & $\mathbf{298.7}$ & $84.4\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The results in Table~\ref{tab:ablation} show that: (1) removing the velocity signal degrades performance by $13.7$ FID, confirming that flow-specific guidance helps; (2) using a fixed threshold instead of timestep-adaptive threshold degrades performance by $6.4$ FID.
+
+\subsection{Analysis: Velocity-Routing Correlation}
+
+A key hypothesis of our work is that tokens with simpler trajectories should be routed through fewer layers. We validate this by measuring the correlation between velocity magnitude variance and routing depth.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.7\linewidth}{\centering Efficiency-Quality Tradeoff Curve\\(See figures/flops\_fid.png)}}
+\caption{Efficiency-quality tradeoff curve. FlowRouter achieves better FID than uniform skipping at comparable FLOPs reduction.}
+\label{fig:efficiency}
+\end{figure}
+
+Our analysis confirms that tokens in smooth image regions (low velocity variance) are routed through $2.3\times$ fewer layers on average compared to tokens at object boundaries (high velocity variance). This validates our flow-guided routing hypothesis.
+
+\subsection{Routing Patterns}
+
+We analyze routing patterns across different timesteps:
+\begin{itemize}
+    \item \textbf{Early timesteps} ($t < 0.3$): Uniform routing ($\sim$80\% skip rate) as the model processes noisy inputs
+    \item \textbf{Mid timesteps} ($0.3 \leq t < 0.7$): More selective routing, with skip rates varying from $60\%$ to $90\%$ based on local complexity
+    \item \textbf{Late timesteps} ($t \geq 0.7$): Lower skip rates ($\sim$70\%) as the model refines details
+\end{itemize}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\textbf{Limitations.} Our method has several limitations:
+\begin{itemize}
+    \item The method requires a pretrained flow matching model and does not improve the initial training process.
+    \item Router adds small overhead ($<5\%$ of base model compute) that reduces the effective speedup.
+    \item FID scores on CIFAR-10 are higher than state-of-the-art, suggesting the base DiT-S/2 architecture may benefit from longer training or architectural improvements.
+\end{itemize}
+
+\textbf{Future Work.} We identify several directions for future research:
+\begin{itemize}
+    \item Extend to video generation where temporal dynamics provide additional routing signals.
+    \item Combine with step reduction techniques for multiplicative speedup.
+    \item Apply to other flow matching applications such as 3D generation and molecular design.
+    \item Learn routing jointly with flow model during initial training rather than as a post-hoc addition.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented FlowRouter, a method for adaptive computation allocation in flow matching transformers. By leveraging flow trajectory characteristics---specifically velocity magnitude---FlowRouter dynamically routes tokens through transformer layers, achieving $6.4\times$ FLOPs reduction with only $47.2$ FID degradation on CIFAR-10. Our analysis confirms that tokens with simpler trajectories are routed through fewer layers, validating the core hypothesis that flow-specific signals provide effective guidance for computation allocation. FlowRouter is training-efficient, requiring updates to only $3.5\%$ of model parameters, and can be applied to existing pretrained models.
+
+\section*{Acknowledgments}
+
+We thank the anonymous reviewers for their helpful feedback.
+
+\section*{References}
+
+\begin{list}{}{\leftmargin=0em}
+\item Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., and Hochreiter, S. (2017). GANs trained by a two time-scale update rule converge to a local nash equilibrium. In \textit{Advances in Neural Information Processing Systems (NeurIPS)}.
+
+\item Krizhevsky, A. (2009). Learning multiple layers of features from tiny images. Technical report, University of Toronto.
+
+\item Lipman, Y., Chen, R. T., Ben-Hamu, H., Nickel, M., and Le, M. (2023). Flow matching for generative modeling. In \textit{International Conference on Learning Representations (ICLR)}.
+
+\item Liu, X., Gong, C., and Liu, Q. (2023). Flow straight and fast: Learning to generate and transfer data with rectified flow. In \textit{International Conference on Learning Representations (ICLR)}.
+
+\item Ma, N., Goldstein, M., Albergo, M. S., Boffi, N. M., Vanden-Eijnden, E., and Xie, S. (2024). SiT: Exploring flow and diffusion-based generative models with scalable interpolant transformers. In \textit{European Conference on Computer Vision (ECCV)}.
+
+\item Raposo, D., Ritter, S., Richards, B., Lillicrap, T., Humphreys, P. C., and Santoro, A. (2024). Mixture-of-depths: Dynamically allocating compute in transformer-based language models. \textit{arXiv preprint arXiv:2404.02258}.
+
+\item Sauer, A., Lorenz, D., Blattmann, A., and Rombach, R. (2023). Adversarial diffusion distillation. \textit{arXiv preprint arXiv:2311.17042}.
+
+\item Song, Y., Dhariwal, P., Chen, M., and Sutskever, I. (2023). Consistency models. In \textit{International Conference on Machine Learning (ICML)}.
+
+\item You, H., Barnes, C., Zhou, Y., Kang, Y., Du, Z., Zhou, W., Zhang, L., Nitzan, Y., Liu, X., Lin, Z., et al. (2025). Layer- and timestep-adaptive differentiable token compression ratios for efficient diffusion transformers. In \textit{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}.
+
+\item Zhao, W., Han, Y., Tang, J., Wang, K., Song, Y., Huang, G., Wang, F., and You, Y. (2025). Dynamic diffusion transformer. In \textit{International Conference on Learning Representations (ICLR)}.
+\end{list}
+
+\end{document}

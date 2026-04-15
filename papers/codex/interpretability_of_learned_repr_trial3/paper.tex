@@ -1,0 +1,457 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[letterpaper,left=0.75in,right=0.75in,top=1in,bottom=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{enumitem}
+\usepackage{subcaption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.35em}
+\setlist[itemize]{leftmargin=1.4em, topsep=0.2em, itemsep=0.15em}
+
+\newcommand{\method}[1]{\textsc{#1}}
+\newcommand{\tfcc}{\textsc{TFCC}}
+\newcommand{\tba}{\textsc{TBA}}
+
+\title{Benchmarking Weakly Supervised Factor-Localized Sparse Autoencoders on Frozen Vision Features}
+\author{Anonymous Authors}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Recent sparse autoencoder work offers several ways to impose structure on learned dictionaries, but it is still unclear whether weak supervision and an explicit latent partition improve factor-localized responses under a leakage-free benchmark. We study this question on frozen vision features using exact single-factor counterfactual pairs from dSprites and Shapes3D. Our benchmark compares matched-capacity unpartitioned baselines (\method{TopK-SAE}, \method{RA-SAE}, and \method{Orbit-SAE}) against partitioned models with fixed invariant, factor, and residual blocks (\method{FB-SAE} and \method{FB-OSAE}). Evaluation uses target-factor change concentration (\tfcc{}) and target-block accuracy (\tba{}) on held-out pairs, with pseudo-block construction for unpartitioned models defined using training pairs only. On DINOv2 features, partitioned models consistently outperform unpartitioned baselines: on dSprites, \method{FB-SAE} reaches $0.392 \pm 0.038$ \tfcc{} versus $\approx 0.250$ for all unpartitioned baselines, and on Shapes3D, \method{FB-OSAE} reaches $0.319 \pm 0.045$ versus at most $0.169 \pm 0.002$. The same ordering is preserved in a dSprites OpenCLIP sensitivity check, where partitioned methods again dominate (\tfcc{} $0.614$--$0.625$ versus $\approx 0.250$). However, nuisance regularization does not produce a stable improvement over partitioning alone. The resulting picture is narrow but clear: when frozen features already linearly retain the factors of interest, weak supervision plus fixed partitioning is a strong benchmark condition for factor-localized SAE responses.
+\end{abstract}
+
+\section{Introduction}
+Sparse autoencoders (SAEs) are increasingly used to extract interpretable directions from pretrained representations, including recent work on vision and multimodal models \citep{mateusz2025sparse,thomas2025archetypal}. At the same time, structure-aware variants already cover many plausible architectural directions, including symmetry-aware dictionaries \citep{liv2024group,ege2025group} and stability-oriented formulations \citep{thomas2025archetypal}. In this setting, a defensible next step is not another lightly modified SAE family, but a controlled benchmark that isolates when structured latent organization actually improves factor-localized behavior.
+
+This paper studies one narrow question: when exact single-factor counterfactual pairs are available, does weak supervision through a fixed latent partition produce cleaner factor-local responses than matched unpartitioned SAEs on frozen vision features? We frame the study as a benchmark and protocol paper rather than a new representation-learning claim. The central design choice is to compare partitioned and unpartitioned models under the same frozen backbones, the same shallow SAE parameterization, and a leakage-free evaluation procedure.
+
+The benchmark operates on dSprites and Shapes3D, two standard controlled datasets with known factors of variation \citep{higgins2017betavae,kim2018factorvae,locatello2019challenging}. Images are embedded by frozen DINOv2 features \citep{oquab2023dinov2}, with a one-seed OpenCLIP sensitivity check on dSprites \citep{radford2021learning}. Partitioned methods divide the latent into invariant, factor, and residual blocks, then use exact counterfactual pairs to encourage target-factor changes to concentrate in the corresponding block. Unpartitioned baselines are evaluated with frozen pseudo-blocks built from training pairs only, so every method is scored under the same denominator and the same block semantics.
+
+Our contributions are:
+\begin{itemize}
+  \item We propose a leakage-free benchmark protocol for testing factor-local counterfactual responses in SAE latents on frozen vision features.
+  \item We provide a fair evaluation recipe for unpartitioned baselines by constructing invariant, factor, and residual pseudo-blocks using training data only.
+  \item We show that fixed partitioning plus weak supervision substantially improves held-out localization on DINOv2 features: the best partitioned model improves \tfcc{} by $0.142$ on dSprites and $0.150$ on Shapes3D over the best unpartitioned baseline.
+  \item We show that adding nuisance regularization sharply reduces invariant-block nuisance change, but does not yield a consistent \tfcc{}/\tba{} gain over partitioning alone.
+\end{itemize}
+
+Probe admissibility is an important part of the story. DINOv2 linearly recovers four of five dSprites factors on the held-out test split, but not rotation ($R^2 = 0.196$), so dSprites aggregate claims exclude rotation. On Shapes3D, all six retained factors are admissible. This avoids blaming an SAE objective for factors that the frozen representation itself does not expose.
+
+Section~\ref{sec:related} reviews prior work on disentanglement benchmarks and structured SAEs. Section~\ref{sec:method} defines the benchmark protocol and methods. Section~\ref{sec:experiments} presents the experimental results, ablations, and sensitivity checks. Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+Our benchmark sits at the intersection of disentanglement evaluation, frozen representation analysis, and structured sparse autoencoders.
+
+\textbf{Disentanglement benchmarks.} Controlled datasets such as dSprites and Shapes3D became standard because they expose exact factors of variation \citep{higgins2017betavae,burgess2018understanding,kim2018factorvae}. Work on quantitative disentanglement evaluation emphasized that claims should be supported by explicit metrics rather than qualitative examples \citep{eastwood2018framework,locatello2019challenging}. We use these datasets for a narrower purpose: not to measure unsupervised factor discovery, but to build exact single-factor interventions for evaluating latent localization.
+
+\textbf{Representation evaluation beyond downstream accuracy.} Recent discussion of representation quality argues that downstream performance alone is too coarse and should be complemented by disentanglement, equivariance, and invariance analyses \citep{christos2025towards}. Our benchmark follows that view by separating factor-local change concentration from nuisance invariance and reconstruction quality.
+
+\textbf{Intervention-based interpretability benchmarks.} RAVEL argues that interpretability methods should be compared using explicit intervention tests rather than cherry-picked visualizations \citep{jing2024ravel}. We import that methodological lesson into frozen vision features: exact single-factor counterfactual pairs define the primary evaluation object, and the pseudo-block protocol fixes the evaluation for unpartitioned models before looking at held-out results.
+
+\textbf{Structured sparse autoencoders.} Recent SAE work already spans several relevant design axes. Group Crosscoders and equivariant SAEs align learned features with symmetry structure \citep{liv2024group,ege2025group}. Archetypal SAE focuses on stability and reproducibility in vision dictionaries \citep{thomas2025archetypal}. Sparse autoencoders have also been used directly on vision-language models to study monosemanticity \citep{mateusz2025sparse}. Unlike these papers, our goal is not to introduce a new SAE family. We instead ask whether a simple fixed partition plus weak supervision wins under a controlled, fully specified benchmark.
+
+\section{Method}
+\label{sec:method}
+\subsection{Setting}
+Each image $x$ is mapped to a frozen feature vector $h(x) \in \mathbb{R}^d$. We use DINOv2-small features for the primary benchmark and OpenCLIP ViT-B/32 features for a dSprites sensitivity check. All methods train a shallow SAE on cached frozen features:
+\begin{equation}
+\hat{h}(x) = D(E(h(x))).
+\end{equation}
+The encoder is a single linear layer followed by ReLU and TopK sparsification, and the decoder is a single linear layer tied to the encoder at initialization. The latent width is $4d$, and TopK uses $32$ active units when $d \leq 512$ and $64$ otherwise.
+
+\subsection{Datasets, splits, and admissibility}
+We evaluate on dSprites and Shapes3D. dSprites retains five factors: shape, scale, rotation, x-position, and y-position. Shapes3D retains six factors: object hue, wall hue, floor hue, scale, shape, and orientation.
+
+Tuple-level train/validation/test splits are created before pair generation using split seed $2026$. dSprites contains $737{,}280$ images, split into $516{,}096/110{,}592/110{,}592$ train/validation/test tuples; Shapes3D contains $480{,}000$ images, split into $336{,}000/72{,}000/72{,}000$. For dSprites, we store $24{,}000/3{,}000/3{,}000$ single-factor pairs per factor and $60{,}000/10{,}000/10{,}000$ nuisance pairs across train/validation/test. For Shapes3D, the corresponding factor-pair counts are $20{,}000/2{,}500/2{,}500$ per factor with the same nuisance-pair counts. Nuisance pairs are always two independent corruptions of the same image, with Gaussian noise $\sigma \in [0.01, 0.05]$, Gaussian blur $\sigma \in [0.4, 1.0]$, JPEG quality $50$--$95$, and dead-pixel masking $0.5\%$--$2\%$. All images are resized to $224 \times 224$.
+
+Before SAE training, we fit linear probes on frozen features. Categorical factors use multinomial logistic regression and are marked admissible when test accuracy is at least $\max(\mathrm{chance}+0.20, 0.35)$; ordered factors use ridge regression and are marked admissible when test $R^2 \geq 0.30$. On DINOv2 dSprites, shape ($0.9999$ accuracy), scale ($0.9580$), x-position ($R^2 = 0.9549$), and y-position ($R^2 = 0.9822$) are admissible, while rotation is not ($R^2 = 0.1962$). On DINOv2 Shapes3D, all six retained factors are admissible. On OpenCLIP dSprites, the same four dSprites factors are admissible and rotation again is not ($R^2 = 0.1828$).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/probe_admissibility.pdf}
+\caption{Frozen-feature probe admissibility on held-out test tuples. Bars show probe accuracy for categorical factors and $R^2$ for ordered factors. Aggregate localization metrics include only factors marked admissible here; for dSprites this excludes rotation on both backbones.}
+\label{fig:probes}
+\end{figure}
+
+\subsection{Partitioned and unpartitioned methods}
+We compare five matched-capacity methods:
+\begin{itemize}
+  \item \method{TopK-SAE}: plain sparse autoencoder.
+  \item \method{RA-SAE}: a relaxed-archetypal SAE baseline.
+  \item \method{Orbit-SAE}: an unpartitioned SAE with nuisance consistency on the full code.
+  \item \method{FB-SAE}: a fixed-partition SAE with counterfactual block supervision.
+  \item \method{FB-OSAE}: \method{FB-SAE} plus nuisance consistency on the invariant block.
+\end{itemize}
+
+For partitioned models, the latent is divided into invariant, factor, and residual blocks with widths $20\%$, $60\%$, and $20\%$ of the latent, respectively. The factor block budget is split equally across retained factors in a dataset. Let
+\begin{equation}
+z = [z_{\mathrm{inv}}, z_1, \dots, z_F, z_{\mathrm{res}}],
+\end{equation}
+where $F$ is the number of retained factors.
+
+\subsection{Training objective}
+Every method uses feature-space mean squared reconstruction loss and the same TopK sparsity mechanism. The implemented training loop samples batches with $50\%$ singleton features, $25\%$ factor counterfactual pairs, and $25\%$ nuisance pairs. The base loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{base}} = \| \hat{h}(x) - h(x) \|_2^2 + 10^{-4} \, \mathrm{mean}(z).
+\end{equation}
+
+For nuisance pairs $(t_1(x), t_2(x))$, \method{Orbit-SAE} penalizes the full-code discrepancy,
+\begin{equation}
+\mathcal{L}_{\mathrm{nuis}}^{\mathrm{orbit}} = \| z(t_1(x)) - z(t_2(x)) \|_2^2,
+\end{equation}
+while \method{FB-OSAE} penalizes only the invariant block,
+\begin{equation}
+\mathcal{L}_{\mathrm{nuis}}^{\mathrm{inv}} = \| z_{\mathrm{inv}}(t_1(x)) - z_{\mathrm{inv}}(t_2(x)) \|_2^2.
+\end{equation}
+
+For a single-factor counterfactual pair $(x, x^{(f)})$, define the mean absolute block change
+\begin{equation}
+\Delta_b(x, x^{(f)}) = \frac{1}{|b|} \sum_{u \in b} | z_u(x) - z_u(x^{(f)}) |.
+\end{equation}
+The counterfactual supervision used by \method{FB-SAE} and \method{FB-OSAE} is
+\begin{equation}
+\mathcal{L}_{\mathrm{cf}} =
+\Delta_{\mathrm{inv}} + \Delta_{\mathrm{res}} + \sum_{f' \neq f} \Delta_{f'} + \max(0, m - \Delta_f),
+\end{equation}
+with margin $m = 0.1$. In practice, the code averages this loss over sampled factor pairs in each minibatch and scales it by $\lambda_{\mathrm{cf}}$.
+
+The pilot-selected hyperparameters are frozen across the benchmark: learning rate $10^{-3}$, batch size $2048$, maximum $20$ epochs, patience $3$, $\lambda_{\mathrm{cf}} = 0.3$ for partitioned models, $\lambda_{\mathrm{nuis}} = 0.3$ for nuisance-regularized models, and RA relaxation coefficient $0.05$. DINOv2 runs use seeds $11$, $17$, and $23$; the OpenCLIP sensitivity check uses seed $29$.
+
+\subsection{Pseudo-block evaluation for unpartitioned methods}
+Evaluation for unpartitioned baselines follows the pre-registered pseudo-block protocol from the proposal. Using training pairs only, we compute per-unit normalized factor-selectivity scores, greedily assign disjoint pseudo-factor blocks in decreasing held-out probe-strength order, assign the invariant pseudo-block using the smallest nuisance-response scores among remaining units, and define the residual block as all leftover units. The block widths exactly match the native partition widths of the partitioned models for the same dataset and backbone.
+
+This matters because \tfcc{} requires a common denominator:
+\begin{equation}
+\mathrm{\tfcc}(x, x^{(f)}) =
+\frac{\Delta_f}{\Delta_{\mathrm{inv}} + \sum_{k=1}^{F} \Delta_k + \Delta_{\mathrm{res}}}.
+\end{equation}
+Without pseudo-blocks, unpartitioned baselines would not have a comparable invariant and residual decomposition.
+
+\subsection{Metrics}
+The primary metric is \tfcc{}, the fraction of total normalized block change assigned to the target factor block. The secondary metric is \tba{}, the fraction of factor pairs for which the target factor block has the largest change. We also report invariant-block nuisance change, variance explained, realized mean $L_0$, reconstruction mean squared error, $95\%$ bootstrap confidence intervals over test pairs, and paired seed-matched comparisons with Holm correction.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Experimental setup}
+The main benchmark uses DINOv2 features on dSprites and Shapes3D. A one-seed OpenCLIP run on dSprites serves as a sensitivity check rather than part of the primary average. Aggregate dSprites metrics are computed over the four admissible factors only; rotation is excluded because the frozen backbone does not linearly expose it. Shapes3D aggregate metrics include all six factors.
+
+Table~\ref{tab:main} reports the primary DINOv2 results. The key pattern is simple: partitioned models dominate the unpartitioned baselines on both datasets, while nuisance regularization improves nuisance isolation much more clearly than it improves localization.
+
+\begin{table*}[t]
+\caption{Main DINOv2 benchmark. Means and standard deviations are computed across seeds $\{11,17,23\}$. Best values in each column are in bold. Higher is better for \tfcc{}, \tba{}, and variance explained; lower is better for nuisance leakage. dSprites aggregates exclude rotation because the frozen probe test marks it inadmissible. Runtime, mean $L_0$, and reconstruction-MSE controls are reported in Appendix Table~\ref{tab:controls}.}
+\label{tab:main}
+\centering
+\setlength{\tabcolsep}{3.2pt}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+& \multicolumn{4}{c}{dSprites + DINOv2} & \multicolumn{4}{c}{Shapes3D + DINOv2} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+Method & \tfcc{} $\uparrow$ & \tba{} $\uparrow$ & Nuisance $\downarrow$ & Var.\ Exp.\ $\uparrow$
+& \tfcc{} $\uparrow$ & \tba{} $\uparrow$ & Nuisance $\downarrow$ & Var.\ Exp.\ $\uparrow$ \\
+\midrule
+\method{TopK-SAE} & $0.250 \pm 0.000$ & $0.250 \pm 0.000$ & $5.43{\times}10^{-7} \pm 7.67{\times}10^{-7}$ & \textbf{$0.9965 \pm 0.0001$}
+& $0.169 \pm 0.002$ & $0.167 \pm 0.001$ & $3.67{\times}10^{-7} \pm 5.19{\times}10^{-7}$ & \textbf{$0.9883 \pm 0.0001$} \\
+\method{RA-SAE} & $0.250 \pm 0.000$ & $0.250 \pm 0.000$ & $1.09{\times}10^{-6} \pm 4.26{\times}10^{-7}$ & $0.9739 \pm 0.0007$
+& $0.167 \pm 0.000$ & $0.167 \pm 0.000$ & $9.76{\times}10^{-6} \pm 1.05{\times}10^{-6}$ & $0.9162 \pm 0.0017$ \\
+\method{Orbit-SAE} & $0.250 \pm 0.000$ & $0.250 \pm 0.000$ & $4.19{\times}10^{-7} \pm 1.63{\times}10^{-7}$ & $0.9963 \pm 0.0001$
+& $0.169 \pm 0.002$ & $0.168 \pm 0.000$ & $7.67{\times}10^{-7} \pm 1.56{\times}10^{-7}$ & $0.9876 \pm 0.0001$ \\
+\method{FB-SAE} & \textbf{$0.392 \pm 0.038$} & \textbf{$0.651 \pm 0.103$} & $0.0231 \pm 0.0051$ & $0.9945 \pm 0.0002$
+& $0.297 \pm 0.032$ & $0.646 \pm 0.094$ & $0.0344 \pm 0.0017$ & $0.9847 \pm 0.0001$ \\
+\method{FB-OSAE} & $0.382 \pm 0.021$ & $0.647 \pm 0.075$ & \textbf{$0.00014 \pm 0.00014$} & $0.9943 \pm 0.0003$
+& \textbf{$0.319 \pm 0.045$} & \textbf{$0.686 \pm 0.087$} & \textbf{$0.00008 \pm 0.00001$} & $0.9848 \pm 0.0001$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Main results}
+The benchmark question receives a positive answer on the primary backbone. On dSprites, \method{FB-SAE} reaches $0.392 \pm 0.038$ \tfcc{} and $0.651 \pm 0.103$ \tba{}, while every unpartitioned baseline remains at approximately $0.250$ \tfcc{} and $0.250$ \tba{}. On Shapes3D, \method{FB-OSAE} reaches $0.319 \pm 0.045$ \tfcc{} and $0.686 \pm 0.087$ \tba{}, versus a best unpartitioned score of $0.169 \pm 0.002$ \tfcc{} and $0.168 \pm 0.000$ \tba{}.
+
+The effect size is substantial in absolute terms. Relative to the best unpartitioned baseline, the strongest partitioned method improves mean \tfcc{} by $0.142$ on dSprites and $0.150$ on Shapes3D. Seed-matched paired tests still remain underpowered at only three seeds: raw $p$-values for \method{FB-SAE} versus unpartitioned baselines lie between $0.026$ and $0.033$, but none survive Holm correction.
+
+Figure~\ref{fig:per_factor} helps explain these gains. On dSprites, unpartitioned methods effectively collapse onto shape: they achieve \tfcc{} $\approx 1.0$ for shape and approximately $0$ for scale, x-position, and y-position. The partitioned methods instead spread response mass across multiple admissible factors, with \method{FB-SAE} averaging $0.588$ on scale and $0.296$ on y-position, and \method{FB-OSAE} averaging $0.507$ on scale and $0.346$ on y-position. On Shapes3D, unpartitioned baselines mainly allocate mass to object hue and wall hue, while partitioned models recover shape ($0.581$--$0.590$), orientation ($0.440$--$0.442$), and additional non-hue factors.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{0.49\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/dsprites_per_factor_tfcc.pdf}
+  \caption{dSprites}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/shapes3d_per_factor_tfcc.pdf}
+  \caption{Shapes3D}
+\end{subfigure}
+\caption{Per-factor \tfcc{} on DINOv2. Bars are means across seeds $\{11,17,23\}$ and error bars denote $\pm 1$ standard deviation across seeds. Only admissible factors are plotted and included in the aggregate metrics; the dSprites rotation factor is therefore omitted here. Partitioned models distribute change concentration across multiple admissible factors, while unpartitioned baselines mostly collapse onto a small subset of factors.}
+\label{fig:per_factor}
+\end{figure*}
+
+\subsection{Nuisance regularization and ablations}
+The ablation between \method{FB-SAE} and \method{FB-OSAE} shows a mixed picture. On dSprites, adding invariant-block nuisance regularization slightly reduces mean \tfcc{} by $0.010$; on Shapes3D, it increases mean \tfcc{} by $0.022$. Neither difference is significant ($p \approx 0.60$ in both cases, Holm-corrected $p = 1.0$). The practical conclusion is that nuisance regularization does not produce a stable localization gain over partitioning alone in this benchmark.
+
+What it does improve is nuisance isolation. On dSprites, invariant-block nuisance change drops from $0.0231 \pm 0.0051$ for \method{FB-SAE} to $0.00014 \pm 0.00014$ for \method{FB-OSAE}. On Shapes3D, the same comparison drops from $0.0344 \pm 0.0017$ to $0.00008 \pm 0.00001$. Figure~\ref{fig:nuisance} shows that this stronger invariance does not automatically translate into higher \tfcc{}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.84\linewidth]{figures/nuisance_vs_tfcc.pdf}
+\caption{Mean nuisance leakage versus mean \tfcc{} for each dataset-method combination. Each point uses seed-averaged DINOv2 results and aggregate metrics over admissible factors only. \method{FB-OSAE} sharply reduces invariant-block nuisance response, but this change does not imply a consistent localization gain over \method{FB-SAE}.}
+\label{fig:nuisance}
+\end{figure}
+
+Permutation control supports the semantic interpretation of the learned blocks. On dSprites, random block-label permutations reduce mean \tba{} to $0.160$ for \method{FB-SAE} and $0.178$ for \method{FB-OSAE}, compared with a chance rate of $0.200$. On Shapes3D, permutation yields mean \tba{} $0.166$ for \method{FB-SAE} and $0.138$ for \method{FB-OSAE}, around the chance rate of $1/6 \approx 0.167$. This collapse indicates that the original block identities, rather than a generic partition, drive the observed \tba{} gains.
+
+Pseudo-block construction for unpartitioned baselines is also stable. Rebuilding pseudo-blocks using only half of the training pairs changes test \tfcc{} by at most $1.13 \times 10^{-6}$ on dSprites and at most $2.54 \times 10^{-4}$ on Shapes3D, with maximum absolute \tba{} change at most $4.00 \times 10^{-4}$. Figure~\ref{fig:heatmaps} surfaces representative block-change diagnostics. The benchmark conclusions are therefore not sensitive to the precise training-pair sample used for pseudo-block assignment.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/ablation_summary.pdf}
+\caption{Ablation summary. Partitioning produces the main localization gain, while nuisance regularization mainly reduces nuisance leakage rather than providing a stable improvement in \tfcc{} or \tba{}.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{Backbone sensitivity}
+The dSprites OpenCLIP sensitivity check preserves the main family ranking. \method{FB-SAE} and \method{FB-OSAE} reach \tfcc{} $0.614$ and $0.625$, respectively, with \tba{} $0.830$ and $0.862$, while \method{TopK-SAE}, \method{RA-SAE}, and \method{Orbit-SAE} remain at approximately $0.250$ \tfcc{} and $0.250$ \tba{}. This matters because it shows the primary DINOv2 finding is not a one-backbone artifact.
+
+\begin{table}[t]
+\caption{dSprites OpenCLIP sensitivity check (seed $29$). The partitioned-vs.-unpartitioned ordering is preserved under the secondary frozen backbone.}
+\label{tab:openclip}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Method & \tfcc{} $\uparrow$ & \tba{} $\uparrow$ & Nuisance $\downarrow$ & Var.\ Exp.\ $\uparrow$ \\
+\midrule
+\method{TopK-SAE} & $0.250$ & $0.250$ & $0.00000$ & \textbf{$0.9970$} \\
+\method{RA-SAE} & $0.250$ & $0.250$ & $0.00000$ & $0.9862$ \\
+\method{Orbit-SAE} & $0.250$ & $0.250$ & $0.00000$ & $0.9967$ \\
+\method{FB-SAE} & $0.614$ & $0.830$ & $0.00058$ & $0.9931$ \\
+\method{FB-OSAE} & \textbf{$0.625$} & \textbf{$0.862$} & \textbf{$0.00002$} & $0.9929$ \\
+\bottomrule
+\end{tabular}
+\vspace{-0.2em}
+}
+\end{table}
+
+The within-family ordering does move slightly: on DINOv2, \method{FB-SAE} is better on dSprites while \method{FB-OSAE} is better on Shapes3D; on OpenCLIP dSprites, \method{FB-OSAE} is ahead. This reinforces the ablation conclusion that nuisance regularization is not uniformly beneficial, even though partitioning itself is robustly helpful.
+
+\subsection{Efficiency and controls}
+These gains come from shallow SAEs on cached features rather than heavy end-to-end training. On DINOv2, per-run runtime ranges from $1.125$ to $2.632$ minutes on dSprites and from $0.784$ to $1.871$ minutes on Shapes3D. Partitioned methods are slower than unpartitioned baselines, but still inexpensive enough for multi-seed benchmarking.
+
+The logged control metrics matter for fairness because the methods do not all operate at the same effective sparsity-quality point. Partitioned DINOv2 models keep mean $L_0$ essentially fixed near $32$ while improving localization, whereas RA-SAE is substantially sparser ($10.51$ on dSprites and $7.42$ on Shapes3D) and also reconstructs much worse (MSE $0.161$ and $0.490$). Conversely, \method{TopK-SAE} and \method{Orbit-SAE} achieve the lowest reconstruction errors on both datasets, yet still fail the localization benchmark. Appendix Table~\ref{tab:controls} reports runtime, mean $L_0$, and reconstruction MSE for every method.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The benchmark supports a narrow claim. When the frozen backbone already linearly retains the relevant factors, weak supervision plus fixed partitioning improves factor-localized responses over matched unpartitioned SAEs. It does not support a broader claim that \method{FB-OSAE} is a superior SAE family in general, or that nuisance regularization consistently improves localization.
+
+Several limitations matter.
+\begin{itemize}
+  \item The study uses synthetic datasets with exact factors. This is useful for protocol design, but says little about behavior on natural images without intervention-ready labels.
+  \item The main benchmark uses one primary backbone and one one-seed sensitivity check. The ordering is stable here, but broader backbone coverage remains untested.
+  \item All SAEs are shallow linear models on frozen pooled features. Deeper decoders, patch-level features, or end-to-end training could change the ranking.
+  \item Statistical power is limited. The partitioning effect is large in mean difference, but the three-seed paired tests do not survive Holm correction.
+  \item The pseudo-block protocol is necessary for fairness, but it also reveals a failure mode of unpartitioned baselines: they often concentrate on one strong factor and leave other admissible factors effectively unmapped.
+\end{itemize}
+
+These limitations are not incidental; they clarify the intended scope. This is a benchmark and evaluation paper, not a claim of universal superiority for one architectural trick.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We introduced a leakage-free benchmark for factor-localized sparse autoencoders on frozen vision features and used it to compare fixed-partition models against matched unpartitioned baselines. Across both DINOv2 datasets, partitioned methods strongly improved held-out localization: the best partitioned configuration reached \tfcc{} $0.392$ on dSprites and $0.319$ on Shapes3D, compared with at most $0.250$ and $0.169$ for unpartitioned baselines. The same partitioned-vs.-unpartitioned ordering held in a dSprites OpenCLIP sensitivity check.
+
+The more specific ablation is less favorable to nuisance regularization. Adding invariant-block nuisance consistency dramatically reduces nuisance leakage, but does not produce a stable improvement over partitioning alone on \tfcc{} or \tba{}. The practical implication is that fixed partitioning and weak supervision appear to be the main ingredients behind the localization gains observed here.
+
+Future work should test whether the same benchmark logic scales to less synthetic data, richer backbones, and patch-level or hierarchical SAE constructions. The main lesson of this paper is methodological: for SAE localization claims, explicit intervention tests and leakage-free block definitions are not optional bookkeeping, but the core of the result.
+
+\appendix
+\section{Reproducibility and Additional Diagnostics}
+
+\subsection{Exact Reproducibility Settings}
+All tuple splits and pair construction use split seed $2026$. Primary DINOv2 runs use seeds $\{11,17,23\}$, and the OpenCLIP sensitivity check uses seed $29$. Probe subsampling uses seeds $0$ and $1$ for train and validation subsamples, bootstrap confidence intervals use $200$ resamples with RNG seed $0$, and permutation controls use $20$ random factor-label permutations per seed with RNG seed $0$.
+
+The training objective, optimizer, and early-stopping settings are exactly those saved in the run artifacts: Adam with learning rate $10^{-3}$, batch size $2048$, maximum $20$ epochs, patience $3$, latent width $4d$, TopK with $32$ active units, margin $0.1$, $\lambda_{\mathrm{cf}} = 0.3$ for partitioned models, $\lambda_{\mathrm{nuis}} = 0.3$ for nuisance-regularized models, and RA relaxation coefficient $0.05$.
+
+\subsection{Admissibility, Aggregation, and Testing Rules}
+dSprites aggregate \tfcc{}/\tba{} metrics use only the admissible factors \{shape, scale, x-position, y-position\}; rotation is reported only diagnostically because both backbones fall below the admissibility threshold. Shapes3D aggregates include all six retained factors.
+
+Each reported \tfcc{} confidence interval is a $95\%$ bootstrap interval over admissible held-out factor-pair evaluations. The paired significance tests in the main text are two-sided paired $t$-tests on seed-matched DINOv2 runs. We correct the eight primary comparisons with Holm correction; none survive at $\alpha = 0.05$.
+
+\subsection{Pseudo-Block Construction Audit}
+For each unpartitioned baseline, pseudo-blocks are built once from training data only. Factor pseudo-blocks are assigned greedily in descending probe-strength order using per-unit normalized change scores on train counterfactual pairs. The invariant pseudo-block is then chosen from the remaining units with the smallest normalized nuisance response on train nuisance pairs, and the residual block contains all remaining units. The robustness audit recomputes pseudo-blocks from only half of the stored training pairs and confirms that the resulting test metrics change negligibly: at most $1.13 \times 10^{-6}$ \tfcc{} on dSprites and $2.54 \times 10^{-4}$ on Shapes3D, with maximum absolute \tba{} change $4.00 \times 10^{-4}$.
+
+\begin{table*}[t]
+\caption{Efficiency and fairness controls. Means and standard deviations are computed across DINOv2 seeds $\{11,17,23\}$; OpenCLIP uses the single sensitivity seed $29$. Lower is better for runtime and reconstruction MSE.}
+\label{tab:controls}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{llccc}
+\toprule
+Dataset + Backbone & Method & Runtime (min) $\downarrow$ & Mean $L_0$ & Reconstruction MSE $\downarrow$ \\
+\midrule
+dSprites + DINOv2 & \method{TopK-SAE} & $1.140 \pm 0.013$ & $31.9999 \pm 0.0000$ & $\mathbf{0.0213 \pm 0.0007}$ \\
+dSprites + DINOv2 & \method{RA-SAE} & $1.149 \pm 0.003$ & $10.51 \pm 0.30$ & $0.1606 \pm 0.0040$ \\
+dSprites + DINOv2 & \method{Orbit-SAE} & $1.237 \pm 0.004$ & $31.9995 \pm 0.0002$ & $0.0230 \pm 0.0004$ \\
+dSprites + DINOv2 & \method{FB-SAE} & $2.483 \pm 0.067$ & $31.9828 \pm 0.0043$ & $0.0336 \pm 0.0010$ \\
+dSprites + DINOv2 & \method{FB-OSAE} & $2.576 \pm 0.046$ & $31.9736 \pm 0.0010$ & $0.0348 \pm 0.0016$ \\
+\midrule
+Shapes3D + DINOv2 & \method{TopK-SAE} & $0.792 \pm 0.008$ & $32.0000 \pm 0.0000$ & $\mathbf{0.0685 \pm 0.0009}$ \\
+Shapes3D + DINOv2 & \method{RA-SAE} & $0.804 \pm 0.004$ & $7.42 \pm 0.63$ & $0.4902 \pm 0.0097$ \\
+Shapes3D + DINOv2 & \method{Orbit-SAE} & $0.856 \pm 0.008$ & $32.0000 \pm 0.0000$ & $0.0723 \pm 0.0006$ \\
+Shapes3D + DINOv2 & \method{FB-SAE} & $1.818 \pm 0.017$ & $32.0000 \pm 0.0000$ & $0.0897 \pm 0.0007$ \\
+Shapes3D + DINOv2 & \method{FB-OSAE} & $1.847 \pm 0.026$ & $32.0000 \pm 0.0000$ & $0.0888 \pm 0.0007$ \\
+\midrule
+dSprites + OpenCLIP & \method{TopK-SAE} & $1.307$ & $32.0000$ & $\mathbf{0.0009}$ \\
+dSprites + OpenCLIP & \method{RA-SAE} & $1.317$ & $22.5584$ & $0.0042$ \\
+dSprites + OpenCLIP & \method{Orbit-SAE} & $1.429$ & $31.9999$ & $0.0010$ \\
+dSprites + OpenCLIP & \method{FB-SAE} & $2.416$ & $31.0664$ & $0.0021$ \\
+dSprites + OpenCLIP & \method{FB-OSAE} & $2.620$ & $30.2388$ & $0.0022$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/topk_sae_block_change_heatmap.pdf}
+  \caption{\method{TopK-SAE}}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/fb_sae_block_change_heatmap.pdf}
+  \caption{\method{FB-SAE}}
+\end{subfigure}
+\caption{Representative block-change heatmaps on dSprites + DINOv2 validation pairs for seed $11$. Each cell shows the mean normalized change assigned to the invariant block, target block, mean non-target factor blocks, or residual block for the named intervention factor. All five dSprites factors are shown here diagnostically, but aggregate paper-wide dSprites metrics exclude rotation because the frozen-feature probes mark it inadmissible. The partitioned model activates target blocks for multiple factors, whereas the unpartitioned baseline collapses onto a narrow subset of pseudo-blocks.}
+\label{fig:heatmaps}
+\end{figure*}
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[{{Burgess} et~al.(2018){Burgess}, {Higgins}, {Pal}, {Matthey},
+  {Watters}, {Desjardins}, and {Lerchner}}]{burgess2018understanding}
+Christopher~P. Burgess, Irina Higgins, Arka Pal, Loic Matthey, Nick Watters,
+  Guillaume Desjardins, and Alexander Lerchner.
+\newblock Understanding disentangling in beta-vae.
+\newblock {\em arXiv preprint arXiv:1804.03599}, 2018.
+
+\bibitem[{{Eastwood} and {Williams}(2018)}]{eastwood2018framework}
+Cian Eastwood and Christopher K.~I. Williams.
+\newblock A framework for the quantitative evaluation of disentangled
+  representations.
+\newblock In {\em International Conference on Learning Representations
+  Workshop}, 2018.
+
+\bibitem[{{Erdogan} and {Lucic}(2025)}]{ege2025group}
+Ege Erdogan and Ana Lucic.
+\newblock Group equivariance meets mechanistic interpretability: Equivariant
+  sparse autoencoders.
+\newblock {\em arXiv preprint arXiv:2511.09432}, 2025.
+
+\bibitem[{{Fel} et~al.(2025){Fel}, {Lubana}, {Prince}, {Kowal}, {Boutin},
+  {Papadimitriou}, {Wang}, {Wattenberg}, {Ba}, and
+  {Konkle}}]{thomas2025archetypal}
+Thomas Fel, Ekdeep~Singh Lubana, Jacob~S. Prince, Matthew Kowal, Victor
+  Boutin, Isabel Papadimitriou, Binxu Wang, Martin Wattenberg, Demba Ba, and
+  Talia Konkle.
+\newblock Archetypal {SAE}: Adaptive and stable dictionary learning for concept
+  extraction in large vision models.
+\newblock {\em arXiv preprint arXiv:2502.12892}, 2025.
+
+\bibitem[{{Gorton}(2024)}]{liv2024group}
+Liv Gorton.
+\newblock Group crosscoders for mechanistic analysis of symmetry.
+\newblock {\em arXiv preprint arXiv:2410.24184}, 2024.
+
+\bibitem[{{Higgins} et~al.(2017){Higgins}, {Matthey}, {Pal}, {Burgess},
+  {Glorot}, {Botvinick}, {Mohamed}, and {Lerchner}}]{higgins2017betavae}
+Irina Higgins, Loic Matthey, Arka Pal, Christopher~P. Burgess, Xavier Glorot,
+  Matthew Botvinick, Shakir Mohamed, and Alexander Lerchner.
+\newblock beta-vae: Learning basic visual concepts with a constrained
+  variational framework.
+\newblock In {\em International Conference on Learning Representations}, 2017.
+
+\bibitem[{{Huang} et~al.(2024){Huang}, {Wu}, {Potts}, {Geva}, and
+  {Geiger}}]{jing2024ravel}
+Jing Huang, Zhengxuan Wu, Christopher Potts, Mor Geva, and Atticus Geiger.
+\newblock {RAVEL}: Evaluating interpretability methods on disentangling
+  language model representations.
+\newblock {\em arXiv preprint arXiv:2402.17700}, 2024.
+
+\bibitem[{{Kim} and {Mnih}(2018)}]{kim2018factorvae}
+Hyunjik Kim and Andriy Mnih.
+\newblock Disentangling by factorising.
+\newblock In {\em International Conference on Machine Learning}, 2018.
+
+\bibitem[{{Locatello} et~al.(2019){Locatello}, {Bauer}, {Lucic}, {Raetsch},
+  {Gelly}, {Schoelkopf}, and {Bachem}}]{locatello2019challenging}
+Francesco Locatello, Stefan Bauer, Mario Lucic, Gunnar Raetsch, Sylvain Gelly,
+  Bernhard Schoelkopf, and Olivier Bachem.
+\newblock Challenging common assumptions in the unsupervised learning of
+  disentangled representations.
+\newblock In {\em International Conference on Machine Learning}, 2019.
+
+\bibitem[{{Oquab} et~al.(2023){Oquab}, {Darcet}, {Moutakanni}, {Vo},
+  {Szafraniec}, {Lachaux}, et~al.}]{oquab2023dinov2}
+Maxime Oquab, Timothee Darcet, Theo Moutakanni, Hugo Vo, Marc Szafraniec,
+  Marie-Anne Lachaux, et~al.
+\newblock {DINOv2}: Learning robust visual features without supervision.
+\newblock {\em arXiv preprint arXiv:2304.07193}, 2023.
+
+\bibitem[{{Pach} et~al.(2025){Pach}, {Karthik}, {Bouniot}, {Belongie}, and
+  {Akata}}]{mateusz2025sparse}
+Mateusz Pach, Shyamgopal Karthik, Quentin Bouniot, Serge Belongie, and Zeynep
+  Akata.
+\newblock Sparse autoencoders learn monosemantic features in vision-language
+  models.
+\newblock {\em arXiv preprint arXiv:2504.02821}, 2025.
+
+\bibitem[{{Plachouras} et~al.(2025){Plachouras}, {Guinot}, {Fazekas},
+  {Quinton}, {Benetos}, and {Pauwels}}]{christos2025towards}
+Christos Plachouras, Julien Guinot, George Fazekas, Elio Quinton, Emmanouil
+  Benetos, and Johan Pauwels.
+\newblock Towards a unified representation evaluation framework beyond
+  downstream tasks.
+\newblock {\em arXiv preprint arXiv:2505.06224}, 2025.
+
+\bibitem[{{Radford} et~al.(2021){Radford}, {Kim}, {Hallacy}, {Ramesh}, {Goh},
+  {Agarwal}, {Sastry}, {Askell}, {Mishkin}, {Clark}, {Krueger}, and
+  {Sutskever}}]{radford2021learning}
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh,
+  Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark,
+  Gretchen Krueger, and Ilya Sutskever.
+\newblock Learning transferable visual models from natural language
+  supervision.
+\newblock In {\em International Conference on Machine Learning}, 2021.
+
+\end{thebibliography}
+
+\end{document}

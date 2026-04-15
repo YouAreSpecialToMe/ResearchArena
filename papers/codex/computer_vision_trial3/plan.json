@@ -1,0 +1,93 @@
+[
+  {
+    "category": "Registration Status",
+    "title": "Separate the unavailable registered study from the executed proxy plan",
+    "description": "The registered CAT-Seg plus Cityscapes/Cityscapes-C/ACDC plus MLMP benchmark was not runnable in this workspace. Stage 2 therefore executes only a proxy feasibility study and must not be reported as confirmatory evidence for the registered OVSS claim.",
+    "steps": {
+      "step1": "Search the workspace for CAT-Seg, Cityscapes, ACDC, and MLMP assets and save the compatibility-check report under exp/00_environment/compatibility_check.json.",
+      "step2": "If those assets are absent, freeze proposal.md, plan.json, and results.json to the proxy framing and set the final claim status to a negative proxy result unless the proxy numbers are clearly compelling.",
+      "step3": "Keep the original registered intent described only as unavailable background; do not present the proxy benchmark as validation of the missing CAT-Seg setup."
+    }
+  },
+  {
+    "category": "Executed Proxy Environment",
+    "title": "Use one reproducible proxy stack that fits the available machine",
+    "description": "Run a small, auditable semantic-segmentation proxy study on one RTX A6000 within the overall eight-hour budget.",
+    "steps": {
+      "step1": "Use the local virtual environment, record pip freeze to exp/00_environment/requirements_lock.txt, and store Python, GPU, and CPU metadata under exp/00_environment/results.json.",
+      "step2": "Use DeepLabV3-ResNet50 from torchvision as the proxy segmentation backbone, a rank-4 logit adapter as the only trainable component, 256x256 resolution, batch size 1, and exactly one update step per image.",
+      "step3": "Use the same seed list for all stochastic runs: 13, 17, and 23.",
+      "step4": "Run everything sequentially on the single GPU and reserve only lightweight CPU work for cache construction, aggregation, and plotting."
+    }
+  },
+  {
+    "category": "Proxy Data",
+    "title": "Build a fixed Pascal VOC proxy stream with synthetic shifts",
+    "description": "Use Pascal VOC 2012 as a closed-vocabulary proxy because the intended Cityscapes and ACDC assets are unavailable.",
+    "steps": {
+      "step1": "Create a 24-image calibration split from Pascal VOC train images with sufficient foreground content.",
+      "step2": "Create a 144-image main benchmark from Pascal VOC val images with six 24-image domain blocks: clean, fog, gaussian_noise, snow, dusk, and night.",
+      "step3": "Create a 72-image reduced slice with 12 images per proxy domain for ablations.",
+      "step4": "Persist sample lists and stream orders in exp/01_data_prep/splits.json so all reruns use identical images.",
+      "step5": "Use the Pascal VOC 21-class label space in code and report foreground mIoU over the 20 non-background classes."
+    }
+  },
+  {
+    "category": "Caches And Calibration",
+    "title": "Cache immutable region features and calibrate thresholds once",
+    "description": "Precompute only artifacts that do not depend on online-updated weights and freeze all operating thresholds from the calibration split.",
+    "steps": {
+      "step1": "Build proposal-region caches and SLIC-region caches for every unique proxy sample under data/proxy_cache/.",
+      "step2": "Cache CLIP text embeddings once for the Pascal VOC vocabulary and CLIP image logits for each cached region crop.",
+      "step3": "On the 24-image calibration split, compute fused margin, fused entropy, augmentation agreement, and accepted-area statistics from the frozen proxy model.",
+      "step4": "Freeze tau_ovss = 1.0 and tau_clip = 1.0, then set the margin threshold to the 60th percentile, entropy threshold to the 40th percentile, agreement threshold to the 50th percentile, and common budget B to the median accepted-area ratio from calibration only.",
+      "step5": "Save calibration diagnostics, rejection counts, and threshold values under exp/02_calibration/results.json."
+    }
+  },
+  {
+    "category": "Runtime Gate",
+    "title": "Measure throughput before launching the full matrix",
+    "description": "Use a dry run to verify that the proxy matrix remains far below the overall experiment budget.",
+    "steps": {
+      "step1": "Run a 12-image dry run with the clip_verified method on Order A.",
+      "step2": "Record inference, support-selection, and update timing, plus peak VRAM and estimated CPU RAM.",
+      "step3": "Project the full main-matrix and reduced-slice runtime from the dry-run throughput and save the projection to exp/02_calibration/dry_run_timing.json.",
+      "step4": "Proceed only if the projected runtime remains below seven GPU-hours; otherwise prune only ablation sensitivity runs before touching the matched main comparison."
+    }
+  },
+  {
+    "category": "Main Comparison",
+    "title": "Run four matched proxy methods on two stream orders",
+    "description": "Evaluate one deterministic non-adaptive baseline and three adaptive methods under the same adapter size, optimizer, step count, and budget accounting.",
+    "steps": {
+      "step1": "Run frozen on Order A and Order B once each.",
+      "step2": "Run topb_pixel on Order A and Order B for seeds 13, 17, and 23.",
+      "step3": "Run raw_mask on Order A and Order B for seeds 13, 17, and 23.",
+      "step4": "Run clip_verified on Order A and Order B for seeds 13, 17, and 23.",
+      "step5": "Save each run's JSON, fresh log, predictions, and domain-boundary checkpoints under its own experiment directory."
+    }
+  },
+  {
+    "category": "Ablations",
+    "title": "Evaluate each claim-critical component on the reduced slice",
+    "description": "Run reduced-slice ablations only on Order A to keep the proxy study cheap while still multi-domain.",
+    "steps": {
+      "step1": "Run slic, no_clip, and no_consistency for seeds 13, 17, and 23.",
+      "step2": "Run threshold sensitivity at margin offsets -0.05, 0.00, and +0.05 for seeds 13, 17, and 23.",
+      "step3": "Run budget sensitivity for topb_pixel and clip_verified at 0.8B, 1.0B, and 1.2B for seeds 13, 17, and 23.",
+      "step4": "Store every ablation run in its own standalone directory under exp/07_ablations/<run_name>/ with colocated JSON, log, predictions, and checkpoints."
+    }
+  },
+  {
+    "category": "Metrics And Reporting",
+    "title": "Use one consistent metric protocol and report the result as negative proxy evidence",
+    "description": "The main scalar is dataset-level foreground mIoU on Pascal VOC, while per-image diagnostics use the same foreground-only class logic at the image level.",
+    "steps": {
+      "step1": "Report aggregate mIoU from the dataset confusion matrix over the 20 Pascal VOC foreground classes.",
+      "step2": "Report per-image mIoU as the mean IoU over only the foreground classes present in that image; keep zero-filled per-image mIoU only as a diagnostic field if needed.",
+      "step3": "Aggregate stochastic methods as mean plus standard deviation over seeds 13, 17, and 23 and run paired Wilcoxon signed-rank tests for clip_verified versus topb_pixel and clip_verified versus raw_mask.",
+      "step4": "Save root results.json, stage-level results.json files, tables under figures/, and all generated figures only from executed code.",
+      "step5": "If clip_verified does not convincingly outperform the matched baselines, report the study explicitly as a negative proxy feasibility result."
+    }
+  }
+]

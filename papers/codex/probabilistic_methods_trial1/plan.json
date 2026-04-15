@@ -1,0 +1,122 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "CPU-only reproducible setup",
+    "description": "Create one deterministic CPU-only environment and an execution schedule that fits 2 CPU cores, 128GB RAM, 0 GPUs, and an 8-hour total budget.",
+    "steps": {
+      "step1": "Use Python 3.11 with `numpy`, `scipy`, `pandas`, `scikit-learn`, `matplotlib`, `seaborn`, `arviz`, and `pymc`. No GPU libraries are required because all experiments are analytic, Monte Carlo, or small-model Bayesian computations on CPU.",
+      "step2": "Export `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` before every run so two independent jobs can use the two CPU cores without BLAS oversubscription.",
+      "step3": "Use exactly three experiment seeds `{11, 23, 37}`. For each seed, generate one shared replicate specification file that fixes prior draws, dataset draws, posterior sample indices, and relabeling draws; reuse that file for CoSBC and every baseline so comparisons are paired.",
+      "step4": "Create directories `results/setup/`, `results/null/`, `results/power/`, `results/localization/`, `results/fixed_data/`, `results/ablations/`, `results/runtime/`, and `figures/`. Save each run as one CSV plus one JSON metadata file containing seed, benchmark, method, approximation, `R`, `M`, `B`, dimension, runtime seconds, and peak memory if available.",
+      "step5": "Parallel execution plan: there are 0 GPUs, so all work is CPU scheduled. Run at most two seed-level jobs concurrently, one per core, and serialize the fixed-data PyMC jobs if memory rises above 32GB. Record the planned batch schedule in `results/runtime/schedule.json` before launching experiments."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Synthetic and fixed-data benchmark construction",
+    "description": "Prepare one family of exact-posterior Gaussian benchmarks for controlled validity and power studies, plus one realistic fixed-data posterior-SBC study on a small hierarchical dataset.",
+    "steps": {
+      "step1": "Synthetic benchmark 1, Toeplitz Gaussian mean model: sample `theta ~ N(0, Sigma0)` with `Sigma0[j,k] = 2.0 * 0.7^|j-k|`, observe `y | theta ~ N(theta, I_d)`, and compute the exact posterior `p(theta | y)` analytically. Use dimensions `d in {8, 16}`.",
+      "step2": "Synthetic benchmark 2, block-pair Gaussian model: use `d in {8, 16}` with independent `2 x 2` prior covariance blocks, each having marginal variance 2.0 and within-block correlation 0.8. This benchmark supports single-pair corruption and pair-localization because one pair can be perturbed while the rest of the posterior stays exact.",
+      "step3": "Tie-handling null benchmark: reuse Toeplitz `d=8`, but quantize each pooled candidate coordinate to a grid of width `0.25` before computing pooled ranks. This produces ties without changing the exact-exchangeability null.",
+      "step4": "Fixed-data benchmark: use the Minnesota radon dataset with county-level varying intercepts and a floor indicator. Restrict to the 12 counties with the most observations and keep all observations from those counties to obtain a small but dependence-rich hierarchical model that is practical on CPU. Standardize continuous predictors once and store the processed design matrix.",
+      "step5": "Default simulation budget for main synthetic studies is `R=100` replicates, `M=24` posterior draws per replicate, and `B=199` Monte Carlo relabelings. The tiny exact-validation setting is the only exhaustive one and uses `R=4`, `M=7`; all other global p-values are Monte Carlo only."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Fair simple and strong baselines",
+    "description": "Implement a simple baseline, a feature-matched enriched-SBC baseline, and two contextual strong baselines. Match summaries, aggregation, and calibration wherever the comparison is meant to isolate pooled ranking.",
+    "steps": {
+      "step1": "Simple baseline: scalar SBC on each coordinate plus one generic radial summary, the posterior Mahalanobis radius. Compute randomized scalar ranks, convert them to PIT values, form family-level quadratic dispersion statistics `S = sum_i (V_i - 0.5)^2` for coordinates and radius separately, and use the same Monte Carlo relabeling count `B` and plus-one correction used by CoSBC for the global max-over-families p-value.",
+      "step2": "Closest baseline, feature-matched enriched SBC: use the same pooled `U` and `Z` transforms, the same covariance features `Z_j Z_k`, the same upper/lower tail indicators `1{U_j>0.9,U_k>0.9}` and `1{U_j<0.1,U_k<0.1}`, the same family definitions, and the same family/global Monte Carlo relabeling calibration as CoSBC. The only change from CoSBC is ranking each scalar feature directly instead of first computing a pooled multivariate candidate score.",
+      "step3": "Aggregation rule for the closest baseline must be feature-matched and calibration-matched: within each family, compute the scalar-feature PIT values for all features, average their replicate-level quadratic dispersion statistics to get one family statistic, and then apply the same `T_max = max(S_cov, S_tail)` construction and the same relabeling draws used by CoSBC. Do not use ad hoc histogram tests, Bonferroni correction, or unmatched bin counts for this baseline.",
+      "step4": "Strong contextual baseline 1: discriminative calibration with `LogisticRegression` from scikit-learn, `solver='lbfgs'`, `penalty='l2'`, `max_iter=2000`, and `C in {0.1, 1.0, 10.0}` chosen on a single fixed 80/20 train-validation split. Use input features equal to raw coordinates, pairwise products, and tail indicators so feature access is comparable even though the test principle is different.",
+      "step5": "Strong contextual baseline 2: energy-distance two-sample test on the same covariance-family and tail-family feature vectors, using `B=199` label permutations and the same shared replicate pools. Treat these two contextual baselines as reference points only; the pre-registered novelty decision depends only on CoSBC versus the feature-matched enriched-SBC baseline."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Per-family validity and tiny exact global check",
+    "description": "Validate the exact exchangeability-based claims under the null and verify that Monte Carlo relabeling matches exhaustive relabeling only in a truly tiny tractable case.",
+    "steps": {
+      "step1": "Null calibration study: on Toeplitz `d in {8, 16}`, run CoSBC with covariance family, tail family, and global max test under exact posterior sampling using the main budget `R=100`, `M=24`, `B=199`. For each family, save discrete rank histograms, PIT histograms, family statistic values, p-values, and rejection indicators at `alpha in {0.05, 0.10}`.",
+      "step2": "Tie-handling study: repeat one null setting on the quantized Toeplitz benchmark with independent uniform tie-breaking seeds stored in the metadata. Confirm that exact-uniform discrete ranks are preserved after quantization and random tie resolution.",
+      "step3": "Tiny exhaustive global check: use Toeplitz `d=8`, `R=4`, and `M=7`, where exhaustive within-replicate relabeling over the planted index has only `(M+1)^R = 8^4 = 4096` global assignments. Compute the exact exhaustive p-value for `T_max` and compare it with the Monte Carlo plus-one estimate using `B=999` relabelings on the same observed statistics.",
+      "step4": "Kernel-score validity robustness: rerun one null setting with a Gaussian-kernel leave-one-out score whose bandwidth is the pooled median pairwise distance within the replicate. Because the bandwidth is selected permutation-equivariantly from the pooled candidate set, null validity should match the energy-score version.",
+      "step5": "Success criteria for this section: empirical rejection under the null should lie in `[0.03, 0.07]` at `alpha=0.05` for both CoSBC families and the global test, the tie-handling setting should remain inside the same band, and the average absolute difference between exhaustive and `B=999` Monte Carlo p-values in the tiny study should be at most `0.03`."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Controlled power on dependence failures",
+    "description": "Test whether pooled symmetric ranking improves sensitivity to covariance and joint-tail errors when summaries, family definitions, and calibration are held fixed across methods.",
+    "steps": {
+      "step1": "Toeplitz alternatives: for `d in {8, 16}`, generate three approximate posteriors from the exact Gaussian posterior. `Diag` keeps the exact posterior mean and marginal variances but zeros all off-diagonal covariance. `Shrink(lambda)` keeps the exact posterior mean and variances but multiplies the posterior correlation matrix by `lambda in {0.25, 0.50, 0.75}`. `TailMix` keeps the exact posterior mean and covariance but samples from a symmetric Gaussian scale mixture with two scales chosen so the covariance matches while tails are heavier than Gaussian.",
+      "step2": "For each alternative, run CoSBC in three variants: covariance family only, tail family only, and the pre-registered combined `T_max` test. Use the energy leave-one-out score as the default scoring rule and keep `R=100`, `M=24`, and `B=199` for every synthetic main-setting run.",
+      "step3": "Run the simple scalar SBC baseline, the feature-matched enriched-SBC baseline, discriminative calibration, and energy-distance baselines on the exact same replicate pools and with the same `R`, `M`, and `B` wherever relabeling applies. Record rejection at `alpha=0.05` and `alpha=0.10`, family-specific p-values, and runtime per method.",
+      "step4": "Primary pre-registered novelty test: compare CoSBC only against the feature-matched enriched-SBC baseline. Keep the stronger novelty claim only if CoSBC exceeds the enriched-SBC baseline by at least `0.08` absolute power at `alpha=0.05` on at least two dependence-only synthetic alternatives while both methods remain null-calibrated.",
+      "step5": "Secondary interpretation checks: covariance-only CoSBC should dominate tail-only CoSBC on `Diag` and severe `Shrink(0.25)`, while tail-only CoSBC should dominate covariance-only CoSBC on `TailMix`. If those pattern checks fail, report that the chosen families are not as failure-mode-specific as intended."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Pair localization on single-pair corruption",
+    "description": "Measure whether the dependence-targeted diagnostics help identify which pair is corrupted, not just whether some global misspecification exists.",
+    "steps": {
+      "step1": "Use the block-pair Gaussian benchmark with `d in {8, 16}`. For each replicate, select one designated pair and create two corruption modes: `ZeroPair`, which sets that pair's posterior correlation to zero, and `FlipPair`, which changes its sign while preserving its magnitude. Keep all other posterior entries equal to the exact posterior.",
+      "step2": "For CoSBC, compute pair-level family statistics by restricting the covariance and tail feature families to each pair separately, then rank pairs by their family-level quadratic dispersion statistic and by the combined pairwise max statistic. This yields an interpretable ranking of suspicious pairs.",
+      "step3": "For the feature-matched enriched-SBC baseline, use the same pairwise covariance and tail summaries, the same pair-level family aggregation, and the same relabeling-calibrated pair scoring pipeline. For scalar SBC, define a weaker localization score as the maximum coordinate-level family statistic over the two coordinates in the pair.",
+      "step4": "Report top-1 recovery, top-3 recovery, mean rank of the true corrupted pair, and wall-clock runtime. Include chance reference levels `1 / {d(d-1)/2}` for top-1 and `3 / {d(d-1)/2}` for top-3.",
+      "step5": "Success criterion for localization: averaged over the two corruption modes and three seeds, CoSBC should beat the feature-matched enriched-SBC baseline by at least `0.10` absolute top-1 recovery on one of the two dimensions or otherwise the localization advantage should be described as inconclusive."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Realistic fixed-data posterior-SBC study",
+    "description": "Show that the dependence diagnostic matters beyond closed-form Gaussian benchmarks by using posterior-SBC on a small real hierarchical model with practical approximate posteriors.",
+    "steps": {
+      "step1": "Model the Minnesota radon subset with a varying-intercept Gaussian regression: county intercepts `a_c ~ N(mu_a, sigma_a^2)`, shared floor effect `beta ~ N(0, 5^2)`, `mu_a ~ N(0, 5^2)`, `sigma_a ~ HalfNormal(2)`, and observation noise `sigma_y ~ HalfNormal(2)`. Use one preprocessed fixed dataset and fit a reference posterior once with PyMC NUTS using 4 chains, 750 warmup draws, 750 kept draws, `target_accept=0.9`, and seed 101 for the reference fit.",
+      "step2": "Construct posterior-SBC replicates conditional on the observed radon data by drawing planted parameter values from the stored reference posterior and drawing `M=24` candidate samples from each approximation fitted to the same fixed data. Use three approximation families: mean-field ADVI, full-rank ADVI, and Laplace-at-MAP with a Gaussian approximation based on the Hessian at the MAP. Fit each approximation once per experiment seed and reuse the fitted approximation for all posterior-SBC replicates in that seed.",
+      "step3": "Use `R=60` posterior-SBC replicates and `B=199` Monte Carlo relabelings for the fixed-data study to keep total runtime within budget. Run CoSBC, the feature-matched enriched-SBC baseline, and the simple scalar SBC baseline; skip discriminative calibration here if the total projected runtime exceeds 8 hours.",
+      "step4": "Evaluation metrics for the fixed-data study are global rejection at `alpha=0.05`, family-level p-values, runtime, posterior covariance Frobenius error relative to the NUTS reference, and rank correlation between each diagnostic's statistic and the covariance-error severity across the three approximation families and three seeds.",
+      "step5": "Pre-registered realistic-study criterion: keep the stronger overall paper claim only if CoSBC exceeds the feature-matched enriched-SBC baseline by at least `0.05` absolute power or by at least `0.10` higher rank correlation with covariance error on this fixed-data study. If not, explicitly state that the evidence for added value beyond enriched SBC is weak outside the synthetic setting."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablations for every novel component",
+    "description": "Isolate which design choice matters: dependence feature families, pooled symmetric ranking, score choice, or family/global aggregation.",
+    "steps": {
+      "step1": "Feature-family ablation: on `Shrink(0.50)` and `TailMix` with `d=16`, compare covariance-only CoSBC, tail-only CoSBC, and combined `T_max`. This tests whether each pre-registered family contributes on the failure mode it was designed for.",
+      "step2": "Pooled-ranking ablation: compare full CoSBC directly to the feature-matched enriched-SBC baseline on the exact same pooled transforms, feature bank, family statistics, and relabeling draws. Any gap is then attributable to pooled symmetric ranking rather than to richer summaries or easier calibration.",
+      "step3": "Score-choice ablation: in one null setting and one `Shrink(0.50)` setting, swap the energy leave-one-out score for the Gaussian-kernel score with pooled median bandwidth. Record type-I error, power, and runtime to decide whether the kernel variant remains only a robustness check.",
+      "step4": "Aggregation ablation: on the same family-level PIT values, replace the pre-registered `T_max` calibration with Bonferroni over family p-values and with Fisher combination. This checks whether the proposed max-over-families randomization is providing benefit beyond generic p-value combination.",
+      "step5": "Budget-sensitivity ablation: on Toeplitz `d=8` with `Shrink(0.50)`, rerun CoSBC and the feature-matched enriched-SBC baseline with `(R, M) in {(80, 16), (100, 24), (140, 32)}` while keeping `B=199`. Plot power versus runtime to justify the default `R=100`, `M=24` operating point under the 8-hour CPU budget."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Decision rules and runtime enforcement",
+    "description": "Specify how the final conclusion will be chosen and enforce the 8-hour CPU budget before execution starts.",
+    "steps": {
+      "step1": "Aggregate each metric over seeds by reporting mean, standard deviation, and paired method differences because all methods use shared replicate pools within each seed. Do not retune methods after seeing test results.",
+      "step2": "Primary failure rules are pre-registered: the main claim is refuted if CoSBC is not null-calibrated, if the feature-matched enriched-SBC baseline stays within `0.05` absolute power on every synthetic alternative, if the realistic fixed-data criterion is not met, or if the localization advantage is absent.",
+      "step3": "Create `results/hypothesis_check.json` with boolean fields `null_valid`, `beats_feature_matched_enriched_sbc_synthetic`, `beats_feature_matched_enriched_sbc_fixed_data`, `beats_scalar_sbc`, `localizes_pairs`, and `within_budget`. The manuscript claim must be derived directly from these booleans: strong claim only if all relevant booleans are true; otherwise present the work as a careful enriched-SBC instantiation and empirical benchmark.",
+      "step4": "Enforce this wall-clock budget before launching runs: environment and preprocessing `0.3h`, null plus tiny exact validation `1.2h`, synthetic power study `3.2h`, localization `1.0h`, fixed-data radon study `1.7h`, ablations `0.4h`, plotting and table generation `0.2h`. Total planned runtime is `8.0h` on 2 CPU cores and 0 GPUs.",
+      "step5": "If runtime estimates exceed budget during a dry run, reduce only contextual baseline load first by dropping discriminative calibration from the fixed-data study and by running energy-distance on synthetic settings only. Do not reduce the three seeds, the feature-matched enriched-SBC baseline, or the realistic fixed-data study because those are part of the core claim."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Figures and tables for a conditional claim",
+    "description": "Generate only the figures needed to support or reject the narrower enriched-SBC contribution claim.",
+    "steps": {
+      "step1": "Figure 1: discrete rank histograms, PIT histograms, and empirical rejection bars for CoSBC covariance, CoSBC tail, and the global `T_max` null study, including one panel for the tie-handling benchmark and one panel comparing exhaustive versus Monte Carlo p-values in the tiny exact check.",
+      "step2": "Figure 2: synthetic power plots showing rejection rate versus corruption strength for `Shrink(lambda)` and grouped bars for `Diag` and `TailMix`, with CoSBC, scalar SBC, feature-matched enriched SBC, discriminative calibration, and energy distance plotted on common axes.",
+      "step3": "Figure 3: pair-localization heatmaps for `ZeroPair` and `FlipPair`, comparing CoSBC and the feature-matched enriched-SBC baseline and marking the true corrupted pair. Add a companion bar chart for top-1 and top-3 recovery.",
+      "step4": "Figure 4: fixed-data radon plots showing each method's statistic versus posterior covariance Frobenius error across approximation families, plus one table-style panel listing global p-values for mean-field ADVI, full-rank ADVI, and Laplace.",
+      "step5": "Create Table 1 for null calibration and tiny exact-check results, Table 2 for synthetic power and runtime, and Table 3 for localization plus fixed-data results. Export each table as CSV and plain-text summaries so they can be inserted directly into the paper draft."
+    }
+  }
+]

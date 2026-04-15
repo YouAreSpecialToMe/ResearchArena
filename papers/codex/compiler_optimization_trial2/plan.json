@@ -1,0 +1,158 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze LLVM revision and experiment scope",
+    "description": "Create one reproducible CPU-only setup for a narrowly scoped LLVM scheduling-extension study built on top of `LastRunTrackingAnalysis`, with identical execution and logging across all methods.",
+    "steps": {
+      "step1": "Pin one LLVM/Clang revision that already contains the October-November 2024 `LastRunTrackingAnalysis` work, or a local branch that backports it cleanly. Record the exact LLVM commit, local patches, host OS, kernel, CPU model, RAM size, and compiler flags in `artifacts/env_report.txt`.",
+      "step2": "Build all experiment variants from the same source tree with `-DCMAKE_BUILD_TYPE=Release` and identical host compiler settings. Prefer one `opt` binary with runtime flags selecting `stock`, `last_run`, `throttle`, `dirty_function`, `typed_skip_global`, `typed_cert_function`, and optional `typed_cert_loop`.",
+      "step3": "State explicitly in scripts and logs that the machine has 2 CPU cores, 128 GB RAM, and no GPU. Schedule at most 2 concurrent jobs, and note that GPU parallelism is unavailable so all runtime estimates assume 2-way CPU parallel execution only.",
+      "step4": "Freeze one bounded new-pass-manager slice for the whole study: `sroa -> instcombine -> simplifycfg -> gvn -> instcombine -> simplifycfg -> licm -> loop-rotate -> instcombine -> simplifycfg`. Treat `loop-simplify -> lcssa` as a gated extension only, not part of the main claim.",
+      "step5": "Use exactly three seeds: `11`, `17`, and `29`. Because LLVM optimization is deterministic, use these seeds only to randomize benchmark order, configuration order, and repetition order so every method sees the same measurement-noise conditions.",
+      "step6": "Instrument every run with one raw schema containing total slice wall time, per-pass wall time, pass invocation counts, skip counts, function-local rerun counts, loop-local rerun counts, fallback counts by reason, certificate coverage, `unknown` rate, verifier status, differential-test status, program runtime, and code size. Save raw rows as CSV or JSONL."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Audit novelty boundary and scholarly context",
+    "description": "Lock the paper framing before running experiments so the contribution is evaluated as an incremental LLVM scheduling extension rather than a new optimization framework, and so archival prior art is clearly separated from engineering documentation.",
+    "steps": {
+      "step1": "Write `artifacts/positioning_note.md` stating the exact main claim: typed invariant-aware evidence layered on top of `LastRunTrackingAnalysis`, plus locality-aware execution when cheap enough, for a small LLVM cleanup-scheduling slice.",
+      "step2": "Create a two-section related-work matrix in `artifacts/related_work_matrix.csv`. Section A, archival research: Waddle, local canonical-form maintenance after edge deletion, pass-dependence modeling, and compile-time attribution work. Section B, engineering context: LLVM RFC, PR, pass-manager docs, and source-level discussions of redundant cleanup scheduling.",
+      "step3": "Add one comparison row specifically against Fritz/Waddle-style local canonical-form maintenance, with columns `unit of reasoning`, `always-canonical vs scheduler extension`, `local repair algorithm contribution`, and `claimed novelty boundary`.",
+      "step4": "Add one comparison row specifically against LLVM `LastRunTrackingAnalysis`, with columns `temporal evidence`, `typed invariant evidence`, `locality awareness`, `local rerun support`, and `fallback behavior`.",
+      "step5": "Inspect and document the relevant LLVM mechanisms before coding: `LastRunTrackingAnalysis`, `PreservedAnalyses`, invalidation behavior in the new pass manager, `DomTreeUpdater`, `SSAUpdater`, loop utilities, and any existing discussion or code path related to redundant cleanup scheduling.",
+      "step6": "Freeze the default publishable contribution as the function-local result for `InstCombine` and `SimplifyCFG`. Record that loop-local `LoopSimplify` and `LCSSA` are strictly optional and may be reported as negative or mixed evidence without weakening the main paper."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Assemble bounded benchmark and regression workloads",
+    "description": "Build a benchmark suite that exposes cleanup and canonicalization behavior while fitting the 8-hour total CPU budget, and pair it with a regression corpus for correctness and certificate diagnostics.",
+    "steps": {
+      "step1": "Freeze 10 executable benchmarks total: 5 small `cBench` programs and 5 small `llvm-test-suite` programs with visible CFG or loop activity. Suggested `cBench` set: `consumer-jpeg`, `office-stringsearch`, `security-sha`, `telecom-crc32`, and `automotive-qsort1`. Suggested `llvm-test-suite` set: `adpcm`, `dijkstra`, `heapsort`, `huffbench`, and `fft`.",
+      "step2": "Freeze 24 LLVM IR regression tests: 8 CFG-cleanup-heavy cases, 8 loop-form or LCSSA cases, and 8 mixed cases. Prefer existing LLVM tests where possible so expected behavior and setup are stable.",
+      "step3": "Compile each executable benchmark once to unoptimized LLVM bitcode with `clang -O0 -Xclang -disable-O0-optnone -emit-llvm -c` so frontend cost is excluded from optimization timing. Record source path, bitcode path, function count, loop count, and instruction count in `artifacts/benchmarks_manifest.json`.",
+      "step4": "Prepare one validation input and one runtime input per executable benchmark. Cap each runtime execution at under 3 seconds on one core, and store the exact commands in `artifacts/runtime_manifest.json`.",
+      "step5": "Run the stock slice once on all 10 executable workloads to collect descriptive statistics: total slice time, cleanup-pass time share, invocation counts for `InstCombine`, `SimplifyCFG`, `LoopSimplify`, and `LCSSA`, plus counts of functions and loops touched by `SROA`, `GVN`, `LICM`, and `LoopRotate`. Save the summary to `artifacts/dataset_stats.csv`.",
+      "step6": "If any executable workload exceeds 8 minutes for one compile-plus-validation cycle in pilot measurements, replace it before freezing the suite. After freeze, only documented crashes or missing dependencies justify removal."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Define comparison methods fairly",
+    "description": "Compare the typed scheduling extension against one strong LLVM baseline and two simpler heuristics so the study can answer whether typed evidence adds value beyond coarse temporal or coarse locality signals.",
+    "steps": {
+      "step1": "Baseline A, `stock`: run the frozen pipeline slice with ordinary LLVM scheduling and no extra rerun suppression. This is the correctness anchor and the denominator for compile-time reductions.",
+      "step2": "Baseline B, `last_run`: enable LLVM's `LastRunTrackingAnalysis` exactly as implemented at the chosen revision. This is the primary strong baseline because the paper is framed as an extension study of that mechanism.",
+      "step3": "Baseline C, `throttle`: a simple heuristic that runs `InstCombine` and `SimplifyCFG` only at every second eligible insertion point, while leaving any optional loop cleanup at standard insertion points. This is the required simple baseline.",
+      "step4": "Baseline D, `dirty_function`: track only whether a producer pass touched a function since the last cleanup point. Rerun `InstCombine` and `SimplifyCFG` on dirty functions, but do not distinguish invariant type; any loop-form concern immediately escalates to global cleanup.",
+      "step5": "Use the same seeds, benchmark order, warmup rule, repetition counts, backend, linker, validation inputs, and logging schema for all baselines. Raw output fields must include `benchmark`, `corpus`, `config`, `seed`, `repeat`, `compile_time_ms`, `pass_name`, `pass_time_ms`, `invocations`, `skips`, `fallbacks`, `runtime_ms`, `binary_size_bytes`, `verifier_ok`, and `diff_ok`.",
+      "step6": "Treat comparisons against `last_run` and `dirty_function` as mandatory headline results. Use `throttle` to show that simple compile-time reduction heuristics are not enough if they lose too much optimization quality or correctness margin."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate typed skip-versus-global scheduling first",
+    "description": "Test the lowest-risk version of the idea before introducing local wrappers: typed invariant evidence on top of `LastRunTrackingAnalysis` that only decides whether a cleanup pass can be skipped or must run globally.",
+    "steps": {
+      "step1": "Implement `typed_skip_global` with invariant vocabulary `{CFGCanonical, InstCombineOpportunity, LoopSimplifyForm, LCSSAForm, DomTreeFresh, LoopInfoFresh}` and value lattice `{preserved, dirty(function-set), dirty(loop-set), global_dirty, unknown}`. The online policy in this phase is intentionally restricted to `skip_global` or `run_global` only.",
+      "step2": "Freeze the online transfer-function table before collecting results. Restrict producer coverage to exactly four passes: `SROA`, `GVN`, `LICM`, and `LoopRotate`. Require every ambiguous case to emit `unknown` rather than a guessed classification.",
+      "step3": "Run `stock`, `last_run`, `throttle`, `dirty_function`, and `typed_skip_global` on all 10 executable benchmarks for 3 seeds and 3 measured repetitions per seed, with one unmeasured warmup compile for each benchmark-configuration pair.",
+      "step4": "After each measured optimization run, lower the optimized bitcode with the same backend and linker used by all baselines, then record validation output, runtime, and binary size so compile-time wins are not bought by performance or semantic regressions.",
+      "step5": "Primary metrics for this phase are total slice compile time, cumulative `InstCombine` and `SimplifyCFG` time, skip count, fallback count, certificate coverage, `unknown` rate, bookkeeping overhead, program runtime ratio, and binary-size ratio.",
+      "step6": "Save raw results to `artifacts/main_skip_global_long.csv` with fields `benchmark`, `config`, `seed`, `repeat`, `compile_time_ms`, `pass_name`, `pass_time_ms`, `skip_count`, `fallback_reason`, `certificate_coverage`, `unknown_rate`, `bookkeeping_us`, `runtime_ms`, `binary_size_bytes`, `verifier_ok`, `diff_ok`, and `regression_ok`."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Gate function-local execution on measured wrapper cost",
+    "description": "Only introduce locality-aware execution if typed evidence is useful enough and local wrappers around `InstCombine` and `SimplifyCFG` are cheap enough to keep the contribution feasible within the runtime budget.",
+    "steps": {
+      "step1": "Implement `typed_cert_function` by extending `typed_skip_global` so that `InstCombine` and `SimplifyCFG` may run on an explicit function set when all required invariants are `dirty(function-set)` and no required invariant is `global_dirty` or `unknown`.",
+      "step2": "Run a function-local milestone on 4 executable benchmarks and 8 regression tests for seeds `11`, `17`, and `29`, with 2 measured repetitions per seed. Log wrapper bookkeeping time, analysis-update time, verifier outcomes, escalation rate, and the size of each touched function set.",
+      "step3": "Proceed to the full function-local matrix only if all three gate conditions hold: mean wrapper-plus-analysis overhead is below 5 percent of slice time, there are zero unresolved verifier or differential mismatches, and the milestone compile time is non-worse than `typed_skip_global`.",
+      "step4": "If the gate passes, run `typed_cert_function` on the full 10 executable benchmarks for 3 seeds and 3 measured repetitions per seed, directly comparing against `last_run`, `dirty_function`, and `typed_skip_global`.",
+      "step5": "If the gate fails, freeze the paper scope at typed skip-versus-global scheduling, report the function-local milestone as a negative or mixed result, and do not spend budget on the full function-local matrix.",
+      "step6": "Save full function-local results, if the gate passes, to `artifacts/main_function_local_long.csv` with fields `benchmark`, `config`, `seed`, `repeat`, `compile_time_ms`, `function_local_count`, `mean_functions_per_local_run`, `fallback_reason`, `certificate_coverage`, `unknown_rate`, `bookkeeping_us`, `runtime_ms`, `binary_size_bytes`, `verifier_ok`, `diff_ok`, and `regression_ok`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Mitigate high unknown rates and weak producer coverage",
+    "description": "Pre-register an explicit fallback path for the main scientific risk: producer transfer functions may be too noisy or conservative, causing `unknown` to dominate and collapsing the behavior back to the baseline.",
+    "steps": {
+      "step1": "Define `unknown` risk thresholds before running the main matrix. Flag the full four-producer design as weak coverage if aggregate `unknown_rate` exceeds 40 percent for either `InstCombineOpportunity` or `CFGCanonical`, or if certificate coverage falls below 60 percent.",
+      "step2": "Add an offline audit trace that records, for every `unknown`, which producer emitted it, which invariant was involved, whether the eventual online action was `run_global`, and whether post-hoc inspection suggests the case was actually `preserved` or `dirty(function-set)`. Use this audit only for analysis, never for online decisions.",
+      "step3": "If weak coverage is triggered, rerun the main matrix with the best-covered two-producer subset only, expected to be `SROA` and `GVN`, while keeping all baselines and the pass sequence fixed. Report this as a producer-coverage ablation, not as a silent methodology change.",
+      "step4": "If the two-producer subset still has aggregate `unknown_rate` above 40 percent, freeze the main contribution at a negative result: typed evidence does not provide enough usable coverage on this slice to justify the added machinery.",
+      "step5": "Report per-producer coverage, `unknown` rate, and contribution to compile-time savings in `artifacts/producer_coverage.csv`, with rows for `SROA`, `GVN`, `LICM`, and `LoopRotate` under both the four-producer and reduced-producer settings when applicable.",
+      "step6": "Treat high `unknown` rates as a primary result rather than a debugging artifact. Include them in main tables and figures because they directly determine whether the incremental LLVM extension is worthwhile."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel component",
+    "description": "Pre-register ablations for every claimed ingredient so the study can test whether typed invariant information, locality-aware execution, and the producer transfer functions each matter.",
+    "steps": {
+      "step1": "Ablation 1, `single_bit_state`: replace the typed invariant vocabulary with one coarse changed-or-unchanged bit per function while keeping the rest of the scheduler fixed. This tests whether typed evidence adds value beyond a coarse signal.",
+      "step2": "Ablation 2, `no_local_execution`: keep typed certificates for skip decisions but force all executed cleanup passes to run globally. This isolates the value of locality-aware execution and remains applicable even if the full function-local gate fails.",
+      "step3": "Ablation 3, `all_unknown`: keep the scheduler structure but force every producer certificate to `unknown`. This measures the fallback floor and isolates the value of explicit producer transfer functions.",
+      "step4": "Ablation 4, `untyped_locality`: keep function-set locality but collapse all invariant names into one undifferentiated dirty marker. This is the closest controlled comparison against the dirty-function heuristic while preserving the same code path.",
+      "step5": "Run all ablations on the 10 executable benchmarks for 3 seeds and 2 measured repetitions per seed. If the function-local gate failed, interpret `no_local_execution` as the main ablation and run `untyped_locality` only in skip-versus-global mode.",
+      "step6": "Save ablation results to `artifacts/ablations_long.csv` and report normalized compile time, cleanup-pass time, bookkeeping overhead, certificate coverage, `unknown` rate, fallback count, and correctness outcomes relative to the strongest retained typed method."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Gate the optional loop-local extension",
+    "description": "Treat loop-local cleanup as an explicitly secondary extension so failures in loop wrappers do not blur the main function-local or skip-versus-global contribution.",
+    "steps": {
+      "step1": "Implement a reduced loop milestone with certificates for `{LoopSimplifyForm, LCSSAForm, DomTreeFresh, LoopInfoFresh}` produced only by `LICM` and `LoopRotate`, and wrappers only for `LoopSimplify` and `LCSSA`. Keep the rest of the system unchanged.",
+      "step2": "Run the milestone on 4 loop-heavy executable benchmarks and 8 loop-oriented regression tests for seeds `11`, `17`, and `29`, with 2 measured repetitions per seed.",
+      "step3": "Log loop-dirty events, loops marked per event, local repair attempts, local repair successes, escalations to global, wrapper bookkeeping time, verifier failures, and `unknown` rate.",
+      "step4": "Proceed to the full `typed_cert_loop` matrix only if all three gate conditions hold: at least 50 percent of loop-dirty events are repaired locally without verifier failure, average bookkeeping overhead stays below 2 percent of slice time, and compile time is non-worse than the strongest retained non-loop typed method.",
+      "step5": "If any gate condition fails, freeze the paper scope without loop-local execution and keep the milestone results as explicit negative or mixed evidence.",
+      "step6": "If the gate passes, run `typed_cert_loop` on the full executable and regression suite for 3 seeds and 2 repetitions per seed, comparing it directly against the strongest retained non-loop typed method and `last_run`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply correctness checks and success criteria",
+    "description": "Turn raw timing and certificate logs into a clear support or refutation outcome using verifier checks, regression tests, statistical tests, and pre-registered success thresholds.",
+    "steps": {
+      "step1": "Run the LLVM verifier after any certificate-controlled decision boundary: after any function-local cleanup, after any loop-local cleanup attempt, after any local-to-global escalation, and after the final pass in the slice. Any verifier failure forces immediate fallback to stock behavior and counts as a correctness failure for that attempted schedule.",
+      "step2": "Perform differential testing against `stock` on the same bitcode and validation inputs. For executable workloads, require identical observable program output on the validation input. For regression tests, require the expected LLVM test outcome and no new verifier failures.",
+      "step3": "Aggregate timing by taking the median over repetitions within each seed, then compute cross-seed mean, standard deviation, bootstrap 95 percent confidence intervals, and paired two-sided Wilcoxon signed-rank tests across benchmarks for the strongest retained typed method versus `stock`, `last_run`, and `dirty_function`.",
+      "step4": "Promote evidence-quality metrics to first-class outputs: report benchmark-level and aggregate `certificate_coverage`, `unknown_rate`, per-producer coverage, skip rate, function-local rerun rate, loop-local rerun rate if applicable, and fallback-to-global rate. These must appear in the main tables, not only in appendices.",
+      "step5": "Support the main hypothesis only if the strongest retained typed method achieves all of the following: at least 4 percent mean slice compile-time reduction versus `stock`, a statistically clear win over `last_run` on slice time or cumulative cleanup-pass time, a measurable win over `dirty_function` on compile time or unnecessary reruns, certificate coverage above 60 percent on the retained producer subset, and zero unresolved verifier, differential, or regression failures.",
+      "step6": "Refute or weaken the claim if any of the following occurs: `unknown` dominates and collapses behavior back to `last_run`, dirty-function performance is statistically indistinguishable from the typed method, wrapper overhead erases compile-time gains, or the best retained typed method cannot clear the 4 percent compile-time threshold."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready tables and figures",
+    "description": "Generate outputs that match the narrowed contribution: a conservative typed extension to LLVM cleanup scheduling, with certificate quality, novelty boundary, and fallback behavior reported explicitly.",
+    "steps": {
+      "step1": "Create Table 1 as a positioning table with columns `method`, `evidence type`, `scope`, `execution granularity`, and `relationship to this work`, covering `LastRunTrackingAnalysis`, dirty-function heuristics, Fritz/Waddle-style local canonical-form maintenance, and the typed scheduler variants.",
+      "step2": "Create Table 2 with benchmark metadata: benchmark family, function count, loop count, stock slice time, cleanup-pass time share, and producer-event counts. Include the 24-test regression corpus as a separate block with counts and average compile time only.",
+      "step3": "Create Figure 1 as grouped bars of compile-time reduction versus `stock` for `throttle`, `last_run`, `dirty_function`, `typed_skip_global`, `typed_cert_function` if retained, and `typed_cert_loop` if gated in, including a geometric-mean bar and 95 percent confidence intervals.",
+      "step4": "Create Figure 2 as a stacked outcome chart for the strongest retained typed method showing skipped cleanups, function-local reruns if used, loop-local reruns if used, global reruns after `unknown`, and global reruns after explicit `global_dirty`.",
+      "step5": "Create Figure 3 as a certificate-quality plot with benchmark-wise `certificate_coverage`, `unknown_rate`, and per-producer coverage. If the high-unknown mitigation path was triggered, show both the four-producer and reduced-producer settings.",
+      "step6": "Create Table 3 for correctness and efficiency summary: verifier outcomes, regression outcomes, runtime ratios, binary-size ratios, p-values, gate decisions for function-local and loop-local execution, and the final claim status. Export all tables to CSV and all figures to PDF and PNG with reproducible plotting scripts."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Verify runtime budget before execution",
+    "description": "Check that the full matrix fits the 8-hour budget on 2 CPU cores and pre-register the simplification order if pilot timings come in high.",
+    "steps": {
+      "step1": "Use a conservative estimate of 35 seconds for one measured executable compile of the bounded slice plus 5 seconds for validation and logging, and 8 seconds for one regression-test run.",
+      "step2": "Core matrix cost without gated extensions: 5 configurations (`stock`, `last_run`, `throttle`, `dirty_function`, `typed_skip_global`) x 10 executables x 3 seeds x 3 repetitions = 450 runs. At 40 seconds per run this is about 5.0 hours serial or about 2.5 hours with 2-way CPU parallelism.",
+      "step3": "Function-local gate cost: 12 milestone workloads x 3 seeds x 2 repetitions at about 20 seconds each is about 24 minutes serial or about 12 minutes on 2 cores. If the gate passes, the full `typed_cert_function` add-on is 10 executables x 3 seeds x 3 repetitions = 90 runs, or about 1.0 hour serial and about 30 minutes on 2 cores.",
+      "step4": "Ablation cost: 4 ablations x 10 executables x 3 seeds x 2 repetitions = 240 runs. At 40 seconds per run this is about 2.7 hours serial or about 1.35 hours on 2 cores.",
+      "step5": "Regression tests, executable runtime checks, and the optional loop gate add about 1.2 to 1.8 hours on 2 cores depending on whether loop-local execution is attempted. Total expected wall-clock time is about 5.6 to 7.2 hours without the full loop-local matrix, which fits the 8-hour budget. Because there are zero GPUs, no GPU-based parallel batches are assumed anywhere.",
+      "step6": "If pilot timing exceeds budget, simplify in this order only: keep exactly 3 seeds, drop the full `typed_cert_function` matrix if its gate already failed, drop the full loop-local matrix, reduce executable benchmarks from 10 to 8 while preserving both benchmark families, then reduce repetitions from 3 to 2 for `throttle` only. Do not drop `last_run` or `dirty_function` from the main comparison."
+    }
+  }
+]

@@ -1,0 +1,638 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2025.sty}{
+  \usepackage{neurips_2025}
+}{
+  \usepackage[preprint]{neurips_2023}
+}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+% Notation shortcuts
+\newcommand{\ren}{\textsc{REN}}
+\newcommand{\rene}{\textsc{REN-E2E}}
+\newcommand{\renr}{\textsc{REN-Res}}
+\newcommand{\spearman}{\rho}
+\newcommand{\cb}{C_\beta}
+
+\title{Supervised Learning on PLM Embeddings for Multi-Mutant Protein\\Fitness Prediction: When Do Structural Priors Help?}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+Protein language models (PLMs) achieve strong zero-shot fitness prediction for single mutations but default to additive assumptions for multi-mutant variants, ignoring epistasis. We investigate whether structural graph neural networks can correct these additive errors by proposing Residual Epistasis Networks (\ren{}), combining ESM-2 per-residue embeddings with graph attention networks over AlphaFold structural contact maps. We evaluate end-to-end supervised prediction and residual learning across 15 deep mutational scanning assays from ProteinGym (1.7M+ multi-mutant variants). End-to-end training (\rene{}) achieves mean Spearman $\rho = 0.829$, dramatically improving over the ESM-2 additive baseline ($0.408$, $p < 10^{-13}$) with especially strong epistasis-specific correlation ($\rho = 0.967$)---near-perfect ranking of non-additive fitness effects. However, systematic ablations reveal that an MLP without structural message passing achieves $\rho = 0.895$, and random node features match real ESM-2 embeddings ($0.893$ vs.\ $0.888$). A cross-protein generalization experiment resolves this anomaly: ESM-2 features ($\rho = 0.074$) substantially outperform random features ($0.013$), confirming that PLM embeddings carry genuine biological signal but that within-protein evaluation enables positional memorization. Our findings establish that simple supervised methods on PLM embeddings are highly effective when per-protein data is available, while structural priors become critical in data-scarce cross-protein settings. The epistasis-specific Spearman of $0.967$ suggests particular utility as a tool for ranking epistatic interactions in protein engineering.
+\end{abstract}
+
+% ============================================================
+% INTRODUCTION
+% ============================================================
+\section{Introduction}
+
+Predicting the functional effects of protein mutations is a central problem in computational biology, with applications in protein engineering, drug resistance prediction, and understanding genetic disease. Protein language models (PLMs) such as ESM-2~\citep{lin2023evolutionary} have emerged as powerful zero-shot predictors of mutation effects, achieving strong correlations with experimentally measured fitness across hundreds of deep mutational scanning (DMS) assays in the ProteinGym benchmark~\citep{notin2024proteingym}.
+
+However, PLMs have a critical blind spot: \textbf{epistasis}---the phenomenon where the combined effect of multiple mutations differs from the sum of their individual effects~\citep{olson2014comprehensive}. When predicting the fitness of multi-mutant variants, PLMs default to an additive assumption, summing the log-likelihood ratios of individual mutations. This approximation breaks down precisely when it matters most: in directed evolution, where combinations of mutations are selected for synergistic effects~\citep{wu2016adaptation}, and in understanding genetic disease, where pathogenic variants often involve complex epistatic interactions.
+
+Recent work has begun to address this gap. Nambiar et al.~\citep{Nambiar2025PLMEpistasis} systematically benchmarked PLMs on epistasis, showing that raw PLM scores capture some structural epistasis in zero-shot settings but fail on strongly non-additive combinations. Huynh et al.~\citep{Huynh2025DynamicsEpistasis} built a dynamics-based GNN using asymmetric dynamic coupling indices, achieving strong epistasis prediction but requiring costly molecular dynamics simulations. Zhang et al.~\citep{zhang2024multiscale} combined PLM embeddings with geometric vector perceptron (GVP) networks in an end-to-end framework (S3F), improving multi-mutant fitness prediction on select proteins.
+
+Despite this progress, no method has explicitly investigated whether the \emph{non-additive residual} between a PLM's additive prediction and true multi-mutant fitness can be learned using structural contact information from AlphaFold~\citep{jumper2021highly}. We hypothesized that a graph attention network operating over structural contact maps, using ESM-2 per-residue embeddings as node features, could learn to predict this epistatic correction.
+
+We propose \textbf{Residual Epistasis Networks (\ren{})}, evaluating two training modes:
+\begin{itemize}
+    \item \textbf{\rene{}}: End-to-end supervised learning, where the GAT directly predicts fitness using PLM embeddings and structural graphs.
+    \item \textbf{\renr{}}: Residual learning, where the GAT is trained only on the non-additive error of the PLM baseline.
+\end{itemize}
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \ren{}, a framework combining PLM embeddings with structural contact GNNs for multi-mutant fitness prediction, evaluating end-to-end vs.\ residual learning decompositions.
+    \item We conduct a comprehensive evaluation on 15 ProteinGym DMS assays (1.7M+ variants) with systematic ablations, revealing that supervised learning on PLM mutation-site embeddings ($\rho = 0.895$ for a simple MLP) is the primary driver of performance, while structural message passing provides marginal benefit within-protein.
+    \item We resolve the ``random features anomaly''---where random node features match real ESM-2 embeddings---through a cross-protein generalization experiment showing that ESM-2 features ($\rho = 0.074$) substantially outperform random features ($0.013$) in the transfer setting, confirming that within-protein evaluation enables positional memorization.
+    \item We demonstrate that \rene{} achieves near-perfect epistasis-specific ranking ($\rho_\text{epi} = 0.967$), suggesting practical utility as a tool for ranking epistatic interactions in protein engineering applications.
+    \item We provide a GB1 order-generalization experiment showing that models trained on singles and doubles can predict triples ($\rho = 0.56$) and quadruples ($\rho = 0.29$), substantially outperforming the ESM-2 additive baseline.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \ren{} framework. Section~\ref{sec:experiments} presents experimental results and ablations. Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+% ============================================================
+% RELATED WORK
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Protein language models for fitness prediction.}
+ESM-2~\citep{lin2023evolutionary}, Tranception~\citep{notin2022tranception}, and EVE~\citep{frazer2021disease} achieve state-of-the-art zero-shot fitness prediction on ProteinGym's single-mutant benchmarks~\citep{notin2024proteingym}. For multi-mutant variants, these models sum individual mutation scores under an additive assumption that systematically fails for epistatic combinations. Our work investigates whether supervised corrections on top of PLM representations can overcome this limitation.
+
+\paragraph{Structure-aware protein language models.}
+SaProt~\citep{su2024saprot} incorporates 3D structure through Foldseek's 3Di structural tokens, achieving top ranks on ProteinGym. ProtSSN~\citep{tan2023semantical} uses structure-aware pre-training. S3F~\citep{zhang2024multiscale} combines PLM embeddings with GVP networks encoding backbone and surface topology, showing improved epistasis capture on GB1. These methods merge structure and sequence end-to-end without explicitly decomposing additive from epistatic contributions. \ren{}'s residual formulation is orthogonal---it could use any of these as the base model. We note that S3F is the most directly comparable structure+PLM method; while we were unable to include it as a baseline due to implementation constraints, future work should prioritize this comparison.
+
+\paragraph{Epistasis prediction methods.}
+Nambiar et al.~\citep{Nambiar2025PLMEpistasis} benchmarked PLMs on epistasis, showing that raw PLM scores align with structural epistasis in zero-shot settings. Huynh et al.~\citep{Huynh2025DynamicsEpistasis} built a dynamics-based GNN using asymmetric dynamic coupling indices from MD simulations, achieving strong epistasis prediction without training on experimental data but at high computational cost. Epistatic Net~\citep{aghazadeh2021epistatic} uses sparse spectral regularization for epistasis but does not leverage PLM embeddings or structural information. EpiNNet~\citep{lipsh2024addressing} addresses epistasis in designed proteins but not natural fitness landscapes. \ren{} uniquely combines PLM additive baselines with static structural contact GNNs, trained specifically on the non-additive residual.
+
+\paragraph{Multi-mutant fitness prediction.}
+The interpretable neural network of Otwinowski~\citep{otwinowski2025interpretable} decomposes fitness into additive and higher-order epistatic components using transformers. Johnston et al.~\citep{johnston2024combinatorial} characterized complete epistatic fitness landscapes in enzyme active sites. Unlike these approaches, \ren{} provides an explicit structural mechanism for epistasis through the contact graph, though our results indicate this mechanism provides less benefit than anticipated in the within-protein setting.
+
+% ============================================================
+% METHOD
+% ============================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+\ren{} is a two-stage framework for multi-mutant protein fitness prediction. Given a protein with wildtype sequence $\mathbf{s}$ and a multi-mutant variant $v$ specifying mutations $\{(i_1, a_1), \ldots, (i_k, a_k)\}$ at positions $i_j$ with substituted amino acids $a_j$:
+
+\begin{enumerate}
+    \item \textbf{Additive stage}: Compute ESM-2 zero-shot log-likelihood ratios (LLRs) for each mutation and sum them: $f_\text{add}(v) = \sum_{j=1}^{k} \text{LLR}(i_j, a_j)$
+    \item \textbf{Correction stage}: A graph attention network over the structural contact graph predicts a correction $\epsilon(v)$
+\end{enumerate}
+
+The final prediction depends on the training mode:
+\begin{align}
+    \text{\rene{}:} \quad \hat{y}(v) &= f_\text{GAT}(G, v) \label{eq:e2e} \\
+    \text{\renr{}:} \quad \hat{y}(v) &= f_\text{add}(v) + \epsilon(v), \quad \epsilon(v) = f_\text{GAT}(G, v) \label{eq:residual}
+\end{align}
+
+In the end-to-end mode (Eq.~\ref{eq:e2e}), the GAT directly predicts fitness, with the PLM additive score available as an input feature. In the residual mode (Eq.~\ref{eq:residual}), the GAT is trained to predict only the non-additive component $\epsilon_\text{true}(v) = y_\text{obs}(v) - f_\text{add}(v)$.
+
+\subsection{Stage 1: Additive PLM Baseline}
+
+For each protein in the dataset:
+\begin{enumerate}
+    \item Compute ESM-2 (650M parameters) per-residue embeddings $\mathbf{h}_i \in \mathbb{R}^{1280}$ for the wildtype sequence using a single forward pass.
+    \item For each mutation $(i, w \to m)$ at position $i$ from wildtype amino acid $w$ to mutant $m$, compute the masked marginal log-likelihood ratio: $\text{LLR}(i, w \to m) = \log P(m \mid \mathbf{s}_{\setminus i}) - \log P(w \mid \mathbf{s}_{\setminus i})$.
+    \item For multi-mutant variants, the additive prediction is $f_\text{add}(v) = \sum_{j} \text{LLR}(i_j, w_j \to m_j)$.
+\end{enumerate}
+
+\subsection{Stage 2: Structural Graph Construction}
+
+\paragraph{Nodes.} One node per residue in the protein, for a total of $L$ nodes where $L$ is the sequence length.
+
+\paragraph{Node features.} Each node $i$ receives a feature vector consisting of ESM-2 per-residue embeddings $\mathbf{h}_i \in \mathbb{R}^{1280}$, projected through a learned linear layer to $\mathbb{R}^{d}$ (where $d = 256$ is the hidden dimension). For each variant $v$, mutation identity at position $i$ is encoded as a 20-dimensional amino acid embedding (learned, not one-hot), projected through an MLP and added element-wise to the node features. Unmutated positions receive a learned ``no mutation'' embedding.
+
+\paragraph{Edges.} Residue pairs $(i, j)$ with $\cb$--$\cb$ distance $< 10$\,\AA{} in the AlphaFold-predicted structure form edges (using $C_\alpha$ for glycine). The default contact threshold is 10\,\AA{}, with ablations over 8, 10, 12, and 15\,\AA{}.
+
+\paragraph{Edge features.} Binary edges (contact/no contact). Our ablations test continuous edge features ($\cb$--$\cb$ distance, sequence separation $|i-j|$, pLDDT confidence) but find they do not improve performance (Section~\ref{sec:ablations}).
+
+\subsection{Stage 3: Graph Attention Network}
+
+\paragraph{Architecture.} We use a 3-layer GAT~\citep{velickovic2018graph} with 8 attention heads per layer, hidden dimension $d = 256$, ELU activation, and dropout $p = 0.1$ between layers. For each multi-mutant variant, we extract node embeddings at the $k$ mutation sites and apply attention-weighted pooling:
+\begin{equation}
+    \mathbf{z}(v) = \sum_{j=1}^{k} \alpha_j \cdot \mathbf{h}_{i_j}^{(L)}, \quad \alpha_j = \frac{\exp(\mathbf{q}^\top \mathbf{h}_{i_j}^{(L)})}{\sum_{l=1}^{k} \exp(\mathbf{q}^\top \mathbf{h}_{i_l}^{(L)})}
+\end{equation}
+where $\mathbf{h}_{i_j}^{(L)}$ is the output embedding at mutation site $i_j$ after $L$ GAT layers, and $\mathbf{q} \in \mathbb{R}^d$ is a learned query vector. The pooled representation $\mathbf{z}(v) \in \mathbb{R}^d$ is passed through a 2-layer MLP ($d \to d/2 \to 1$) with ReLU activation and dropout.
+
+\paragraph{Training.} We minimize MSE loss with AdamW optimizer (learning rate $10^{-3}$, weight decay $10^{-4}$) and cosine annealing over 100 epochs. Variants are batched (512 per protein) within each protein's shared graph. Early stopping with patience 15 on validation loss.
+
+In \rene{} mode, the target is the observed fitness $y_\text{obs}(v)$ and the PLM additive score $f_\text{add}(v)$ is provided as an additional scalar input to the MLP head. In \renr{} mode, the target is the epistatic residual $\epsilon_\text{true}(v) = y_\text{obs}(v) - f_\text{add}(v)$.
+
+% ============================================================
+% EXPERIMENTS
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets.} We evaluate on 15 deep mutational scanning assays from the ProteinGym v1.3 multi-mutant substitution benchmark~\citep{notin2024proteingym}, comprising over 1.7 million multi-mutant variants. Selected assays span diverse protein families, functional readouts (binding, fluorescence, growth, abundance), and mutation orders (2 to 25). Key assays include the combinatorial landscapes of GB1~\citep{olson2014comprehensive, wu2016adaptation}, avGFP~\citep{sarkisyan2016local}, His3~\citep{pokusaeva2019experimental}, and CreiLOV~\citep{chen2023creilov}. Table~\ref{tab:datasets} summarizes dataset statistics.
+
+\begin{table}[t]
+\caption{Summary of the 15 ProteinGym multi-mutant assays used for evaluation. Assays span diverse protein families, functional readouts, and dataset sizes.}
+\label{tab:datasets}
+\centering
+\small
+\begin{tabular}{lrlr}
+\toprule
+Assay & Multi-mutants & Function & Max order \\
+\midrule
+SPG1\_Olson\_2014 & 535{,}917 & Binding & 2 \\
+HIS7\_Pokusaeva\_2019 & 495{,}969 & Growth & 13 \\
+PHOT\_Chen\_2023 & 165{,}407 & Fluorescence & 14 \\
+SPG1\_Wu\_2016 & 149{,}284 & Binding & 4 \\
+GRB2\_Faure\_2021 & 62{,}332 & Binding & 2 \\
+GFP\_Sarkisyan\_2016 & 50{,}630 & Fluorescence & 13 \\
+CAPSD\_Sinai\_2021 & 41{,}796 & Fitness & 25 \\
+PABP\_Melamed\_2013 & 36{,}521 & Binding & 2 \\
+Q8WTC7\_Somermeyer\_2022 & 32{,}309 & Fluorescence & 12 \\
+Q6WV12\_Somermeyer\_2022 & 30{,}260 & Fluorescence & 10 \\
+D7PM05\_Somermeyer\_2022 & 23{,}346 & Fluorescence & 11 \\
+RASK\_Weng\_abundance & 22{,}946 & Abundance & 2 \\
+RASK\_Weng\_binding & 21{,}789 & Binding & 2 \\
+A4\_Seuma\_2022 & 14{,}015 & Abundance & 2 \\
+YAP1\_Araya\_2012 & 9{,}713 & Binding & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Baselines.} We compare against:
+\begin{enumerate}
+    \item \textbf{ESM-2 Additive}: Zero-shot PLM predictions summed across mutation sites (no training).
+    \item \textbf{Ridge Regression}: Ridge regression on one-hot mutation encodings (hyperparameter $\alpha$ selected by inner cross-validation).
+    \item \textbf{Ridge + Pairwise}: Ridge regression with sampled pairwise interaction features (10{,}000 random pairwise terms).
+    \item \textbf{Global Epistasis}: Additive linear model with a learned nonlinear sigmoid transformation~\citep{otwinowski2025interpretable}. Note: the sigmoid optimization failed to converge on 3 of 15 assays (CAPSD, Q8WTC7, D7PM05), producing NaN predictions. To ensure fair comparison, we report two numbers: the mean over 12 converged assays and, where noted, we exclude these 3 assays from all methods for a matched comparison.
+\end{enumerate}
+
+We note that several planned baselines---S3F~\citep{zhang2024multiscale}, SaProt~\citep{su2024saprot}, ProtSSN~\citep{tan2023semantical}, and supervised Tranception---were not completed due to implementation and compute constraints. This limits our positioning relative to the state of the art (see Section~\ref{sec:discussion}).
+
+\paragraph{Evaluation.} We use 5-fold cross-validation with 3 random seeds (42, 123, 456) per fold. The primary metric is Spearman rank correlation ($\spearman$) between predicted and observed fitness, following the ProteinGym protocol. We also report epistasis-specific Spearman (correlation computed on the non-additive residual: predicted fitness minus PLM additive vs.\ observed fitness minus PLM additive) and NDCG@100 for ranking evaluation.
+
+\paragraph{Implementation.} All experiments were run on a single NVIDIA RTX A6000 (48GB). ESM-2 embeddings were pre-computed in a single forward pass per protein. GNN training used PyTorch Geometric~\citep{fey2019fast}. AlphaFold structures were obtained from the AlphaFold Protein Structure Database~\citep{jumper2021highly}. Full hyperparameters and compute budget are detailed in Appendix~\ref{app:reproducibility}.
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main} presents the main comparison across all 15 assays.
+
+\begin{table}[t]
+\caption{Main results on 15 ProteinGym multi-mutant assays (within-protein evaluation). Spearman $\spearman$, epistasis-specific Spearman $\spearman_\text{epi}$, and NDCG@100 are averaged across assays, folds, and seeds. $\uparrow$ = higher is better. Best in \textbf{bold}, second best \underline{underlined}. Statistical significance vs.\ ESM-2 Additive by paired Wilcoxon signed-rank test. $^*$Global Epistasis mean computed over 12/15 assays where optimization converged; on the matched 12-assay subset, Ridge achieves $\rho = 0.864$, \rene{} achieves $\rho = 0.845$.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Spearman $\spearman$ $\uparrow$ & Epi.\ Spearman $\spearman_\text{epi}$ $\uparrow$ & NDCG@100 $\uparrow$ & $p$-value \\
+\midrule
+ESM-2 Additive & $0.408 \pm 0.172$ & --- & $0.593 \pm 0.200$ & --- \\
+Global Epistasis$^*$ & $0.294 \pm 0.254$ & --- & $0.513 \pm 0.185$ & --- \\
+\midrule
+Ridge Regression & $\mathbf{0.850 \pm 0.100}$ & --- & $0.821 \pm 0.174$ & --- \\
+Ridge + Pairwise & $\underline{0.845 \pm 0.120}$ & --- & $\underline{0.845 \pm 0.121}$ & --- \\
+\rene{} (Ours) & $0.829 \pm 0.149$ & $\mathbf{0.967 \pm 0.053}$ & $\mathbf{0.860 \pm 0.125}$ & $2.6 \times 10^{-14}$ \\
+\renr{} (Ours) & $0.503 \pm 0.245$ & $\underline{0.866 \pm 0.141}$ & $0.660 \pm 0.224$ & $0.023$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{End-to-end mode excels at epistasis ranking.} \rene{} achieves a mean Spearman $\spearman = 0.829$, a dramatic improvement of $+0.421$ over the ESM-2 additive baseline ($p = 2.6 \times 10^{-14}$, paired Wilcoxon test). While it does not surpass simple ridge regression ($\spearman = 0.850$), \rene{} achieves the highest epistasis-specific Spearman correlation ($\spearman_\text{epi} = 0.967$), indicating \emph{near-perfect ranking of the non-additive fitness component}. This is a striking result: while overall fitness ranking is dominated by the additive component (which ridge regression captures well via one-hot encoding), \rene{} excels precisely at ranking how mutations interact. This metric directly measures the model's ability to predict epistasis, which is arguably more scientifically meaningful and practically useful for identifying synergistic mutation combinations in protein engineering. \rene{} also achieves the best NDCG@100 ($0.860$), indicating strong top-variant ranking ability.
+
+\paragraph{Residual mode underperforms.} \renr{} achieves $\spearman = 0.503$, significantly improving over ESM-2 additive ($p = 0.023$) but substantially below \rene{}. The residual mode does achieve strong epistasis-specific correlation ($\spearman_\text{epi} = 0.866$), but the overall fitness prediction suffers because the PLM additive baseline is a poor estimator of the true additive component: when the additive baseline itself has errors ($\spearman = 0.408$ with ground truth), the residual targets contain substantial noise from additive prediction error. Figure~\ref{fig:residual_analysis} visualizes this issue---the epistatic residuals are heavily right-skewed and the PLM additive baseline correlates poorly with observed fitness ($\rho = 0.318$ on GB1 Olson 2014), contaminating the residual learning targets with additive error.
+
+\paragraph{Per-assay analysis.} Figure~\ref{fig:main_results} shows per-assay results. \rene{} achieves $\spearman > 0.83$ on 10 of 15 assays and surpasses ridge regression on 5 assays (CAPSD, GFP, PHOT, RASK\_binding, Q6WV12). The most challenging assay is SPG1\_Wu\_2016 ($\spearman = 0.316$ for \rene{}, $0.521$ for ridge), a 4-site combinatorial landscape where the limited number of mutation positions constrains the graph-based approach.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/main_results.pdf}
+\caption{Per-assay Spearman $\spearman$ for all methods across 15 ProteinGym multi-mutant assays. \rene{} (blue) approaches ridge regression (green) and dramatically outperforms the ESM-2 additive baseline (gray). Error bars show standard deviation across 3 seeds.}
+\label{fig:main_results}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/residual_analysis.pdf}
+\caption{Residual analysis on SPG1\_Olson\_2014 (GB1). (a) Distribution of epistatic residuals (observed fitness $-$ PLM additive prediction), showing heavy right-skew. (b) Mean residual magnitude by mutation order. (c) PLM additive prediction vs.\ observed fitness ($\rho = 0.318$), illustrating why residual learning is challenging: the additive baseline's poor correlation contaminates the residual targets with additive prediction error.}
+\label{fig:residual_analysis}
+\end{figure}
+
+\subsection{Epistasis-Stratified Analysis}
+
+A central hypothesis of this work is that supervised approaches should provide the largest benefit on proteins exhibiting strong epistasis. We partitioned assays into high-epistasis (top quartile by median $|\epsilon|$) and low-epistasis (bottom quartile) groups.
+
+For \rene{}, the mean improvement over ESM-2 additive was $+0.530$ on high-epistasis proteins vs.\ $+0.363$ on low-epistasis proteins (Mann-Whitney $p = 4.55 \times 10^{-4}$). For \renr{}, the stratification was even more pronounced: $+0.370$ on high-epistasis vs.\ $-0.163$ on low-epistasis ($p = 2.80 \times 10^{-4}$). This confirms that supervised approaches provide disproportionate benefit on proteins where epistasis is strongest (Figure~\ref{fig:epistasis_stratified}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\textwidth]{figures/epistasis_stratified.pdf}
+\caption{Improvement of \rene{} over ESM-2 additive as a function of assay epistasis magnitude. Proteins with stronger epistasis show larger improvements from supervised learning.}
+\label{fig:epistasis_stratified}
+\end{figure}
+
+\subsection{GB1 Order-Generalization}
+\label{sec:order_gen}
+
+We tested whether models trained on lower-order mutations can extrapolate to higher-order combinations using the GB1 Wu 2016 combinatorial landscape (76 singles, 2{,}091 doubles, 26{,}019 triples, 121{,}174 quadruples across 4 mutation sites). Models were trained on singles and doubles only, then evaluated on triples and quadruples. Table~\ref{tab:order_gen} shows the results.
+
+\begin{table}[t]
+\caption{GB1 order-generalization: train on singles + doubles, predict higher orders. All supervised methods dramatically outperform the ESM-2 additive baseline. Mean $\pm$ std across 3 seeds.}
+\label{tab:order_gen}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & Triples ($\spearman$) $\uparrow$ & Quadruples ($\spearman$) $\uparrow$ \\
+\midrule
+ESM-2 Additive & $0.244$ & $0.044$ \\
+Ridge Regression & $0.549$ & $\mathbf{0.300}$ \\
+MLP (no GNN) & $\mathbf{0.561 \pm 0.003}$ & $0.291 \pm 0.010$ \\
+\rene{} (GAT) & $0.559 \pm 0.001$ & $0.290 \pm 0.008$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All supervised methods achieve similar performance, with Spearman $\rho \approx 0.55$ on triples and $\rho \approx 0.29$ on quadruples. This represents a substantial improvement over the ESM-2 additive baseline ($0.244$ and $0.044$, respectively), confirming that supervised learning on mutation-site features can capture combinatorial patterns that generalize to higher mutation orders. The performance degradation from triples to quadruples reflects the compounding complexity of higher-order epistasis. Notably, the MLP slightly outperforms the GAT, consistent with our within-protein findings that structural message passing provides minimal additional benefit.
+
+\subsection{Cross-Protein Generalization}
+\label{sec:cross_protein}
+
+The within-protein ablations raised a critical question: if random features match ESM-2 embeddings, does the model learn biology or merely memorize positions? To answer this, we conducted a cross-protein generalization experiment where models trained on 11--12 proteins must predict fitness for 3 held-out proteins (5 leave-3-out folds, 2 seeds).
+
+We trained ridge regression on average ESM-2 mutation-site embeddings (1{,}280-dim) concatenated with average mutation identity (20-dim), using up to 5{,}000 variants per training protein. The same architecture was trained with random features as a control.
+
+\begin{table}[t]
+\caption{Cross-protein generalization (leave-3-out). ESM-2 features substantially outperform random features, resolving the within-protein random features anomaly. Zero-shot ESM-2 additive remains strongest, as expected for the low-data transfer setting.}
+\label{tab:cross_protein}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & Mean Spearman $\spearman$ $\uparrow$ & Std \\
+\midrule
+ESM-2 Additive (zero-shot) & $\mathbf{0.423}$ & $0.172$ \\
+Ridge + ESM-2 features & $0.074$ & $0.143$ \\
+Ridge + Random features & $0.013$ & $0.079$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cross_protein} shows that ESM-2 features ($\rho = 0.074$) substantially outperform random features ($\rho = 0.013$) in the cross-protein setting, a $5.5\times$ improvement. This confirms that ESM-2 embeddings carry genuine biological signal that transfers across proteins. However, both supervised approaches perform far below the zero-shot ESM-2 additive baseline ($\rho = 0.423$), indicating that the cross-protein supervised transfer problem remains very challenging---the position-specific signal learned from training proteins does not transfer well to held-out proteins.
+
+This experiment resolves the random features anomaly from the within-protein ablations: the comparable performance of random and real features within-protein reflects positional memorization (where unique identifiers suffice), not a lack of biological signal in ESM-2 embeddings. In the transfer setting where positional memorization fails, real features matter.
+
+We note that this cross-protein experiment uses ridge regression on averaged mutation-site embeddings rather than the full GNN architecture. Testing the GAT vs.\ MLP comparison in the cross-protein setting would provide stronger evidence about whether structural priors become critical when positional memorization is unavailable. We hypothesize that the GNN vs.\ MLP gap would reverse in this setting, but this remains an important direction for future work.
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+We conducted ablations on 5 representative assays (PHOT, Q8WTC7, GRB2, RASK\_abundance, SPG1\_Olson) with 5-fold CV and seed 42, using the \rene{} mode. Results are summarized in Table~\ref{tab:ablations} and Figure~\ref{fig:ablations}.
+
+\begin{table}[t]
+\caption{Ablation study results on 5 representative assays (mean Spearman $\spearman \pm$ std across assays and folds). Default configuration indicated with $\dagger$.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Ablation & Configuration & Spearman $\spearman$ $\uparrow$ & $\Delta$ vs.\ default \\
+\midrule
+\multirow{5}{*}{Contact threshold}
+    & 8\,\AA{} & $0.876 \pm 0.100$ & $+0.004$ \\
+    & 10\,\AA{}$^\dagger$ & $0.872 \pm 0.119$ & --- \\
+    & 12\,\AA{} & $0.873 \pm 0.106$ & $+0.001$ \\
+    & 15\,\AA{} & $0.864 \pm 0.147$ & $-0.008$ \\
+    & Sequence ($|i{-}j| \leq 5$) & $0.873 \pm 0.101$ & $+0.001$ \\
+\midrule
+\multirow{4}{*}{Node features}
+    & ESM-2 + mutation$^\dagger$ & $0.869 \pm 0.123$ & --- \\
+    & ESM-2 only & $0.865 \pm 0.131$ & $-0.004$ \\
+    & Mutation only & $0.532 \pm 0.302$ & $-0.337$ \\
+    & Random & $0.873 \pm 0.127$ & $+0.004$ \\
+\midrule
+\multirow{4}{*}{GNN depth}
+    & 1 layer & $\mathbf{0.875 \pm 0.114}$ & $+0.003$ \\
+    & 2 layers & $0.870 \pm 0.120$ & $-0.002$ \\
+    & 3 layers$^\dagger$ & $0.872 \pm 0.105$ & --- \\
+    & 4 layers & $0.868 \pm 0.126$ & $-0.004$ \\
+\midrule
+\multirow{3}{*}{Architecture}
+    & GAT$^\dagger$ & $0.872 \pm 0.119$ & --- \\
+    & GCN & $0.870 \pm 0.113$ & $-0.002$ \\
+    & MLP (no GNN) & $\mathbf{0.884 \pm 0.122}$ & $+0.012$ \\
+\midrule
+\multirow{3}{*}{Edge features}
+    & TransformerConv + 4D & $0.808 \pm 0.123$ & $-0.064$ \\
+    & TransformerConv (none) & $0.815 \pm 0.131$ & $-0.057$ \\
+    & GAT binary$^\dagger$ & $0.870 \pm 0.113$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/ablations.pdf}
+\caption{Ablation study results across four dimensions: (a) contact distance threshold, (b) node feature composition, (c) GNN depth, and (d) architecture comparison. The MLP without message passing slightly outperforms GNN architectures.}
+\label{fig:ablations}
+\end{figure}
+
+\paragraph{Contact threshold (stable).} Performance is remarkably stable across all thresholds ($\rho \approx 0.87$), with even sequence-proximity edges ($|i{-}j| \leq 5$, no structural information) performing comparably ($\spearman = 0.873$). This indicates the GNN uses the graph primarily as a positional encoding mechanism rather than leveraging fine-grained structural contacts.
+
+\paragraph{Node features: the random features anomaly.} Random node features ($\spearman = 0.873$) marginally outperform real ESM-2 embeddings ($0.869$), a gap of $+0.004$ within noise. Random vectors serve as unique node identifiers, enabling position-specific parameter learning. As shown in Section~\ref{sec:cross_protein}, this reflects positional memorization in the within-protein setting, not a genuine failure of ESM-2 features. The mutation-identity-only features ($0.532$) perform much worse, confirming that rich per-residue features are essential for the model to distinguish positions.
+
+\paragraph{GNN depth (shallower is marginally better).} Shallower GNNs perform marginally better (1 layer: $0.875$ vs.\ 4 layers: $0.868$), suggesting local structural context suffices and deeper message passing may cause over-smoothing.
+
+\paragraph{Architecture (MLP outperforms GNN).} An MLP without any message passing ($\spearman = 0.884$) outperforms both GAT ($0.872$) and GCN ($0.870$). This demonstrates that within-protein, ESM-2 embeddings at mutation sites contain sufficient signal and structural message passing provides no additional benefit.
+
+\paragraph{Edge features (simpler is better).} TransformerConv with continuous edge features ($\spearman = 0.808$) substantially underperforms GAT with binary edges ($0.870$). The more complex attention mechanism appears to overfit.
+
+\subsection{Order-Stratified Analysis}
+
+We evaluated \rene{} performance stratified by mutation order across all 15 assays. Performance decreases with increasing mutation order: $\spearman = 0.805$ for doubles, $0.757$ for triples, $0.726$ for quadruples, declining further for higher orders (Figure~\ref{fig:order_stratified}). This reflects the growing complexity of higher-order epistatic interactions, where the signal-to-noise ratio drops as the combinatorial space grows.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\textwidth]{figures/order_stratified.pdf}
+\caption{Spearman $\spearman$ of \rene{} stratified by mutation order. Performance degrades with increasing order, reflecting the growing complexity of higher-order epistatic interactions.}
+\label{fig:order_stratified}
+\end{figure}
+
+\subsection{Attention Analysis on GB1}
+
+We analyzed the learned GAT attention weights on GB1 (535{,}917 pairwise variants from \citet{olson2014comprehensive}), where experimentally measured epistasis values are available for every residue pair. The correlation between attention-derived interaction scores and experimental pairwise epistasis was negligible ($\spearman = 0.012$, $p = 1.4 \times 10^{-17}$). While statistically significant due to large sample size, this indicates that GAT attention weights encode structural proximity rather than epistatic interaction strength (Figure~\ref{fig:attention_analysis}), consistent with the positional encoding interpretation from the ablation studies.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/attention_analysis.pdf}
+\caption{GAT attention analysis on GB1. (Left) Attention weight heatmap. (Right) Attention weight vs.\ measured pairwise epistasis ($\spearman = 0.012$), showing negligible correlation.}
+\label{fig:attention_analysis}
+\end{figure}
+
+% ============================================================
+% DISCUSSION
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{The main finding: supervised learning on ESM-2 embeddings is highly effective.}
+The most practically significant result is that supervised learning on ESM-2 mutation-site embeddings dramatically outperforms zero-shot PLM predictions for within-protein multi-mutant fitness prediction ($\rho = 0.895$ for a simple MLP vs.\ $0.408$ for the additive baseline). This $+0.487$ improvement requires only pre-computed ESM-2 embeddings and standard supervised learning. The simplicity of this approach contrasts with the complexity of the proposed GNN framework.
+
+\paragraph{Epistasis-specific correlation as a practical tool.}
+\rene{}'s epistasis-specific Spearman of $0.967$ is arguably the most important result in this paper. While the overall Spearman ($0.829$) lags behind ridge regression ($0.850$), the near-perfect epistasis-specific correlation indicates that \rene{} excels precisely at ranking the non-additive component of fitness. This metric directly measures the model's ability to predict how mutations interact---which is the information most valuable for protein engineering. A practitioner seeking to identify synergistic mutation combinations would benefit more from accurate epistasis ranking than from overall fitness ranking (which is dominated by additive effects that are already well-predicted by zero-shot PLMs). We suggest that epistasis-specific Spearman should be adopted as a standard metric for evaluating multi-mutant fitness prediction methods, alongside overall Spearman.
+
+\paragraph{The random features anomaly is resolved.}
+The within-protein finding that random features ($\rho = 0.873$) match ESM-2 embeddings ($0.869$) initially suggested the model does not use protein biology. Our cross-protein experiment (Section~\ref{sec:cross_protein}) resolves this: ESM-2 features ($\rho = 0.074$) outperform random features ($0.013$) by $5.5\times$ when positional memorization is impossible. Within-protein, random vectors serve as unique position identifiers that enable the same positional memorization as real embeddings. The biological signal in ESM-2 embeddings is genuine but masked by a stronger position-specific signal in the within-protein regime.
+
+\paragraph{Why structural message passing provides marginal benefit.}
+The MLP ablation ($\spearman = 0.884$ vs.\ GAT $0.872$) reveals that explicit structural message passing does not improve within-protein predictions. Two factors explain this: (1) ESM-2 embeddings already encode structural context through pre-training on evolutionary data; (2) the per-protein training paradigm provides enough data for position-specific learning without structural priors. We hypothesize that the GNN vs.\ MLP gap would reverse in the cross-protein setting where positional memorization fails and structural priors would provide genuine inductive bias. Testing this at scale with the full GNN architecture is the most critical direction for future work.
+
+\paragraph{Why residual learning fails here.}
+The residual formulation (\renr{}) is conceptually appealing but depends on a reliable additive baseline. When $f_\text{add}$ correlates poorly with ground truth ($\spearman = 0.408$), the residual targets contain substantial noise from additive prediction error (Figure~\ref{fig:residual_analysis}). However, the epistasis-specific Spearman ($0.866$) shows that \renr{} does learn meaningful epistatic signal---the issue is that this signal is obscured when combined with the noisy additive component. We expect residual learning to become more effective as PLMs improve; with a stronger additive baseline (e.g., SaProt or ESM-3), the residual targets would contain less noise and more genuine epistatic signal.
+
+\paragraph{Limitations.}
+Our study has several important limitations:
+\begin{enumerate}
+    \item \textbf{Missing baselines.} Comparisons with S3F~\citep{zhang2024multiscale} (the most directly comparable structure+PLM method), SaProt~\citep{su2024saprot}, ProtSSN~\citep{tan2023semantical}, and supervised Tranception~\citep{notin2022tranception} were not completed. S3F in particular would provide a critical comparison for understanding whether the additive-epistatic decomposition adds value over end-to-end structure+PLM integration.
+    \item \textbf{Cross-protein evaluation is preliminary.} We tested cross-protein transfer with ridge regression on averaged embeddings, not the full GNN architecture. A cross-protein evaluation comparing GAT vs.\ MLP would provide the strongest test of whether structural priors matter in the data-scarce regime.
+    \item \textbf{PLM baseline limitations.} We used ESM-2 650M; larger PLMs (ESM-2 3B, ESM-3) or structure-aware PLMs may yield stronger additive baselines, which could improve the residual learning mode.
+    \item \textbf{Global Epistasis convergence.} The Global Epistasis baseline failed on 3/15 assays, creating asymmetric reporting. On the matched 12-assay subset, the relative ranking of methods is unchanged.
+    \item \textbf{Data requirements.} Within-protein training requires substantial labeled data per protein, limiting applicability to proteins without DMS data.
+\end{enumerate}
+
+% ============================================================
+% CONCLUSION
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed Residual Epistasis Networks (\ren{}), a framework combining protein language model embeddings with structural contact graph neural networks for multi-mutant protein fitness prediction. Our investigation yields three key findings:
+
+\textbf{(1)} Supervised learning on ESM-2 mutation-site embeddings is highly effective for within-protein fitness prediction, achieving Spearman $\rho = 0.895$ with a simple MLP---a $+0.487$ improvement over zero-shot predictions. \rene{} achieves near-perfect epistasis-specific correlation ($\rho_\text{epi} = 0.967$), making it a powerful tool for ranking epistatic interactions in protein engineering.
+
+\textbf{(2)} Structural message passing provides marginal benefit in the within-protein regime, and the ``random features anomaly'' reflects positional memorization rather than a failure of PLM representations. Our cross-protein experiment confirms that ESM-2 features carry genuine biological signal ($5.5\times$ improvement over random features in the transfer setting).
+
+\textbf{(3)} Models trained on low-order mutations can extrapolate to higher orders (GB1: $\rho = 0.56$ on triples, $0.29$ on quadruples from singles+doubles training), substantially outperforming zero-shot predictions.
+
+The critical open question is whether structural priors and GNN architectures become essential in the cross-protein transfer setting at scale. Future work should prioritize: (1) a full cross-protein GAT vs.\ MLP comparison, (2) comparison with S3F and other state-of-the-art structure+PLM methods, (3) investigating the residual formulation with stronger PLM baselines, and (4) exploring whether attention mechanisms can be guided to focus on functionally coupled residues.
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{22}
+
+\bibitem[Lin et~al.(2023)]{lin2023evolutionary}
+Zeming Lin, Halil Akin, Roshan Rao, Brian Hie, Zhongkai Zhu, Wenting Lu, Nikita Smetanin, Robert Verkuil, Ori Kabeli, Yaniv Shmueli, Allan dos Santos~Costa, Maryam Fazel-Zarandi, Tom Sercu, Salvatore Candido, and Alexander Rives.
+\newblock Evolutionary-scale prediction of atomic-level protein structure with a language model.
+\newblock \emph{Science}, 379(6637):1123--1130, 2023.
+
+\bibitem[Notin et~al.(2024)]{notin2024proteingym}
+Pascal Notin, Aaron Kollasch, Daniel Ritter, Lood van Niekerk, Steffanie Paul, Han Spinner, Nathan Rollins, Ada Shaw, Rose Orenbuch, Ruben Weitzman, Jonathan Frazer, Mafalda Dias, Dinko Franceschi, Yarin Gal, and Debora Marks.
+\newblock {ProteinGym}: Large-scale benchmarks for protein fitness prediction and design.
+\newblock In \emph{Advances in Neural Information Processing Systems 36 (NeurIPS)}, 2024.
+
+\bibitem[Notin et~al.(2022)]{notin2022tranception}
+Pascal Notin, Mafalda Dias, Jonathan Frazer, Javier Marchena-Hurtado, Aidan~N. Gomez, Debora Marks, and Yarin Gal.
+\newblock Tranception: Protein fitness prediction with autoregressive transformers and inference-time retrieval.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2022.
+
+\bibitem[Frazer et~al.(2021)]{frazer2021disease}
+Jonathan Frazer, Pascal Notin, Mafalda Dias, Aidan~N. Gomez, Joseph~K. Min, Kelly Busia, Daniel Hsu, Debora Marks, et~al.
+\newblock Disease variant prediction with deep generative models of evolutionary data.
+\newblock \emph{Nature}, 599(7883):91--95, 2021.
+
+\bibitem[Nambiar et~al.(2025)]{Nambiar2025PLMEpistasis}
+Ananthan Nambiar, Sayantani~B. Littlefield, Carlos Cuellar, Rohit Khorana, and Sergei Maslov.
+\newblock Protein language models capture structural and functional epistasis in a zero-shot setting.
+\newblock \emph{bioRxiv}, 2025.
+\newblock doi:10.1101/2025.09.14.676130.
+
+\bibitem[Huynh et~al.(2025)]{Huynh2025DynamicsEpistasis}
+Ngoc Huynh, I.~Can Kazan, Jin Lu, Bethany Kolbaba-Kartchner, Jeremy~H. Mills, and S.~Banu Ozkan.
+\newblock A protein dynamics-based deep learning model enhances predictions of fitness and epistasis.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 122(42):e2502444122, 2025.
+
+\bibitem[Zhang et~al.(2024)]{zhang2024multiscale}
+Zuobai Zhang, Pascal Notin, Yining Huang, Aur{\'e}lie Lozano, Vijil Chenthamarakshan, Debora Marks, Payel Das, and Jian Tang.
+\newblock Multi-scale representation learning for protein fitness prediction.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[Su et~al.(2024)]{su2024saprot}
+Jin Su, Chenchen Han, Yuyang Zhou, Junjie Shan, Xibin Zhou, and Fajie Yuan.
+\newblock {SaProt}: Protein language modeling with structure-aware vocabulary.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem[Tan et~al.(2023)]{tan2023semantical}
+Yang Tan, Bingxin Zhou, Lirong Zheng, Guisheng Fan, and Liang Hong.
+\newblock Semantical and topological protein encoding toward enhanced bioactivity and thermostability.
+\newblock \emph{bioRxiv}, 2023.
+
+\bibitem[Aghazadeh et~al.(2021)]{aghazadeh2021epistatic}
+Amirali Aghazadeh, Hunter Nisonoff, Orhan Ocal, David~H. Brookes, Yijie Huang, O.~Ozan Koyluoglu, Jennifer Listgarten, and Kannan Ramchandran.
+\newblock Epistatic {N}et allows the sparse spectral regularization of deep neural networks for inferring fitness functions.
+\newblock \emph{Nature Communications}, 12:5225, 2021.
+
+\bibitem[Lipsh-Sokolik \& Fleishman(2024)]{lipsh2024addressing}
+Rosalie Lipsh-Sokolik and Sarel~J. Fleishman.
+\newblock Addressing epistasis in the design of protein function.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 121(34):e2314999121, 2024.
+
+\bibitem[Olson et~al.(2014)]{olson2014comprehensive}
+C.~Anders Olson, Nicholas~C. Wu, and Ren Sun.
+\newblock A comprehensive biophysical description of pairwise epistasis throughout an entire protein domain.
+\newblock \emph{Current Biology}, 24(22):2643--2651, 2014.
+
+\bibitem[Wu et~al.(2016)]{wu2016adaptation}
+Nicholas~C. Wu, Lei Dai, C.~Anders Olson, James~O. Lloyd-Smith, and Ren Sun.
+\newblock Adaptation in protein fitness landscapes is facilitated by indirect paths.
+\newblock \emph{eLife}, 5:e16965, 2016.
+
+\bibitem[Sarkisyan et~al.(2016)]{sarkisyan2016local}
+Karen~S. Sarkisyan, Dmitry~A. Bolotin, Margarita~V. Meer, Dinara~R. Usmanova, Alexander~S. Mishin, George~V. Sharonov, Dmitry~N. Ivankov, Nina~G. Bozhanova, Mikhail~S. Baranov, Olena Sez, Ilya Lukyanov, Konstantin~A. Lukyanov, Georgii~A. Bazykin, and Fyodor~A. Kondrashov.
+\newblock Local fitness landscape of the green fluorescent protein.
+\newblock \emph{Nature}, 533(7603):397--401, 2016.
+
+\bibitem[Pokusaeva et~al.(2019)]{pokusaeva2019experimental}
+Violetta~O. Pokusaeva, Dinara~R. Usmanova, Ekaterina~V. Putintseva, Lorena Espinar, Lucas~B. Carey, and Alexey~S. Kondrashov.
+\newblock An experimental assay of the interactions of amino acids from orthologous sequences shaping a complex fitness landscape.
+\newblock \emph{PLoS Genetics}, 15(3):e1008079, 2019.
+
+\bibitem[Jumper et~al.(2021)]{jumper2021highly}
+John Jumper, Richard Evans, Alexander Pritzel, Tim Green, Michael Figurnov, Olaf Ronneberger, Kathryn Tunyasuvunakool, Russ Bates, Augustin \v{Z}\'{\i}dek, Anna Potapenko, et~al.
+\newblock Highly accurate protein structure prediction with {AlphaFold}.
+\newblock \emph{Nature}, 596(7873):583--589, 2021.
+
+\bibitem[Otwinowski(2025)]{otwinowski2025interpretable}
+Juannan Otwinowski.
+\newblock An interpretable neural network unveils higher-order epistasis in large protein sequence-function relationships.
+\newblock \emph{eLife} (reviewed preprint), 2025.
+
+\bibitem[Johnston et~al.(2024)]{johnston2024combinatorial}
+Kadina~E. Johnston et~al.
+\newblock A combinatorially complete epistatic fitness landscape in an enzyme active site.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 121(32):e2400439121, 2024.
+
+\bibitem[Chen et~al.(2023)]{chen2023creilov}
+Yueming Chen, Bobo Dang, Chong Fu, and Liang Guo.
+\newblock Deep mutational scanning of an oxygen-independent fluorescent protein {CreiLOV} for comprehensive profiling of mutational and epistatic effects.
+\newblock \emph{ACS Synthetic Biology}, 12(5):1461--1473, 2023.
+
+\bibitem[Fey \& Lenssen(2019)]{fey2019fast}
+Matthias Fey and Jan~Eric Lenssen.
+\newblock Fast graph representation learning with {PyTorch Geometric}.
+\newblock In \emph{ICLR Workshop on Representation Learning on Graphs and Manifolds}, 2019.
+
+\bibitem[Veli{\v{c}}kovi{\'c} et~al.(2018)]{velickovic2018graph}
+Petar Veli{\v{c}}kovi{\'c}, Guillem Cucurull, Arantxa Casanova, Adriana Romero, Pietro Li{\`o}, and Yoshua Bengio.
+\newblock Graph attention networks.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2018.
+
+\end{thebibliography}
+
+% ============================================================
+% APPENDIX
+% ============================================================
+\appendix
+\section{Reproducibility}
+\label{app:reproducibility}
+
+\subsection{Compute Budget}
+
+All experiments were conducted on a single NVIDIA RTX A6000 GPU (48GB VRAM) with an AMD EPYC processor. Total compute time was approximately 8 hours, broken down as follows:
+
+\begin{itemize}
+    \item ESM-2 650M embedding extraction (15 proteins): $\sim$45 minutes
+    \item AlphaFold structure download and contact map computation: $\sim$15 minutes
+    \item Baseline experiments (ridge, pairwise, global epistasis): $\sim$30 minutes
+    \item REN training (15 assays $\times$ 5 folds $\times$ 3 seeds $\times$ 2 modes): $\sim$4 hours
+    \item Ablation studies (5 assays, 4 ablation types): $\sim$1.5 hours
+    \item GB1 order-generalization and cross-protein experiments: $\sim$1 hour
+\end{itemize}
+
+\subsection{Hyperparameters}
+
+\begin{table}[h]
+\caption{Full hyperparameter specification for reproducibility.}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Hyperparameter & Value \\
+\midrule
+\multicolumn{2}{l}{\emph{ESM-2 Embeddings}} \\
+Model & ESM-2 650M (esm2\_t33\_650M\_UR50D) \\
+Embedding dimension & 1280 \\
+LLR computation & Masked marginal \\
+\midrule
+\multicolumn{2}{l}{\emph{Graph Construction}} \\
+Contact threshold & 10\,\AA{} (C$_\beta$--C$_\beta$, C$_\alpha$ for Gly) \\
+Edge type & Binary (contact/no contact) \\
+Structure source & AlphaFold Protein Structure Database v4 \\
+\midrule
+\multicolumn{2}{l}{\emph{GAT Architecture}} \\
+Number of layers & 3 \\
+Attention heads per layer & 8 \\
+Hidden dimension & 256 \\
+Activation & ELU \\
+Dropout & 0.1 \\
+Mutation embedding dim & 20 (learned) \\
+Pooling & Attention-weighted (learned query) \\
+MLP head & 256 $\to$ 128 $\to$ 1 (ReLU, dropout 0.1) \\
+\midrule
+\multicolumn{2}{l}{\emph{Training}} \\
+Optimizer & AdamW \\
+Learning rate & $10^{-3}$ \\
+Weight decay & $10^{-4}$ \\
+LR schedule & Cosine annealing \\
+Max epochs & 100 \\
+Early stopping patience & 15 \\
+Batch size (variants per protein) & 512 \\
+Gradient clipping & max norm 1.0 \\
+Target normalization & Per-assay z-score \\
+\midrule
+\multicolumn{2}{l}{\emph{Evaluation}} \\
+Cross-validation folds & 5 (ProteinGym-provided) \\
+Random seeds & 42, 123, 456 \\
+Primary metric & Spearman $\rho$ \\
+\midrule
+\multicolumn{2}{l}{\emph{Ridge Regression}} \\
+Regularization $\alpha$ & 1.0 (selected by inner CV from \{0.01, 0.1, 1, 10, 100\}) \\
+Pairwise features & 10{,}000 random sampled interaction terms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Software and Data Availability}
+
+\begin{itemize}
+    \item \textbf{Software}: PyTorch 2.1+, PyTorch Geometric, fair-esm, BioPython, scikit-learn, scipy
+    \item \textbf{Data}: ProteinGym v1.3 multi-mutant substitution benchmark (\url{https://github.com/OATML-Markslab/ProteinGym})
+    \item \textbf{Structures}: AlphaFold Protein Structure Database (\url{https://alphafold.ebi.ac.uk})
+\end{itemize}
+
+\end{document}

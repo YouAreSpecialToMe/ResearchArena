@@ -1,0 +1,215 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for ViT inference, spectral analysis, and ImageNet-C evaluation. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: torch (>=2.0), torchvision, timm (>=0.9.0), numpy, scipy, matplotlib, seaborn, pandas, tqdm, Pillow",
+      "step2": "Verify CUDA is available and confirm GPU is NVIDIA RTX A6000 with 48GB VRAM: run torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem",
+      "step3": "Verify pretrained model availability by loading DeiT-Small (deit_small_patch16_224), DeiT-Base (deit_base_patch16_224), and Swin-Tiny (swin_tiny_patch4_window7_224) from timm and running a dummy forward pass on GPU",
+      "step4": "Create the project directory structure: results/, figures/, checkpoints/ (for calibration stats), logs/",
+      "step5": "Set global random seeds: SEEDS = [42, 123, 456]. Set torch.backends.cudnn.deterministic = True, torch.backends.cudnn.benchmark = False for reproducibility"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare ImageNet validation and ImageNet-C",
+    "description": "Obtain ImageNet validation set (50K images) and ImageNet-C benchmark (15 corruptions × 5 severity levels). Prepare data loaders with standard ViT preprocessing. Since full ImageNet-C is very large (~75GB), we use a practical subset strategy: full evaluation for main results on key severities, subset for ablations.",
+    "steps": {
+      "step1": "Check if ImageNet validation set is already available at standard locations (/data/imagenet/val, ~/data/imagenet/val, etc.). If not, download ILSVRC2012 validation set (50K images, 1000 classes). Organize in torchvision ImageFolder format: val/class_name/image.JPEG",
+      "step2": "Download ImageNet-C from https://zenodo.org/record/2235448 (or use the robustness library). ImageNet-C contains 15 corruption types organized as: imagenet-c/{corruption_type}/{severity}/. The 15 corruptions are: gaussian_noise, shot_noise, impulse_noise, defocus_blur, glass_blur, motion_blur, zoom_blur, snow, frost, fog, brightness, contrast, elastic_transform, pixelate, jpeg_compression",
+      "step3": "Define corruption categories for analysis: NOISE = [gaussian_noise, shot_noise, impulse_noise], BLUR = [defocus_blur, glass_blur, motion_blur, zoom_blur], WEATHER = [snow, frost, fog, brightness], DIGITAL = [contrast, elastic_transform, pixelate, jpeg_compression]",
+      "step4": "Create standard preprocessing pipeline for all models: transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]). For ImageNet-C images (already corrupted PNGs), skip Resize/CenterCrop if images are already 224×224",
+      "step5": "Create DataLoader factory with batch_size=256 for DeiT-S/Swin-T and batch_size=128 for DeiT-B, num_workers=4, pin_memory=True",
+      "step6": "Sample calibration sets: For each seed in [42, 123, 456], randomly sample 1000 images from ImageNet validation set (using the seed for random selection). Save the indices to checkpoints/calibration_indices_seed{seed}.npy for reproducibility",
+      "step7": "For ablation experiments, define a REPRESENTATIVE_SUBSET of 5 corruptions (one per category plus one extra noise): [gaussian_noise, defocus_blur, snow, contrast, jpeg_compression] at severity=5 only, using a random 5000-image subset of validation for faster iteration"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement Spectral Token Gating (STG) method",
+    "description": "Implement the core STG method as a plug-and-play module that can wrap any pretrained ViT. This includes calibration (offline spectral statistics collection), test-time spectral analysis, gating score computation, and attention modulation.",
+    "steps": {
+      "step1": "Implement the SpectralTokenGating module with the following components: (a) FrequencyBandAnalyzer: computes 1D-DFT of token embeddings and partitions into K frequency bands, returning spectral energy ratios. (b) CalibrationStats: stores per-layer mean and covariance of spectral energy ratios. (c) GatingModule: computes Mahalanobis distance and converts to gating scores via sigmoid",
+      "step2": "Implement the calibration procedure: register forward hooks at target layers to capture token embeddings. For each calibration image, compute spectral energy ratios at each hooked layer. Aggregate across the calibration set to compute mean (mu_ref) and covariance (Sigma_ref) per layer. Add small regularization (1e-5 * I) to covariance for numerical stability. Save calibration stats to checkpoints/calibration_{model}_{seed}.pt",
+      "step3": "Implement the test-time gating: At inference, hooks capture token embeddings at target layers. For each token, compute spectral energy ratio, then Mahalanobis distance from calibration stats. Apply sigmoid gating: g_i = sigmoid(-alpha * (d_i - tau)). Default hyperparameters: K=3 frequency bands (low: 0-33%, mid: 33-66%, high: 66-100% of frequency spectrum), alpha=5.0 (gating sharpness), tau=95th percentile of calibration distances",
+      "step4": "Implement attention modulation: Modify the attention forward pass to multiply value vectors by gating scores: V_gated = diag(g) * V. For DeiT models (timm Attention module), monkey-patch the forward method. For Swin-T (window attention), adapt the gating to work within each window. IMPORTANT: Never gate the CLS token (always g_cls = 1.0)",
+      "step5": "Implement layer selection logic: For DeiT-S (12 layers), DeiT-B (12 layers), default to applying STG at layers [3, 6, 9, 11] (early-mid, mid, mid-late, late). For Swin-T (stages with 2,2,6,2 blocks), default to applying at the last block of each stage",
+      "step6": "Add inference-time FLOPs/latency measurement: wrap the forward pass with torch.cuda.Event for timing, and estimate additional FLOPs from DFT computation (O(d * log(d)) per token per layer)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate vanilla pretrained models on ImageNet-C",
+    "description": "Establish baseline performance by evaluating unmodified pretrained ViTs on clean ImageNet and all ImageNet-C corruptions. This serves as the simple baseline and provides the denominator for mCE computation.",
+    "steps": {
+      "step1": "Load pretrained models from timm: deit_small_patch16_224 (pretrained=True), deit_base_patch16_224 (pretrained=True), swin_tiny_patch4_window7_224 (pretrained=True). Set to eval mode",
+      "step2": "Evaluate clean ImageNet top-1 and top-5 accuracy for all 3 models. Expected: DeiT-S ~79.8%, DeiT-B ~81.8%, Swin-T ~81.3%. Save results to results/clean_accuracy.json",
+      "step3": "Evaluate each model on all 15 ImageNet-C corruptions at all 5 severity levels. For each corruption-severity pair, compute top-1 accuracy. Save per-corruption results to results/vanilla_{model}_imagenetc.json with structure: {corruption: {severity: accuracy}}",
+      "step4": "Compute mCE (mean Corruption Error) for each model. CE per corruption = sum over severities of (1 - accuracy_model) / sum over severities of (1 - accuracy_AlexNet_reference). Use standard AlexNet reference values from the ImageNet-C paper. Compute mCE = mean of CE across 15 corruptions. Save to results/vanilla_mce.json",
+      "step5": "Runtime estimate: ~20 min per model for full ImageNet-C eval (50K images × 75 variants, batch_size=256). Total: ~60 min for all 3 models"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and evaluate Tent (test-time adaptation) baseline",
+    "description": "Implement Tent as the strong test-time baseline. Tent adapts batch normalization parameters at test time by minimizing prediction entropy. Since DeiT and Swin-T use LayerNorm (not BatchNorm), we adapt Tent to optimize LayerNorm affine parameters, following the standard approach for ViTs.",
+    "steps": {
+      "step1": "Implement Tent for ViTs: (a) Identify all LayerNorm layers with affine=True. (b) Set only their weight and bias as trainable, freeze everything else. (c) At test time, for each batch, compute softmax entropy loss = -sum(p * log(p)), backprop, and update LayerNorm params with SGD (lr=1e-3, as in original Tent). (d) Reset parameters after each corruption type to avoid accumulation",
+      "step2": "Evaluate Tent on all 3 models across all 15 ImageNet-C corruptions at all 5 severity levels. Use batch_size=64 for Tent (needs gradients, higher memory). Save results to results/tent_{model}_imagenetc.json",
+      "step3": "Compute mCE for Tent on each model. Save to results/tent_mce.json",
+      "step4": "Also evaluate Tent on clean ImageNet to measure any clean accuracy change. Save to results/tent_clean_accuracy.json",
+      "step5": "Runtime estimate: ~45 min per model (forward + backward pass per batch). Total: ~2.25 hours for all 3 models"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Calibrate STG and evaluate on ImageNet-C",
+    "description": "Run STG calibration for each model and seed, then evaluate on the full ImageNet-C benchmark. This is the core experiment testing whether spectral token gating improves corruption robustness.",
+    "steps": {
+      "step1": "For each model (DeiT-S, DeiT-B, Swin-T) and each seed (42, 123, 456): (a) Load the calibration image set (1000 images sampled with that seed). (b) Run calibration forward passes to collect spectral statistics at target layers. (c) Save calibration stats to checkpoints/calibration_{model}_seed{seed}.pt. Estimated time: ~2 min per model-seed = 18 min total",
+      "step2": "For each model and seed, evaluate STG on clean ImageNet. Record top-1 and top-5 accuracy. Verify clean accuracy drop is <0.5%. Save to results/stg_clean_accuracy.json with structure: {model: {seed: {top1, top5}}}",
+      "step3": "For each model and seed, evaluate STG on all 15 ImageNet-C corruptions at all 5 severity levels. Use default hyperparameters: K=3 bands, alpha=5.0, tau=95th percentile, layers=[3,6,9,11] for DeiT / last-block-per-stage for Swin. Save per-corruption results to results/stg_{model}_seed{seed}_imagenetc.json",
+      "step4": "Compute mCE for each model-seed combination. Average across seeds and report mean ± std. Save to results/stg_mce.json with structure: {model: {seed: mCE, mean: mCE_mean, std: mCE_std}}",
+      "step5": "Compare STG mCE against vanilla and Tent baselines. Compute relative improvement: (vanilla_mCE - stg_mCE) / vanilla_mCE * 100. Target: ≥3% relative improvement on at least 2 of 3 models",
+      "step6": "Runtime estimate: ~25 min per model-seed for full ImageNet-C (slightly slower than vanilla due to DFT + gating). 3 models × 3 seeds = 9 runs × 25 min = 3.75 hours. Can optimize by caching calibration stats and reusing across evaluations"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Spectral signature analysis of corruptions",
+    "description": "Analyze and visualize the frequency-domain signatures of different corruption types in token embedding space. This is both a scientific contribution (demonstrating that corruptions have detectable spectral signatures) and a validation of STG's core premise.",
+    "steps": {
+      "step1": "For DeiT-S, collect token embeddings at layers [3, 6, 9, 11] for: (a) 500 clean images, (b) 500 images per corruption type at severity 5 (15 corruptions). Compute spectral energy ratios (K=3 bands: low, mid, high) for all tokens",
+      "step2": "Compute per-corruption spectral statistics: mean spectral energy ratios per frequency band, compared to clean reference. Create a 15×3 matrix (corruptions × bands) showing the shift from clean statistics",
+      "step3": "Compute Mahalanobis distances between clean and each corruption's spectral distributions. Report separability: what fraction of corrupted tokens exceed the 95th percentile of clean distances? Higher separability = more detectable corruption",
+      "step4": "Analyze per-category patterns: (a) Noise corruptions should show elevated high-frequency energy. (b) Blur corruptions should show suppressed high-frequency energy. (c) Weather/digital should show mixed mid-frequency perturbations. Verify these hypothesized patterns",
+      "step5": "Analyze layer-dependence: How do spectral signatures evolve across layers? Are they more detectable in early, middle, or late layers? This informs layer selection for STG",
+      "step6": "Runtime estimate: ~30 min for embedding collection and analysis on DeiT-S"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Number of frequency bands (K)",
+    "description": "Ablate the number of frequency bands K used to partition the DFT spectrum. Test K=2 (low/high), K=3 (low/mid/high, default), K=4, K=5. Use DeiT-S on the representative corruption subset for efficiency.",
+    "steps": {
+      "step1": "Fix model=DeiT-S, seed=42, alpha=5.0, tau=95th percentile, layers=[3,6,9,11]. Vary K in {2, 3, 4, 5}",
+      "step2": "For each K value: (a) Re-run calibration with K frequency bands (evenly partitioned). (b) Evaluate on the 5 representative corruptions (gaussian_noise, defocus_blur, snow, contrast, jpeg_compression) at severity 5 using 5000 validation images",
+      "step3": "Also evaluate clean accuracy for each K to check for degradation",
+      "step4": "Record: accuracy per corruption, mean accuracy across 5 corruptions, clean accuracy. Save to results/ablation_K.json",
+      "step5": "Runtime estimate: 4 variants × ~5 min each = 20 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Layer selection",
+    "description": "Ablate which transformer layers STG is applied to. Test different layer subsets to identify where spectral gating is most effective.",
+    "steps": {
+      "step1": "Fix model=DeiT-S (12 layers), seed=42, K=3, alpha=5.0, tau=95th percentile. Test layer selections: (a) Early only: [0,1,2], (b) Middle only: [4,5,6,7], (c) Late only: [9,10,11], (d) Spread: [3,6,9,11] (default), (e) All layers: [0..11], (f) Single best layer (determined from spectral signature analysis)",
+      "step2": "For each layer selection: (a) Calibrate at the selected layers. (b) Evaluate on 5 representative corruptions at severity 5 using 5000 images",
+      "step3": "Also evaluate clean accuracy for each configuration",
+      "step4": "Record results. Save to results/ablation_layers.json",
+      "step5": "Runtime estimate: 6 variants × ~5 min each = 30 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Gating function",
+    "description": "Ablate the gating function that converts Mahalanobis distances to gating scores. Compare sigmoid (default), hard threshold, and linear ramp.",
+    "steps": {
+      "step1": "Fix model=DeiT-S, seed=42, K=3, layers=[3,6,9,11], tau=95th percentile. Test 3 gating functions: (a) Sigmoid: g = sigmoid(-alpha * (d - tau)), alpha=5.0 (default). (b) Hard threshold: g = 1 if d < tau else 0. (c) Linear ramp: g = max(0, 1 - d/tau_max) where tau_max is the 99th percentile of calibration distances",
+      "step2": "For each gating function, evaluate on 5 representative corruptions at severity 5 using 5000 images",
+      "step3": "Also evaluate clean accuracy",
+      "step4": "Record results. Save to results/ablation_gating.json",
+      "step5": "Runtime estimate: 3 variants × ~5 min each = 15 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Calibration set size",
+    "description": "Test sensitivity to the number of calibration images used to collect clean reference statistics. This determines the minimum practical calibration cost.",
+    "steps": {
+      "step1": "Fix model=DeiT-S, seed=42, K=3, alpha=5.0, layers=[3,6,9,11]. Test calibration set sizes: {50, 100, 250, 500, 1000, 2000}",
+      "step2": "For each size, re-run calibration using the first N images from the seed-42 calibration index set (to keep them nested). Then evaluate on 5 representative corruptions at severity 5 using 5000 images",
+      "step3": "Also evaluate clean accuracy for each calibration set size",
+      "step4": "Record results. Save to results/ablation_calibration_size.json",
+      "step5": "Runtime estimate: 6 variants × ~5 min each = 30 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Threshold sensitivity (tau)",
+    "description": "Vary the gating threshold tau to understand the trade-off between aggressiveness of gating (more tokens suppressed) and clean accuracy preservation.",
+    "steps": {
+      "step1": "Fix model=DeiT-S, seed=42, K=3, alpha=5.0, layers=[3,6,9,11]. Test tau as percentile of calibration distance distribution: {75th, 85th, 90th, 95th (default), 99th}",
+      "step2": "For each tau value, evaluate on 5 representative corruptions at severity 5 using 5000 images",
+      "step3": "Also evaluate clean accuracy — this is critical because lower tau = more aggressive gating = more risk of clean accuracy degradation",
+      "step4": "Record results. Save to results/ablation_tau.json",
+      "step5": "Runtime estimate: 5 variants × ~5 min each = 25 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Per-corruption and per-severity breakdown",
+    "description": "Analyze STG performance broken down by corruption type and severity level to understand which corruptions benefit most from spectral gating and how the benefit scales with severity.",
+    "steps": {
+      "step1": "Using the full ImageNet-C results from the main experiment (DeiT-S, seed=42), compute per-corruption improvement: (vanilla_acc - stg_acc) for each of the 15 corruptions at each severity level",
+      "step2": "Group corruptions by category (noise, blur, weather, digital) and compute category-level average improvement",
+      "step3": "Test hypothesis: noise corruptions should show the largest improvement (most distinctive spectral signatures), blur should show moderate improvement, weather/digital should show smaller but still positive improvement",
+      "step4": "Analyze severity scaling: Does STG benefit increase with corruption severity? Plot improvement vs. severity for each corruption category",
+      "step5": "Save detailed per-corruption results to results/per_corruption_analysis.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Computational overhead measurement",
+    "description": "Measure the computational cost added by STG in terms of wall-clock latency, GPU memory, and estimated FLOPs overhead.",
+    "steps": {
+      "step1": "For each model (DeiT-S, DeiT-B, Swin-T), measure average inference latency per image for: (a) Vanilla forward pass, (b) STG forward pass (including DFT, Mahalanobis, gating). Use batch_size=256, average over 100 batches after 10 warmup batches. Use torch.cuda.synchronize() for accurate timing",
+      "step2": "Measure peak GPU memory for vanilla vs STG using torch.cuda.max_memory_allocated()",
+      "step3": "Compute theoretical FLOPs overhead: DFT per token = O(d * log(d)), Mahalanobis = O(K^2), gating multiply = O(d). Compare to total model FLOPs",
+      "step4": "Report latency overhead as percentage of vanilla inference time. Target: <5% overhead",
+      "step5": "Save to results/overhead.json. Runtime estimate: ~15 min"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical significance and success criteria evaluation",
+    "description": "Aggregate all results and evaluate against the predefined success criteria with statistical rigor.",
+    "steps": {
+      "step1": "Aggregate main results across 3 seeds for each model. Compute mean ± std for: mCE, clean top-1 accuracy, per-category corruption accuracy",
+      "step2": "Evaluate PRIMARY success criteria: (a) STG improves mCE by ≥3% relative on at least 2/3 models. (b) Clean accuracy drop < 0.5% for all models. (c) Spectral analysis shows distinct signatures per corruption type",
+      "step3": "Evaluate SECONDARY success criteria: (a) Generalizes across DeiT (columnar) and Swin (hierarchical). (b) Gating visualizations are qualitatively correct",
+      "step4": "Check REFUTATION criteria: (a) Are spectral signatures reliably separable? (b) Does gating hurt accuracy? (c) Is clean accuracy drop > 1%?",
+      "step5": "Create summary results table: rows = models, columns = Clean Acc, mCE (Vanilla), mCE (Tent), mCE (STG), Relative Improvement. Include ± std across seeds. Save to results/summary.json",
+      "step6": "If primary success criteria are not met, analyze failure modes: (a) Which corruptions/layers are problematic? (b) Is the spectral analysis premise valid but the gating mechanism suboptimal? (c) Document negative results honestly for the paper"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate all figures for the paper",
+    "description": "Create publication-quality figures summarizing the experimental results. All figures saved as both PDF (for paper) and PNG (for quick viewing) at 300 DPI.",
+    "steps": {
+      "step1": "Figure 1 — Method overview / Spectral signature visualization: (a) Show spectral energy ratio distributions for clean vs. corrupted tokens (3-band bar chart). (b) Show distributions for representative corruption types (gaussian_noise, defocus_blur, fog, jpeg_compression). (c) Overlay Mahalanobis distance threshold. Save as figures/spectral_signatures.pdf",
+      "step2": "Figure 2 — Main results table as a grouped bar chart: mCE for Vanilla, Tent, and STG across 3 models. Include error bars (std across seeds for STG). Save as figures/main_results.pdf",
+      "step3": "Figure 3 — Per-corruption accuracy heatmap: rows = 15 corruption types, columns = 5 severity levels, color = accuracy improvement (STG - Vanilla). Show for DeiT-S. Save as figures/per_corruption_heatmap.pdf",
+      "step4": "Figure 4 — Ablation studies (2×2 subplot grid): (a) K bands ablation, (b) Layer selection ablation, (c) Calibration set size ablation, (d) Threshold tau ablation. Each subplot shows accuracy on representative corruptions. Save as figures/ablations.pdf",
+      "step5": "Figure 5 — Gating visualization: For 3-4 example images (clean + corrupted versions), show: (a) Original image, (b) Corrupted image, (c) Gating score heatmap overlaid on image (reshaped from token grid to spatial grid), (d) Attention map before/after STG. Save as figures/gating_visualization.pdf",
+      "step6": "Figure 6 — Corruption category breakdown: Grouped bar chart showing mCE improvement by corruption category (noise, blur, weather, digital) across 3 models. Save as figures/category_breakdown.pdf",
+      "step7": "Table 1 (LaTeX) — Main results: Generate LaTeX table with Clean Acc, mCE, per-category mCE for all methods × models. Save to figures/table_main.tex",
+      "step8": "Table 2 (LaTeX) — Computational overhead: Latency, memory, FLOPs overhead for each model. Save to figures/table_overhead.tex",
+      "step9": "Use consistent styling: matplotlib rcParams with font.size=12, axes.labelsize=14, figure.figsize appropriate per figure, colorblind-friendly color palette (e.g., seaborn 'colorblind' palette)"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate gating and attention map visualizations",
+    "description": "Create qualitative visualizations showing that STG correctly identifies corrupted spatial regions and appropriately modulates attention.",
+    "steps": {
+      "step1": "Select 4 diverse example images from ImageNet validation set (different classes, different scene types). For each, generate corrupted versions: gaussian_noise (sev 5), defocus_blur (sev 5), fog (sev 3), jpeg_compression (sev 5)",
+      "step2": "For each image-corruption pair, extract: (a) Per-token gating scores at layer 6 of DeiT-S. (b) Reshape gating scores to 14×14 spatial grid (corresponding to 16×16 patch layout). (c) Attention maps from the CLS token to all patch tokens (averaged across heads)",
+      "step3": "Create visualization grid: rows = images, columns = [clean image, corrupted image, gating heatmap, vanilla attention, STG attention]. Use hot colormap for gating (red = suppressed, blue = passed), and viridis for attention maps",
+      "step4": "Save to figures/qualitative_examples.pdf"
+    }
+  }
+]

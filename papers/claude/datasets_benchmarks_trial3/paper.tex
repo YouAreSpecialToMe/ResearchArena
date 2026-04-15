@@ -1,0 +1,589 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+\title{SkillStack: A Procedurally Generated Benchmark for Measuring Compositional Cognitive Skill Gaps in Large Language Models}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large Language Models (LLMs) achieve strong performance on benchmarks testing individual cognitive skills, yet real-world tasks demand the simultaneous composition of multiple skills. We introduce \textbf{SkillStack}, a procedurally generated benchmark that systematically measures the \emph{compositional cognitive skill gap} in LLMs. SkillStack defines 8 atomic cognitive primitives---arithmetic, comparison, counting, logical deduction, spatial reasoning, string manipulation, temporal reasoning, and set operations---and evaluates all 28 pairwise and 56 triple combinations (92 categories, 4{,}600 instances per run) with automatically verifiable answers. We evaluate 8 models from the Qwen, Llama, and DeepSeek families (0.5B--32B parameters) under direct and chain-of-thought prompting.
+Our key finding is that performance degrades substantially with composition level: the best model (Qwen2.5-32B) achieves 75.5\% on single skills but only 56.5\% on pairs and 37.6\% on triples. However, separating pairs by template type reveals that this degradation is primarily driven by generic parallel templates (which concatenate independent questions and incur attention-splitting penalties, avg CG=+0.17), while dedicated templates (which integrate skills into coherent problems) show near-zero or negative average CG ($-$0.17 to $+$0.02). Additionally, 21--43\% of pairwise compositions yield \emph{negative} composition gaps where compositional context aids performance---a phenomenon robust to floor-effect filtering and concentrated in dedicated templates. Test-retest reliability across independently generated instance sets yields pairwise accuracy $r=0.95$--$0.99$ and composition gap $r=0.86$--$0.94$, confirming measurement stability. SkillStack enables fine-grained diagnosis of compositional weaknesses and is freely available for contamination-resistant evaluation.
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+\label{sec:intro}
+%=====================================================================
+
+Large Language Models (LLMs) have achieved impressive scores on benchmarks testing individual cognitive capabilities: arithmetic on GSM8K~\citep{cobbe2021training}, broad knowledge on MMLU, and reasoning on ARC. However, real-world tasks rarely demand a single skill in isolation. Writing a data analysis report requires arithmetic, logical reasoning, and language generation simultaneously; debugging code demands tracing, deduction, and pattern recognition together. The critical question is: \emph{can LLMs compose multiple cognitive skills effectively, or do their capabilities degrade when skills must be combined?}
+
+Recent evidence suggests a severe \textbf{compositional capability gap}. GSM-Symbolic~\citep{mirzadeh2025gsmsymbolic} showed that adding irrelevant clauses to math problems causes up to 65\% accuracy drops, suggesting reliance on pattern matching rather than genuine reasoning. Skill-Mix~\citep{yu2024skillmix} demonstrated that LLMs struggle to combine language skills (e.g., metaphor + irony) in text generation. Research on compositional multi-tasking found 20--40\% accuracy drops on tasks requiring simultaneous execution of multiple skills~\citep{zhao2024canmodels}. Yet no existing benchmark \textbf{systematically measures} how cognitive skill composition degrades across controlled combinations with verifiable answers and procedural generation for contamination resistance.
+
+We introduce \textbf{SkillStack}, a procedurally generated benchmark that addresses this gap. Our key insight is that the compositional capability gap can be precisely quantified by decomposing complex tasks into \emph{atomic cognitive primitives} and systematically evaluating all pairwise and triple combinations. SkillStack defines 8 skills, generates 50 instances per category across 92 categories (8 single + 28 pairwise + 56 triple), and provides deterministic ground-truth answers enabling fully automatic evaluation.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose SkillStack, a contamination-resistant benchmark with 8 cognitive primitives and systematic evaluation of all 92 single, pairwise, and triple skill combinations with automatically verifiable answers.
+    \item We demonstrate that composition-level performance degrades substantially with increasing composition level, with degradation being steeper for smaller models ($\leq$7B) than larger models ($\geq$14B).
+    \item We identify a previously underexplored phenomenon: 21--43\% of pairwise compositions yield \emph{negative} composition gaps, and show that template type is the primary driver---dedicated templates that integrate skills show near-zero or negative CG, while generic parallel templates that concatenate independent questions show substantial positive CG, revealing that much of the measured ``composition gap'' reflects attention-splitting rather than skill integration failure.
+    \item We provide test-retest reliability analysis showing pairwise accuracy correlations of $r=0.95$--$0.99$ and composition gap correlations of $r=0.86$--$0.94$ across independently generated instance sets, validating measurement stability.
+\end{itemize}
+
+The remainder of this paper is organized as follows: Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the SkillStack benchmark design, Section~\ref{sec:experiments} presents experimental results, Section~\ref{sec:discussion} discusses findings and limitations, and Section~\ref{sec:conclusion} concludes.
+
+%=====================================================================
+\section{Related Work}
+\label{sec:related}
+%=====================================================================
+
+\paragraph{Compositional evaluation of LLMs.}
+Skill-Mix~\citep{yu2024skillmix} tests LLMs' ability to combine $k$ language skills (metaphor, alliteration, humor) in text generation using LLM-as-judge evaluation. SkillStack differs in three ways: (1) we test \emph{cognitive/reasoning} skills rather than stylistic skills; (2) answers are automatically verifiable via exact match, eliminating judge bias; and (3) procedural generation ensures contamination resistance. \citet{zhao2024canmodels} extend Skill-Mix to study whether fine-tuning on $k$=2,3 compositions transfers to $k$=4,5, finding that composition can be learned but does not fully transfer. This motivates our systematic measurement of the composition gap across cognitive skills.
+
+\paragraph{Robustness and perturbation benchmarks.}
+GSM-Symbolic~\citep{mirzadeh2025gsmsymbolic} demonstrates that symbolic substitution and irrelevant clause insertion cause significant math performance degradation, suggesting pattern matching rather than genuine reasoning. GSM-DC~\citep{yang2025gsmdc} constructs controlled distractors for math reasoning, showing accuracy degrades with increasing distractors. While both focus on robustness within a single skill domain (mathematics), SkillStack measures the orthogonal dimension of cross-skill composition.
+
+\paragraph{Benchmark quality and measurement.}
+MetaBench~\citep{kipnis2025metabench} compresses 6 LLM benchmarks to 3\% of their size using item-level analysis, finding high inter-benchmark correlations suggesting a single underlying factor. SkillStack tests whether this ``monolithic factor'' masks fine-grained compositional weaknesses. PSN-IRT~\citep{zhou2026lost} applies Item Response Theory to diagnose benchmark quality, finding poor measurement properties in existing benchmarks---motivating our controlled-difficulty procedural design. LiveBench~\citep{white2025livebench} addresses contamination through monthly-updated questions; SkillStack takes a complementary approach via template-based procedural generation.
+
+\paragraph{Cognitive evaluation frameworks.}
+BIG-Bench~\citep{srivastava2023beyond} provides 204 tasks across diverse cognitive domains but lacks systematic control over skill composition, as tasks are independently authored without shared primitives. \citet{bai2025how} decompose reasoning into atomic cognitive behaviors and study fine-tuning effects; SkillStack provides a complementary reusable benchmark focused on composition at evaluation time.
+
+%=====================================================================
+\section{Method: The SkillStack Benchmark}
+\label{sec:method}
+%=====================================================================
+
+\subsection{Cognitive Primitives}
+\label{sec:primitives}
+
+We define 8 atomic cognitive skills spanning core capabilities tested across existing LLM benchmarks:
+
+\begin{enumerate}
+    \item \textbf{Arithmetic (AR)}: Multi-step integer arithmetic with addition, multiplication, and division. \emph{Example}: ``What is $(47 \times 13) + 289$?''
+    \item \textbf{Comparison (CO)}: Ordering and comparing quantities, fractions, or magnitudes. \emph{Example}: ``Which is larger: $\nicefrac{3}{7}$ or $\nicefrac{5}{12}$?''
+    \item \textbf{Counting (CN)}: Counting items satisfying specific predicates in a given set. \emph{Example}: ``How many items in [apple, banana, avocado, apricot, cherry] start with `a'?''
+    \item \textbf{Logical Deduction (LD)}: Syllogistic reasoning and if-then chains with fictional entities. \emph{Example}: ``If all Zorbians are Plexites, and no Plexites are Dravians, are any Zorbians Dravians?''
+    \item \textbf{Spatial Reasoning (SP)}: Relative positions and directional relationships. \emph{Example}: ``Alice is north of Bob. Bob is east of Carol. What direction is Alice from Carol?''
+    \item \textbf{String Manipulation (ST)}: Character-level operations---reversing, extracting, counting characters. \emph{Example}: ``What is the 4th character of the reverse of `BENCHMARK'?''
+    \item \textbf{Temporal Reasoning (TE)}: Before/after relationships and duration calculations. \emph{Example}: ``Event A starts at 2:30~PM and lasts 1 hour 45 minutes. Event B starts at 3:00~PM. Do they overlap?''
+    \item \textbf{Set Operations (SE)}: Union, intersection, difference, and cardinality. \emph{Example}: ``$X = \{1,3,5,7\}$, $Y = \{2,3,5,8\}$. What is $|X \cap Y|$?''
+\end{enumerate}
+
+These 8 skills were selected to cover diverse cognitive demands (numerical, logical, spatial, temporal, symbolic) while being amenable to procedural generation with deterministic answers.
+
+\subsection{Composition Levels}
+
+\textbf{Level 1 (Single Skill):} 8 skills $\times$ 50 instances = 400 items. These establish per-skill baselines.
+
+\textbf{Level 2 (Pairwise):} $\binom{8}{2} = 28$ pairs $\times$ 50 instances = 1{,}400 items. Each requires applying two skills in sequence or parallel. \emph{Example (AR+CO):} ``Alice has $3 \times 17$ apples. Bob has $2 \times 29$ apples. Who has more?'' (arithmetic to compute 51 and 58, then comparison).
+
+\textbf{Level 3 (Triple):} $\binom{8}{3} = 56$ triples $\times$ 50 instances = 2{,}800 items. \emph{Example (AR+TE+CO):} ``Train A departs at 9:15~AM at 60~mph. Train B departs at 9:45~AM at 80~mph. After 2 hours from A's departure, which has traveled farther?''
+
+The total benchmark comprises 92 categories $\times$ 50 instances = 4{,}600 items per seed.
+
+\subsection{Procedural Generation Framework}
+
+Each test item is generated by a template engine with randomized parameters:
+
+\begin{enumerate}
+    \item \textbf{Skill templates}: 5 template structures per single skill with variable slots (e.g., \texttt{ar\_chain\_add}, \texttt{ar\_mixed\_ops}, \texttt{ar\_nested}, \texttt{ar\_remainder}, \texttt{ar\_word} for Arithmetic).
+    \item \textbf{Composition templates}: For each pair, a dedicated or generic composition template integrating both skills with defined dependency structure (sequential or parallel). For triples, a generic parallel composition template is used.
+    \item \textbf{Deterministic solver}: Computes ground-truth from template parameters.
+    \item \textbf{Difficulty calibration}: Parameter ranges are calibrated so single-skill difficulty remains consistent whether tested alone or in composition.
+    \item \textbf{Validation}: Each instance is verified by the solver; ambiguous instances are filtered.
+\end{enumerate}
+
+An important design distinction is that 13 of the 28 pairwise compositions use \emph{dedicated} templates that integrate both skills into a single coherent problem (e.g., computing two quantities then comparing them), while 15 pairs use a \emph{generic parallel} template that concatenates two independent single-skill questions. This means the generic parallel pairs primarily test multi-task attention rather than genuine skill integration. We analyze these two template types separately in Section~\ref{sec:template_type_analysis}. Each composition uses only a single template, unlike single skills which use 5 diverse templates, limiting our ability to assess template robustness at the composition level (see Section~\ref{sec:template_analysis}).
+
+Procedural generation enables: (a)~\emph{contamination resistance}---unlimited fresh instances; (b)~\emph{statistical power}---50 instances per category; and (c)~\emph{controlled difficulty}---component difficulty held constant across levels.
+
+\subsection{Metrics}
+\label{sec:metrics}
+
+\begin{itemize}
+    \item \textbf{Per-Skill Accuracy (PSA)}: Accuracy on Level 1 items for each skill.
+    \item \textbf{Composed Accuracy (CA)}: Accuracy on Level 2/3 items.
+    \item \textbf{Composition Gap (CG)}: $\text{CG}(S_i, S_j) = \min(\text{PSA}(S_i), \text{PSA}(S_j)) - \text{CA}(S_i, S_j)$. Positive CG indicates composition degrades performance beyond what individual skill weakness predicts.
+    \item \textbf{Composition Efficiency (CE)}: $\text{CE} = \text{CA} / \min(\text{PSA})$, averaged across pairs. Values below 1.0 indicate composition overhead. CE can exceed 1.0 when composed accuracy surpasses the weakest component skill---this occurs when very low single-skill baselines (e.g., Temporal at 2\% for Qwen-0.5B) are paired with a skill whose compositional context elevates accuracy far above the floor. In such cases, CE is of limited interpretive value because the ratio amplifies noise in near-zero denominators.
+\end{itemize}
+
+%=====================================================================
+\section{Experiments}
+\label{sec:experiments}
+%=====================================================================
+
+\subsection{Setup}
+
+\paragraph{Models.} We evaluate 8 instruction-tuned models spanning three families and a wide size range:
+\begin{itemize}
+    \item \textbf{Qwen family}: Qwen2.5-0.5B, 1.5B, 3B, 7B, 14B (AWQ), and 32B (AWQ) Instruct
+    \item \textbf{Llama family}: Llama-3.1-8B-Instruct
+    \item \textbf{Reasoning-tuned}: DeepSeek-R1-Distill-Qwen-7B
+\end{itemize}
+The Qwen family provides a controlled size sweep (0.5B--32B). Llama-8B and DeepSeek-R1-7B enable cross-family and cross-training-paradigm comparisons at the $\sim$7B scale. DeepSeek-R1-7B was included as a reasoning-specialized model distilled from DeepSeek-R1, providing contrast with standard instruction tuning.
+
+\paragraph{Prompting strategies.} We evaluate two prompting strategies:
+\begin{itemize}
+    \item \textbf{Direct}: ``Answer with just the final answer, no explanation.'' ($\text{temperature}=0$, $\text{max\_tokens}=256$)
+    \item \textbf{Chain-of-thought (CoT)}: ``Let me think step by step:'' ($\text{temperature}=0$, $\text{max\_tokens}=512$)
+\end{itemize}
+CoT evaluation was run on 5 models: Qwen-1.5B, 7B, 14B, 32B, and DeepSeek-R1-7B. The proposed 3-shot evaluation was not conducted due to time constraints; we discuss this omission in Section~\ref{sec:discussion}.
+
+\paragraph{Evaluation protocol.} Exact match for string/set answers, numerical tolerance ($\pm 0.01$) for arithmetic, Yes/No matching for logical/comparison answers. All models evaluated on the same 4{,}600 instances generated with seed 42. A second set (seed 123) was generated for reliability testing.
+
+\paragraph{Infrastructure.} All experiments run on a single NVIDIA A6000 GPU (48GB) using vLLM for batched inference. Total computation time: approximately 18 hours.
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\centering
+\caption{Main results: accuracy by composition level and average pairwise composition gap (CG). Bootstrap 95\% confidence intervals shown for CG. CE values above 1.0 (marked with $\dagger$) occur when pairs involving very weak single skills ($\text{PSA} < 15\%$) show higher composed accuracy, inflating the ratio---see Section~\ref{sec:metrics}.}
+\label{tab:main}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccccc}
+\toprule
+Model & Prompt & Single $\uparrow$ & Pair $\uparrow$ & Triple $\uparrow$ & Avg CG & CG 95\% CI & CE \\
+\midrule
+Qwen-0.5B & Direct & 0.423 & 0.183 & 0.002 & 0.088 & [$-$0.02, 0.18] & 2.00$^\dagger$ \\
+Qwen-1.5B & Direct & 0.438 & 0.193 & 0.025 & 0.103 & [0.00, 0.19] & 0.74 \\
+Qwen-1.5B & CoT & 0.570 & 0.290 & 0.033 & 0.098 & [$-$0.01, 0.21] & 0.84 \\
+Qwen-3B & Direct & 0.518 & 0.294 & 0.071 & 0.077 & [$-$0.01, 0.16] & 0.80 \\
+Llama-8B & Direct & 0.515 & 0.317 & 0.125 & 0.060 & [$-$0.04, 0.15] & 0.87 \\
+Qwen-7B & Direct & 0.623 & 0.396 & 0.179 & 0.062 & [$-$0.04, 0.16] & 0.91 \\
+Qwen-7B & CoT & 0.578 & 0.543 & 0.354 & $-$0.050 & [$-$0.17, 0.06] & 1.31$^\dagger$ \\
+DS-R1-7B & Direct & 0.358 & 0.266 & 0.065 & $-$0.056 & [$-$0.18, 0.06] & 1.69$^\dagger$ \\
+DS-R1-7B & CoT & 0.560 & 0.241 & 0.004 & 0.206 & [0.08, 0.33] & 1.16$^\dagger$ \\
+Qwen-14B & Direct & 0.677 & 0.511 & 0.269 & 0.029 & [$-$0.06, 0.11] & 0.94 \\
+Qwen-14B & CoT & 0.705 & 0.491 & 0.210 & 0.159 & [0.05, 0.27] & 0.78 \\
+Qwen-32B & Direct & \textbf{0.755} & 0.565 & \textbf{0.376} & 0.080 & [$-$0.02, 0.18] & 0.90 \\
+Qwen-32B & CoT & 0.870 & \textbf{0.729} & 0.309 & 0.118 & [0.05, 0.18] & 0.86 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:main} presents the main results. Several findings emerge:
+
+\textbf{Substantial composition degradation.} All models show significant accuracy drops from single to pairwise to triple compositions. The strongest model, Qwen-32B with direct prompting, drops from 75.5\% (single) to 56.5\% (pair, $-$19.0pp) to 37.6\% (triple, $-$37.9pp). For smaller models, degradation is more severe: Qwen-0.5B drops from 42.3\% to 0.2\% at the triple level, indicating near-complete failure on three-skill compositions.
+
+\textbf{Average composition gap with uncertainty.} The average pairwise CG ranges from $-$0.056 (DS-R1-7B, direct) to 0.206 (DS-R1-7B, CoT), with most models showing positive gaps of 0.03--0.10 in direct prompting. Importantly, the 95\% bootstrap CIs for most models span zero (Table~\ref{tab:main}), indicating that the \emph{average} CG is not consistently distinguishable from zero---this reflects the heterogeneity across skill pairs, with some showing large positive gaps and others showing negative gaps (Section~\ref{sec:negative_cg}). At the individual pair level, CG values have standard errors of $\sim$7pp (given $n$=50 per category and accuracies near 50\%), meaning CG values smaller than $\sim$14pp should be interpreted cautiously.
+
+\textbf{Chain-of-thought effects are inconsistent.} CoT substantially helps Qwen-7B on compositions (pair accuracy: 0.396$\rightarrow$0.543, triple: 0.179$\rightarrow$0.354) but \emph{hurts} DS-R1-7B (pair: 0.266$\rightarrow$0.241, triple: 0.065$\rightarrow$0.004) and Qwen-14B (pair: 0.511$\rightarrow$0.491, triple: 0.269$\rightarrow$0.210). This suggests CoT benefits depend on whether the model can effectively decompose compositional problems; reasoning-distilled models like DS-R1 may already internalize decomposition, and CoT may interfere with this process.
+
+\subsection{Per-Skill Analysis}
+
+\begin{table}[t]
+\centering
+\caption{Single-skill accuracy (\%) for each cognitive primitive under direct prompting.}
+\label{tab:per_skill}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Model & AR & CO & CN & LD & SP & ST & TE & SE \\
+\midrule
+Qwen-0.5B & 36 & \textbf{86} & 30 & 72 & 48 & 32 & 2 & 32 \\
+Qwen-1.5B & 38 & 80 & 34 & 78 & 30 & 18 & 20 & 52 \\
+Qwen-3B & 38 & 84 & 52 & \textbf{88} & 34 & 30 & 24 & 64 \\
+Llama-8B & 30 & \textbf{86} & 40 & 80 & 54 & 28 & 30 & 64 \\
+Qwen-7B & 48 & 92 & 58 & \textbf{100} & 66 & 28 & 28 & 78 \\
+DS-R1-7B & 48 & 56 & 50 & 78 & 14 & 16 & 14 & 10 \\
+Qwen-14B & 54 & 96 & 44 & 94 & 80 & 38 & 54 & 82 \\
+Qwen-32B & \textbf{84} & \textbf{100} & \textbf{62} & 80 & \textbf{84} & \textbf{42} & \textbf{62} & \textbf{90} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:per_skill} reveals consistent difficulty patterns across models. \textbf{Comparison} (CO) and \textbf{Logical Deduction} (LD) are the easiest skills, with most models achieving 72--100\%. \textbf{String Manipulation} (ST) is consistently the hardest (16--42\%), followed by \textbf{Temporal Reasoning} (TE, 2--62\%) and \textbf{Counting} (CN, 30--62\%). This ranking persists across model families, suggesting these difficulties reflect fundamental challenges in how LLMs process character-level and temporal information.
+
+DS-R1-7B shows an unusual profile: despite being reasoning-tuned, it achieves low accuracy on Spatial (14\%), Temporal (14\%), and Set Operations (10\%), while performing competitively on Arithmetic (48\%) and Counting (50\%). This suggests reasoning distillation may not transfer equally across all cognitive skill types.
+
+\subsection{Composition Scaling Analysis}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure2_composition_scaling.pdf}
+\caption{Accuracy degradation across composition levels (K=1: single, K=2: pair, K=3: triple) for all models under direct prompting. Larger models degrade more gracefully.}
+\label{fig:scaling}
+\end{figure}
+
+Figure~\ref{fig:scaling} shows accuracy degradation across composition levels. We fit a linear model $\text{Accuracy}(K) = A + \alpha \cdot K$ to each model's level means ($K \in \{1,2,3\}$) as a \emph{descriptive summary} of degradation rate.
+
+\textbf{Steeper degradation in smaller models.} Models $\leq$7B show larger per-level drops ($|\alpha| > 0.6$): Qwen-0.5B ($\alpha = -2.73$), Qwen-1.5B ($-1.43$), Qwen-3B ($-0.99$), Qwen-7B ($-0.62$), Llama-8B ($-0.71$), DS-R1-7B ($-0.86$). Models $\geq$14B show shallower slopes: Qwen-14B ($\alpha = -0.46$) and Qwen-32B ($\alpha = -0.35$).
+
+\textbf{Important caveats.} We fit to only 3 data points ($K$=1,2,3), so $R^2$ values (all $>$0.86) are high by construction for any monotonic trend and should not be over-interpreted. We do not claim to have identified a specific functional form (e.g., ``super-linear''); rather, we use $\alpha$ as a descriptive measure of how steeply accuracy declines per composition level. As supporting evidence, we compare observed Level 3 accuracy to linear extrapolation from L1$\rightarrow$L2: for Qwen-0.5B, extrapolation predicts L3$\approx$0.06 but observed L3 is 0.002; for Qwen-32B, extrapolation predicts 0.38 and observed is 0.376. This convergence of extrapolation residuals with model size supports the observation that larger models compose skills more gracefully.
+
+\subsection{Skill Interaction Heatmap}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_skill_interaction_matrix.pdf}
+\caption{Skill Interaction Heatmap showing composition gap CG for all 28 pairwise combinations. Blue cells indicate negative CG (composition \emph{helps}); red cells indicate positive CG (composition \emph{hurts}). Four representative models shown.}
+\label{fig:heatmap}
+\end{figure}
+
+Figure~\ref{fig:heatmap} visualizes the composition gap across all 28 pairwise combinations for four representative models. The heatmaps reveal highly structured patterns: certain pairs consistently show large positive gaps (e.g., AR+CN, CO+SE, SP+SE) while others consistently show large negative gaps (e.g., AR+SP, CO+TE, CN+ST). This structure is remarkably consistent across model sizes.
+
+\subsection{Negative Composition Gaps: When Composition Helps}
+\label{sec:negative_cg}
+
+A striking finding is that a substantial fraction of pairwise compositions yield \emph{negative} composition gaps---composed accuracy exceeding the minimum single-skill accuracy. Under direct prompting, 21\% (Qwen-0.5B) to 43\% (DS-R1-7B) of pairs show negative CG.
+
+\textbf{Floor-effect filtering.} One concern is that negative CG may be an artifact of extremely low single-skill baselines: when $\min(\text{PSA}) < 15\%$, any contextual boost can trivially exceed the floor, inflating negative CG values. Filtering pairs where $\min(\text{PSA}) \geq 15\%$, the negative CG fractions remain substantial: 18--39\% for most models, with the notable exception of DS-R1-7B where filtering reduces the fraction from 43\% to 30\% (its many near-zero single-skill accuracies on SE=10\%, SP=14\%, TE=14\% produce 18 filtered pairs). This confirms that negative CG is not primarily a floor-effect artifact---it persists even when single-skill baselines are well above chance.
+
+\begin{table}[t]
+\centering
+\caption{Skill pairs with most consistently negative composition gaps (CG$<$0) across 8 models under direct prompting. ``Neg in'' counts how many models show negative CG for that pair.}
+\label{tab:negative_cg}
+\begin{tabular}{lccc}
+\toprule
+Skill Pair & Neg in & Avg Neg CG & Hypothesis \\
+\midrule
+AR+SP & 8/8 & $-$0.56 & Spatial context disambiguates arithmetic \\
+CN+ST & 8/8 & $-$0.31 & String provides concrete counting targets \\
+CO+TE & 7/8 & $-$0.37 & Temporal structure aids comparison \\
+AR+TE & 5/8 & $-$0.38 & Time context grounds arithmetic operations \\
+CO+ST & 6/8 & $-$0.23 & String provides concrete comparison targets \\
+AR+CO & 5/8 & $-$0.26 & Comparison structures arithmetic output \\
+LD+SE & 6/8 & $-$0.18 & Set formalism aids logical deduction \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:negative_cg} shows the most consistently negative-CG pairs. Three patterns emerge:
+
+\textbf{Context-as-scaffold.} Pairs like AR+SP (negative in all 8 models, avg CG=$-$0.56) consistently show composed accuracy exceeding both single-skill accuracies. For AR+SP, the spatial context (``Alice is $3\times17$ miles north...'') provides a concrete, grounded scenario for arithmetic that may reduce ambiguity relative to the abstract single-skill prompts (``What is $3 \times 17 + 289$?'').
+
+\textbf{Structural cues.} Pairs involving CO (comparison) combined with other skills (CO+TE, CO+ST, AR+CO) often benefit from comparison providing a clear output structure (a binary ``who has more'' answer) that may be easier for models to extract correctly.
+
+\textbf{Formalism alignment.} LD+SE shows negative CG in 6/8 models, suggesting that set-theoretic formalism provides a natural framework for logical deduction that aids model reasoning.
+
+\subsection{Hardest and Easiest Compositions}
+
+\begin{table}[t]
+\centering
+\caption{Top-5 hardest and easiest pairwise skill compositions by average CG across all 8 models (direct prompting). Positive CG = composition hurts; negative CG = composition helps.}
+\label{tab:hard_easy}
+\begin{tabular}{lcc}
+\toprule
+Skill Pair & Avg CG & CG Range \\
+\midrule
+\multicolumn{3}{c}{\textit{Hardest (largest positive CG)}} \\
+\midrule
+AR+CN & 0.35 & 0.26 \\
+CO+SE & 0.32 & 0.96 \\
+SP+SE & 0.31 & 0.44 \\
+AR+SE & 0.21 & 0.50 \\
+CN+SP & 0.20 & 0.36 \\
+\midrule
+\multicolumn{3}{c}{\textit{Easiest (most negative CG)}} \\
+\midrule
+AR+SP & $-$0.56 & 0.62 \\
+CN+ST & $-$0.31 & 0.52 \\
+CO+TE & $-$0.30 & 1.04 \\
+AR+TE & $-$0.22 & 0.76 \\
+CO+ST & $-$0.15 & 0.74 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:hard_easy} shows the hardest and easiest compositions. The hardest compositions consistently involve \textbf{Set Operations} (SE) paired with other skills (3 of top 5), suggesting that maintaining set-theoretic reasoning while simultaneously performing another cognitive task is particularly challenging. The easiest compositions involve skills where the compositional context provides natural scaffolding. Notably, the CG Range column shows high variability across models for many pairs (e.g., CO+SE range = 0.96, CO+TE range = 1.04), indicating that the composition gap for individual pairs can differ substantially across model families and sizes.
+
+\subsection{Chain-of-Thought and Sequential vs.\ Parallel Analysis}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure3_cot_effect.pdf}
+\caption{CoT effect on composition gap: comparison of direct vs.\ CoT prompting across models.}
+\label{fig:cot}
+\end{figure}
+
+We hypothesized that CoT would help more for sequential compositions (where skill $A$ feeds into skill $B$) than parallel compositions (where both skills operate on independent parts). We classified each of the 28 pairs as sequential (9 pairs, e.g., AR+CO where arithmetic output feeds into comparison) or parallel (15 pairs, e.g., AR+LD where skills operate on separate subproblems), with 4 pairs having mixed classification.
+
+However, the data does not support this hypothesis. Sequential vs.\ parallel CG differences are not statistically significant for any model (all $p > 0.15$, two-sample $t$-test; Table~\ref{tab:seq_par}). The high variance within each group and modest sample sizes (9 sequential, 15 parallel) limit statistical power, but the lack of even a consistent trend suggests that the dependency structure of composition templates does not systematically determine the composition gap.
+
+\begin{table}[t]
+\centering
+\caption{Sequential vs.\ parallel composition gap comparison under direct prompting. $p$-values from two-sample $t$-test. No significant differences found.}
+\label{tab:seq_par}
+\begin{tabular}{lccc}
+\toprule
+Model & Seq Mean CG & Par Mean CG & $p$-value \\
+\midrule
+Qwen-0.5B & 0.020 & 0.108 & 0.94 \\
+Qwen-1.5B & 0.062 & 0.117 & 0.16 \\
+Qwen-3B & 0.027 & 0.083 & 0.41 \\
+Llama-8B & $-$0.018 & 0.065 & 0.72 \\
+Qwen-7B & $-$0.044 & 0.081 & 0.84 \\
+DS-R1-7B & $-$0.247 & 0.033 & 0.96 \\
+Qwen-14B & $-$0.100 & 0.060 & 0.96 \\
+Qwen-32B & $-$0.013 & 0.080 & 0.81 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Dedicated vs.\ Generic Parallel Template Analysis}
+\label{sec:template_type_analysis}
+
+A critical design question is whether the measured composition gaps reflect genuine skill integration difficulty or merely the overhead of answering two questions at once. We separate the 28 pairwise compositions into 13 \emph{dedicated} pairs (where a custom template integrates both skills into a single problem, e.g., AR+CO: ``compute two quantities then compare'') and 15 \emph{generic parallel} pairs (where two independent single-skill questions are concatenated).
+
+\begin{table}[t]
+\centering
+\caption{Composition gap (CG) separated by template type under direct prompting. Dedicated templates integrate skills into one problem; generic parallel templates concatenate two independent questions. Negative CG indicates composition helps.}
+\label{tab:template_type}
+\begin{tabular}{lcccc}
+\toprule
+Model & Dedicated CG & Neg/13 & Generic CG & Neg/15 \\
+\midrule
+Qwen-0.5B & $-$0.043 & 6 & 0.201 & 0 \\
+Qwen-1.5B & 0.018 & 5 & 0.176 & 0 \\
+Qwen-3B & $-$0.037 & 7 & 0.176 & 0 \\
+Llama-8B & $-$0.063 & 5 & 0.167 & 1 \\
+Qwen-7B & $-$0.071 & 7 & 0.177 & 1 \\
+DS-R1-7B & $-$0.174 & 9 & 0.045 & 3 \\
+Qwen-14B & $-$0.135 & 9 & 0.172 & 0 \\
+Qwen-32B & $-$0.060 & 9 & 0.201 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:template_type} reveals a striking pattern: \textbf{dedicated templates consistently show near-zero or negative average CG} ($-$0.174 to $+$0.018), meaning that integrated compositional problems are no harder---and often easier---than their single-skill components. In contrast, \textbf{generic parallel templates consistently show substantial positive CG} (0.045 to 0.201), indicating that simply answering two independent questions in one prompt incurs a significant attention-splitting penalty. This split explains much of the heterogeneity in overall CG measurements.
+
+This finding has important implications for interpreting the benchmark. The positive composition gaps reported in the aggregate analysis (Table~\ref{tab:main}) are primarily driven by the generic parallel pairs, which test multi-task attention rather than genuine skill composition. The dedicated pairs, which test genuine skill integration, show that models can often benefit from the richer contextual structure of integrated problems. Future work should prioritize dedicated templates for all pairs to isolate genuine compositional difficulty from attention-splitting effects.
+
+\subsection{Composition Difficulty Clustering}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/figure4_composition_clusters.pdf}
+\caption{Hierarchical clustering of the 28 pairwise compositions based on their CG profiles across 8 models. Two main clusters emerge.}
+\label{fig:clusters}
+\end{figure}
+
+We applied hierarchical clustering (Ward's linkage, cosine distance) on the 28-dimensional CG vectors across all 8 models. The silhouette analysis identifies 2 natural clusters (silhouette score: 0.43), falling short of our target of $\geq$3 distinct patterns (Figure~\ref{fig:clusters}). Cluster~0 (8 pairs) contains compositions that tend to show negative or small CG---pairs like AR+CO, AR+SP, AR+TE, CO+TE where compositional context helps. Cluster~1 (20 pairs) contains compositions with moderate to large positive CG, dominated by pairs involving SE, CN, and SP. The two-cluster structure suggests a binary distinction between ``composition-aided'' and ``composition-penalized'' categories rather than a finer-grained taxonomy.
+
+\subsection{Test-Retest Reliability}
+\label{sec:reliability}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure5_reliability.pdf}
+\caption{Test-retest reliability: per-category accuracy on seed 42 (x-axis) vs.\ seed 123 (y-axis) for three models. Pearson $r$ values shown.}
+\label{fig:reliability}
+\end{figure}
+
+To validate measurement stability, we evaluated 3 models on a second independently generated benchmark set (seed 123). Figure~\ref{fig:reliability} shows strong correlations between per-category accuracy across seeds.
+
+We report reliability at multiple levels to ensure full transparency and avoid the conflation of different correlation measures:
+
+\begin{itemize}
+    \item \textbf{All-category accuracy correlation} (92 categories---8 single + 28 pairwise + 56 triple): Qwen-0.5B $r = 0.987$, Qwen-7B $r = 0.954$, Qwen-14B $r = 0.940$. Average $r = 0.960$.
+    \item \textbf{Pairwise accuracy correlation} (28 categories): Qwen-0.5B $r = 0.985$, Qwen-7B $r = 0.961$, Qwen-14B $r = 0.954$. Average $r = 0.967$.
+    \item \textbf{Pairwise composition gap (CG) correlation} (28 categories): Qwen-0.5B $r = 0.944$, Qwen-7B $r = 0.888$, Qwen-14B $r = 0.864$. Average $r = 0.899$.
+\end{itemize}
+
+The pairwise CG correlation is lower than the accuracy correlation because CG involves a subtraction ($\min(\text{PSA}) - \text{CA}$), which amplifies measurement noise in both the numerator and denominator. The CG reliability of $r = 0.899$ indicates that the \emph{relative ordering} of pair difficulty is stable across seeds, but individual pair CG estimates carry substantial uncertainty ($\pm$10--14pp at $n$=50). Our pre-registered criterion of $r > 0.90$ for composition gap measurements is approximately met on average. Increasing instances per category beyond 50 would improve precision.
+
+\subsection{Template Diversity Analysis}
+\label{sec:template_analysis}
+
+A key construct validity question is whether measured composition gaps reflect genuine compositional difficulty or are artifacts of specific template formulations. We analyze template diversity at both single-skill and composition levels.
+
+\textbf{Single-skill template diversity.} Each single skill uses 5 distinct templates, allowing within-skill analysis. Across 4 models and 8 skills, the mean within-skill template standard deviation is 0.210, compared to an inter-pair accuracy standard deviation of $\sim$0.278. Template choice substantially affects single-skill accuracy: for example, Arithmetic templates range from \texttt{ar\_remainder} (near-perfect for many models) to \texttt{ar\_nested} and \texttt{ar\_word} (substantially harder). Temporal Reasoning templates range from \texttt{te\_duration} (moderate) to \texttt{te\_overlap} and \texttt{te\_sequence} (near-zero for most models). This within-skill variance means that PSA values---and consequently CG values derived from them---depend on the specific mix of templates sampled.
+
+\textbf{Composition-level template limitation.} Each pairwise composition uses only a single template type (e.g., \texttt{ar\_co\_compute\_compare} for AR+CO, \texttt{generic\_parallel} for CO+SE). This is a significant limitation: we cannot assess whether the measured composition gap for a given pair generalizes across different ways of combining those skills. A pair that shows large CG under one template might show small CG under an alternative formulation. The 15 pairs that use the generic parallel template (which concatenates two independent single-skill questions) may behave differently from the 13 pairs with dedicated sequential/integrated templates.
+
+\textbf{Implications.} The test-retest reliability analysis (Section~\ref{sec:reliability}) demonstrates that CG measurements are stable across different \emph{parameter instantiations} of the same templates (different random numbers, names, etc.). However, it does \emph{not} demonstrate robustness across different template \emph{structures}. Expanding template diversity for compositions is a critical direction for future work.
+
+\subsection{Success Criteria Assessment}
+
+We evaluate the four pre-registered success criteria:
+
+\textbf{Criterion 1} (significant CG in $\geq$80\% of pairs for $\geq$5 models): \emph{Not met.} The fraction of pairs with CG $>$ 5\% ranges from 50\% to 79\%, with no model reaching 80\%. This is primarily because 21--43\% of pairs show \emph{negative} CG---a finding we did not anticipate. The composition gap is real but heterogeneous.
+
+\textbf{Criterion 2} ($\geq$3 distinct composition patterns): \emph{Not met.} Clustering identifies 2 clusters (silhouette: 0.43) rather than the hypothesized 3+.
+
+\textbf{Criterion 3} ($>$10pp CG variation): \emph{Met.} The CG difference between smallest and largest models is 22.4pp.
+
+\textbf{Criterion 4} (test-retest $r > 0.90$): \emph{Approximately met.} Pairwise CG average $r = 0.899$; pairwise accuracy average $r = 0.967$.
+
+Two of four criteria are not met, reflecting that our initial hypotheses were partially incorrect: the composition gap is not uniformly positive across skill pairs, and the composition landscape is less structured than expected. We view these null results as informative---they reveal that the relationship between single-skill and composed performance is more complex than a simple degradation model predicts.
+
+%=====================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+%=====================================================================
+
+\paragraph{Principal findings.} SkillStack reveals four main findings about compositional cognition in LLMs. First, composition-level degradation is substantial and follows a size-dependent pattern: smaller models degrade more steeply while larger models degrade more gracefully. Second, the composition gap is highly heterogeneous across skill pairs, with 21--43\% showing \emph{improved} performance under composition. Third, and most importantly, template type is the dominant factor: dedicated templates that integrate skills show near-zero or negative CG (avg $-$0.07 across models), while generic parallel templates show consistently positive CG (avg $+$0.16), indicating that the aggregate ``composition gap'' conflates genuine integration difficulty with attention-splitting overhead. Fourth, CoT prompting effects are model-dependent and do not consistently reduce the gap.
+
+\paragraph{The negative CG phenomenon.} The widespread occurrence of negative composition gaps is our most surprising finding. The dedicated vs.\ generic template analysis (Section~\ref{sec:template_type_analysis}) provides the clearest explanation: dedicated templates, which embed skills in a coherent problem context, consistently produce near-zero or negative CG, while generic parallel templates (independent question concatenation) consistently produce positive CG. This strongly suggests that much of the measured ``composition gap'' is driven by attention-splitting in generic templates rather than genuine skill integration failure. For the dedicated templates, the composition-as-scaffolding hypothesis is most parsimonious: when skills are combined into a coherent problem, the resulting context provides disambiguation cues that aid performance, analogous to how humans sometimes find word problems easier than abstract equations.
+
+We also verified that negative CG is not primarily a floor-effect artifact: filtering pairs where $\min(\text{PSA}) \geq 15\%$, the negative CG fractions remain substantial (18--39\% for most models). A more controlled investigation would compare composed templates against single-skill templates that include equivalent contextual information but require only one skill. We leave this to future work.
+
+\paragraph{Missing planned evaluations.} Our proposal specified several evaluations that were not conducted due to time constraints: template diversity ablation (the most critical gap, given the single-template-per-composition limitation), difficulty calibration ablation, 3-shot evaluation, and base vs.\ instruction-tuned comparisons. The template diversity ablation is especially important because (a)~each composition uses only a single template, (b)~within-skill template variance is substantial (mean std~=~0.210), and (c)~the dedicated vs.\ generic analysis (Section~\ref{sec:template_type_analysis}) shows that template type is the dominant driver of CG. Without multi-template evaluation per composition, we cannot disentangle template-specific difficulty from genuine compositional difficulty. Future versions of SkillStack should include 3--5 templates per composition with ICC analysis. The proposal also specified 10--15 models including base models and frontier models (70B+); we evaluated only 8 instruction-tuned models up to 32B, substantially limiting scaling claims.
+
+\paragraph{Limitations.}
+
+\begin{itemize}
+    \item \textbf{Sample size:} With $n$=50 per category, individual CG estimates have bootstrap 95\% CIs of $\pm$10--14pp, making most pair-level conclusions statistically fragile. Increasing to $n$=100--200 would substantially tighten confidence intervals ($\pm$5--7pp) and enable reliable pair-level statistical testing. Conclusions about specific pairs should focus on those with large, consistent effects across models (e.g., AR+SP at CG=$-$0.56 across all 8 models).
+    \item \textbf{Template construct validity:} Each composition uses a single template type, and the dedicated vs.\ generic parallel analysis (Section~\ref{sec:template_type_analysis}) shows that template type is the primary driver of CG sign and magnitude. This means measured CG values conflate genuine compositional difficulty with template-specific effects. Even within the dedicated templates, a single template per pair cannot rule out that observed CG is an artifact of that specific problem formulation rather than the underlying skill combination. Expanding to 3--5 templates per composition, with an intra-class correlation (ICC) analysis, is the single most critical improvement for future work.
+    \item \textbf{Model coverage:} We evaluate only 8 open-weight instruction-tuned models up to 32B parameters. Frontier models (70B+, GPT-4o, Claude) were not evaluated due to resource constraints; claims about whether the composition gap closes at scale are limited without such evaluation. Even a single API-based frontier evaluation would substantially strengthen scaling claims.
+    \item \textbf{Missing planned evaluations:} The proposal specified template diversity ablation, difficulty calibration ablation, 3-shot evaluation, and base vs.\ instruction-tuned comparisons---none were conducted. The template diversity ablation is especially critical given the construct validity concern above.
+    \item \textbf{Skill selection:} Our 8 skills are not exhaustive. Important capabilities (analogy, causal reasoning, planning) are absent.
+    \item \textbf{Quantization:} The 14B and 32B models use AWQ quantization, which may affect accuracy.
+    \item \textbf{Scaling analysis:} Fitting to 3 data points ($K$=1,2,3) with 2 parameters provides a descriptive summary only. The $\alpha$ values and $R^2$ are not meaningful as evidence for a specific functional form; they serve as a compact way to summarize the degradation rate across models.
+\end{itemize}
+
+%=====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%=====================================================================
+
+We introduced SkillStack, a procedurally generated benchmark for measuring compositional cognitive skill gaps in LLMs. Evaluating 8 models (0.5B--32B) across 92 skill categories, we find that composition degrades performance substantially: the best model drops from 75.5\% on single skills to 37.6\% on triples, with steeper degradation for smaller models. Our most important finding is that template type is the primary driver of composition gap sign: dedicated templates that integrate skills into coherent problems show near-zero or negative average CG, while generic parallel templates that concatenate independent questions produce consistent positive CG (+0.17 on average). This reveals that much of the measured ``composition gap'' reflects attention-splitting rather than genuine skill integration failure.
+
+SkillStack provides actionable diagnostics: Set Operations is consistently the hardest skill to compose, while pairs like Arithmetic+Spatial reliably benefit from compositional context. Test-retest reliability (pairwise accuracy $r=0.97$, CG $r=0.90$) confirms stable measurements. The most critical direction for future work is expanding template diversity at the composition level (3--5 templates per pair with ICC analysis), followed by increasing to $n \geq 100$ instances for tighter confidence intervals and evaluating frontier-scale models to determine whether the composition gap eventually closes.
+
+%=====================================================================
+% References
+%=====================================================================
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{10}
+
+\bibitem[Bai et~al.(2025)]{bai2025how}
+Haoyue Bai, Yiyou Sun, Wenjie Hu, Shi Qiu, Maggie~Ziyu Huan, Peiyang Song, Robert Nowak, and Dawn Song.
+\newblock How and why {LLM}s generalize: A fine-grained analysis of {LLM} reasoning from cognitive behaviors to low-level patterns.
+\newblock \emph{arXiv preprint arXiv:2512.24063}, 2025.
+
+\bibitem[Cobbe et~al.(2021)]{cobbe2021training}
+Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman.
+\newblock Training verifiers to solve math word problems.
+\newblock \emph{arXiv preprint arXiv:2110.14168}, 2021.
+
+\bibitem[Kipnis et~al.(2025)]{kipnis2025metabench}
+Alex Kipnis, Konstantinos Voudouris, Luca~M. Schulze~Buschoff, and Eric Schulz.
+\newblock {metabench} -- a sparse benchmark of reasoning and knowledge in large language models.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\bibitem[Mirzadeh et~al.(2025)]{mirzadeh2025gsmsymbolic}
+Iman Mirzadeh, Keivan Alizadeh, Hooman Shahrokhi, Oncel Tuzel, Samy Bengio, and Mehrdad Farajtabar.
+\newblock {GSM-Symbolic}: Understanding the limitations of mathematical reasoning in large language models.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\bibitem[Srivastava et~al.(2023)]{srivastava2023beyond}
+Aarohi Srivastava, Abhinav Rastogi, Abhishek Rao, Abu~Awal~Md Shoeb, Abubakar Abid, Adam Fisch, Adam~R. Brown, Adam Santoro, Aditya Gupta, Adri\`{a} Garriga-Alonso, and others.
+\newblock Beyond the imitation game: Quantifying and extrapolating the capabilities of language models.
+\newblock \emph{Transactions on Machine Learning Research}, 2023.
+
+\bibitem[White et~al.(2025)]{white2025livebench}
+Colin White, Samuel Dooley, Manley Roberts, Arka Pal, Ben Feuer, Siddhartha Jain, Ravid Shwartz-Ziv, Neel Jain, Khalid Saifullah, Sreemanti Dey, and others.
+\newblock {LiveBench}: A challenging, contamination-limited {LLM} benchmark.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+\newblock Spotlight.
+
+\bibitem[Yang et~al.(2025)]{yang2025gsmdc}
+Minglai Yang, Ethan Huang, Liang Zhang, Mihai Surdeanu, William~Yang Wang, and Liangming Pan.
+\newblock How is {LLM} reasoning distracted by irrelevant context? {A}n analysis using a controlled benchmark.
+\newblock In \emph{Proceedings of the Conference on Empirical Methods in Natural Language Processing (EMNLP)}, 2025.
+
+\bibitem[Yu et~al.(2024)]{yu2024skillmix}
+Dingli Yu, Simran Kaur, Arushi Gupta, Jonah Brown-Cohen, Anirudh Goyal, and Sanjeev Arora.
+\newblock Skill-{M}ix: a flexible and expandable family of evaluations for {AI} models.
+\newblock In \emph{The Twelfth International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem[Zhao et~al.(2024)]{zhao2024canmodels}
+Haoyu Zhao, Simran Kaur, Dingli Yu, Anirudh Goyal, and Sanjeev Arora.
+\newblock Can models learn skill composition from examples?
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[Zhou et~al.(2026)]{zhou2026lost}
+Hongli Zhou, Hui Huang, Ziqing Zhao, Lvyuan Han, Huicheng Wang, Kehai Chen, Muyun Yang, Wei Bao, Jian Dong, Bing Xu, Conghui Zhu, Hailong Cao, and Tiejun Zhao.
+\newblock Lost in benchmarks? {R}ethinking large language model benchmarking with item response theory.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2026.
+
+\end{thebibliography}
+
+%=====================================================================
+% Appendix
+%=====================================================================
+\appendix
+\section{Additional Experimental Details}
+
+\subsection{Model Details}
+All models were loaded via vLLM with the following configurations: Qwen2.5-0.5B/1.5B/3B/7B-Instruct used full precision (float16). Qwen2.5-14B-Instruct-AWQ and Qwen2.5-32B-Instruct-AWQ used 4-bit AWQ quantization. Llama-3.1-8B-Instruct used float16. DeepSeek-R1-Distill-Qwen-7B used float16. All inference used temperature=0 (greedy decoding).
+
+\subsection{Answer Parsing}
+For direct prompting, we extract the final answer using regex patterns tailored to each answer type:
+\begin{itemize}
+    \item \textbf{Numerical}: Extract the first number (integer or float) from the response.
+    \item \textbf{Yes/No}: Match ``yes'', ``no'', ``true'', ``false'' (case-insensitive).
+    \item \textbf{Name/String}: Extract the first quoted string or capitalized name.
+    \item \textbf{Set}: Parse set notation or comma-separated lists.
+\end{itemize}
+For CoT prompting, we extract the answer appearing after common markers (``the answer is'', ``therefore'', ``='') in the final sentence.
+
+\subsection{Benchmark Statistics}
+Each seed generates exactly 4{,}600 instances: 400 single-skill (8$\times$50), 1{,}400 pairwise (28$\times$50), and 2{,}800 triple (56$\times$50). Answer types include: integers (42\%), yes/no (18\%), names/strings (15\%), sets (12\%), and other (13\%).
+
+\subsection{Per-Skill Accuracy under Chain-of-Thought}
+
+\begin{table}[h]
+\centering
+\caption{Single-skill accuracy (\%) under CoT prompting.}
+\label{tab:per_skill_cot}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Model & AR & CO & CN & LD & SP & ST & TE & SE \\
+\midrule
+Qwen-1.5B CoT & 92 & 86 & 18 & 92 & 56 & 20 & 40 & 52 \\
+Qwen-7B CoT & 26 & 72 & 56 & 58 & 70 & 58 & 72 & 50 \\
+DS-R1-7B CoT & 66 & 82 & 6 & 58 & 62 & 64 & 60 & 50 \\
+Qwen-14B CoT & 52 & 84 & 68 & 66 & 78 & 72 & 76 & 68 \\
+Qwen-32B CoT & 90 & 84 & 88 & 80 & 90 & 86 & 86 & 92 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:per_skill_cot} shows that CoT often improves String Manipulation and Temporal Reasoning (the hardest skills under direct prompting) but can hurt Comparison and Logical Deduction performance, particularly for mid-sized models.
+
+\subsection{Template Diversity Details}
+
+Table~\ref{tab:template_diversity} shows within-skill template standard deviations for four models. The substantial within-skill variance (mean 0.210) demonstrates that template choice meaningfully affects single-skill accuracy measurements.
+
+\begin{table}[h]
+\centering
+\caption{Within-skill template standard deviation for four models. Each skill has 5 templates; values show the standard deviation of accuracy across these templates.}
+\label{tab:template_diversity}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc|c}
+\toprule
+Model & AR & CO & CN & LD & SP & ST & TE & SE & Mean \\
+\midrule
+Qwen-0.5B & 0.326 & 0.130 & 0.241 & 0.283 & 0.339 & 0.321 & 0.034 & 0.166 & 0.230 \\
+Qwen-7B & 0.372 & 0.163 & 0.256 & 0.000 & 0.290 & 0.113 & 0.306 & 0.157 & 0.207 \\
+Qwen-14B & 0.327 & 0.081 & 0.242 & 0.134 & 0.313 & 0.052 & 0.361 & 0.077 & 0.198 \\
+Qwen-32B & 0.171 & 0.000 & 0.199 & 0.346 & 0.249 & 0.234 & 0.322 & 0.124 & 0.206 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\end{document}

@@ -1,0 +1,286 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2024}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{array}
+
+\title{LIMS-RAG: Localized Minimal-Support Perturbations Are a Weak but Measurable Feature Family for Sentence-Level RAG Verification}
+
+\author{Anonymous Authors}
+
+\newcommand{\smin}{S_{\mathrm{min}}}
+\newcommand{\tauv}{\tau}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Retrieval-augmented generation (RAG) verification often asks only whether a response sentence can be supported by retrieved evidence after the fact, even though recent work shows that post-hoc support is not the same as faithfulness. We study a narrow feature-engineering question rather than a new verification framework: does localized perturbation around a greedily inferred support subset improve a lightweight sentence-level detector beyond support-only features, support-plus-compactness features, and coarse full-context removal? Building on a small-model pipeline from the proposal, we compare these alternatives on executed RAGTruth experiments using strict and projected sentence-label slices. The full detector reaches the best strict macro F1 at $0.5359$, improving over support-only ($0.5120$) and full-context removal ($0.4904$), but it is effectively tied with support+compactness ($0.5354$). The ranking story is less favorable: support-only remains best on strict AUPRC at $0.0996$, while the full detector reaches $0.0574$. Ablations further weaken a strong novelty claim: removing localized perturbations slightly improves strict macro F1 to $0.5369$, and the best localized variant is the simpler swap-only model at $0.5486$. We therefore position localized minimal-support perturbation as a useful negative-result case study. It can alter thresholded decisions, but the current evidence does not support it as a robust practical upgrade over simpler compactness-aware baselines.
+\end{abstract}
+
+\section{Introduction}
+RAG systems reduce hallucination by grounding generation in retrieved evidence, but a growing line of work argues that post-hoc support is an incomplete notion of trustworthiness. A sentence may look supported once the full context is available even if the decisive evidence for generation was missing, redundant, or only weakly implicated in the actual output \citep{wallat2024correctness,wu-etal-2024-synchronous}. This matters because many practical verification pipelines still need compact models, post-hoc analysis, and modest compute budgets.
+
+This paper studies a narrower question than a new faithfulness framework: if we greedily infer a compact support subset for each answer sentence, do localized perturbations around that subset add useful signal beyond a strong support-only verifier, beyond support-plus-compactness features, and beyond coarse full-context removal? The claim is intentionally modest. We do not claim optimal attribution, causal identification, or superiority to larger diagnostic systems such as RAGChecker \citep{ru2024ragcheckerfinegrainedframeworkdiagnosing}.
+
+The executed evidence supports a mixed, mostly negative answer. On the strict slice, the full detector improves thresholded macro F1 over support-only and full-context removal, but it is only marginally above support+compactness and clearly worse than support-only on AUPRC. The ablations are similarly unfavorable to a strong novelty claim: the full localized bundle is not necessary for the best observed strict macro F1.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.2em]
+  \item We formulate \textbf{LIMS-RAG}, a lightweight feature family that augments support verification with localized perturbations around a greedily selected support subset $\smin$.
+  \item We provide an empirical comparison against fair in-setting baselines under a shared low-cost scaffold: BM25, support-only, support+compactness, full-context removal, localized-only, and a training-free additive score.
+  \item We report a negative-to-mixed result: the full detector reaches strict macro F1 $0.5359$, above support-only ($0.5120$) and full-context removal ($0.4904$), but not meaningfully above support+compactness ($0.5354$), while support-only remains best on strict AUPRC at $0.0996$.
+  \item We show through ablations that simpler variants remain competitive: swap-only reaches strict macro F1 $0.5486$, while removing localized perturbations yields $0.5369$.
+\end{itemize}
+
+Section~\ref{sec:related} positions the paper relative to prior RAG verification work. Section~\ref{sec:method} describes the support-set construction and localized features. Section~\ref{sec:experiments} reports the executed experiments and figures. Section~\ref{sec:limitations} explains what remains unsupported by the current workspace.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Lightweight support verification.}
+MiniCheck \citep{tang-etal-2024-minicheck} and Auto-GDA \citep{Leemann2025} show that compact verification models can provide useful grounding signals for RAG. Our support-only baseline sits in this lineage. The question here is not whether lightweight verification works, but whether localized perturbation adds value beyond it.
+
+\paragraph{Sentence-level and claim-level faithfulness analysis.}
+RAGChecker \citep{ru2024ragcheckerfinegrainedframeworkdiagnosing} offers a broader diagnosis framework, while synchronous faithfulness monitoring \citep{wu-etal-2024-synchronous} uses decoding-time signals for sentence-level trustworthiness. Our setting is narrower and strictly post-hoc: we use benchmark-provided context and compact models only.
+
+\paragraph{Context sensitivity and perturbation signals.}
+REFIND \citep{lee-yu-2025-refind} and SelfCheckGPT \citep{manakul-etal-2023-selfcheckgpt} motivate the use of perturbation sensitivity for hallucination detection. Their interventions are global or sampling-based. LIMS-RAG instead perturbs only a predicted compact support subset.
+
+\paragraph{Attribution, sufficiency, and conflict.}
+Counterfactual evidence removal has been used for attribution in conversational QA over heterogeneous RAG systems \citep{saharoy2025evidence}, and correctness-versus-faithfulness analyses motivate our concern that post-hoc support can be misleading \citep{wallat2024correctness}. Sufficient-context and conflict-aware work likewise argues that trustworthiness depends on context completeness and contradiction structure, not just raw support \citep{joren2024sufficient,zhang-etal-2025-faithfulrag}. Unlike these broader proposals, our claim is only about a practical feature family under a shared low-cost detector scaffold.
+
+\section{Method}
+\label{sec:method}
+\subsection{Task and supervision}
+For each example, we observe a query $q$, benchmark-provided retrieved context $E=\{e_i\}_{i=1}^{n}$, and a generated answer segmented into sentences. For each answer sentence $c$, the detector outputs a probability that $c$ is unsupported or unfaithful relative to the provided context.
+
+Following the proposal, we evaluate two sentence-label slices derived from RAGTruth \citep{niu-etal-2024-ragtruth}: a stricter ambiguity-controlled slice used for the main claim, and a more permissive projected-all slice used as a secondary comparison. The paper does not claim that manual audit or robustness analyses were completed.
+
+\subsection{Base support verifier}
+The base pipeline uses three lightweight components already specified in the proposal:
+\begin{enumerate}[leftmargin=1.2em]
+  \item evidence-sentence retrieval with \texttt{intfloat/e5-base-v2},
+  \item reranking with \texttt{cross-encoder/ms-marco-MiniLM-L-6-v2},
+  \item support scoring with \texttt{MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli}.
+\end{enumerate}
+Support-only features are the best entailment, contradiction, and neutral probabilities together with the entailment margin over the second-best evidence sentence.
+
+\subsection{Greedy support subset}
+Given reranked evidence sentences $(e_{(1)}, e_{(2)}, \dots)$, we construct prefix contexts
+\[
+C_k = e_{(1)} \oplus e_{(2)} \oplus \dots \oplus e_{(k)}
+\]
+and choose
+\[
+\smin(\tauv) = \{e_{(1)}, \dots, e_{(k^\star)}\}, \qquad
+k^\star = \min\{k : \mathrm{entail}(C_k) \ge \tauv\},
+\]
+with maximum prefix size $3$. This is a heuristic support-set approximation, not a claim of true minimality.
+
+From $\smin$ we derive compactness features: $\lvert \smin \rvert$, support on $\smin$, the margin between $\smin$ and the best single sentence, the number of candidates above $\tauv$, document dispersion, and a redundancy proxy based on leave-one-out rescoring.
+
+\subsection{Localized perturbation features}
+The proposed feature family intervenes only around $\smin$:
+\begin{itemize}[leftmargin=1.2em]
+  \item \textbf{remove-local}: remove all members of $\smin$ from the context,
+  \item \textbf{drop-one}: remove each member of $\smin$ in turn,
+  \item \textbf{swap-local}: replace each member of $\smin$ with a lower-support nearby distractor from the same example.
+\end{itemize}
+From these interventions we compute support drops, mean and max leave-one-out drop, swap sensitivity, normalized drop, best residual support after local removal, and whether the best support bundle changes after removal.
+
+\subsection{Compared detectors}
+We compare the following models under the same feature scaffold:
+\begin{itemize}[leftmargin=1.2em]
+  \item \textbf{BM25}: a lexical heuristic over evidence sentences,
+  \item \textbf{Support-only}: verifier features only,
+  \item \textbf{Support+compactness}: support features plus $\smin$ compactness features,
+  \item \textbf{Full-context removal}: coarse removal features,
+  \item \textbf{Localized-only}: perturbation features only,
+  \item \textbf{Training-free additive}: a fixed additive score,
+  \item \textbf{Full detector}: support, compactness, redundancy, and localized perturbation together.
+\end{itemize}
+Trainable detectors use class-balanced logistic regression over z-scored features.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+The experiments follow the planned benchmark choice and model scaffold from the proposal, using RAGTruth sentence labels, the retriever--reranker--verifier stack above, and a locked support-set threshold $\tauv=0.65$ in all completed end-to-end detector results. The official test split is retained, and the workspace uses a fixed train/validation partition of the remaining examples. Table~\ref{tab:data} summarizes the resulting claim slices from \texttt{exp/data\_prep/results.json} and \texttt{artifacts/tables/data\_stats.csv}.
+
+\begin{table}[t]
+\caption{Sentence-level data summary used in the workspace. ``Claims'' is the full projected slice before ambiguity filtering; ``strict claims'' is the ambiguity-controlled slice used for the main claim. Positive rates and ambiguity-drop rates come directly from \texttt{artifacts/tables/data\_stats.csv}.}
+\label{tab:data}
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Split & Responses & Claims & Strict claims & Strict pos.\ rate & Ambig.\ drop \\
+\midrule
+Train & 13{,}447 & 100{,}812 & 92{,}897 & 0.0390 & 0.0785 \\
+Val   & 1{,}495 & 11{,}285 & 10{,}461 & 0.0391 & 0.0730 \\
+Test  & 2{,}675 & 18{,}970 & 17{,}947 & 0.0327 & 0.0539 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We evaluate both the strict slice and the projected-all slice. The main claim is based on the strict slice, because that was the proposal's ambiguity-controlled target. Metrics are macro F1, AUPRC, AUROC, Brier score, and expected calibration error. All numbers in Tables~\ref{tab:main} and \ref{tab:ablation} come directly from \texttt{artifacts/tables/main\_results.csv} or the corresponding \texttt{exp/*/results.json} files.
+
+Validation also locks both the support-set threshold and the classifier operating thresholds. Before any test evaluation, the pilot searched $\tau \in \{0.55,0.60,0.65,0.70\}$ using the support-only verifier on the strict validation slice, ranking candidates by AUPRC first and Brier second. Table~\ref{tab:scope} reports the outcome: $\tau=0.65$ was locked because it gave the best validation AUPRC ($0.02994$) in \texttt{artifacts/tables/tau\_selection.csv}, narrowly above $\tau=0.70$ ($0.02993$), even though $\tau=0.70$ had slightly lower Brier. After $\tau$ was fixed, each model selected its decision threshold on validation only: BM25 used $0.95$; support-only, full-context removal, and localized-only used $0.60$; support+compactness, full detector, and the no-localized, remove-only, drop-one-only, fixed-top-$k$, and no-redundancy ablations used $0.75$; swap-only used $0.80$; and the training-free additive score used $0.90$. Logistic regression tuned $C \in \{0.1,1.0,10.0\}$ on validation, selecting $C=10$ for support-only and full-context removal and $C=0.1$ for the remaining trainable models.
+
+The saved experiment outputs contain three nominal seeds, but the reported metrics are identical across seeds $13$, $21$, and $42$ for every completed trainable run, so we report the means from the stored files rather than seed-wise confidence bands.
+
+\subsection{Main comparison}
+Table~\ref{tab:main} summarizes the executed detector comparison. The full detector reaches the best strict macro F1 at $0.5359$, with support+compactness effectively tied at $0.5354$. The localized feature family therefore helps thresholded decisions relative to support-only ($0.5120$) and especially full-context removal ($0.4904$), but the gain over the strongest nonlocalized in-setting baseline is negligible.
+
+The ranking picture is weaker for LIMS-RAG. Support-only is clearly best on strict AUPRC at $0.0996$, ahead of the full detector at $0.0574$ and support+compactness at $0.0527$. This matters because the paper's original motivation was to add useful signal, not merely to reshuffle thresholded predictions. On projected-all labels, support-only is also strongest, reaching macro F1 $0.5382$ and AUPRC $0.1133$.
+
+\begin{table*}[t]
+\caption{Executed comparison from \texttt{exp/*/results.json}. Best value in each column is in \textbf{bold}. Higher is better for macro F1, AUPRC, and AUROC; lower is better for Brier.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccccccc}
+\toprule
+Method & Strict macro F1 $\uparrow$ & Strict AUPRC $\uparrow$ & Strict AUROC $\uparrow$ & Strict Brier $\downarrow$ & Projected macro F1 $\uparrow$ & Projected AUPRC $\uparrow$ & Runtime (min) $\downarrow$ \\
+\midrule
+BM25 & 0.5326 & 0.0817 & \textbf{0.7389} & 0.6266 & 0.5223 & 0.1023 & 0.0063 \\
+Support-only & 0.5120 & \textbf{0.0996} & 0.5966 & 0.2231 & \textbf{0.5382} & \textbf{0.1133} & 0.0278 \\
+Support+compactness & 0.5354 & 0.0527 & 0.5738 & 0.2206 & 0.5074 & 0.0821 & 0.0277 \\
+Full-context removal & 0.4904 & 0.0347 & 0.5144 & 0.2520 & 0.4782 & 0.0579 & 0.0277 \\
+Localized-only & 0.5021 & 0.0577 & 0.5342 & 0.2327 & 0.4987 & 0.0827 & 0.0277 \\
+Training-free additive & 0.4905 & 0.0286 & 0.4135 & 0.2882 & 0.4815 & 0.0550 & \textbf{0.0053} \\
+Full detector & \textbf{0.5359} & 0.0574 & 0.5777 & \textbf{0.2115} & 0.5211 & 0.0857 & 0.0273 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Ablations}
+Table~\ref{tab:ablation} reports the ablations that matter for the novelty claim. The results do not support a strong statement that the full localized bundle is necessary. Removing localized perturbations entirely gives slightly \emph{higher} strict macro F1 ($0.5369$ versus $0.5359$), albeit with slightly worse strict AUPRC and Brier. The strongest strict macro F1 comes from the simpler swap-only variant at $0.5486$. The fixed-top-$k$ support ablation is the clearest degradation, dropping to strict macro F1 $0.5163$ and AUPRC $0.0444$, which suggests that the greedy support-set construction matters more than the full perturbation bundle.
+
+\begin{table}[t]
+\caption{Strict-slice ablations from \texttt{exp/*/results.json}. The full detector is shown for reference.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Macro F1 $\uparrow$ & AUPRC $\uparrow$ & Brier $\downarrow$ \\
+\midrule
+Full detector & 0.5359 & 0.0574 & 0.2115 \\
+No localized perturbation & 0.5369 & 0.0548 & 0.2204 \\
+Remove-only & 0.5369 & 0.0544 & 0.2203 \\
+Drop-one-only & 0.5369 & 0.0559 & 0.2203 \\
+Swap-only & \textbf{0.5486} & 0.0567 & 0.2195 \\
+Fixed top-$k$ support & 0.5163 & 0.0444 & 0.2139 \\
+No redundancy & 0.5359 & \textbf{0.0575} & \textbf{0.2114} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ablation} visualizes these deltas relative to the full detector. The pattern is again mixed: several ablations are nearly neutral, and one simpler localized variant improves strict macro F1.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/ablation_deltas.pdf}
+\caption{Strict-slice ablation deltas relative to the full detector. Each bar reports the change in test macro F1 or test AUPRC from \texttt{artifacts/tables/main\_results.csv} for one ablation run: no localized perturbation, remove-only, drop-one-only, swap-only, fixed top-$k$ support, or no redundancy.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{Diagnostics and executed scope}
+The remaining generated figures are useful diagnostics, but they should be interpreted narrowly. Figure~\ref{fig:pr} illustrates the ranking gap already visible in Table~\ref{tab:main}: support-only maintains a stronger precision--recall profile than the full detector. Figure~\ref{fig:calibration} shows that the full detector is better calibrated than support-only, consistent with its lower strict Brier score ($0.2115$ versus $0.2231$) and lower strict ECE ($0.3908$ versus $0.4273$) in the executed runs.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/strict_pr_curve.pdf}
+\caption{Strict-slice precision--recall curves for support-only, support+compactness, full-context removal, and the full detector. The plotted points come from the stored strict test predictions, while the scalar AUPRC values cited in the text and tables come from the saved evaluation summaries under \texttt{exp/} and \texttt{artifacts/tables/main\_results.csv}.}
+\label{fig:pr}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/calibration_curve.pdf}
+\caption{Validation calibration curves for support-only and the full detector on the strict slice. The x-axis is mean predicted probability per bin and the y-axis is empirical positive frequency; the corresponding summary ECE and Brier values are stored in \texttt{artifacts/tables/calibration.json}.}
+\label{fig:calibration}
+\end{figure}
+
+Threshold stability needs stronger qualification than in the prior draft. The current workspace contains completed end-to-end detector metrics only for the locked $\tauv=0.65$ setting. The originally planned neighboring-threshold retraining runs were not completed, so we do \emph{not} present a threshold sweep with comparable test metrics. Figure~\ref{fig:stability} is therefore included only as a structural diagnostic for support-set behavior around the locked threshold, not as evidence that detector quality was validated end-to-end at adjacent $\tau$ values.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/threshold_stability.pdf}
+\caption{Threshold-stability diagnostic around the locked support-set threshold. The plotted quantities are validation support-only AUPRC and Brier together with support-set structural measures such as $\smin$ change rate and mean Jaccard similarity. Only $\tau=0.65$ has completed end-to-end detector metrics in the current workspace, so neighboring $\tau$ values are diagnostics of support-set structure rather than full retrained test comparisons.}
+\label{fig:stability}
+\end{figure}
+
+For completeness, Figure~\ref{fig:runtime} summarizes the overall pipeline runtime decomposition that accompanied the draft workspace. The paper does not use that figure to argue for a scientific claim; it simply shows that feature extraction dominates the lightweight classifier stage.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/runtime_breakdown.pdf}
+\caption{Runtime breakdown for the executed workspace pipeline. The bars summarize preprocessing, feature extraction, model evaluation, and plotting stages using the saved timing artifacts in \texttt{results.json} and \texttt{exp/visualization/results.json}; the figure is included as a reproducibility aid rather than as a scientific performance claim.}
+\label{fig:runtime}
+\end{figure}
+
+\subsection{Executed scope versus plan}
+The original plan was broader than the final workspace, so Table~\ref{tab:scope} makes the completion boundary explicit. This matters because the paper's core claim is already mixed; omitted robustness or audit results should not be mistaken for silent negative findings discovered late in writing.
+
+\begin{table}[t]
+\caption{Compact audit of planned versus completed items. Validation-based $\tau$ selection and strict-slice threshold locking were completed, but several higher-cost robustness checks from the proposal remained unfinished.}
+\label{tab:scope}
+\centering
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.37\linewidth}p{0.17\linewidth}>{\raggedright\arraybackslash}p{0.38\linewidth}}
+\toprule
+Planned item & Status & Evidence in workspace \\
+\midrule
+Main baselines and full detector at locked $\tau=0.65$ & Completed & \texttt{exp/*/results.json}, \texttt{artifacts/tables/main\_results.csv} \\
+Ablations A--F from the plan & Completed & \texttt{exp/ablation\_*}, Figure~\ref{fig:ablation} \\
+Validation-based $\tau$ search and structural stability diagnostics & Completed & Saved in \texttt{artifacts/tables/} and shown in Figure~\ref{fig:stability} \\
+Calibration analysis & Completed & Saved in \texttt{artifacts/tables/} and shown in Figure~\ref{fig:calibration} \\
+Stable-vs.-unstable $\smin$ subset evaluation & Completed & Saved in \texttt{artifacts/tables/} \\
+Audited subset with manual relabeling & Not completed & Sampling/annotation artifacts were planned, but no adjudicated audit results are present \\
+Neighboring-$\tau$ end-to-end retraining on test & Not completed & Only $\tau=0.65$ has completed test metrics for trainable detectors \\
+Held-out generator/task robustness runs & Not completed & Slice counts exist in \texttt{data\_stats\_by\_*.csv}, but no completed detector evaluations are stored \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The completed stability artifacts still provide a useful qualification. In \texttt{artifacts/tables/tau\_stability.csv}, moving from $\tau=0.65$ to $0.60$ or $0.70$ changes $\smin$ membership for only $1.59\%$ and $1.46\%$ of validation claims, with mean Jaccard similarity $0.9905$ and $0.9927$, respectively. On the strict test set, the stable-$\smin$ subset contains 1,462 claims and the unstable subset only 46 claims; within the stable subset the full detector reaches macro F1 $0.5362$ and AUPRC $0.0597$, versus $0.5112$ and $0.1001$ for support-only. This supports the narrower statement that the observed thresholded gain is not driven entirely by gross $\smin$ instability, while still falling short of the planned neighboring-$\tau$ retraining check.
+
+\section{Reproducibility Summary}
+\label{sec:repro}
+The workspace is reproducible at the artifact level even though several planned analyses are missing. All executed tables and figures can be regenerated from the saved outputs under \texttt{exp/}, while the paper-level summaries live in \texttt{artifacts/tables/} and the plotted PDFs live in \texttt{figures/}. Feature matrices for the locked run, the stability analysis, and the validation $\tau$ search are stored under \texttt{artifacts/features/}, and predictions are stored under \texttt{artifacts/predictions/}.
+
+Several implementation choices are fully locked by saved configuration files. The support-set threshold is $\tau=0.65$ for all completed detector runs. Decision thresholds are validation-selected and then frozen per model as listed above. Logistic regression uses class-balanced training with $C$ chosen from $\{0.1,1.0,10.0\}$, and the saved runs show deterministic outputs across seeds $13$, $21$, and $42$. The execution manifest in \texttt{artifacts/run\_manifest.json} records Python 3.12.7, \texttt{transformers} 4.44.2, \texttt{torch} 2.10.0+cu128, and one NVIDIA RTX A6000 GPU.
+
+\section{Discussion and Limitations}
+\label{sec:limitations}
+The main finding is a negative-to-mixed result. Localized perturbation is not useless: the full detector improves strict macro F1 over support-only and full-context removal, and it also improves strict Brier score over the compared baselines. But those gains are not enough to support the stronger claim that localized perturbation is a robust practical improvement over compactness-aware support verification. The strongest nonlocalized in-setting baseline, support+compactness, is effectively tied on strict macro F1, and support-only is much better on strict AUPRC.
+
+The ablations sharpen that conclusion. If the full localized bundle were the main scientific novelty, we would expect a clearer degradation when it is removed. Instead, no-localized-perturbation is slightly better on strict macro F1, and swap-only is the best strict macro-F1 variant overall. That pattern suggests the signal is real but weak, unstable, or not cleanly isolated by the full feature bundle.
+
+Several planned validations are missing and should not be inferred from the draft. The audited-subset study proposed for uncertainty analysis was not completed. Held-out generator and held-out task robustness analyses were not completed. Neighboring-$\tau$ detector retraining artifacts were not completed either, so threshold stability remains only partially checked. These omissions matter because the paper is framed as a negative result about incremental utility, and stronger validation would be needed before making broader claims about faithfulness, post-rationalization, or robustness.
+
+Finally, the repeated seeds do not provide meaningful uncertainty estimates in the current workspace because the saved metrics are identical across seeds for every completed run. The results should therefore be read as deterministic executed outputs from one fixed scaffold, not as a full variance study.
+
+\section{Conclusion}
+We evaluated whether localized perturbations around a greedily inferred support subset improve sentence-level RAG verification under a lightweight post-hoc pipeline. The answer from the executed workspace is limited. The full detector reaches the best strict macro F1 at $0.5359$, but it is only marginally above support+compactness at $0.5354$, while support-only remains clearly best on strict AUPRC at $0.0996$.
+
+The practical implication is that localized minimal-support perturbation remains a plausible feature family, but the current evidence does not justify it as a robust upgrade over simpler support and compactness baselines. A stronger follow-up would need the missing audited-subset analysis, completed neighboring-$\tau$ retraining, and robustness tests that were planned but not executed here.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

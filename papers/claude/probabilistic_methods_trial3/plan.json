@@ -1,0 +1,178 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and set up project structure",
+    "description": "Install all required Python packages and create the project directory structure for experiments, results, and figures.",
+    "steps": {
+      "step1": "Install Python dependencies: numpy, scipy, matplotlib, seaborn, pandas, tqdm. Use pip install.",
+      "step2": "Optionally install the 'confseq' library (pip install confseq) for baseline Bernoulli confidence sequences. If unavailable or incompatible, implement the empirical Bernstein CS from Howard et al. (2021) directly.",
+      "step3": "Create project directory structure: src/ (algorithm code), experiments/ (experiment scripts), results/ (raw outputs as .csv or .npz), figures/ (plots for paper).",
+      "step4": "Create src/adaquantcs.py — the main AdaQuantCS algorithm class.",
+      "step5": "Create src/baselines.py — implementations of baseline methods (full-memory CS, sketch+bootstrap, fixed-grid CS).",
+      "step6": "Create src/confidence_sequences.py — Bernoulli confidence sequence implementations (empirical Bernstein, Hoeffding, betting-based).",
+      "step7": "Create src/utils.py — shared utilities for data generation, metrics computation, and I/O."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic data streams and prepare real-world datasets",
+    "description": "Create synthetic data generators for controlled experiments and download/prepare real-world datasets for practical evaluation.",
+    "steps": {
+      "step1": "Implement synthetic stream generators for: (a) Gaussian(0,1), (b) Exponential(rate=1), (c) Pareto(alpha=2, x_m=1), (d) Student-t(df=3). Each generator yields i.i.d. samples on demand. Use numpy.random.Generator with explicit seeds for reproducibility.",
+      "step2": "For each distribution, precompute the true quantiles at levels p in {0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99} using scipy.stats for ground-truth coverage evaluation.",
+      "step3": "Prepare real-world dataset 1: Download daily S&P 500 returns from a public source (e.g., Yahoo Finance via pandas-datareader or a CSV file). Use at least 10 years of daily returns (~2500 observations). Compute rolling VaR at 95th percentile as a benchmark.",
+      "step4": "Prepare real-world dataset 2: Generate synthetic network latency traces that mimic real-world characteristics — use a log-normal base distribution with occasional spikes (mixture model: 95% LogNormal(mu=2, sigma=0.5) + 5% LogNormal(mu=4, sigma=1)). Stream length: 500,000 observations. This models realistic latency monitoring where p99 tracking is critical.",
+      "step5": "Save all generated data and true quantile values to results/ for reproducibility. Store random seeds used: seeds = [42, 123, 456, 789, 1024]."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and run full-memory confidence sequence baseline",
+    "description": "Implement the Howard & Ramdas (2022) full-memory quantile confidence sequence as the gold-standard baseline. This requires O(t) memory and provides the best possible CI widths.",
+    "steps": {
+      "step1": "Implement FullMemoryQuantileCS class: maintains the full sorted array of observations. At each time t, computes the confidence interval for Q_p by using order-statistic-based confidence sequences. Specifically, for target quantile p, compute the Clopper-Pearson style interval by finding order statistics X_(l) and X_(u) such that P(X_(l) <= Q_p <= X_(u)) >= 1 - alpha uniformly over t, using the binomial confidence sequence from Howard et al. (2021).",
+      "step2": "Run on all 4 synthetic distributions × 2 quantile levels (p=0.5, p=0.95) × 5 seeds × stream length n=100,000. Record: (a) CI bounds at every checkpoint t in {100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000}, (b) whether true quantile is always covered, (c) peak memory usage.",
+      "step3": "Run extended experiments with n=1,000,000 for memory comparison, recording memory at checkpoints t in {1000, 10000, 100000, 1000000}.",
+      "step4": "Save all results to results/baseline_fullmemory.npz. Expected runtime: ~30 minutes (vectorize across seeds where possible)."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and run sketch + bootstrap baseline",
+    "description": "Implement a KLL-sketch-based quantile estimator with bootstrap confidence intervals as a practical baseline that uses sublinear memory but lacks anytime-valid guarantees.",
+    "steps": {
+      "step1": "Implement a simplified KLL sketch (or use the sorted-array compaction approach): maintain a sketch of size O(1/epsilon * log log(1/delta)) supporting merge and quantile queries. Use epsilon=0.01 for the sketch error parameter. If implementing from scratch is too complex, use a simpler approach: maintain a reservoir sample of fixed size M (e.g., M=1000) and compute bootstrap CIs from the reservoir.",
+      "step2": "Implement bootstrap CI computation: at each checkpoint, draw B=500 bootstrap samples from the sketch/reservoir, compute the quantile from each, and report the alpha/2 and 1-alpha/2 percentiles of the bootstrap distribution as the CI. Use alpha=0.05.",
+      "step3": "Run on all 4 distributions × 2 quantile levels × 5 seeds × n=100,000. Record CI bounds, coverage, memory usage at the same checkpoints as the full-memory baseline.",
+      "step4": "Specifically measure 'peeking coverage': check coverage at every checkpoint (not just the final one) to demonstrate that bootstrap CIs lose validity under continuous monitoring — this is the key weakness we exploit.",
+      "step5": "Save results to results/baseline_sketch_bootstrap.npz. Expected runtime: ~20 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement AdaQuantCS algorithm",
+    "description": "Implement the core AdaQuantCS algorithm with adaptive CDF-tracking grids, doubling epochs, and multi-epoch CI intersection.",
+    "steps": {
+      "step1": "Implement the empirical Bernstein confidence sequence for Bernoulli parameters (Howard et al., 2021). Given n observations of Z_i in {0,1} with mean-hat p_hat and variance-hat V_hat, compute: width = sqrt(2 * V_hat * log(log_2(2*n) / alpha) / n) + (2/3) * log(log_2(2*n) / alpha) / n. This provides an anytime-valid CI [p_hat - width, p_hat + width] for E[Z].",
+      "step2": "Implement the AdaQuantCS class with parameters: (a) target quantile level p, (b) grid size k (default=50), (c) confidence level alpha (default=0.05), (d) epoch schedule ('doubling' by default). Internal state: list of epochs, each storing k thresholds with their running counts and epoch lengths.",
+      "step3": "Implement epoch initialization: at start of epoch j, compute [a_j, b_j] from previous epoch CIs (or use a wide initial range for epoch 0, e.g., from data range estimates). Place k thresholds uniformly in [a_j, b_j] plus 2 sentinel thresholds at a_j - margin and b_j + margin.",
+      "step4": "Implement the update(x) method: for each observation x, increment counters c(q) for all thresholds q >= x in the current epoch. At epoch boundaries (t = 2^j), start a new epoch.",
+      "step5": "Implement the get_ci() method: for each threshold q in the current epoch, compute the Bernoulli CS for F(q). Then invert: CI_lower = inf{q : U_t(q) >= p}, CI_upper = sup{q : L_t(q) <= p}. Intersect with CIs from all previous epochs.",
+      "step6": "Implement memory tracking: count total number of active counters across all epochs. Each epoch stores 2*k numbers (counter + epoch_length per threshold) plus k threshold values, so memory per epoch is 3*k. Total memory = 3*k * num_epochs = 3*k * ceil(log2(t)).",
+      "step7": "Write unit tests: (a) verify coverage on a short Gaussian stream (n=10000, 100 trials), (b) verify memory is O(k log t), (c) verify CI width decreases over time."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run coverage validation experiments (Experiment 1)",
+    "description": "Verify that AdaQuantCS achieves the nominal coverage rate across distributions and quantile levels, matching the theoretical guarantee.",
+    "steps": {
+      "step1": "Run AdaQuantCS with k=50, alpha=0.05 on all 4 distributions × 2 quantile levels (p=0.5 and p=0.95) × 1000 independent trials × n=100,000. Use seeds 0..999 for the 1000 trials. Vectorize: run all 1000 trials in parallel using numpy arrays of shape (1000, n) where feasible, or batch in groups of 100.",
+      "step2": "For each trial, check whether the true quantile is contained in the CI at ALL checkpoints (anytime-valid coverage). Record: (a) anytime coverage (true quantile always in CI), (b) pointwise coverage at each checkpoint, (c) CI width at each checkpoint.",
+      "step3": "Compute empirical coverage rates with 95% Wilson confidence intervals. Target: coverage >= 0.94 (= 1 - alpha - 0.01 = 0.95 - 0.01).",
+      "step4": "Compare coverage with full-memory baseline and sketch+bootstrap baseline at the same checkpoints.",
+      "step5": "Save detailed results to results/experiment1_coverage.npz. Expected runtime: ~90 minutes (4 distributions × 2 quantiles × 1000 trials × 100K observations each, but vectorized)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run memory-accuracy tradeoff experiments (Experiment 2)",
+    "description": "Characterize how CI width varies with the memory budget parameter k, establishing the memory-accuracy Pareto frontier.",
+    "steps": {
+      "step1": "Fix distribution to Gaussian(0,1), quantile level p=0.5, stream length n=1,000,000, alpha=0.05.",
+      "step2": "Run AdaQuantCS with k in {5, 10, 20, 50, 100, 200} × 5 seeds. Record CI width and memory usage at checkpoints t in {1000, 5000, 10000, 50000, 100000, 500000, 1000000}.",
+      "step3": "Run the full-memory baseline on the same streams for comparison.",
+      "step4": "Compute the 'width ratio' = AdaQuantCS_width / FullMemory_width at each checkpoint and k value. Target: ratio <= 2.0 for k >= 50.",
+      "step5": "Compute 'memory ratio' = FullMemory_memory / AdaQuantCS_memory at each checkpoint. Target: ratio >= 100 at t=1,000,000.",
+      "step6": "Save to results/experiment2_memory_accuracy.npz. Expected runtime: ~30 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run comparison with sketch+bootstrap (Experiment 3)",
+    "description": "Compare AdaQuantCS with the sketch+bootstrap baseline, focusing on the anytime-valid coverage guarantee difference.",
+    "steps": {
+      "step1": "Use the same synthetic streams from Experiment 1 (4 distributions × 2 quantiles × 5 seeds × n=100,000).",
+      "step2": "Run both AdaQuantCS (k=50) and sketch+bootstrap (reservoir size M=1000, B=500 bootstrap samples) on each stream.",
+      "step3": "At each checkpoint, record: CI width, coverage (pointwise and anytime), memory usage, wall-clock computation time.",
+      "step4": "Specifically measure 'peeking penalty': for the sketch+bootstrap method, track how coverage degrades as the number of peeks increases (check at 10, 100, 1000 evenly-spaced time points vs. just the final time).",
+      "step5": "Save to results/experiment3_comparison.npz. Expected runtime: ~20 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run real-world data experiments (Experiment 4)",
+    "description": "Demonstrate practical utility of AdaQuantCS on real-world-like monitoring scenarios.",
+    "steps": {
+      "step1": "Financial data: Run AdaQuantCS (k=50, alpha=0.05) on S&P 500 daily returns, tracking VaR at p=0.05 (5th percentile, corresponding to 95% VaR). Also run full-memory CS and sketch+bootstrap. Plot CI evolution over time overlaid with the rolling 250-day empirical quantile.",
+      "step2": "Network latency data: Run AdaQuantCS on the synthetic latency trace (500K observations), tracking p99 latency (p=0.99). Compare CI widths and memory with baselines.",
+      "step3": "For both datasets, report: final CI width, peak memory, total computation time, and whether CIs capture the true quantile trajectory (for the synthetic latency data where ground truth is known).",
+      "step4": "Save to results/experiment4_realworld.npz. Expected runtime: ~10 minutes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run multiple quantile tracking experiments (Experiment 5)",
+    "description": "Evaluate simultaneous tracking of 7 quantile levels to assess scalability.",
+    "steps": {
+      "step1": "Run AdaQuantCS simultaneously for p in {0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99} on Gaussian(0,1) and Student-t(df=3) streams, n=100,000, 5 seeds.",
+      "step2": "Use two approaches: (a) independent grids (k=50 per quantile, total memory = 7 × k × log(t)), (b) shared grid (single grid of k=200 covering the full range).",
+      "step3": "Record per-quantile CI width, per-quantile coverage, total memory for both approaches.",
+      "step4": "Compute joint coverage: fraction of trials where ALL 7 quantile CIs simultaneously contain their true values at all time points. Apply Bonferroni correction (alpha_per_quantile = alpha/7) and compare with uncorrected.",
+      "step5": "Save to results/experiment5_multiquantile.npz. Expected runtime: ~15 minutes."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run ablation studies (Experiment 6)",
+    "description": "Systematically ablate each novel component of AdaQuantCS to understand its contribution.",
+    "steps": {
+      "step1": "Ablation A — Fixed vs. adaptive grid: Replace the adaptive grid placement (which narrows around the estimated quantile) with a fixed uniform grid spanning the full data range. Run on Gaussian(0,1), p=0.5, k=50, n=100,000, 5 seeds. Measure CI width difference.",
+      "step2": "Ablation B — Grid size sensitivity: Run AdaQuantCS on Gaussian(0,1) and Student-t(df=3), p=0.5, with k in {5, 10, 20, 50, 100, 200}, n=100,000, 5 seeds. Identify the point of diminishing returns.",
+      "step3": "Ablation C — Confidence sequence type: Replace the empirical Bernstein CS with (a) Hoeffding CS (no variance adaptation), (b) a simple Wald-type interval (asymptotic, not anytime-valid). Run on Gaussian(0,1), p=0.5, k=50, n=100,000, 5 seeds. Compare CI width and coverage.",
+      "step4": "Ablation D — Epoch schedule: Compare (a) doubling epochs (2^j), (b) fixed-length epochs (length=1000), (c) tripling epochs (3^j). Run on Gaussian(0,1), p=0.5, k=50, n=100,000, 5 seeds. Measure CI width and memory.",
+      "step5": "Ablation E — Multi-epoch intersection: Compare using only the current epoch's CI vs. intersecting CIs from all epochs. Run on Gaussian(0,1), p=0.5, k=50, n=100,000, 5 seeds.",
+      "step6": "Save all ablation results to results/experiment6_ablations.npz. Expected runtime: ~40 minutes."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Convergence rate analysis",
+    "description": "Empirically verify that AdaQuantCS CI widths converge at the optimal LIL rate sqrt(log log t / t).",
+    "steps": {
+      "step1": "Run AdaQuantCS (k=50) on Gaussian(0,1), p=0.5, with a single long stream of n=10,000,000 (10M observations), 3 seeds. Record CI width at logarithmically-spaced checkpoints: t in {100, 300, 1000, 3000, 10000, 30000, 100000, 300000, 1000000, 3000000, 10000000}.",
+      "step2": "Run the full-memory baseline on the same streams (this will use significant memory at n=10M — approximately 80MB per stream for float64, which is feasible with 128GB RAM).",
+      "step3": "Plot log(CI width) vs. log(t) for both methods. Fit a linear regression to estimate the convergence exponent. The theoretical prediction is slope = -0.5 (up to log log correction). Compute the ratio CI_width * sqrt(t / log(log(t))) — this should plateau if the rate is correct.",
+      "step4": "Save to results/convergence_rate.npz. Expected runtime: ~30 minutes."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and evaluate success criteria",
+    "description": "Compile all experimental results and formally evaluate each success criterion from the proposal.",
+    "steps": {
+      "step1": "Success criterion 1 (Coverage): From Experiment 1, compute the overall empirical coverage rate across all distribution × quantile combinations. Report per-combination coverage with Wilson CIs. Pass if all coverages >= 0.94.",
+      "step2": "Success criterion 2 (CI width convergence): From the convergence rate analysis, report the estimated convergence exponent and the width ratio vs. full-memory baseline. Pass if the exponent is within [-0.55, -0.45] and the ratio is <= 2.0 for k >= 50.",
+      "step3": "Success criterion 3 (Memory savings): From Experiment 2, report the memory ratio at t=10^6. Pass if ratio >= 100.",
+      "step4": "Success criterion 4 (Adaptive vs. fixed grid): From Ablation A, compute the CI width improvement of adaptive over fixed grid. Pass if improvement >= 30%.",
+      "step5": "Compile a summary table of all results and success criteria pass/fail status. Save to results/summary.json.",
+      "step6": "Expected runtime: ~5 minutes (aggregation only)."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for the research paper.",
+    "steps": {
+      "step1": "Figure 1 (Coverage validation): 2×4 grid of panels (2 quantile levels × 4 distributions). Each panel shows CI bounds over time for AdaQuantCS, full-memory CS, and sketch+bootstrap, with the true quantile marked. Use matplotlib with seaborn styling, figsize=(14, 7).",
+      "step2": "Figure 2 (Memory-accuracy tradeoff): (a) Left panel: CI width vs. k at t=100,000, with full-memory baseline as horizontal line. (b) Right panel: CI width vs. time for k in {10, 50, 200} and full-memory, on log-log scale.",
+      "step3": "Figure 3 (Convergence rate): Log-log plot of CI width vs. t for AdaQuantCS (k=50) and full-memory CS, with theoretical sqrt(log log t / t) reference line. Include 3-seed error bands.",
+      "step4": "Figure 4 (Peeking penalty): Coverage vs. number of peeks for sketch+bootstrap (degrading) vs. AdaQuantCS (constant). Show that bootstrap coverage drops from ~0.95 to ~0.80 with 1000 peeks while AdaQuantCS stays at ~0.95.",
+      "step5": "Figure 5 (Ablation summary): Bar chart or heatmap showing CI width across all ablation conditions (grid type, k, CS type, epoch schedule, intersection).",
+      "step6": "Figure 6 (Real-world demo): Two panels showing CI evolution on (a) financial returns VaR and (b) network latency p99, with memory annotation.",
+      "step7": "Table 1: Coverage rates across all distribution × quantile × method combinations with mean +/- std.",
+      "step8": "Table 2: Memory usage and computation time comparison across methods.",
+      "step9": "Save all figures to figures/ as both PDF and PNG (300 DPI). Save tables as LaTeX-formatted strings in results/tables.tex. Use consistent styling: font size 12, colorblind-friendly palette (tab10 or colorbrewer). Expected runtime: ~10 minutes."
+    }
+  }
+]

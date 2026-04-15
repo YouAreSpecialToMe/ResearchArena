@@ -1,0 +1,163 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for ESM-2 inference, GNN training, and evaluation. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 (or latest compatible CUDA version). Verify torch.cuda.is_available() returns True and torch.cuda.get_device_properties(0).total_memory >= 48GB.",
+      "step2": "Install ESM: pip install fair-esm. Verify by importing esm and loading esm.pretrained.esm2_t33_650M_UR50D() on GPU.",
+      "step3": "Install GNN and scientific packages: pip install torch-geometric torch-scatter torch-sparse scipy pandas scikit-learn matplotlib seaborn tqdm requests.",
+      "step4": "Install ProteinGym utilities: pip install proteingym (or clone the ProteinGym repo if pip install is unavailable). We need access to the multi-mutation substitution benchmark CSVs.",
+      "step5": "Create experiment directory structure: exp/ with subdirectories data/, features/, models/, results/, figures/, logs/.",
+      "step6": "Set global random seeds: SEEDS = [42, 123, 456]. Save a shared config file exp/shared/config.py with seeds, hyperparameters, and paths."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess ProteinGym multi-mutation DMS data",
+    "description": "Download ProteinGym substitution benchmark data, filter for assays containing multi-mutation variants (>=2 simultaneous substitutions), and prepare train/val/test splits. We focus on proteins with at least 500 multi-mutation variants to ensure sufficient training data for the GNN.",
+    "steps": {
+      "step1": "Download ProteinGym substitution benchmark CSV files from the official ProteinGym repository (https://github.com/OATML-Markslab/ProteinGym). These are hosted on HuggingFace as well. Download the DMS_substitutions/ directory containing per-assay CSV files.",
+      "step2": "For each assay CSV, parse the 'mutant' column to count the number of mutations per variant (format: 'A123B:C456D' where ':' separates mutations). Filter to keep only assays where at least 500 variants have >=2 mutations. Record dataset statistics: protein name, UniProt ID, wild-type sequence, number of single/double/triple/higher-order mutants, fitness column name.",
+      "step3": "Target datasets (expected from ProteinGym): (a) BLAT_ECOLX_Stiffler_2015 (beta-lactamase, many multi-mutants), (b) GB1_WU_2016 (IgG-binding, complete 4-position combinatorial landscape with ~150K variants), (c) GFP_AEQVI_Sarkisyan_2016 (avGFP, combinatorial mutants), (d) Any additional assays meeting the 500 multi-mutant threshold. If fewer than 4 assays qualify, lower threshold to 200.",
+      "step4": "For each qualifying assay, compute epistasis scores for multi-mutants: epistasis = observed_fitness - sum(single_mutation_effects). The single mutation effects are taken from the same DMS assay when available. Store as a new column 'epistasis_score' in the dataframe.",
+      "step5": "Create 5-fold cross-validation splits for within-protein evaluation. Split on variants (not individual mutations) using stratified splitting based on mutation count (double, triple, etc.) to ensure balanced representation. Save splits as indices in exp/data/splits/{protein_name}_fold{k}.json.",
+      "step6": "Save processed datasets as parquet files in exp/data/processed/{protein_name}.parquet with columns: variant_id, mutant_string, mutations_list (parsed), num_mutations, fitness, epistasis_score, fold_assignment.",
+      "step7": "Generate and save dataset statistics table: exp/data/dataset_statistics.csv with columns protein_name, num_variants_total, num_single, num_double, num_triple_plus, mean_epistasis, std_epistasis, fitness_range."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Extract ESM-2 features and coupling matrices",
+    "description": "Run ESM-2 (650M) inference on all wild-type sequences and mutant sequences to extract per-residue embeddings, masked marginal log-likelihood scores, and attention-based residue coupling matrices. This is the most computationally expensive step (~2-3 hours on 1x A6000).",
+    "steps": {
+      "step1": "Load ESM-2 (esm2_t33_650M_UR50D) onto GPU. For each protein's wild-type sequence: (a) Run forward pass to get per-residue embeddings from the last hidden layer (dim=1280). Save as exp/features/{protein_name}_wt_embeddings.pt (shape: [L, 1280]). (b) Extract attention maps from all 33 layers x 20 heads. Save as exp/features/{protein_name}_attention.pt (shape: [33, 20, L, L]).",
+      "step2": "Compute masked marginal scores for ALL mutations in each assay. For each position i in the protein: mask position i, run ESM-2 forward pass, extract log-probabilities for all 20 amino acids. The single-mutation score s(pos, mut) = log P(mut | context) - log P(wt | context). Save per-protein score matrices as exp/features/{protein_name}_masked_marginal.pt (shape: [L, 20]).",
+      "step3": "Compute residue coupling matrix C from attention maps. For each protein: (a) Select attention heads from layers 20-33 (deeper layers encode more structural information per Rao et al. 2021). (b) Symmetrize attention: C_raw[i,j] = mean over selected heads of (A[h,i,j] + A[h,j,i])/2. (c) Apply Average Product Correction (APC): C_apc[i,j] = C_raw[i,j] - (C_raw[i,:].mean() * C_raw[:,j].mean()) / C_raw.mean(). (d) Save as exp/features/{protein_name}_coupling.pt (shape: [L, L]).",
+      "step4": "For each multi-mutant variant in each assay, compute mutation-specific features: (a) Mutation embedding delta: run ESM-2 on the mutant sequence, extract residue embedding at mutated position, subtract wild-type embedding. delta_i = h_mut_i - h_wt_i (dim=1280). (b) To save compute, batch mutant sequences and process in batches of 8-16. Save per-variant features. NOTE: If computing per-variant embeddings is too slow (>3 hours), use an approximation: use the wild-type embeddings and encode the mutation identity via a learned amino acid embedding instead.",
+      "step5": "Precompute additive ESM-2 scores for all multi-mutant variants: additive_score = sum of masked marginal scores for each constituent mutation. Save as a column in the processed dataset. This serves as both a feature and the primary baseline prediction.",
+      "step6": "Save a feature manifest exp/features/manifest.json listing all extracted features, their shapes, and file paths. Verify all features are consistent (same sequence lengths, no NaN values)."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Additive ESM-2 baseline (simple baseline)",
+    "description": "Evaluate the standard additive ESM-2 approach where multi-mutation fitness is predicted as the sum of individual masked marginal scores. This is the simplest and most widely used PLM-based approach, serving as our primary simple baseline.",
+    "steps": {
+      "step1": "For each protein and each fold, compute Spearman correlation between additive ESM-2 scores and observed fitness on the held-out fold. Also compute RMSE. This is a zero-shot method so no training is needed — just evaluate the precomputed additive scores on each fold's test set.",
+      "step2": "Separately evaluate on subsets: (a) double mutants only, (b) triple+ mutants only, (c) variants with high epistasis (|epistasis_score| > median), (d) variants with low epistasis (|epistasis_score| <= median).",
+      "step3": "Compute epistasis correlation: Spearman rho between (additive_score - mean_additive_score) and (observed_fitness - mean_fitness) restricted to the non-additive residual. Since the additive baseline predicts zero epistasis by definition, this is effectively the correlation of predicted=0 vs observed epistasis.",
+      "step4": "Save all results to exp/results/baseline_additive_esm2.json with structure: {protein_name: {fold_k: {spearman, rmse, spearman_doubles, spearman_triples, spearman_high_epi, spearman_low_epi, epistasis_corr}}}.",
+      "step5": "Run for all 3 seeds (seeds only affect data splits in CV). Record mean and std across folds."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Ridge regression baseline (strong supervised baseline)",
+    "description": "Train a ridge regression model that takes ESM-2 mutation features as input and predicts fitness. This tests whether a simple linear model with the same features can capture non-additive effects, providing a strong supervised baseline that controls for the feature quality.",
+    "steps": {
+      "step1": "For each multi-mutant variant, construct a feature vector by concatenating: (a) additive ESM-2 score (1 dim), (b) number of mutations (1 dim), (c) sum of absolute mutation embedding deltas across positions (1280 dim or a PCA-reduced version to 64 dim), (d) mean pairwise coupling score among mutated positions (1 dim), (e) max pairwise coupling score (1 dim), (f) mean sequence separation between mutated positions (1 dim). Total feature dim: ~70 (with PCA) or ~1285 (without).",
+      "step2": "Use PCA to reduce mutation embedding features to 64 dimensions (fit PCA on training fold only to avoid leakage). Standardize all features (fit scaler on training fold).",
+      "step3": "Train sklearn Ridge regression with alpha selected via inner 3-fold CV on the training fold (alphas = [0.01, 0.1, 1, 10, 100, 1000]). Evaluate on held-out fold.",
+      "step4": "Evaluate same metrics as additive baseline: Spearman, RMSE, subset analyses, epistasis correlation.",
+      "step5": "Save results to exp/results/baseline_ridge.json. Run for all 3 seeds (which vary the CV folds). Record mean and std."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "MLP baseline (strong non-linear baseline / ablation)",
+    "description": "Train a small MLP that takes the same mutation features as EpiGNN but without the graph structure. This directly ablates the contribution of the graph — if the MLP matches EpiGNN, the graph structure is not helping. Uses the same feature set but with a simple concatenation + pooling instead of message passing.",
+    "steps": {
+      "step1": "Architecture: For each multi-mutant, pool mutation features by summing the per-mutation embeddings (delta_i). Concatenate with: additive score, num_mutations, mean/max coupling, mean separation. Pass through MLP: Linear(input_dim, 256) -> ReLU -> Dropout(0.1) -> Linear(256, 128) -> ReLU -> Dropout(0.1) -> Linear(128, 1). Output is the predicted epistatic correction epsilon. Final prediction = additive_score + epsilon.",
+      "step2": "Training: Adam optimizer, lr=1e-3, weight_decay=1e-4, batch_size=64, max 200 epochs with early stopping (patience=20) on validation Spearman correlation. Use 80/20 split of training fold for train/val within each CV fold.",
+      "step3": "Evaluate same metrics as other baselines on held-out fold.",
+      "step4": "Save results to exp/results/baseline_mlp.json. Run for all 3 seeds.",
+      "step5": "This also serves as the 'no graph structure' ablation for EpiGNN."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "EpiGNN: mutation-centric graph attention network",
+    "description": "Train and evaluate the proposed EpiGNN model. For each multi-mutant variant, construct a mutation subgraph where nodes are mutated positions (with PLM-derived mutation embeddings) and edges are weighted by PLM attention-based residue coupling. Apply GATv2 message passing layers to model epistatic interactions, predicting an epistatic correction term added to the additive PLM score.",
+    "steps": {
+      "step1": "Implement EpiGNN in exp/shared/models.py. Architecture details: (a) Node features: mutation embedding delta_i (1280 dim) projected via Linear(1280, 128). (b) Edge features: [coupling_score, sequence_separation, coupling_score * sequence_separation_inv] (3 dim) projected via Linear(3, 32). (c) GATv2 layers: 2 layers, 4 attention heads, hidden dim 128, concat heads then project. Use edge features in attention computation by adding edge_proj to the attention logits. (d) Readout: sum pooling over nodes -> Linear(128, 64) -> ReLU -> Linear(64, 1) to predict epistatic correction epsilon. (e) Final: fitness = additive_score + epsilon.",
+      "step2": "Implement graph construction in exp/shared/graph_utils.py. For a variant with k mutations at positions {p1,...,pk}: (a) Create k nodes with mutation embedding deltas as features. (b) Create fully-connected edges (k*(k-1) directed edges for k nodes). (c) Edge features: coupling C[pi,pj] from precomputed coupling matrix, |pi-pj| (sequence separation), 1/(1+|pi-pj|) (inverse separation). (d) For single mutants, create a single-node graph with a self-loop (coupling=1, sep=0). (e) Use PyTorch Geometric Data objects. Batch variants into DataLoader with batch_size=64.",
+      "step3": "Training loop in exp/train_epignn.py: (a) Loss: MSE on the epistatic correction (epsilon_pred vs epsilon_obs = fitness_obs - additive_score). Also experiment with direct fitness MSE. (b) Optimizer: Adam, lr=5e-4, weight_decay=1e-4. (c) LR scheduler: ReduceLROnPlateau(patience=10, factor=0.5). (d) Early stopping: patience=30 epochs based on validation Spearman on epistatic correction. (e) Max epochs: 300. (f) Train/val split: 80/20 of training fold.",
+      "step4": "Run 5-fold CV for each protein, for each of 3 seeds. Evaluate: Spearman(predicted_fitness, observed_fitness), RMSE, epistasis_correlation (Spearman of predicted vs observed epistasis), and subset analyses (doubles, triples, high/low epistasis).",
+      "step5": "Save per-fold predictions to exp/results/epignn_predictions_{protein}_{seed}_fold{k}.csv. Save aggregated metrics to exp/results/main_epignn.json.",
+      "step6": "Monitor GPU memory usage during training. The model should use <2GB VRAM. If memory issues arise with batching large graphs, reduce batch_size to 32."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: random coupling edges",
+    "description": "Replace PLM-derived coupling scores with random edge weights drawn from U(0,1) to test whether the specific coupling information from ESM-2 attention maps is important, or whether any graph structure suffices.",
+    "steps": {
+      "step1": "Use the same EpiGNN architecture but replace coupling_score edge features with random values sampled from Uniform(0,1). Keep sequence separation features unchanged.",
+      "step2": "Train with identical hyperparameters, folds, and seeds as the main EpiGNN experiment.",
+      "step3": "Evaluate same metrics. Save to exp/results/ablation_random_edges.json.",
+      "step4": "Statistical test: paired t-test (or Wilcoxon signed-rank test) comparing EpiGNN vs random-edge EpiGNN across all protein-fold combinations. Report p-value."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: number of GNN layers",
+    "description": "Vary the number of GATv2 layers (1, 2, 3) to determine the optimal depth for modeling epistatic interactions. Too few layers may underfit; too many may oversmooth on these small graphs.",
+    "steps": {
+      "step1": "Run EpiGNN with 1 GATv2 layer (same hidden dim 128, 4 heads). Train with same protocol.",
+      "step2": "Run EpiGNN with 3 GATv2 layers. Train with same protocol.",
+      "step3": "Compare 1-layer, 2-layer (main), 3-layer results. Save to exp/results/ablation_num_layers.json.",
+      "step4": "Analyze whether optimal depth correlates with typical mutation count in the dataset (more mutations = larger graphs = potentially more layers needed)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: training target (fitness vs epistasis residual)",
+    "description": "Compare training on direct fitness prediction vs training on the epistatic residual (non-additive component). The residual-based training should help the model focus on what matters — the deviation from additivity.",
+    "steps": {
+      "step1": "Train EpiGNN variant that minimizes MSE(predicted_fitness, observed_fitness) directly instead of the epistatic residual. Architecture is identical; only the loss target changes.",
+      "step2": "Evaluate same metrics. Save to exp/results/ablation_fitness_target.json.",
+      "step3": "Compare: which training target produces better Spearman correlation on fitness? Which produces better epistasis correlation? Hypothesis: residual training produces better epistasis correlation but fitness-target training may produce comparable or better overall Spearman."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: ESM-2 model size (650M vs 150M)",
+    "description": "Test whether a smaller ESM-2 backbone (150M parameters) provides sufficient coupling information, or whether the larger 650M model is needed for accurate epistasis prediction. This tests the claim that deeper PLMs encode richer epistatic information.",
+    "steps": {
+      "step1": "Load ESM-2 (esm2_t30_150M_UR50D). Re-extract features for all proteins: wild-type embeddings (dim=640), masked marginal scores, and coupling matrices (from 30 layers x 20 heads).",
+      "step2": "Adjust EpiGNN input projection: Linear(640, 128) instead of Linear(1280, 128). Adjust coupling computation to use layers 15-30 of the 150M model.",
+      "step3": "Train and evaluate with same protocol. Save to exp/results/ablation_esm2_150m.json.",
+      "step4": "Compare feature extraction time and prediction quality. The 150M model should be ~4x faster for inference."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical comparison and success criteria evaluation",
+    "description": "Perform rigorous statistical comparisons across all methods and evaluate against the predefined success criteria from idea.json.",
+    "steps": {
+      "step1": "Aggregate all results across proteins, folds, and seeds. Create a master results table with columns: method, protein, seed, fold, spearman, rmse, epistasis_corr, spearman_doubles, spearman_triples.",
+      "step2": "For each protein, compute paired statistical tests (Wilcoxon signed-rank test) comparing EpiGNN vs each baseline across fold-seed combinations. Report p-values with Bonferroni correction for multiple comparisons.",
+      "step3": "Evaluate success criterion 1: Does EpiGNN achieve statistically significant improvement (p < 0.05) over additive ESM-2 on >= 70% of proteins?",
+      "step4": "Evaluate success criterion 2: Does EpiGNN significantly outperform the MLP baseline (no graph)? Use paired test across all protein-fold-seed combinations.",
+      "step5": "Evaluate success criterion 3: Does EpiGNN with PLM coupling edges significantly outperform random edges?",
+      "step6": "Evaluate success criterion 4: Is the epistasis correlation significantly positive for EpiGNN and significantly better than baselines?",
+      "step7": "Compute improvement correlation: across proteins, does EpiGNN's improvement over additive baseline correlate with the mean epistasis magnitude in that protein's dataset? Report Spearman correlation of (improvement_per_protein) vs (mean_abs_epistasis_per_protein).",
+      "step8": "Save comprehensive results to exp/results/statistical_comparison.json and a human-readable summary to exp/results/summary.md."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures summarizing main results, ablations, and analyses for the paper.",
+    "steps": {
+      "step1": "Figure 1 — Main results bar chart: Spearman correlation for each method (Additive ESM-2, Ridge, MLP, EpiGNN) across all proteins. Grouped bar chart with proteins on x-axis, methods as groups, error bars showing std across seeds. Use matplotlib with seaborn styling. Save as exp/figures/figure1_main_results.pdf and .png (300 DPI).",
+      "step2": "Figure 2 — Epistasis improvement scatter: x-axis = mean |epistasis| per protein, y-axis = EpiGNN improvement over additive baseline (delta Spearman). Each point is a protein. Add trend line and Pearson/Spearman correlation annotation. Save as exp/figures/figure2_epistasis_improvement.pdf.",
+      "step3": "Figure 3 — Ablation results: grouped bar chart comparing EpiGNN variants (full, no graph/MLP, random edges, 1-layer, 3-layer, fitness target, ESM-2 150M). Mean Spearman across proteins with error bars. Save as exp/figures/figure3_ablations.pdf.",
+      "step4": "Figure 4 — Per-mutation-count performance: line plot showing Spearman correlation vs number of mutations (2, 3, 4+) for each method. This shows whether EpiGNN's advantage grows with mutation count (more epistasis opportunities). Save as exp/figures/figure4_mutation_count.pdf.",
+      "step5": "Table 1 — Main results table: LaTeX-formatted table with proteins as rows, methods as columns, Spearman correlation ± std as entries. Bold best, underline second-best. Save as exp/figures/table1_main_results.tex.",
+      "step6": "Table 2 — Ablation results table: LaTeX-formatted table summarizing all ablations. Save as exp/figures/table2_ablations.tex.",
+      "step7": "Supplementary Figure — Coupling matrix visualization: for one example protein (e.g., GB1), plot the ESM-2 attention-derived coupling matrix as a heatmap, highlighting the mutated positions. Overlay known structural contacts if available. Save as exp/figures/supp_coupling_matrix.pdf."
+    }
+  }
+]

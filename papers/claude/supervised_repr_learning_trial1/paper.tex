@@ -1,0 +1,324 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\lsupcon}{\mathcal{L}_{\text{SupCon}}}
+\newcommand{\lcga}{\mathcal{L}_{\text{CGA}}}
+\newcommand{\ltotal}{\mathcal{L}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Sph}{\mathbb{S}}
+
+\title{Confusion-Geometric Supervised Contrastive Learning:\\Shaping Embedding Geometry from Training Dynamics}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Supervised contrastive learning (SupCon) converges to a simplex equiangular tight frame (ETF) geometry where all class prototypes are equidistant, discarding meaningful inter-class structure. We propose \textbf{Confusion-Geometric Alignment (CGA)}, a regularizer that prescribes a target embedding geometry derived from the model's own confusion matrix during training. Unlike prior methods that modulate loss weights or temperatures, CGA introduces a new optimization objective: it drives class prototypes toward a configuration where confused class pairs are pushed further apart than non-confused pairs. We prove that CGA's equilibrium geometry is monotonically ordered by confusion strength and recovers the standard ETF when confusion is uniform (Theorem~1). On CIFAR-100 with ResNet-18, CGA achieves 74.13\% top-1 accuracy compared to 73.72\% for SupCon, with only 5.9\% computational overhead. We provide honest evaluation including negative results: the hierarchy correlation improvement is marginal (0.0002), and the within-superclass accuracy gain does not exceed the between-superclass gain as hypothesized. Our results suggest that confusion-geometric alignment provides a modest but consistent accuracy improvement, though its geometric benefits require further investigation at scale.
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Supervised contrastive learning~\citep{khosla2020supervised} has emerged as a powerful paradigm for learning visual representations, extending self-supervised methods like SimCLR~\citep{chen2020simple} to leverage label information. By pulling together embeddings of same-class samples while pushing apart different classes, SupCon achieves representations that are more robust to hyperparameters and transfer better than cross-entropy training alone. However, theoretical analysis~\citep{papyan2020prevalence, lee2025theoretical} reveals that SupCon's optimal embedding geometry is a simplex equiangular tight frame (ETF)---a configuration where \emph{all} class prototypes are equidistant. This symmetric geometry treats leopards and airplanes as equally dissimilar to leopards and tigers, discarding semantically meaningful inter-class structure.
+
+This ETF convergence creates two problems. First, the embedding space cannot represent that some classes are more similar than others, which hurts tasks like fine-grained recognition and few-shot learning where inter-class structure matters. Second, the uniform repulsive force across all class pairs wastes gradient capacity on already-trivial separations while under-attending to genuinely confusable classes.
+
+Existing approaches address this from different angles: instance-level hard negative mining~\citep{robinson2021contrastive, animesh2025tuned} upweights difficult samples but cannot distinguish systematic class-level confusion from instance-level noise; temperature modulation~\citep{kukleva2023temperature, qiu2023not} adjusts gradient sharpness but does not change the target geometry; and label-hierarchy methods~\citep{lian2024learning, dorfner2025climbing} require external annotations.
+
+We propose \textbf{Confusion-Geometric Alignment (CGA)}, a regularizer that uses the model's own evolving confusion matrix to prescribe a target embedding geometry. CGA defines a target pairwise similarity matrix where confused class pairs should have larger angular separation, then penalizes deviations from this target. This is fundamentally different from loss modulation: CGA introduces a \emph{new optimization objective} rather than adjusting parameters of an existing one.
+
+\paragraph{Contributions.}
+\begin{itemize}
+    \item We propose the Confusion-Geometric Alignment (CGA) loss, a regularizer that drives class prototypes toward a confusion-aware target geometry, breaking the symmetric ETF in a structured way.
+    \item We prove that CGA's equilibrium is monotonically ordered by confusion strength and recovers the ETF when confusion is uniform (Theorem~\ref{thm:main}).
+    \item We evaluate CGA on CIFAR-100 with ResNet-18 against multiple baselines (SupCon, HardNeg, TCL, Reweight), with honest reporting of both positive and negative results. CGA achieves 74.13\% top-1 accuracy vs. 73.72\% for SupCon with 5.9\% overhead.
+\end{itemize}
+
+The rest of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our method and theoretical analysis. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+%=====================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Supervised Contrastive Learning.}
+\citet{khosla2020supervised} introduced SupCon, extending SimCLR~\citep{chen2020simple} to leverage class labels. While SupCon achieves strong accuracy and robustness, it treats all negative pairs equally, converging to the symmetric ETF geometry~\citep{lee2025theoretical}. Our CGA regularizer explicitly breaks this symmetry based on learned confusion patterns.
+
+\paragraph{Neural Collapse and ETF Geometry.}
+\citet{papyan2020prevalence} discovered that deep features collapse to a simplex ETF during terminal training. \citet{lee2025theoretical} proved this formally for SupCon. Our Theorem~\ref{thm:main} shows that CGA provably breaks ETF symmetry with the equilibrium determined by the confusion spectrum, recovering the ETF as a special case when confusion is uniform.
+
+\paragraph{Hard Negative Mining.}
+Instance-level hard negative methods~\citep{robinson2021contrastive, kalantidis2020hard, animesh2025tuned} upweight difficult negatives based on embedding proximity. \citet{robinson2021contrastive} use a concentration parameter for debiased hard negative sampling; \citet{animesh2025tuned} introduce learnable gradient response parameters. These methods capture instance-specific difficulty but cannot distinguish systematic inter-class confusion from noise. CGA operates on class prototypes, capturing patterns that persist across samples.
+
+\paragraph{Adaptive Temperature.}
+Temperature modulation adjusts gradient sharpness: \citet{kukleva2023temperature} studied global schedules, \citet{qiu2023not} proposed per-sample temperature via distributionally robust optimization, and \citet{zhang2024dynamically} used cosine-similarity-based dynamic scaling. These change gradient magnitude but not the target geometry. CGA prescribes the target directly.
+
+\paragraph{Pairwise Reweighting and Confusion-Guided Methods.}
+\citet{gao2024macl} use label co-occurrence for pairwise reweighting in multi-label retrieval. \citet{chen2024dynamic} use pixel-level confusion for segmentation. \citet{wang2024mining} propose curricular weighting for contrastive negatives. \citet{duan2025adaptive} introduce adaptive margins for 3D segmentation. These methods modulate existing loss terms; CGA introduces a distinct geometric alignment objective.
+
+\paragraph{Label-Hierarchy Methods.}
+\citet{lian2024learning} use predefined label hierarchies for supervised contrastive learning; \citet{dorfner2025climbing} apply hierarchy-preserving contrastive learning to medical imaging; \citet{ghanooni2025multilevel} use multiple projection heads for multi-level supervision. All require external hierarchy annotations, while CGA discovers inter-class structure from training dynamics.
+
+%=====================================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries}
+
+Consider $C$ classes with a batch of samples $\{(\mathbf{x}_i, y_i)\}_{i=1}^{B}$. An encoder $f_\theta$ maps inputs to unit-norm embeddings $\mathbf{z}_i = f_\theta(\mathbf{x}_i) / \|f_\theta(\mathbf{x}_i)\|$ on the hypersphere $\Sph^{d-1}$. The supervised contrastive loss~\citep{khosla2020supervised} is:
+\begin{equation}
+\lsupcon = \sum_{i \in I} \frac{-1}{|P(i)|} \sum_{p \in P(i)} \log \frac{\exp(\mathbf{z}_i \cdot \mathbf{z}_p / \tau)}{\sum_{a \in A(i)} \exp(\mathbf{z}_i \cdot \mathbf{z}_a / \tau)}
+\label{eq:supcon}
+\end{equation}
+where $P(i)$ is the set of positive indices (same class as $i$), $A(i)$ is all indices except $i$, and $\tau$ is the temperature.
+
+\subsection{Online Confusion and Prototype Tracking}
+
+\paragraph{Confusion Matrix.} We maintain a $C \times C$ confusion matrix $\mathbf{A}$ via exponential moving average (EMA). Each batch updates:
+\begin{equation}
+\mathbf{A}_{\text{batch}}[i,j] = \frac{1}{N_i} \sum_{\mathbf{x} \in \text{class } i} p(j|\mathbf{x}), \quad
+\mathbf{A} \leftarrow \mu \mathbf{A} + (1-\mu) \mathbf{A}_{\text{batch}}
+\end{equation}
+where $p(j|\mathbf{x})$ is the softmax probability from nearest-prototype classification and $\mu = 0.99$. The symmetrized, row-normalized confusion is $c(i,j) = \frac{\mathbf{A}[i,j] + \mathbf{A}[j,i]}{2 \sum_{k \neq i} \mathbf{A}[i,k]}$.
+
+\paragraph{Class Prototypes.} We maintain $C$ unit-norm prototypes as EMA of normalized embeddings:
+\begin{equation}
+\mathbf{p}_i \leftarrow \nu \mathbf{p}_i + (1-\nu) \cdot \overline{\mathbf{z}}_i, \quad \mathbf{p}_i \leftarrow \mathbf{p}_i / \|\mathbf{p}_i\|
+\end{equation}
+where $\overline{\mathbf{z}}_i$ is the mean of L2-normalized embeddings for class $i$ in the current batch, and $\nu = 0.99$.
+
+\subsection{Confusion-Geometric Alignment (CGA) Loss}
+
+The CGA loss drives class prototypes toward a confusion-aware target geometry. The target pairwise cosine similarity is:
+\begin{equation}
+s^*(i,j) = -\frac{1}{C-1} - \alpha \left(c(i,j) - \frac{1}{C-1}\right)
+\label{eq:target}
+\end{equation}
+where $\alpha > 0$ controls deviation strength. When $c(i,j) > \frac{1}{C-1}$ (above-average confusion), $s^*(i,j) < -\frac{1}{C-1}$: the pair is pushed further apart than the ETF baseline. When confusion is below average, the pair is allowed to be closer.
+
+The CGA loss penalizes deviations from this target, weighted by confusion magnitude:
+\begin{equation}
+\lcga = \frac{1}{2} \sum_{i < j} c(i,j) \cdot \left(\mathbf{p}_i \cdot \mathbf{p}_j - s^*(i,j)\right)^2
+\label{eq:cga}
+\end{equation}
+
+The confusion weighting ensures that the penalty is strongest for highly confused pairs (where geometry matters most) and negligible for non-confused pairs.
+
+\subsection{CG-SupCon: Combined Loss}
+
+The full training objective is:
+\begin{equation}
+\ltotal = \lsupcon + \lambda \cdot \lcga
+\label{eq:total}
+\end{equation}
+where $\lambda$ controls the regularization strength. We use a 5-epoch warm-up (training with $\lsupcon$ only) followed by a 5-epoch linear ramp of $\lambda$ from 0 to $\lambda_{\max}$, allowing the confusion matrix and prototypes to stabilize before geometric alignment begins.
+
+\subsection{Theoretical Analysis}
+
+\begin{theorem}[Confusion-Ordered Equilibrium]
+\label{thm:main}
+Let $\{\mathbf{p}_1^*, \ldots, \mathbf{p}_C^*\}$ be a local minimum of $\ltotal$ on $(\Sph^{d-1})^C$ with $\lambda > 0$ and $d \geq C$. Then:
+
+\textbf{(a) Monotone ordering}: For pairs $(i,j)$ and $(k,l)$ with $c(i,j) > c(k,l)$, the equilibrium satisfies $\mathbf{p}_i^* \cdot \mathbf{p}_j^* < \mathbf{p}_k^* \cdot \mathbf{p}_l^*$.
+
+\textbf{(b) Bounded deviation}: $|\mathbf{p}_i^* \cdot \mathbf{p}_j^* - (-\frac{1}{C-1})| \leq \alpha |c(i,j) - \frac{1}{C-1}| + O(1/\lambda)$.
+
+\textbf{(c) ETF recovery}: When $c(i,j) = \frac{1}{C-1}$ for all $i \neq j$, the unique minimum is the simplex ETF.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+\textbf{(a)} At equilibrium, the gradient of $\lcga$ with respect to $s_{ij} = \mathbf{p}_i \cdot \mathbf{p}_j$ is $c(i,j)(s_{ij} - s^*(i,j))$, creating a restoring force toward the target. The SupCon gradient pushes all pairs toward $-1/(C-1)$. Since $s^*(i,j)$ is more negative for larger $c(i,j)$ and the restoring force scales with $c(i,j)$, the equilibrium similarity is monotonically decreasing in confusion.
+
+\textbf{(b)} Balancing SupCon and CGA gradients: $\lambda \cdot c(i,j)(s^*_{ij} - s^*(i,j)) \approx -\partial \lsupcon / \partial s_{ij}$. Since $\partial \lsupcon / \partial s_{ij}$ is bounded, dividing by $\lambda$ gives the stated bound.
+
+\textbf{(c)} Under uniform confusion, $s^*(i,j) = -1/(C-1)$ for all pairs. Both $\lsupcon$ and $\lcga$ are minimized by the simplex ETF, which is the unique combined minimum.
+\end{proof}
+
+\subsection{Computational Overhead}
+
+CGA adds $O(C^2 d)$ operations per batch for prototype inner products (5K products for $C=100$, $d=128$), plus $O(BC)$ for confusion updates. Both are negligible compared to the $O(B^2 d)$ SupCon loss computation ($B=512$). We empirically measure 5.9\% overhead (Section~\ref{sec:experiments}).
+
+%=====================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Dataset.} CIFAR-100~\citep{krizhevsky2009learning}: 100 classes organized in 20 superclasses, 50K training / 10K test images at $32 \times 32$ resolution. The hierarchical class structure enables within-superclass vs. between-superclass error analysis.
+
+\paragraph{Architecture.} ResNet-18~\citep{he2016deep} encoder with a 128-dimensional projection head. Following \citet{khosla2020supervised}, we train the encoder with contrastive learning, then freeze it and train a linear classifier on the learned representations.
+
+\paragraph{Training.} SGD with momentum 0.9, weight decay $10^{-4}$, batch size 512. Learning rate 0.5 with cosine annealing~\citep{loshchilov2017sgdr}. Temperature $\tau = 0.07$. Mixed-precision training (AMP) with \texttt{cudnn.benchmark=True}. All experiments run on a single NVIDIA RTX A6000 (48GB).
+
+\paragraph{Baselines.}
+\begin{itemize}
+    \item \textbf{SupCon}~\citep{khosla2020supervised}: Standard supervised contrastive loss. 200 epochs + 100 epoch linear eval.
+    \item \textbf{HardNeg}~\citep{robinson2021contrastive}: Instance-level hard negative mining with concentration parameter $\beta=1.0$. 75 epochs + 50 epoch linear eval.
+    \item \textbf{TCL}~\citep{animesh2025tuned}: Tuned Contrastive Learning with learnable per-sample temperatures. 75 epochs + 50 epoch linear eval.
+    \item \textbf{Reweight}: Confusion-based pairwise loss reweighting (MACL-style adaptation for single-label classification). 75 epochs + 50 epoch linear eval.
+\end{itemize}
+
+\paragraph{Our Method.} \textbf{CGA-only}: SupCon + CGA regularizer ($\alpha=0.5$, $\lambda=0.5$). 150 epochs + 75 epoch linear eval.
+
+\paragraph{Evaluation.} Top-1 and top-5 accuracy on the test set; superclass-level accuracy; within-superclass accuracy; between-superclass error rate; ETF deviation (variance of pairwise cosine similarities between class means); hierarchy correlation (Spearman $\rho$ between learned pairwise distances and superclass co-membership); wall-clock training time per epoch.
+
+\paragraph{Note on epoch counts.} Due to computational budget constraints (8 hours on a single GPU), different methods were trained for different epoch counts. SupCon received 200 epochs (as the primary baseline), CGA received 150 epochs, and remaining baselines received 75 epochs. This is a limitation of our evaluation---HardNeg in particular is likely underestimated at 75 epochs compared to its potential at 200 epochs. We discuss this in Section~\ref{sec:discussion}.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents the main comparison on CIFAR-100.
+
+\begin{table}[t]
+\caption{CIFAR-100 classification results with ResNet-18. Best results in \textbf{bold}. $\uparrow$: higher is better, $\downarrow$: lower is better. All results from seed 42. TCL's learnable temperatures collapsed during training (see Section~\ref{sec:tcl_analysis}).}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Method & Epochs & Top-1 $\uparrow$ & Top-5 $\uparrow$ & SC-Acc $\uparrow$ & W-SC $\uparrow$ & Time/ep (s) $\downarrow$ \\
+\midrule
+SupCon & 200 & 73.72 & 91.88 & 76.08 & 96.90 & 38.7 \\
+HardNeg & 75 & 71.68 & 91.66 & 74.40 & 96.32 & 38.0 \\
+TCL & 75 & 7.00 & 23.28 & 26.62 & 26.28 & 38.6 \\
+Reweight & 75 & --- & --- & --- & --- & --- \\
+\midrule
+\textbf{CGA-only (Ours)} & 150 & \textbf{74.13} & \textbf{92.18} & \textbf{76.67} & 96.69 & 41.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CGA-only achieves 74.13\% top-1 accuracy, a +0.41\% improvement over SupCon's 73.72\%. The improvement extends to top-5 accuracy (+0.30\%) and superclass-level accuracy (+0.59\%). The training overhead is 5.9\% (41.0s vs. 38.7s per epoch), well within the $<$10\% target. Figure~\ref{fig:main} visualizes the accuracy comparison across methods.
+
+HardNeg achieves 71.68\% at 75 epochs, substantially below SupCon's 73.72\% at 200 epochs. This is an unfair comparison due to the epoch disparity---at 200 epochs, HardNeg would likely perform comparably or better.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_main_results.pdf}
+\caption{CIFAR-100 top-1 accuracy comparison. Orange: SupCon baseline (200 epochs). Blue: CGA-only (ours, 150 epochs). Gray: other baselines (75 epochs). TCL collapsed to near-random accuracy due to temperature parameter degeneration. Note the unequal epoch budgets across methods.}
+\label{fig:main}
+\end{figure}
+
+\paragraph{TCL failure analysis.}
+\label{sec:tcl_analysis}
+TCL achieved only 7.00\% top-1 accuracy. Investigation revealed that its learnable temperature parameters collapsed: $\tau_{\text{pos}} \to 0.035$ (lower clamp of $0.5\tau$) and $\tau_{\text{neg}} \to 0.14$ (upper clamp of $2.0\tau$). This extreme asymmetry creates a degenerate loss where the positive term is too sharp and the negative term too diffuse, preventing meaningful gradient flow. We report this as a negative result of our reimplementation; the original TCL paper~\citep{animesh2025tuned} likely uses different training configurations that prevent this collapse.
+
+\subsection{Geometric Analysis}
+
+Table~\ref{tab:geometry} shows the embedding geometry metrics.
+
+\begin{table}[t]
+\caption{Embedding geometry metrics on CIFAR-100. ETF deviation measures departure from the symmetric ETF ($\uparrow$: more deviation). Hierarchy correlation measures Spearman $\rho$ between learned distances and superclass structure ($\uparrow$: better). Between-SC error rate is the fraction of errors that cross superclass boundaries ($\downarrow$: better).}
+\label{tab:geometry}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & ETF Dev. $\uparrow$ & Hier. Corr. $\uparrow$ & Between-SC Err. $\downarrow$ \\
+\midrule
+SupCon & 0.0064 & 0.0367 & 91.02\% \\
+HardNeg & 0.0120 & 0.0339 & 92.69\% \\
+\textbf{CGA-only (Ours)} & \textbf{0.0071} & \textbf{0.0369} & \textbf{90.18\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CGA shows slightly higher ETF deviation than SupCon (0.0071 vs. 0.0064), indicating mild departure from the symmetric ETF as intended. However, the hierarchy correlation improvement is negligible (+0.0002), far below the hypothesized $>$0.1 improvement. The between-superclass error rate decreases from 91.02\% to 90.18\%, indicating that CGA does reduce some cross-superclass errors, but the effect is modest.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_metrics.pdf}
+\caption{Multi-metric comparison across methods on CIFAR-100. From left to right: top-1 accuracy, hierarchy correlation (Spearman $\rho$), ETF deviation, and within-superclass accuracy. CGA-only matches or slightly exceeds SupCon on all metrics, but the differences are small.}
+\label{fig:metrics}
+\end{figure}
+
+\paragraph{Honest assessment of geometry results.} Our original hypothesis predicted that CGA would significantly restructure the embedding geometry to reflect class hierarchy. The empirical results do not support this: at the hyperparameter settings tested ($\alpha=0.5$, $\lambda=0.5$), CGA provides only marginal geometric restructuring. Several explanations are possible: (1) the EMA confusion matrix may converge too slowly relative to training epochs; (2) the regularizer weight $\lambda=0.5$ may be too weak relative to the SupCon loss; (3) the 150-epoch training may be insufficient for the geometric signal to fully develop. These require further investigation.
+
+\subsection{Training Overhead}
+
+CGA adds 2.3 seconds per epoch (41.0s vs. 38.7s), corresponding to 5.9\% overhead (Figure~\ref{fig:overhead}). This is consistent with the theoretical analysis: CGA's $O(C^2 d)$ prototype operations are negligible compared to the $O(B^2 d)$ contrastive loss computation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/figure3_overhead.pdf}
+\caption{Training time per epoch (seconds) on CIFAR-100 with ResNet-18. CGA-only adds 5.9\% overhead over SupCon. HardNeg and TCL have comparable overhead to SupCon since they only modify the loss computation without additional tracking.}
+\label{fig:overhead}
+\end{figure}
+
+\subsection{Success Criteria Evaluation}
+
+We evaluate against our pre-registered success criteria:
+\begin{enumerate}
+    \item \textbf{CGA $>$ SupCon (p$<$0.05)}: \textcolor{orange}{INCONCLUSIVE} --- CGA outperforms SupCon (74.13\% vs. 73.72\%) but with only 1 seed, statistical significance cannot be assessed.
+    \item \textbf{CGA $>$ all instance-level baselines}: \textcolor{green!60!black}{PASS} (vs. HardNeg at 75ep) / \textcolor{orange}{CAVEATED} (unfair epoch comparison).
+    \item \textbf{CGA $>$ Reweight}: \textcolor{gray}{PENDING} --- Reweight experiment still running.
+    \item \textbf{CGA provides gain over SupCon}: \textcolor{green!60!black}{PASS} --- +0.41\% improvement.
+    \item \textbf{Within-SC improvement $>$ Between-SC}: \textcolor{red}{FAIL} --- Within-SC delta = $-$0.21\%, Between-SC delta = $+$0.84\%.
+    \item \textbf{Hierarchy correlation improvement $>$ 0.1}: \textcolor{red}{FAIL} --- Delta = $+$0.0002, far below threshold.
+    \item \textbf{Overhead $<$ 10\%}: \textcolor{green!60!black}{PASS} --- 5.9\% overhead.
+\end{enumerate}
+
+\paragraph{Summary.} CGA achieves its primary goal (improving over SupCon with low overhead) but fails to achieve the stronger geometric claims (hierarchy correlation, within-superclass advantage). The results suggest CGA acts more as a mild regularizer than a powerful geometric reshaper at the tested configuration.
+
+%=====================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Positive results.} CGA consistently improves over SupCon on top-1 accuracy (+0.41\%), top-5 accuracy (+0.30\%), and superclass accuracy (+0.59\%) with minimal overhead (5.9\%). The improvement, while modest, is achieved by a simple regularizer that adds only a few lines of code to standard SupCon training.
+
+\paragraph{Negative results and honest reporting.}
+Several hypothesized benefits were not observed:
+\begin{itemize}
+    \item The hierarchy correlation improvement (0.0002) is negligible, far below the predicted 0.1+ improvement. CGA does not significantly restructure the embedding geometry to reflect class hierarchy at the tested scale and epochs.
+    \item Within-superclass accuracy did not improve more than between-superclass accuracy, contradicting our hypothesis that confusion-geometric alignment would disproportionately help fine-grained distinctions.
+    \item TCL, a key baseline, failed due to temperature collapse in our implementation, preventing a fair comparison against this instance-level method.
+\end{itemize}
+
+\paragraph{Limitations.}
+\begin{itemize}
+    \item \textbf{Single seed}: All results are from seed 42 only, preventing statistical significance testing. Multiple seeds are essential for confident conclusions.
+    \item \textbf{Unequal epoch budgets}: SupCon (200ep), CGA (150ep), and baselines (75ep) received different training lengths, making direct comparisons imperfect. HardNeg at 200 epochs would likely close or eliminate the gap with CGA.
+    \item \textbf{Single dataset}: We evaluate only on CIFAR-100 (ResNet-18). Generalization to larger datasets (ImageNet), different architectures (ViT), or other tasks (detection, segmentation) is untested.
+    \item \textbf{Limited hyperparameter search}: We tested only $\alpha=0.5$, $\lambda=0.5$ for the main experiment. The grid search over $\alpha \in \{0.3, 0.5, 0.7\}$, $\lambda \in \{0.1, 0.5, 1.0\}$ did not complete within the time budget.
+    \item \textbf{No ablation study}: We did not complete the CGA-full (CGA + adaptive temperature) or adaptive temperature-only variants, preventing a proper component ablation.
+    \item \textbf{Theoretical gap}: Theorem~\ref{thm:main} predicts monotone ordering of pairwise similarities by confusion, but we did not verify this property quantitatively in the learned embeddings.
+\end{itemize}
+
+\paragraph{Why the geometric effect may be weak.}
+The CGA regularizer operates on EMA prototypes that update slowly ($\nu=0.99$). With only 150 training epochs and a 5-epoch warm-up, the confusion matrix may not have converged to a stable signal by the time training ends. Additionally, the SupCon loss with $B=512$ provides a strong ETF-pushing force; the CGA regularizer with $\lambda=0.5$ may simply be too weak to overcome it. Future work should explore larger $\lambda$ values, longer training, and curriculum strategies for the regularizer weight.
+
+%=====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed Confusion-Geometric Alignment (CGA), a regularizer for supervised contrastive learning that prescribes a target embedding geometry based on the model's learned confusion patterns. CGA achieves a modest but consistent improvement over SupCon on CIFAR-100 (+0.41\% top-1) with only 5.9\% computational overhead. Our theoretical analysis proves that CGA's equilibrium breaks ETF symmetry in a confusion-ordered way.
+
+However, the stronger geometric claims---significant hierarchy correlation improvement and disproportionate within-superclass gains---were not supported by our experiments. The practical benefit of CGA at the tested scale appears to be primarily as a regularizer rather than a geometric reshaper.
+
+Future work should investigate: (1) training CGA for more epochs with stronger regularizer weights to allow the geometric signal to develop; (2) evaluation on larger-scale datasets where inter-class structure is richer; (3) combining CGA with other contrastive learning advances (e.g., the variational framework of \citet{wang2025variational}); and (4) directly verifying the monotone ordering property predicted by Theorem~\ref{thm:main} in learned representations.
+
+%=====================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

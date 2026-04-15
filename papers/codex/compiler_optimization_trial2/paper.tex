@@ -1,0 +1,429 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{multirow}
+
+\title{Typed Skip-Versus-Global Scheduling for LLVM Cleanup Pipelines: A Negative Proxy Study}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+LLVM's 2024 \emph{LastRunTrackingAnalysis} established that some cleanup reruns are redundant, but it only carries coarse temporal evidence. Our original proposal asked whether richer typed evidence plus local execution could improve cleanup scheduling on a bounded LLVM slice. The available artifact cannot execute that full design: the workspace exposes installed LLVM 18.1.3 command-line passes, but not the in-tree pass-manager hooks needed for function-local or loop-local cleanup. We therefore report the strongest executable study that remains: a proxy harness that keeps the typed evidence model but can decide only between skipping a cleanup rerun and executing it globally. The evaluated slice is \texttt{sroa $\rightarrow$ instcombine $\rightarrow$ simplifycfg $\rightarrow$ gvn $\rightarrow$ instcombine $\rightarrow$ simplifycfg $\rightarrow$ licm $\rightarrow$ loop-rotate $\rightarrow$ instcombine $\rightarrow$ simplifycfg}. Across 10 generated executable workloads, the main typed proxy (\texttt{typed\_skip\_global}) reaches 50\% certificate coverage and 50\% \texttt{unknown} rate, slows compilation by 40.9\% versus stock LLVM (589.2\,ms vs.\ 418.1\,ms), and increases generated-program runtime by 38.9\% (85.0\,ms vs.\ 61.2\,ms). On 24 reduced regressions, the same proxy improves compile time by 7.8\% (286.3\,ms vs.\ 310.7\,ms). The resulting claim is intentionally narrow: in this LLVM 18.1.3 command-line proxy harness, typed evidence without executable local repair does not outperform coarse baselines on the broader workload mix.
+\end{abstract}
+
+\section{Introduction}
+
+Cleanup and canonicalization still consume visible LLVM middle-end time. Passes such as \texttt{InstCombine}, \texttt{SimplifyCFG}, \texttt{LoopSimplify}, and \texttt{LCSSA} recur because earlier transforms may invalidate the structural assumptions that later optimization passes require. LLVM's recent \emph{LastRunTrackingAnalysis} already narrowed this space by tracking whether an idempotent transform has already converged and whether compatible intervening changes have occurred \citep{zheng2024lastrun}. The remaining question is therefore incremental rather than foundational: can richer evidence make those rerun decisions better?
+
+Our proposal targeted one specific extension. Producer passes would emit typed evidence about cleanup-facing invariants and, when possible, where any damage was localized. The scheduler would then choose among skipping the rerun, rerunning on a function subset, or falling back to a global cleanup. That full mechanism is \emph{not} executable in the present workspace. The artifact contains installed LLVM 18.1.3 command-line tools and a proxy harness, but not the in-tree pass-manager instrumentation needed for true function-local or loop-local cleanup execution.
+
+This paper is therefore framed around the strongest claim that the artifact can support: a negative proxy study of typed \emph{skip-versus-global} scheduling on a fixed LLVM cleanup slice. The proxy keeps the typed certificate vocabulary from the proposal, but when it encounters non-preserved state it can only run the cleanup pass globally. That is weaker than the intended design, but still scientifically useful. It tests whether typed evidence alone is strong enough to beat coarse baselines in a controlled harness, and it exposes where the evidence collapses.
+
+The answer is mixed and mostly negative. On 10 generated executable workloads, the typed proxy reaches only 50\% certificate coverage, falls back to \texttt{unknown} on the other 50\%, and slows compilation by 40.9\% versus stock LLVM. On 24 reduced regressions, the same proxy improves compile time by 7.8\%, indicating that the typed rules are not vacuous but are too narrow to generalize. The artifact therefore supports a limited empirical conclusion: typed evidence in this command-line proxy harness is not yet good enough to justify the added machinery.
+
+Our contributions are:
+\begin{itemize}
+  \item We reframe the project around the strongest executable claim in the current artifact: a conservative proxy study of typed skip-versus-global cleanup scheduling on LLVM 18.1.3 command-line passes.
+  \item We compare that proxy against stock scheduling, a last-run proxy, a dirty-function heuristic, a throttling baseline, and three executed ablations on 10 executable workloads and 24 reduced regressions.
+  \item We show that the main typed proxy reaches 50\% coverage and 50\% \texttt{unknown} rate, which is sufficient for a 7.8\% compile-time win on targeted regressions but not for the broader executable suite, where it slows compilation by 40.9\%.
+  \item We document reproducibility boundaries directly, including three planned but infeasible conditions whose local-execution mechanisms are absent from this workspace.
+\end{itemize}
+
+Section~\ref{sec:related} separates archival prior work from LLVM engineering context. Section~\ref{sec:method} describes the proxy scheduler and its scope. Section~\ref{sec:experiments} presents the experimental results. Section~\ref{sec:repro} summarizes reproducibility and artifact mapping. Section~\ref{sec:discussion} discusses limitations and implications. The appendix records exact manifests, skipped conditions, and artifact paths.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Archival research}
+
+\paragraph{Canonical-form maintenance.}
+\citet{fritz2018waddle} argues for always-canonical intermediate representation maintained through local repair, and \citet{fritz2018canonical} gives a concrete local maintenance algorithm for a specific CFG update. These are the closest conceptual predecessors, but they make a stronger claim than this paper. They redesign or extend the maintenance mechanism itself. Our study does not propose a new local repair algorithm; it asks whether typed evidence can improve \emph{scheduling} decisions in an LLVM-like pipeline.
+
+\paragraph{Compile-time optimization and scheduling.}
+Prior work has optimized pass order, modeled pass interactions, or provided research infrastructure for studying compiler decisions at scale \citep{liu2024efficient,liang2023learning,trofin2021mlgo,cummins2022compilergym}. That literature is adjacent but not directly competitive. We keep the pass order fixed and optimize only whether cleanup passes rerun inside one bounded slice. \citet{huemer2024closer} is especially relevant methodologically because it argues for fine-grained attribution of compilation cost; that motivates our reporting of cleanup time, skip counts, coverage, and fallback behavior instead of only end-to-end compile time.
+
+\subsection{LLVM engineering context}
+
+The direct engineering baseline is LLVM's 2024 \emph{LastRunTrackingAnalysis} RFC and implementation effort \citep{zheng2024lastrun}. It contributes temporal evidence about whether rerunning a transform is likely to be redundant. Our original proposal aimed to extend that mechanism with invariant type and locality-aware execution.
+
+LLVM documentation and source-level utilities provide implementation context, not equivalent scholarly evidence. The new pass manager documentation explains invalidation and analysis-preservation behavior \citep{llvm-new-pass-manager}, while utilities such as \texttt{DomTreeUpdater}, \texttt{LoopSimplify}, and LCSSA support local maintenance in principle \citep{llvm-domtreeupdater,llvm-loopsimplify,llvm-lcssa-ssaupdater}. We cite them only to clarify why the original design was plausible, not to present them as prior empirical validation.
+
+Relative to this landscape, our paper occupies a narrow position. It is more incremental than always-canonical IR work, but more semantically structured than coarse temporal rerun tracking. The present artifact, however, only validates the proxy skip-versus-global fragment of that idea.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Target slice and retained claim}
+
+We study the fixed optimization slice
+\begin{center}
+\small
+\texttt{sroa $\rightarrow$ instcombine $\rightarrow$ simplifycfg $\rightarrow$ gvn $\rightarrow$ instcombine $\rightarrow$ simplifycfg $\rightarrow$ licm $\rightarrow$ loop-rotate $\rightarrow$ instcombine $\rightarrow$ simplifycfg}.
+\normalsize
+\end{center}
+This slice contains four producer passes (\texttt{SROA}, \texttt{GVN}, \texttt{LICM}, and \texttt{LoopRotate}) and three cleanup insertion points, each consisting of \texttt{InstCombine} followed by \texttt{SimplifyCFG}. The proposal's optional \texttt{LoopSimplify}/\texttt{LCSSA} path remains part of the conceptual design, but it is not executable in the present harness.
+
+The retained empirical claim is deliberately limited. We do \emph{not} evaluate function-local or loop-local execution. We evaluate only whether typed evidence, when restricted to skip-versus-global decisions, improves behavior relative to coarse baselines on this fixed slice.
+
+\subsection{Typed certificate lattice}
+
+The proxy preserves the proposal's cleanup-facing invariant vocabulary:
+\begin{itemize}
+  \item \texttt{CFGCanonical}
+  \item \texttt{InstCombineOpportunity}
+  \item \texttt{LoopSimplifyForm}
+  \item \texttt{LCSSAForm}
+  \item \texttt{DomTreeFresh}
+  \item \texttt{LoopInfoFresh}
+\end{itemize}
+Each invariant takes one of five conceptual values:
+\[
+\{\texttt{preserved},\ \texttt{dirty(function\mbox{-}set)},\ \texttt{dirty(loop\mbox{-}set)},\ \texttt{global\_dirty},\ \texttt{unknown}\}.
+\]
+\texttt{unknown} is first-class and conservative. Any required \texttt{unknown} forces global execution.
+
+The executable harness uses a reduced online subset of this lattice. For the measured cleanup decisions, the observed reasons are \texttt{preserved}, \texttt{dirty(function-set)}, and \texttt{unknown}. The stronger locality-aware states remain part of the intended design but are unreachable in the current artifact because the proxy cannot exploit them operationally.
+
+\subsection{Proxy scheduler policy}
+
+The original design would choose among \texttt{skip\_global}, \texttt{run\_function\_local}, \texttt{run\_loop\_local}, and \texttt{run\_global}. The present artifact supports only two actions:
+\begin{itemize}
+  \item \textbf{skip} when the relevant certificate is \texttt{preserved};
+  \item \textbf{run globally} otherwise.
+\end{itemize}
+This restriction is the core scope boundary of the paper. It preserves the evidence question while removing the unimplemented local-execution mechanism.
+
+\subsection{Executable transfer rules}
+
+The transfer functions are intentionally conservative and small. They use producer deltas over instruction, CFG, loop, PHI, alloca, and call counts, plus the set of changed functions, to assign cleanup-facing evidence. Table~\ref{tab:rules} summarizes the exact executable rules used by \texttt{typed\_skip\_global}. The asymmetry of these rules is reflected directly in the results: the main proxy exhibits 50\% certificate coverage and 50\% \texttt{unknown} rate on both corpora.
+
+\begin{table*}[t]
+\caption{Executable transfer rules used by \texttt{typed\_skip\_global}. Here $\Delta x$ denotes the producer-induced change in metric $x$, and $|F|$ is the number of dirty functions. Any non-\texttt{preserved} result still executes globally in this artifact because local cleanup is unavailable.}
+\label{tab:rules}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Producer & \texttt{InstCombine} rule & \texttt{SimplifyCFG} rule \\
+\midrule
+\texttt{SROA} &
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $|\Delta$instruction$| > 18$ \\
+\texttt{dirty(function-set)} if any of $\Delta$instruction, $\Delta$alloca, $\Delta\phi$ is nonzero \\
+\texttt{preserved} otherwise
+\end{tabular}
+&
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $\Delta$loop $\neq 0$ or $|F| > 2$ \\
+\texttt{dirty(function-set)} if $\Delta$branch $\neq 0$ or $\Delta$basic-block $\neq 0$ \\
+\texttt{preserved} otherwise
+\end{tabular}
+\\
+\midrule
+\texttt{GVN} &
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $|\Delta$call$| > 1$ \\
+\texttt{dirty(function-set)} if any of $\Delta$instruction, $\Delta\phi$, $\Delta$call is nonzero \\
+\texttt{preserved} otherwise
+\end{tabular}
+&
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $|\Delta$basic-block$| > 2$ \\
+\texttt{dirty(function-set)} if $\Delta$branch $\neq 0$ or $\Delta$basic-block $\neq 0$ \\
+\texttt{preserved} otherwise
+\end{tabular}
+\\
+\midrule
+\texttt{LICM} &
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $\Delta$loop $\neq 0$ \\
+\texttt{dirty(function-set)} if $\Delta$instruction $\neq 0$ \\
+\texttt{preserved} otherwise
+\end{tabular}
+&
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $\Delta$loop $\neq 0$ or $|\Delta\phi| > 1$ \\
+\texttt{dirty(function-set)} if any of $\Delta$branch, $\Delta$basic-block, $\Delta\phi$ is nonzero \\
+\texttt{preserved} otherwise
+\end{tabular}
+\\
+\midrule
+\texttt{LoopRotate} &
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $\Delta$loop $\neq 0$ \\
+\texttt{dirty(function-set)} if $|\Delta$instruction$| > 2$ \\
+\texttt{preserved} otherwise
+\end{tabular}
+&
+\begin{tabular}[t]{@{}l@{}}
+\texttt{unknown} if $\Delta$loop $\neq 0$ or $|F| > 1$ \\
+\texttt{dirty(function-set)} if $\Delta$branch $\neq 0$ or $\Delta$basic-block $\neq 0$ \\
+\texttt{preserved} otherwise
+\end{tabular}
+\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Baselines and ablations}
+
+We compare the main typed proxy against four executed baselines:
+\begin{itemize}
+  \item \textbf{stock}: the fixed pipeline slice with ordinary cleanup scheduling.
+  \item \textbf{last\_run}: a coarse temporal rerun proxy.
+  \item \textbf{dirty\_function}: a locality-only heuristic.
+  \item \textbf{throttle}: a simple schedule that skips every second eligible cleanup point.
+\end{itemize}
+We also report three executed ablations:
+\texttt{untyped\_locality}, \texttt{single\_bit\_state}, and \texttt{all\_unknown}. Three additional planned conditions are explicitly marked as infeasible in the artifact: \texttt{typed\_cert\_function}, \texttt{typed\_cert\_loop}, and \texttt{no\_local\_execution}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Environment.}
+All results come from the installed LLVM 18.1.3 command-line toolchain in the workspace. The experiments are CPU-only, use at most two workers, and treat seeds \{11, 17, 29\} as order-randomization seeds rather than optimization randomness. The artifact itself describes this as a proxy heuristic study over stock LLVM command-line passes.
+
+\paragraph{Workloads.}
+The executable suite contains 10 generated workloads:
+\texttt{adpcm\_like}, \texttt{automotive\_qsort1\_like}, \texttt{consumer\_jpeg\_like}, \texttt{dijkstra\_like}, \texttt{fft\_like}, \texttt{heapsort\_like}, \texttt{huffbench\_like}, \texttt{office\_stringsearch\_like}, \texttt{security\_sha\_like}, and \texttt{telecom\_crc32\_like}. The regression suite contains 24 reduced LLVM IR tests organized as 8 CFG-cleanup cases, 8 loop-form cases, and 8 mixed cases.
+
+\paragraph{Measurement protocol.}
+Each main configuration (\texttt{stock}, \texttt{last\_run}, \texttt{dirty\_function}, \texttt{throttle}, and \texttt{typed\_skip\_global}) contributes 90 executable-suite runs and 72 regression-suite runs. Each auxiliary ablation contributes 60 executable runs and 72 regression runs. The paper reports the means and standard deviations stored in \texttt{exp/*/results.json} and \texttt{exp/*/regressions\_summary.json}. All recorded executed runs satisfy verifier, differential-output, and regression checks.
+
+\paragraph{Metrics.}
+We report compile time, cumulative cleanup time, generated-program runtime, binary size, certificate coverage, and \texttt{unknown} rate. We additionally summarize bookkeeping overhead and per-run cleanup decision patterns from the raw JSONL traces.
+
+\subsection{Main result on executable workloads}
+
+Table~\ref{tab:exec-main} gives the paper's main empirical result. On the executable workload mix, \texttt{typed\_skip\_global} is substantially worse than stock and worse than the coarse baselines. Mean compile time rises from 418.1\,ms to 589.2\,ms (+40.9\%), cleanup time rises from 269.5\,ms to 392.2\,ms, and generated-program runtime rises from 61.2\,ms to 85.0\,ms (+38.9\%). Certificate coverage is only 0.5, exactly matched by a 0.5 \texttt{unknown} rate.
+
+The negative result is important because it is not just a bookkeeping artifact. The typed proxy is allowed to skip only when the evidence is strong, but in this corpus the rules are strong enough only half the time. The other half collapses to coarse global execution.
+
+\begin{table}[t]
+\caption{Executable-workload results on 10 generated benchmarks. Best compile-time value is in bold. Negative $\Delta$ means faster than stock.}
+\label{tab:exec-main}
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Compile (ms) & $\Delta$ (\%) & Cleanup (ms) & Runtime (ms) & Size (B) & Coverage / Unknown \\
+\midrule
+Stock & 418.1 & 0.0 & 269.5 & 61.2 & 29515.2 & 1.0 / 0.0 \\
+Last-run proxy & 420.7 & 0.6 & 287.4 & 62.5 & 29515.2 & 1.0 / 0.0 \\
+Dirty-function & 431.4 & 3.2 & 279.7 & 66.2 & 29515.2 & 1.0 / 0.0 \\
+\textbf{Throttle} & \textbf{275.4} & \textbf{-34.1} & \textbf{145.3} & 61.1 & 29924.8 & 1.0 / 0.0 \\
+Typed skip/global & 589.2 & 40.9 & 392.2 & 85.0 & 29515.2 & 0.5 / 0.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:compile-reduction} visualizes the same executable-suite result for the five main configurations. The most aggressive simple baseline, \texttt{throttle}, improves compile time dramatically, which shows that compile-time reductions are easy to obtain if one is willing to skip cleanup more broadly. The typed proxy does not achieve the same effect because it pays evidence-gathering overhead while still falling back frequently.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/figure1_compile_reduction.pdf}
+  \caption{Compile-time reduction relative to stock for the five executed main configurations. On the executable suite, \texttt{typed\_skip\_global} is slower than stock, while \texttt{throttle} yields the largest speedup.}
+  \label{fig:compile-reduction}
+\end{figure}
+
+\subsection{Regression results}
+
+The reduced regression suite yields a different outcome. As Table~\ref{tab:reg-main} shows, \texttt{typed\_skip\_global} reduces compile time from 310.7\,ms to 286.3\,ms, a 7.8\% improvement over stock and a 7.7\% improvement over the last-run proxy. Cleanup time also falls from 210.2\,ms to 185.1\,ms. This is the strongest non-throttle result on the regression corpus.
+
+That contrast is the core empirical shape of the paper. The typed rules \emph{can} remove some redundant cleanup when the workload is aligned to the proxy's assumptions, but they are not robust enough to carry over to the broader generated executable suite.
+
+\begin{table}[t]
+\caption{Regression-suite results on 24 reduced LLVM IR tests. Best compile-time value is in bold. Negative $\Delta$ means faster than stock.}
+\label{tab:reg-main}
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Compile (ms) & $\Delta$ (\%) & Cleanup (ms) & Runtime (ms) & Size (B) & Coverage / Unknown \\
+\midrule
+Stock & 310.7 & 0.0 & 210.2 & 5.3 & 20589.3 & 1.0 / 0.0 \\
+Last-run proxy & 310.1 & -0.2 & 208.4 & 6.9 & 20589.3 & 1.0 / 0.0 \\
+Dirty-function & 315.8 & 1.6 & 209.8 & 5.4 & 20589.3 & 1.0 / 0.0 \\
+\textbf{Throttle} & \textbf{202.5} & \textbf{-34.8} & \textbf{104.6} & 4.8 & 20589.3 & 1.0 / 0.0 \\
+Typed skip/global & 286.3 & -7.8 & 185.1 & 4.8 & 20589.3 & 0.5 / 0.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Outcome accounting and evidence quality}
+
+The raw traces explain why the proxy behaves this way. Every \texttt{typed\_skip\_global} run contains exactly eight cleanup decisions: one preserved skip, four \texttt{unknown}-driven global executions, and three \texttt{dirty(function-set)} cases that still execute globally because the artifact has no local path. On the executable suite alone, that corresponds to 90 preserved skips, 360 global executions after \texttt{unknown}, and 270 global executions after \texttt{dirty(function-set)}. Across executable and regression traces together, the counts are 162, 648, and 486 respectively.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.82\linewidth]{figures/figure2_outcomes.pdf}
+  \caption{Outcome breakdown for \texttt{typed\_skip\_global} on the executable suite. Bars show mean cleanup decisions per run. The segment labeled ``global after dirty(function-set)'' denotes cleanup decisions whose certificate was \texttt{dirty(function-set)} but that still ran globally because the artifact has no local-execution path.}
+  \label{fig:outcomes}
+\end{figure}
+
+Figure~\ref{fig:cert-quality} shows the second important fact: each executable benchmark exhibits the same 0.5 coverage and 0.5 \texttt{unknown} rate. The proxy is therefore not being hurt by a small number of outliers; the evidence deficit is structural in this harness.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.82\linewidth]{figures/figure3_certificate_quality.pdf}
+  \caption{Per-benchmark certificate coverage and \texttt{unknown} rate for \texttt{typed\_skip\_global} on the 10 executable workloads. Each benchmark shows the same 0.5 coverage and 0.5 \texttt{unknown} rate.}
+  \label{fig:cert-quality}
+\end{figure}
+
+This pattern also appears in bookkeeping overhead. Averaged over executable and regression traces together, mean bookkeeping cost is 80.7\,$\mu$s for \texttt{typed\_skip\_global}, 30.4\,$\mu$s for \texttt{last\_run}, 16.1\,$\mu$s for \texttt{dirty\_function}, and 7.1\,$\mu$s for \texttt{stock}. On executable traces only, the corresponding means are 94.2, 30.8, 14.9, and 7.1\,$\mu$s. These values are small in absolute terms, but they matter because the typed proxy pays them while still executing seven of eight cleanup decisions.
+
+\subsection{Ablations}
+
+Table~\ref{tab:ablations} positions the main typed proxy against its executed simplifications. No typed variant wins on executable workloads. \texttt{all\_unknown} is slower than stock by 20.3\% but still faster than \texttt{typed\_skip\_global}, indicating that partially useful typed state can be worse than fully conservative fallback when it does not enable enough skips. \texttt{untyped\_locality} and \texttt{single\_bit\_state} are also worse than stock on executables. On regressions, however, \texttt{typed\_skip\_global} is the strongest non-throttle configuration.
+
+\begin{table}[t]
+\caption{Ablation summary. Negative $\Delta$ means faster than stock. The strongest non-throttle regression result is \texttt{typed\_skip\_global}; no typed variant wins on executables.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Method & Exec.\ $\Delta$ (\%) & Reg.\ $\Delta$ (\%) & Exec.\ coverage & Exec.\ unknown \\
+\midrule
+Typed skip/global & 40.9 & -7.8 & 0.5 & 0.5 \\
+Untyped locality & 25.3 & 8.5 & 1.0 & 0.0 \\
+Single-bit state & 80.7 & 0.7 & 1.0 & 0.0 \\
+All unknown & 20.3 & 10.1 & 0.0 & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Reproducibility}
+\label{sec:repro}
+
+This paper is reproducible at the level of the present artifact's claim. All quantitative results in the main text come directly from the checked-in summaries under \texttt{exp/}. The executable-suite numbers in Table~\ref{tab:exec-main} come from \texttt{exp/*/results.json}; the regression-suite numbers in Table~\ref{tab:reg-main} come from \texttt{exp/*/regressions\_summary.json}. Figures~\ref{fig:compile-reduction}, \ref{fig:outcomes}, and \ref{fig:cert-quality} use the checked-in PDFs in \texttt{figures/}. Raw per-run traces, including bookkeeping overhead and cleanup decisions, are stored in \texttt{exp/*/raw\_results.jsonl} and \texttt{exp/*/regressions\_results.jsonl}.
+
+Three planned conditions are not merely absent but explicitly marked as infeasible. \texttt{typed\_cert\_function} and \texttt{typed\_cert\_loop} require in-tree LLVM pass-manager wrappers that the workspace does not contain. \texttt{no\_local\_execution} is skipped because, in this harness, disabling local execution would be behaviorally identical to \texttt{typed\_skip\_global}. Reporting those conditions as skipped rather than fabricating surrogates is part of the paper's scientific scope control.
+
+Appendix~\ref{app:artifacts} lists the exact artifact paths used in the paper, and Appendix~\ref{app:skipped} summarizes the skipped conditions and their recorded reasons.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The paper's main result is negative but internally consistent. Typed evidence is helpful only when the scheduler can obtain it with enough coverage and then act on it at the required granularity. In this harness, neither condition is satisfied. Coverage stops at 50\%, and the remaining 50\% of decisions become \texttt{unknown}. Even when the proxy obtains \texttt{dirty(function-set)} evidence, it cannot convert that into local execution, so seven of eight cleanup decisions still run globally.
+
+The baselines sharpen that conclusion. \texttt{last\_run} is nearly neutral on both corpora, and \texttt{dirty\_function} is slightly worse than stock. \texttt{throttle} is the only strong compile-time winner, but it does so by skipping cleanup much more aggressively and, on executable workloads, increases mean binary size from 29{,}515.2 to 29{,}924.8 bytes. That is not evidence for the typed-scheduling hypothesis; it is evidence that simple compile-time reduction heuristics can trade away some optimization behavior.
+
+The study has four major limitations. First, it is a proxy evaluation over LLVM 18.1.3 command-line tools rather than an in-tree pass-manager extension. Second, the workload suite is locally generated and reduced, not an upstream benchmark release. Third, the executed design is skip-versus-global only; the proposal's main function-local mechanism is untested. Fourth, the paper inherits the available artifact outputs rather than regenerating the entire experimental matrix during this writing stage.
+
+These limitations should narrow the claim, not invalidate the result. The negative finding is still useful because it identifies two concrete gates for future work: usable typed coverage must rise well above 50\%, and true local execution must exist so that dirty-function evidence does not collapse back to global reruns.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper studied the strongest version of the idea that the present artifact can execute: typed skip-versus-global cleanup scheduling on a bounded LLVM cleanup slice. The main proxy, \texttt{typed\_skip\_global}, reaches 50\% certificate coverage and 50\% \texttt{unknown} rate. That is enough to improve compile time by 7.8\% on 24 targeted regressions, but not enough to help on 10 executable workloads, where compile time worsens by 40.9\% relative to stock LLVM.
+
+The conclusion is therefore narrow and negative. In this LLVM 18.1.3 command-line proxy harness, typed evidence without executable local repair does not outperform LLVM's coarse baselines on the broader workload mix. A stronger future test would need to run inside LLVM's pass manager, implement real function-local cleanup wrappers, and treat \texttt{unknown}-rate reduction as a first-order objective.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+
+\section{Experiment Manifests and Artifact Paths}
+\label{app:artifacts}
+
+Table~\ref{tab:artifact-paths} lists the exact artifact paths used by the paper relative to the workspace root.
+
+\begin{table*}[h]
+\caption{Artifact paths used in the paper.}
+\label{tab:artifact-paths}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Purpose & Path \\
+\midrule
+Main manuscript source & \texttt{paper.tex} \\
+Bibliography database & \texttt{refs.bib} \\
+Proposal foundation & \texttt{proposal.md} \\
+Idea summary & \texttt{idea.json} \\
+Experiment plan & \texttt{plan.json} \\
+Executable-suite stock summary & \texttt{exp/stock/results.json} \\
+Executable-suite last-run summary & \texttt{exp/last\_run/results.json} \\
+Executable-suite dirty-function summary & \texttt{exp/dirty\_function/results.json} \\
+Executable-suite throttle summary & \texttt{exp/throttle/results.json} \\
+Executable-suite typed proxy summary & \texttt{exp/typed\_skip\_global/results.json} \\
+Executable-suite ablation summaries & \texttt{exp/untyped\_locality/results.json}, \texttt{exp/single\_bit\_state/results.json}, \texttt{exp/all\_unknown/results.json} \\
+Regression-suite stock summary & \texttt{exp/stock/regressions\_summary.json} \\
+Regression-suite last-run summary & \texttt{exp/last\_run/regressions\_summary.json} \\
+Regression-suite dirty-function summary & \texttt{exp/dirty\_function/regressions\_summary.json} \\
+Regression-suite throttle summary & \texttt{exp/throttle/regressions\_summary.json} \\
+Regression-suite typed proxy summary & \texttt{exp/typed\_skip\_global/regressions\_summary.json} \\
+Regression-suite ablation summaries & \texttt{exp/untyped\_locality/regressions\_summary.json}, \texttt{exp/single\_bit\_state/regressions\_summary.json}, \texttt{exp/all\_unknown/regressions\_summary.json} \\
+Executable raw traces & \texttt{exp/*/raw\_results.jsonl} \\
+Regression raw traces & \texttt{exp/*/regressions\_results.jsonl} \\
+Command logs & \texttt{exp/*/logs/benchmarks\_commands.jsonl}, \texttt{exp/*/logs/regressions\_commands.jsonl} \\
+Compile-reduction figure & \texttt{figures/figure1\_compile\_reduction.pdf} \\
+Outcome figure & \texttt{figures/figure2\_outcomes.pdf} \\
+Certificate-quality figure & \texttt{figures/figure3\_certificate\_quality.pdf} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Run counts.}
+The main executed configurations each contain 90 executable-suite runs and 72 regression-suite runs. The auxiliary executed ablations each contain 60 executable-suite runs and 72 regression-suite runs. For \texttt{typed\_skip\_global}, each run contains exactly eight cleanup decisions, yielding 720 executable-suite cleanup decisions and 576 regression-suite cleanup decisions.
+
+\section{Skipped Conditions}
+\label{app:skipped}
+
+Table~\ref{tab:skipped} summarizes the planned conditions that were intentionally not executed.
+
+\begin{table*}[h]
+\caption{Planned conditions marked as skipped in the artifact.}
+\label{tab:skipped}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Condition & Recorded path & Recorded reason \\
+\midrule
+\texttt{typed\_cert\_function} & \texttt{exp/typed\_cert\_function/results.json} &
+True function-local cleanup execution requires LLVM pass-manager instrumentation and wrappers that are not present in this workspace. \\
+\texttt{typed\_cert\_loop} & \texttt{exp/typed\_cert\_loop/results.json} &
+Loop-local repair wrappers for \texttt{LoopSimplify}/\texttt{LCSSA} are not implementable against the installed stock LLVM binaries alone. \\
+\texttt{no\_local\_execution} & \texttt{exp/no\_local\_execution/results.json} &
+The proxy harness never implements local execution, so this ablation would be behaviorally identical to \texttt{typed\_skip\_global}. \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Selected Numeric Provenance}
+\label{app:numbers}
+
+The main numeric claims in the paper map directly to the following files:
+\begin{itemize}
+  \item 418.1\,ms, 589.2\,ms, and the 40.9\% executable compile-time delta come from \texttt{exp/stock/results.json} and \texttt{exp/typed\_skip\_global/results.json}.
+  \item 310.7\,ms, 286.3\,ms, and the 7.8\% regression compile-time delta come from \texttt{exp/stock/regressions\_summary.json} and \texttt{exp/typed\_skip\_global/regressions\_summary.json}.
+  \item 61.2\,ms and 85.0\,ms executable runtime means come from the same two executable-suite summaries above.
+  \item The 0.5 coverage and 0.5 \texttt{unknown} rate for the typed proxy come from \texttt{exp/typed\_skip\_global/results.json} and \texttt{exp/typed\_skip\_global/regressions\_summary.json}.
+  \item The per-run pattern of one skip, four \texttt{unknown} fallbacks, and three dirty-but-global runs is derived from \texttt{exp/typed\_skip\_global/raw\_results.jsonl} and \texttt{exp/typed\_skip\_global/regressions\_results.jsonl}.
+  \item The bookkeeping-overhead means of 80.7, 30.4, 16.1, and 7.1\,$\mu$s across both corpora are derived from the raw JSONL traces for \texttt{typed\_skip\_global}, \texttt{last\_run}, \texttt{dirty\_function}, and \texttt{stock}.
+\end{itemize}
+
+\end{document}

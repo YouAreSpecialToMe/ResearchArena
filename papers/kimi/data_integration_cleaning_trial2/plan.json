@@ -1,0 +1,229 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for ProgramClean experiments including vLLM for local LLM inference, data processing libraries, and baseline implementations",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "1.1_create_venv": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "1.2_install_core": "Install core dependencies: pip install pandas numpy scipy scikit-learn tqdm",
+      "1.3_install_llm": "Install vLLM for CPU inference: pip install vllm --extra-index-url https://download.pytorch.org/whl/cpu",
+      "1.4_install_analysis": "Install analysis/plotting: pip install matplotlib seaborn tabulate",
+      "1.5_verify": "Verify installations: python -c 'import pandas; import vllm; print(\"OK\")'",
+      "1.6_model_download": "Download models: huggingface-cli download meta-llama/Llama-3.2-3B-Instruct --local-dir ./models/llama-3.2-3b; huggingface-cli download codellama/CodeLlama-7b-Instruct-hf --local-dir ./models/codellama-7b"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Benchmark Datasets",
+    "description": "Download standard data cleaning benchmarks (Hospital, Flights, Beers) and create novel domain test data. Prepare ground truth labels for evaluation.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "2.1_create_dirs": "Create directory structure: mkdir -p data/{hospital,flights,beers,novel}/raw data/{hospital,flights,beers,novel}/processed",
+      "2.2_download_hospital": "Download Hospital dataset from https://github.com/BigDaMa/raha/tree/master/raha/datasets/hospital. Save to data/hospital/raw/",
+      "2.3_download_flights": "Download Flights dataset from https://github.com/BigDaMa/raha/tree/master/raha/datasets/flights. Save to data/flights/raw/",
+      "2.4_download_beers": "Download Beers dataset from https://github.com/BigDaMa/raha/tree/master/raha/datasets/beers. Save to data/beers/raw/",
+      "2.5_create_novel": "Create novel domain test datasets with 6 semantic types: BTC addresses (100 samples), ETH addresses (100), JWT tokens (100), modern TLD emails (100), UUIDs (100), GitHub repo URLs (100). Include ~20% errors per type.",
+      "2.6_ground_truth": "Parse ground truth files for Hospital, Flights, Beers datasets. Create CSV with columns: row_id, column_name, original_value, clean_value, is_error.",
+      "2.7_statistics": "Compute dataset statistics: row counts, column counts, error rates per column, data types. Save to data/{dataset}/stats.json",
+      "2.8_split": "For each dataset, ensure dirty/clean pairs are aligned. No train/test split needed (unsupervised setting)."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Implement Data Profiling Utilities",
+    "description": "Create utilities for extracting column statistics and samples for LLM prompting. This supports Phase 1 (Semantic Profiling) of ProgramClean.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "3.1_profiler_class": "Implement ColumnProfiler class in src/profiler.py with methods: profile_column(df, col_name) returning {min, max, distinct_count, null_count, pattern_distribution, sample_values}",
+      "3.2_pattern_detection": "Implement pattern detection: detect_regex_patterns(values) to identify common patterns like dates, phone numbers, IDs",
+      "3.3_sample_selection": "Implement diverse sampling: select_diverse_samples(values, n=10) that selects representative values covering pattern diversity",
+      "3.4_test_profiler": "Test profiler on Hospital dataset: python -m pytest tests/test_profiler.py -v"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement ProgramClean Core Components",
+    "description": "Implement the three-phase ProgramClean pipeline: Semantic Profiling (LLM), Constraint Program Synthesis (LLM), and Program Execution (native Python).",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "4.1_llm_backend": "Implement LLM backend in src/llm_backend.py: class vLLMBackend with generate(prompt, max_tokens=1024, temperature=0.1) method. Support both Llama-3.2-3B and CodeLlama-7b.",
+      "4.2_semantic_profiler": "Implement semantic profiling in src/semantic_profiler.py: generate_semantic_profile(column_stats, column_name, samples) → structured profile with type, constraints, common_errors",
+      "4.3_program_synthesis": "Implement program synthesis in src/program_synthesis.py: synthesize_constraint_program(semantic_profile) → Python code string with validate_X(), repair_X(), detect_and_repair() functions",
+      "4.4_sandbox": "Implement sandboxed execution in src/sandbox.py: execute_program_safely(code, data, timeout=30, max_memory_mb=512) with AST-based validation, restricted builtins, process isolation",
+      "4.5_programclean_class": "Implement main ProgramClean class in src/programclean.py with methods: fit(df) [profiles columns and synthesizes programs], transform(df) [executes programs], fit_transform(df)",
+      "4.6_test_components": "Unit test each component: python -m pytest tests/ -v --tb=short"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Simple Baseline: Raha Statistical Method",
+    "description": "Implement or adapt Raha as a simple statistical baseline that is fast but semantically blind. This establishes the performance floor for accuracy and ceiling for speed.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "5.1_install_raha": "Install Raha: pip install raha",
+      "5.2_wrapper": "Implement wrapper in baselines/raha_baseline.py: RahaBaseline class with fit(dirty_df) and predict() methods returning error detection results",
+      "5.3_configure": "Configure Raha for fair comparison: use default parameters (configuration-free as per paper), limit to 3 detection strategies for speed",
+      "5.4_verify": "Test on Hospital dataset: python baselines/raha_baseline.py --dataset hospital --output results/raha/hospital.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Strong Baseline: IterClean-style Direct LLM",
+    "description": "Implement a simplified version of IterClean that uses LLM for direct cell validation. This is our accuracy benchmark (should be strong but slow). Limited to subset due to cost.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "6.1_direct_validation": "Implement DirectValidation baseline in baselines/direct_validation.py. For each cell: prompt LLM 'Is value X valid for column Y with semantic type Z? Answer YES/NO'",
+      "6.2_batch_prompting": "Implement batch prompting for efficiency: validate 10 cells per prompt to reduce API calls",
+      "6.3_subset": "Limit to 100 cells per dataset for feasibility: sample cells stratified by column",
+      "6.4_cache": "Implement response caching to avoid re-generating for same values: use sqlite3 cache",
+      "6.5_test": "Test on Hospital subset: python baselines/direct_validation.py --dataset hospital --max-cells 100 --output results/direct_val/hospital.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement SEED-style Compiler Baseline",
+    "description": "Implement a simplified SEED-style baseline that uses LLM-as-compiler but without unified programs or coupled detection-repair. This isolates the value of our specific compilation approach.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "7.1_seed_baseline": "Implement SEEDBaseline in baselines/seed_baseline.py: Uses LLM to generate individual validation functions per column (like SEED's CodeGen module) without semantic profiling step",
+      "7.2_no_repair": "SEED baseline generates detection-only functions (no repair synthesis) to show value of coupled detection-repair",
+      "7.3_no_profile": "Direct code generation from samples without structured semantic profiling step",
+      "7.4_test": "Test on all datasets: python baselines/seed_baseline.py --dataset all --output results/seed/"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run ProgramClean on All Datasets",
+    "description": "Execute ProgramClean on all benchmark datasets with both LLM models (Llama-3.2-3B and CodeLlama-7b) to test accuracy and efficiency. Run with 3 random seeds for robustness.",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "8.1_hospital": "Run on Hospital dataset: for seed in 42 43 44; do python experiments/run_programclean.py --dataset hospital --model llama-3.2-3b --seed $seed --output results/programclean/hospital_llama_seed${seed}.json; done",
+      "8.2_flights": "Run on Flights dataset: for seed in 42 43 44; do python experiments/run_programclean.py --dataset flights --model llama-3.2-3b --seed $seed --output results/programclean/flights_llama_seed${seed}.json; done",
+      "8.3_beers": "Run on Beers dataset: for seed in 42 43 44; do python experiments/run_programclean.py --dataset beers --model llama-3.2-3b --seed $seed --output results/programclean/beers_llama_seed${seed}.json; done",
+      "8.4_novel": "Run on novel domain tests: python experiments/run_programclean.py --dataset novel --model llama-3.2-3b --seed 42 --output results/programclean/novel_llama.json",
+      "8.5_codellama": "Run subset with CodeLlama-7b for comparison: python experiments/run_programclean.py --dataset hospital --model codellama-7b --seed 42 --output results/programclean/hospital_codellama.json",
+      "8.6_collect_metrics": "Collect all metrics: precision, recall, F1, runtime, llm_calls, program_validity_rate. Save aggregated results."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Baselines on All Datasets",
+    "description": "Execute all baselines on the same datasets for fair comparison. Run with same random seeds where applicable.",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "9.1_raha_all": "Run Raha on all datasets: for dataset in hospital flights beers; do python baselines/raha_baseline.py --dataset $dataset --seed 42 --output results/raha/${dataset}.json; done",
+      "9.2_direct_val": "Run Direct Validation on 100-cell subsets: for dataset in hospital flights beers; do python baselines/direct_validation.py --dataset $dataset --max-cells 100 --seed 42 --output results/direct_val/${dataset}.json; done",
+      "9.3_seed_baseline": "Run SEED baseline on all datasets: for dataset in hospital flights beers novel; do python baselines/seed_baseline.py --dataset $dataset --seed 42 --output results/seed/${dataset}.json; done"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Semantic Profiling vs Direct Code Gen",
+    "description": "Test the value of the semantic profiling step by comparing ProgramClean (full) against a variant that skips profiling and generates code directly from samples.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "10.1_naive_variant": "Implement NaiveCodeGen variant in ablations/naive_codegen.py: Directly prompts LLM to generate constraint code from samples without structured semantic profile",
+      "10.2_run_ablation": "Run on Hospital and Beers datasets: for dataset in hospital beers; do python ablations/naive_codegen.py --dataset $dataset --seed 42 --output results/ablations/naive_${dataset}.json; done",
+      "10.3_compare": "Compare F1 scores: ProgramClean full vs Naive CodeGen. Expectation: ProgramClean has higher accuracy due to structured semantic understanding"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Detection-Only vs Detection+Repair",
+    "description": "Test the value of coupled repair synthesis by comparing ProgramClean (with repair) against a detection-only variant.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "11.1_detection_only": "Implement DetectionOnly variant in ablations/detection_only.py: Uses ProgramClean but only generates validate functions (no repair synthesis)",
+      "11.2_run_ablation": "Run on Hospital and Beers datasets: for dataset in hospital beers; do python ablations/detection_only.py --dataset $dataset --seed 42 --output results/ablations/detonly_${dataset}.json; done",
+      "11.3_compare": "Compare detection F1 and repair accuracy. Expectation: Detection F1 similar; repair capability only in full version"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Model Size Comparison",
+    "description": "Compare performance across different model sizes to understand the compute-accuracy tradeoff.",
+    "estimated_time": "40 minutes",
+    "steps": {
+      "12.1_download_small": "Download smaller model for comparison: huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir ./models/tinyllama-1b",
+      "12.2_run_small": "Run ProgramClean with TinyLlama-1B on Hospital dataset: python experiments/run_programclean.py --dataset hospital --model tinyllama-1b --seed 42 --output results/ablations/hospital_tinyllama.json",
+      "12.3_compare_models": "Compare F1 across: TinyLlama-1B, Llama-3.2-3B, CodeLlama-7B. Analyze if larger models improve synthesis quality"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Program Validity and Semantic Correctness Analysis",
+    "description": "Measure the rate of syntactically valid programs, execution errors, and semantic bugs (correct syntax but wrong logic).",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "13.1_validity_rate": "Analyze all synthesized programs: compute percentage that execute without errors. Target: >90%",
+      "13.2_error_categories": "Categorize execution errors: syntax errors, import errors, runtime exceptions, timeout errors",
+      "13.3_semantic_audit": "Manual audit of 30 randomly selected programs for semantic correctness. Check: does validate function correctly encode column semantics?",
+      "13.4_self_validation": "Test self-validation mechanism: does synthetic violation detection catch semantic bugs? Measure precision of self-validation"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Security and Sandboxing Validation",
+    "description": "Validate that the sandboxing effectively prevents malicious code execution while allowing legitimate constraint programs.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "14.1_test_sandbox": "Create test cases with malicious patterns: file I/O, network access, code injection. Verify all are blocked.",
+      "14.2_resource_limits": "Test resource limits: programs exceeding 30s timeout or 512MB memory are terminated. Verify.",
+      "14.3_legitimate": "Test that legitimate constraint programs (regex, datetime parsing) execute successfully within sandbox"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute Cost and Runtime Analysis",
+    "description": "Measure and compare computational costs: runtime, LLM API calls, memory usage across all methods.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "15.1_runtime_compare": "Compare wall-clock time: ProgramClean vs Raha vs Direct Validation vs SEED baseline. Compute speedup factors.",
+      "15.2_llm_calls": "Count LLM invocations: ProgramClean (O(columns)) vs Direct Validation (O(cells)). Verify 100x+ reduction.",
+      "15.3_memory_profile": "Measure peak memory usage for each method using memory_profiler",
+      "15.4_cost_estimate": "Estimate cloud LLM API cost: multiply token counts by pricing. Show ProgramClean cost advantage"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Validation",
+    "description": "Evaluate all results against the predefined success and refutation criteria from the proposal.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "16.1_rq1_accuracy": "RQ1 (Accuracy): Check if ProgramClean F1 is within 10% of Direct Validation (IterClean proxy). Report: achieved/not achieved",
+      "16.2_rq2_speed": "RQ2 (Speed): Check if ProgramClean is 100x faster than Direct Validation. Report speedup factor",
+      "16.3_rq3_zeroshot": "RQ3 (Zero-shot): Check if ProgramClean succeeds on novel domain types (BTC, JWT, etc.) that Auto-Test cannot handle",
+      "16.4_rq4_ablation": "RQ4 (Ablation): Check if ProgramClean matches Direct Validation accuracy. Validate compilation value",
+      "16.5_confirmation_check": "Confirmation criteria: Check all 5 criteria from proposal. Count how many are met",
+      "16.6_refutation_check": "Refutation criteria: Check if any refutation condition is triggered. If so, document findings"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Result Figures and Tables",
+    "description": "Create publication-ready figures and tables for the paper. Include error bars for multi-seed experiments.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "17.1_fig_accuracy": "Create Figure 1: Bar chart comparing F1 scores across methods (ProgramClean, Raha, Direct Validation, SEED baseline) with error bars from 3 seeds",
+      "17.2_fig_runtime": "Create Figure 2: Log-scale runtime comparison showing speedup factors",
+      "17.3_fig_ablation": "Create Figure 3: Ablation study results showing contribution of each component",
+      "17.4_table_results": "Create Table 1: Comprehensive results table with Precision, Recall, F1, Runtime, LLM calls for each method and dataset",
+      "17.5_table_novel": "Create Table 2: Novel domain test results showing zero-shot generalization",
+      "17.6_fig_program_validity": "Create Figure 4: Pie chart showing program validity rates and error categories",
+      "17.7_save_outputs": "Save all figures to figures/ directory in PDF and PNG formats. Save tables as LaTeX and CSV."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Final Result Summary",
+    "description": "Create comprehensive summary of all experimental results with statistical significance testing.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "18.1_aggregate": "Aggregate all results across seeds: compute mean and std for each metric",
+      "18.2_significance": "Perform statistical significance tests (paired t-test) comparing ProgramClean to baselines",
+      "18.3_summary_json": "Generate results/summary.json with all aggregated metrics and significance results",
+      "18.4_summary_report": "Generate results/SUMMARY.md with narrative description of findings, answering each RQ"
+    }
+  }
+]

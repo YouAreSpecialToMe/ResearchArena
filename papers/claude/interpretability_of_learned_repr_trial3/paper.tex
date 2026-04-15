@@ -1,0 +1,430 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+
+\newcommand{\consensus}{\textsc{Consensus}}
+\newcommand{\singleton}{\textsc{Singleton}}
+\newcommand{\partialfeat}{\textsc{Partial}}
+\newcommand{\kl}{\mathrm{KL}}
+
+\title{Faithful by Consensus: Identifying Causally Important Features\\Through Multi-Seed Sparse Autoencoder Agreement}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Sparse autoencoders (SAEs) have become the primary tool for decomposing neural network representations into interpretable features, yet recent work reveals that SAEs trained with different random seeds on the same data discover substantially different feature sets. This instability raises a fundamental question: which SAE features reflect the model's true computational structure? We propose that \emph{multi-seed consensus} provides a signal for identifying causally faithful features. By training 8 independent TopK SAEs at each of 3 layers of Pythia-160M and matching features across runs via greedy cosine-similarity matching, we assign each feature a \emph{consensus score} measuring cross-seed reproducibility. We find that consensus features (recovered in $\geq$75\% of runs) are significantly more causally important than singleton features (recovered in $\leq$25\% of runs), with 2.0--2.5$\times$ higher mean KL divergence under ablation (Cohen's $d = 1.20$--$1.88$, $p < 10^{-10}$) and Spearman correlations of $\rho = 0.52$--$0.65$ between consensus score and causal importance across layers. This relationship holds after controlling for firing frequency (partial $\rho = 0.54$--$0.60$), and consensus features dramatically outperform frequency-selected features of equal count (Cohen's $d = 1.12$--$1.16$, with only $\sim$27\% overlap). We evaluate consensus features on sparse probing for three surface-level token classification tasks, finding statistically significant advantages at $k{=}50$ for punctuation ($+5.5$~pp, $p < 10^{-4}$) and word boundaries ($+6.7$~pp, $p < 10^{-4}$), with 3 of 12 task--sparsity comparisons reaching $p < 0.05$. Consensus features also produce $40\times$ larger steering effects. We construct \emph{consensus dictionaries} that achieve 21\% higher reconstruction quality per feature than random subsamples. Our results establish multi-seed agreement as a practical, training-free method for curating higher-quality SAE feature dictionaries, though important limitations remain regarding training budget, probing task complexity, and model scale.
+\end{abstract}
+
+\section{Introduction}
+
+Sparse autoencoders (SAEs) have emerged as the dominant tool for decomposing neural network representations into interpretable features~\citep{cunningham2023sparse, bricken2023monosemanticity}. By mapping dense, polysemantic activations into high-dimensional sparse codes, SAEs promise to reveal the fundamental units of computation within language models. The field has seen rapid progress in SAE architectures~\citep{gao2024scaling}, evaluation benchmarks~\citep{karvonen2025saebench}, and applications to circuit discovery~\citep{marks2024sparse}.
+
+However, a critical challenge undermines the promise of SAE-based interpretability: SAEs trained on the same model and data with different random seeds discover substantially different feature sets, with only $\sim$30\% of features shared across runs~\citep{paulo2025sparse}. This instability raises a fundamental question: \emph{which SAE features, if any, reflect the model's true computational structure?}
+
+While \citet{paulo2025sparse} established that shared features tend to fire more frequently and receive higher auto-interpretability scores, they did not investigate whether this stability signal predicts \emph{causal importance}---the degree to which a feature actually matters for model predictions. We bridge this gap by systematically measuring the causal importance of features at different consensus levels through ablation experiments, sparse probing, and feature steering.
+
+Our core hypothesis is that features consistently recovered across independently trained SAEs---which we term \emph{consensus features}---are not merely artifacts of stable optimization landscapes, but are causally important for model behavior. Conversely, features found by only a single SAE run (\emph{singleton features}) are more likely to be artifacts of the decomposition process, such as arbitrary tilings of feature manifolds~\citep{michaud2025understanding}.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \emph{consensus scoring}, a simple, training-free metric that assigns each SAE feature a quality score based on cross-seed reproducibility, requiring only feature matching across existing SAE runs.
+    \item We demonstrate that consensus score strongly predicts causal importance: consensus features exhibit 2.0--2.5$\times$ higher KL divergence under ablation than singletons (Cohen's $d$ up to 1.88, $p < 10^{-10}$), with Spearman $\rho = 0.52$--$0.65$ across three model layers. This signal is distinct from firing frequency: consensus features dramatically outperform frequency-selected features of equal count (Cohen's $d \geq 1.12$), with only $\sim$27\% overlap between the two sets.
+    \item We provide initial evidence that consensus features encode more useful information per feature through sparse probing (3 of 12 comparisons statistically significant, with large gains at $k{=}50$) and produce dramatically larger steering effects ($40\times$), though we caution that our probing tasks are surface-level and more complex semantic evaluations are needed.
+    \item We construct \emph{consensus dictionaries} that provide 21\% higher per-feature reconstruction quality than random subsamples, demonstrating that multi-seed agreement enables effective feature curation.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our consensus scoring methodology. Section~\ref{sec:experiments} presents experimental results. Section~\ref{sec:discussion} discusses implications, limitations, and missing experiments, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Sparse Autoencoders for Interpretability.}
+SAEs were introduced for language model interpretability by \citet{cunningham2023sparse} and scaled by \citet{bricken2023monosemanticity}. \citet{gao2024scaling} introduced $k$-sparse autoencoders (TopK) with clean scaling laws. Recent architectural variants include crosscoders for cross-layer features~\citep{lieberum2024crosscoders} and transcoders~\citep{dunefsky2025transcoders}. Our consensus scoring approach is orthogonal to architecture improvements and can be applied to any SAE variant.
+
+\paragraph{SAE Feature Stability.}
+\citet{paulo2025sparse} demonstrated that only $\sim$30\% of SAE features are shared across random seeds, with TopK SAEs being more seed-dependent than ReLU SAEs. They showed shared features fire more frequently and have higher auto-interpretability scores. Our work extends this by (a) connecting stability to \emph{causal} importance, (b) proposing consensus scoring as a practical feature quality metric, and (c) evaluating consensus features on downstream tasks including sparse probing and steering. An important finding from their work---that ReLU SAEs show greater seed stability---raises the question of whether consensus scoring adds value when the base architecture is already more stable; we discuss this in Section~\ref{sec:discussion} as an important direction we were unable to complete.
+
+\paragraph{SAE Evaluation.}
+SAEBench~\citep{karvonen2025saebench} provides comprehensive SAE evaluation across multiple metrics. \citet{chanin2024absorption} identified feature absorption as a failure mode. Our consensus metric complements these by providing a \emph{feature-level} quality signal rather than an SAE-level benchmark.
+
+\paragraph{Feature Geometry and Manifolds.}
+\citet{li2025geometry} revealed multi-scale geometric structure in SAE features. \citet{michaud2025understanding} showed SAEs tile feature manifolds with increasing dictionary size. Our work investigates a potential connection between manifold tiling and instability, though our preliminary analysis does not find strong support for this hypothesis (Section~\ref{sec:manifold}).
+
+\paragraph{Causal Methods in Interpretability.}
+Activation patching~\citep{zhang2024towards} and sparse feature circuits~\citep{marks2024sparse} provide causal evaluation of model components. \citet{cho2025faithfulsae} proposed training SAEs on model-generated data to improve faithfulness. We adapt feature ablation techniques to compare causal importance across consensus tiers, providing a new lens on feature quality that complements faithfulness-oriented training.
+
+\section{Method}
+\label{sec:method}
+
+Our method consists of three stages: (1) training multiple SAEs with different random seeds, (2) matching features across runs and computing consensus scores, and (3) evaluating features by consensus tier. Figure~\ref{fig:consensus_dist} illustrates the resulting consensus score distribution.
+
+\subsection{Multi-Seed SAE Training}
+
+We train $N = 8$ independent SAEs at each of $K = 3$ layers of a target language model, varying only the random seed. All SAEs share the same architecture (TopK with $k = 50$), dictionary size ($d = 16{,}384$, expansion factor $16\times$), and training data. This produces $N \times K = 24$ SAEs total.
+
+\subsection{Cross-Seed Feature Matching}
+\label{sec:matching}
+
+For each pair of SAE runs $(i, j)$ at the same layer, we compute cosine similarity between all pairs of decoder weight vectors:
+\begin{equation}
+    s(f_i^a, f_j^b) = \frac{\mathbf{w}_i^a \cdot \mathbf{w}_j^b}{\|\mathbf{w}_i^a\| \|\mathbf{w}_j^b\|}
+\end{equation}
+where $\mathbf{w}_i^a \in \mathbb{R}^{d_\text{model}}$ is the decoder weight vector for feature $a$ in SAE run $i$.
+
+We employ greedy matching with a similarity threshold $\tau = 0.7$: for each pair of SAE runs, we iteratively match the highest-similarity unmatched pair until no remaining pair exceeds $\tau$. We chose greedy matching over the Hungarian algorithm (as used by \citet{paulo2025sparse}) because the Hungarian algorithm's $O(n^3)$ complexity is prohibitive for $n = 16{,}384$ features ($\sim$50 minutes per pair versus $\sim$8 seconds for greedy matching). With a threshold of 0.7, the vast majority of features have at most one plausible match, so the solutions coincide---we verified this on a subsample of 2,048 features where both algorithms produced identical matchings above the threshold.
+
+We build a feature-identity graph where nodes are (seed, feature\_index) pairs and edges connect matched features. Connected components define \emph{feature identities}---abstract features that may be recovered by 1 to $N$ SAE runs.
+
+\subsection{Consensus Scoring}
+
+Each feature identity receives a consensus score:
+\begin{equation}
+    c(f) = \frac{|\{i \in [N] : f \text{ is recovered in run } i\}|}{N}
+\end{equation}
+We partition features into three tiers:
+\begin{itemize}
+    \item \textbf{Consensus} ($c \geq 0.75$): recovered in $\geq 6$ of 8 runs
+    \item \textbf{Partial} ($0.25 < c < 0.75$): recovered in 3--5 runs
+    \item \textbf{Singleton} ($c \leq 0.25$): recovered in $\leq 2$ runs
+\end{itemize}
+
+\subsection{Causal Importance Evaluation}
+
+For a reference SAE run, we measure the causal importance of each feature $f$ by zeroing its activation on a held-out evaluation set and computing the KL divergence between the original and modified output distributions:
+\begin{equation}
+    \text{CI}(f) = \mathbb{E}_{x \in \mathcal{D}_f}\left[D_{\kl}\!\left(p_\theta(y \mid x) \;\|\; p_\theta(y \mid x; a_f \leftarrow 0)\right)\right]
+\end{equation}
+where $\mathcal{D}_f$ denotes the set of inputs where feature $f$ is active (activation $> 0$), and $a_f \leftarrow 0$ denotes zeroing the feature's activation before reconstruction through the SAE decoder. Restricting to tokens where the feature fires avoids diluting the signal.
+
+\subsection{Consensus Dictionary Construction}
+
+We construct a \emph{consensus dictionary} by retaining only consensus feature identities ($c \geq 0.75$). For each such identity, we select the representative decoder vector from the reference SAE run. The resulting dictionary contains only high-consensus features, providing a curated subset with higher per-feature quality.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Model.} We use Pythia-160M~\citep{biderman2023pythia}, a 12-layer transformer with hidden dimension 768, chosen for tractable SAE training while being large enough for meaningful features.
+
+\paragraph{SAE Training.} We train TopK SAEs ($k = 50$, dictionary size 16{,}384) using SAELens~\citep{bloom2024saelens} at layers 2 (early), 6 (middle), and 10 (late). Each layer has 8 independently trained SAEs with seeds $\{42, 137, 256, 512, 1024, 2048, 4096, 8192\}$, trained on \textbf{20M tokens} from The Pile with learning rate $3 \times 10^{-4}$, batch size 4096, and context length 128.
+
+\emph{Training budget caveat.} Our 20M token training budget is substantially below the 100M--1B range typically used for SAE training~\citep{gao2024scaling, paulo2025sparse}. This reduced budget was necessary to train 24 SAEs within our compute constraints (single GPU, $\sim$10 min per SAE). Undertrained SAEs may exhibit qualitatively different stability patterns than fully converged ones: features that would eventually stabilize may appear as singletons simply because they have not converged, potentially inflating the apparent consensus--causal importance gap. We regard validating these results with the full 100M token budget as critical future work (Section~\ref{sec:discussion}).
+
+\paragraph{Feature Matching.} We use greedy cosine-similarity matching with threshold $\tau = 0.7$ across all $\binom{8}{2} = 28$ pairs of SAEs per layer (see Section~\ref{sec:matching}). Matching takes approximately 2 minutes per layer.
+
+\paragraph{Evaluation Data.} We use 5{,}000 held-out sequences (640K tokens) from The Pile for causal importance evaluation, and construct token-level classification tasks for sparse probing: capitalization detection, punctuation detection, and word boundary detection. These are \emph{surface-level} features; we were unable to complete the planned evaluation on semantic tasks (POS tagging, NER, sentiment) due to time constraints. We discuss this limitation in Section~\ref{sec:discussion}.
+
+\paragraph{Hardware.} All experiments were conducted on a single NVIDIA RTX A6000 (48GB). Total time: approximately 8 hours.
+
+\subsection{Consensus Score Distribution}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_consensus_distribution.pdf}
+\caption{Distribution of consensus scores across layers 2, 6, and 10. The majority of feature identities are singletons (score $\leq 0.25$), with a smaller peak of consensus features (score $\geq 0.75$). Dashed lines indicate tier boundaries.}
+\label{fig:consensus_dist}
+\end{figure}
+
+Figure~\ref{fig:consensus_dist} shows the distribution of consensus scores across all three layers. The distribution is strongly right-skewed: the vast majority of feature identities are singletons. At layer 6, the feature-identity graph contains 105{,}983 total identities, of which 2{,}001 are consensus (1.9\%), 1{,}267 are partial (1.2\%), and 102{,}715 are singletons (97.0\%). Similar proportions hold at layers 2 and 10 (Table~\ref{tab:matching} in the Appendix).
+
+Within a single reference SAE (seed 42) at layer 6, there are 13{,}138 active features: 2{,}570 consensus, 532 partial, and 10{,}036 singletons. Active features are those with nonzero activation on at least one evaluation token.
+
+\subsection{Consensus Predicts Causal Importance}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_causal_importance.pdf}
+\caption{Consensus score predicts causal importance (KL divergence under feature ablation). \textbf{Top:} Scatter plots with regression lines show strong positive correlation at all layers. \textbf{Bottom:} Box plots comparing tiers show consensus features have 2.0--2.5$\times$ higher median causal importance than singletons.}
+\label{fig:causal}
+\end{figure}
+
+Table~\ref{tab:main} and Figure~\ref{fig:causal} present our primary result: consensus score strongly predicts causal importance across all three layers.
+
+\begin{table}[t]
+\caption{Causal importance (mean KL divergence under feature ablation $\pm$ std) by consensus tier across layers. $\rho$: Spearman correlation between consensus score and causal importance; $\rho_{\text{partial}}$: partial correlation controlling for firing frequency. All $p < 10^{-10}$.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lccccccc}
+\toprule
+Layer & $n_{\text{active}}$ & \consensus{} & \partialfeat{} & \singleton{} & Cohen's $d$ & $\rho$ & $\rho_{\text{partial}}$ \\
+\midrule
+2  & 15{,}409 & $0.124 \pm 0.064$ & $0.117 \pm 0.055$ & $0.061 \pm 0.038$ & 1.20 & 0.52 & 0.58 \\
+6  & 13{,}138 & $0.108 \pm 0.043$ & $0.090 \pm 0.033$ & $0.043 \pm 0.024$ & 1.85 & 0.65 & 0.60 \\
+10 & 14{,}101 & $0.098 \pm 0.037$ & $0.083 \pm 0.027$ & $0.042 \pm 0.021$ & 1.88 & 0.63 & 0.54 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At layer 6, consensus features have mean causal importance of 0.108, compared to 0.043 for singletons---a 2.5$\times$ gap. The Spearman correlation between consensus score and causal importance is $\rho = 0.65$ ($p < 10^{-10}$), and the effect size is Cohen's $d = 1.85$. Critically, this relationship is not merely a proxy for firing frequency: the partial Spearman correlation controlling for firing rate is $\rho_{\text{partial}} = 0.60$ ($p < 10^{-10}$), while the correlation between firing rate and consensus score is only $r = 0.15$. The effect is consistent across layers, with Cohen's $d$ ranging from 1.20 (layer 2) to 1.88 (layer 10).
+
+\paragraph{Frequency baseline comparison.} To test whether consensus score provides signal beyond simple firing frequency, we compare consensus features against the top-$N$-by-frequency features (where $N$ = number of consensus features). Results are striking: at layer 6, consensus features have mean CI of 0.100 vs.\ 0.051 for frequency-selected features (Cohen's $d = 1.13$, $p < 10^{-10}$), despite only 27.8\% overlap between the two sets. Features that are high-frequency but \emph{not} consensus have mean CI of only 0.035---barely above singletons (0.034). Conversely, features that are consensus but \emph{not} high-frequency maintain high CI of 0.103. This pattern is consistent across all three layers (Table~\ref{tab:freq}). Furthermore, within every firing-rate decile, consensus score still strongly predicts CI (Spearman $\rho = 0.51$--$0.72$ at layer 6), confirming that the consensus signal is not confounded by frequency.
+
+\begin{table}[t]
+\caption{Frequency baseline comparison across layers. Mean causal importance (CI) for consensus-selected vs.\ frequency-selected feature sets of equal size. ``Freq-only'' = high-frequency but not consensus; ``Cons-only'' = consensus but not high-frequency. Overlap is the Jaccard-like intersection as a percentage of $N$. Consensus features dramatically outperform frequency-selected features at all layers.}
+\label{tab:freq}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Layer & $N$ & Overlap & CI (Consensus) & CI (Top-Freq) & CI (Freq-only) & Cohen's $d$ \\
+\midrule
+2  & 2{,}916 & 26.7\% & 0.118 & 0.054 & 0.040 & 1.12 \\
+6  & 2{,}762 & 27.8\% & 0.100 & 0.051 & 0.035 & 1.13 \\
+10 & 2{,}330 & 26.4\% & 0.093 & 0.049 & 0.035 & 1.16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sparse Probing}
+
+\begin{table}[t]
+\caption{Sparse probing accuracy (\%, mean $\pm$ std over 5 random seeds) by consensus tier at layer 6. Bold indicates the best-performing tier for each task--$k$ combination. Consensus features outperform singletons in 9 of 12 comparisons by point estimate, but only 3 reach statistical significance ($^*$: $p < 0.05$, $^{**}$: $p < 0.01$, Welch's $t$-test). For capitalization, singletons outperform consensus at $k \geq 10$ (though not significantly).}
+\label{tab:probing}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Task & $k$ & \consensus{} & \partialfeat{} & \singleton{} & Random \\
+\midrule
+\multirow{4}{*}{Capitalization}
+  & 5 & \textbf{86.9}$\pm$1.0 & 86.7$\pm$0.9 & 86.8$\pm$1.0 & 86.8$\pm$1.0 \\
+  & 10 & 86.8$\pm$1.0 & 86.7$\pm$0.9 & \textbf{87.9}$\pm$0.8 & 86.8$\pm$1.0 \\
+  & 20 & 86.8$\pm$0.9 & 87.3$\pm$0.7 & \textbf{87.7}$\pm$0.8 & 86.8$\pm$1.0 \\
+  & 50 & 87.5$\pm$1.0 & \textbf{88.0}$\pm$1.0 & 87.9$\pm$0.9 & 86.7$\pm$1.0 \\
+\midrule
+\multirow{4}{*}{Punctuation}
+  & 5 & \textbf{87.4}$\pm$0.4 & 87.4$\pm$0.3 & 87.2$\pm$0.4 & 86.3$\pm$0.5 \\
+  & 10 & \textbf{88.0}$\pm$0.2 & 87.7$\pm$0.4 & 87.7$\pm$0.2 & 86.4$\pm$0.5 \\
+  & 20 & \textbf{88.2}$\pm$0.4$^*$ & 87.8$\pm$0.3 & 87.6$\pm$0.3 & 86.4$\pm$0.5 \\
+  & 50 & \textbf{93.1}$\pm$0.7$^{**}$ & 88.6$\pm$0.4 & 87.6$\pm$0.4 & 86.8$\pm$1.1 \\
+\midrule
+\multirow{4}{*}{Word Boundary}
+  & 5 & \textbf{68.2}$\pm$1.3 & 67.9$\pm$1.5 & 67.5$\pm$1.7 & 65.8$\pm$1.8 \\
+  & 10 & \textbf{70.6}$\pm$1.7 & 68.4$\pm$1.6 & 68.2$\pm$1.6 & 65.9$\pm$1.7 \\
+  & 20 & \textbf{71.6}$\pm$1.5 & 69.1$\pm$1.8 & 69.8$\pm$1.5 & 66.0$\pm$1.8 \\
+  & 50 & \textbf{79.2}$\pm$1.4$^{**}$ & 71.4$\pm$1.6 & 72.5$\pm$1.0 & 66.7$\pm$2.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_sparse_probing.pdf}
+\caption{Sparse probing accuracy (mean over 5 seeds) by consensus tier across three token classification tasks at layer 6. Consensus features show clear advantages at $k = 50$ for punctuation and word boundary tasks, but the pattern is less clear for capitalization and at lower $k$ values.}
+\label{fig:probing}
+\end{figure}
+
+Table~\ref{tab:probing} and Figure~\ref{fig:probing} show sparse probing results at layer 6, averaged over 5 random seeds. We provide a transparent assessment of these results:
+
+\emph{Point estimates.} Consensus features achieve higher accuracy than singletons in 9 of 12 task--$k$ combinations (75\%).
+
+\emph{Statistical significance.} Only 3 of 12 comparisons reach $p < 0.05$ (Welch's $t$-test): punctuation at $k = 20$ ($p = 0.030$) and $k = 50$ ($p < 10^{-4}$), and word boundary at $k = 50$ ($p < 10^{-4}$). At $k = 50$, consensus features achieve $93.1 \pm 0.7$\% on punctuation vs.\ $87.6 \pm 0.4$\% for singletons ($+5.5$~pp) and $79.2 \pm 1.4$\% on word boundaries vs.\ $72.5 \pm 1.0$\% ($+6.7$~pp).
+
+\emph{Capitalization reversal.} For capitalization---arguably the most linguistically meaningful of our three tasks---singletons outperform consensus features at $k \geq 10$, though no difference is significant (all $p > 0.10$). This may reflect the fact that capitalization is a highly localized feature that individual SAE runs can capture effectively, or it may indicate that our consensus signal does not uniformly improve feature quality for all task types.
+
+\emph{Task limitations.} These are surface-level token classification tasks (capitalization, punctuation, word boundaries) rather than the planned semantic tasks (POS tagging, NER, sentiment). The degree to which these results generalize to linguistically richer tasks remains unknown and is a key limitation of this work.
+
+\subsection{Feature Steering}
+
+We compare the steering effectiveness of 30 frequency-matched consensus and singleton features at layer 6. Consensus features produce dramatically larger behavioral changes when their activations are amplified by $3\times$: mean steering effect (KL divergence) of 0.561 for consensus features vs.\ 0.014 for singletons---a $40\times$ difference (Mann-Whitney $p < 10^{-10}$). This suggests that consensus features correspond to coherent, behaviorally meaningful directions in activation space, while singleton features have minimal impact on model outputs even when strongly amplified.
+
+\subsection{Consensus Dictionary Evaluation}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure6_dictionary_eval.pdf}
+\caption{Consensus dictionary evaluation at layer 6. The consensus dictionary (2{,}001 features) achieves mean cosine similarity of 0.718, outperforming a random subsample of equal size (0.592) and the singleton dictionary (0.687, with 13{,}012 features). The full dictionary (16{,}384 features) achieves 0.807.}
+\label{fig:dict}
+\end{figure}
+
+Figure~\ref{fig:dict} evaluates the consensus dictionary (2{,}001 features, consensus score $\geq 0.75$) at layer 6. Mean cosine similarity between original and reconstructed hidden states: consensus dictionary 0.718, random subsample of equal size 0.592 (21\% improvement), singleton dictionary (13{,}012 features) 0.687, full dictionary (16{,}384 features) 0.807. The consensus dictionary captures 89\% of the full dictionary's quality with only 12\% of the features, and outperforms the much larger singleton dictionary.
+
+\subsection{Ablation Studies}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_ablations.pdf}
+\caption{Ablation studies at layer 6. \textbf{(a)} Effect of number of seeds: even 3 seeds yield $\rho \approx 0.65$, with diminishing returns beyond 5. \textbf{(b)} Threshold sensitivity: Cohen's $d$ increases monotonically with threshold while the number of consensus features decreases. Results are robust across all thresholds tested.}
+\label{fig:ablations}
+\end{figure}
+
+\paragraph{Number of Seeds.}
+Figure~\ref{fig:ablations}(a) shows that even with $N = 3$ seeds, the Spearman correlation between consensus score and causal importance is $\rho = 0.653 \pm 0.02$, comparable to the full 8-seed result ($\rho = 0.652$). This suggests the consensus signal is robust and can be extracted with modest overhead---just 3 total SAE training runs.
+
+\paragraph{Consensus Threshold.}
+Figure~\ref{fig:ablations}(b) demonstrates robustness across consensus thresholds. As the threshold increases from 0.375 to 1.0, Cohen's $d$ between consensus and singleton tiers increases monotonically from 1.77 to 1.88, while consensus features decrease from 3{,}440 to 2{,}065. The causal importance gap is present at every threshold tested.
+
+\subsection{Manifold Tiling Analysis}
+\label{sec:manifold}
+
+We investigated whether singleton features show signatures of manifold tiling~\citep{michaud2025understanding}---the hypothesis that singletons correspond to arbitrary discretizations of continuous feature manifolds. Contrary to our initial hypothesis, consensus features have \emph{higher} mean neighborhood density (0.117 at layer 6) than singletons (0.017). DBSCAN clustering finds very few clusters (1 at layer 6) with negligible cluster membership fractions ($<$0.2\% for singletons). Density test $p$-values are all 1.0 across layers. We conclude that, as operationalized through our density and clustering metrics, the manifold tiling hypothesis is not supported. This may reflect limitations in our geometric analysis rather than absence of the phenomenon; more sophisticated methods~\citep{li2025geometry} may be needed (see Appendix~\ref{app:manifold} for full results).
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Summary of Findings.}
+Our primary result---that consensus score strongly predicts causal importance---is robust: large effect sizes (Cohen's $d$ up to 1.88), highly significant ($p < 10^{-10}$), consistent across three model layers, and holds after controlling for firing frequency. The steering result ($40\times$ effect size difference) further supports the practical importance of consensus features. However, the sparse probing evidence is mixed: while consensus features show advantages at higher sparsity budgets, most individual comparisons do not reach statistical significance, and singletons win on capitalization.
+
+\paragraph{Why Does Consensus Predict Causal Importance?}
+We hypothesize that causally important features correspond to sharp, well-defined directions in activation space that gradient-based optimization consistently discovers, while less important features lie in flatter regions where multiple decompositions achieve similar reconstruction quality. The strong partial correlation ($\rho_{\text{partial}} = 0.54$--$0.60$) after controlling for firing frequency indicates the consensus signal captures information beyond simple feature frequency.
+
+\paragraph{Practical Implications.}
+Researchers can train as few as 3 total SAE runs and use consensus scoring to identify reliable features. Feature matching via greedy cosine similarity takes $\sim$2 minutes per layer for 8 SAEs with 16K features, requiring no additional model evaluations.
+
+\paragraph{Limitations and Missing Experiments.}
+Our study has several important limitations, including experiments from the original plan that we were unable to complete:
+
+\emph{Training budget (20M vs.\ 100M+ tokens).} Our SAEs were trained on only 20M tokens, well below the standard 100M--1B range. This is the most significant confound: undertrained SAEs may exhibit artificially inflated instability, making the consensus--causal importance gap appear larger than it would be with fully trained SAEs. Features that simply have not converged would appear as singletons, confounding our interpretation. We expect the core finding (consensus predicts causal importance) to hold with more training, but the effect size may differ.
+
+\emph{Surface-level probing tasks.} We evaluated on capitalization, punctuation, and word boundary detection rather than the planned semantic tasks (POS tagging, NER, sentiment classification). These surface tasks may be too simple to demonstrate meaningful differences in feature quality---particularly since singletons outperform consensus features on capitalization. Evaluation on genuine linguistic tasks is essential to validate claims about consensus features encoding ``more useful information.''
+
+\emph{Preliminary ReLU+L1 results.} We trained 4 ReLU+L1 SAEs at layer 6, but the L1 coefficient ($\lambda = 0.008$) yielded extremely dense representations (L0 $\approx$ 7{,}531 vs.\ 50 for TopK), producing very few cross-seed matches (only 10 consensus feature identities vs.\ 2{,}001 for TopK). Despite this, the few consensus features still showed significantly higher causal importance (Cohen's $d = 1.39$, $p < 10^{-25}$), but the overall Spearman correlation was weak ($\rho = 0.08$). A proper comparison requires ReLU+L1 SAEs tuned to achieve comparable sparsity to TopK, which \citet{paulo2025sparse} showed yields greater seed stability. Whether consensus scoring adds value when the base architecture is already more stable remains an important open question.
+
+\emph{Missing auto-interpretability evaluation.} Our original plan included LLM-based automated interpretability scoring~\citep{bills2023language} to test whether consensus features are more interpretable beyond what \citet{paulo2025sparse} showed. This was not completed.
+
+\emph{Missing dictionary size ablation.} We planned to test dictionary sizes of 4K, 16K, and 32K to assess how the consensus distribution changes with expansion factor. This ablation was not completed.
+
+\emph{Single model scale.} We evaluated only Pythia-160M. Whether the consensus--causal importance relationship holds for larger models (1B+ parameters) is unknown. Larger models may have richer feature spaces where the distinction between consensus and singleton features is different.
+
+\emph{Matching algorithm.} Greedy matching may miss some matches in dense regions. While we verified equivalence on subsamples, the approximation quality across the full feature space is not guaranteed.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have demonstrated that multi-seed consensus provides a strong signal for identifying causally important sparse autoencoder features. Across three layers of Pythia-160M, consensus features are 2.0--2.5$\times$ more causally important than singleton features (Cohen's $d$ up to 1.88, $p < 10^{-10}$). This signal is distinct from firing frequency: consensus features dramatically outperform frequency-selected features of equal count (Cohen's $d \geq 1.12$), with only $\sim$27\% overlap between the two sets. Consensus features also produce $40\times$ larger steering effects and achieve 21\% higher per-feature reconstruction quality in consensus dictionaries. Sparse probing provides partial support, with significant advantages at $k{=}50$ for punctuation and word boundaries (3 of 12 comparisons reaching $p < 0.05$).
+
+These findings suggest that feature instability~\citep{paulo2025sparse} carries useful information: unstable features are less important features. However, we emphasize that our results come with important caveats---a reduced training budget (20M tokens), surface-level probing tasks, and evaluation on a single small model. Validating with full training budgets, semantic probing tasks, ReLU+L1 architectures, and larger models are essential next steps before these findings can be considered robust.
+
+We hope this work encourages the SAE interpretability community to explore multi-seed training as a potential standard practice, and to develop the consensus scoring approach into a more thoroughly validated tool for feature curation.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+\section{Reproducibility: Hyperparameters and Implementation Details}
+\label{app:hyperparams}
+
+\begin{table}[h]
+\caption{Complete hyperparameters for all experiments.}
+\label{tab:hyperparams}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{l}{\emph{Model}} \\
+Model & Pythia-160M (EleutherAI/pythia-160m) \\
+Layers analyzed & 2 (early), 6 (middle), 10 (late) \\
+Hidden dimension & 768 \\
+Total layers & 12 \\
+\midrule
+\multicolumn{2}{l}{\emph{SAE Training}} \\
+Architecture & TopK \\
+Top-$k$ & 50 \\
+Dictionary size & 16{,}384 ($16\times$ expansion) \\
+Training tokens & 20{,}000{,}000 (20M) \\
+Context length & 128 tokens \\
+Learning rate & $3 \times 10^{-4}$ \\
+Batch size & 4{,}096 tokens \\
+Number of seeds & 8 \\
+Seeds & $\{42, 137, 256, 512, 1024, 2048, 4096, 8192\}$ \\
+Training framework & SAELens~\citep{bloom2024saelens} \\
+Training time per SAE & $\sim$10 minutes \\
+\midrule
+\multicolumn{2}{l}{\emph{Feature Matching}} \\
+Similarity metric & Cosine similarity of decoder weights \\
+Matching algorithm & Greedy (descending similarity order) \\
+Matching threshold ($\tau$) & 0.7 \\
+Consensus threshold (high) & $\geq 0.75$ ($\geq 6/8$ seeds) \\
+Singleton threshold (low) & $\leq 0.25$ ($\leq 2/8$ seeds) \\
+Matching time per layer & $\sim$2 minutes \\
+\midrule
+\multicolumn{2}{l}{\emph{Evaluation}} \\
+Evaluation sequences & 5{,}000 (640K tokens) \\
+Evaluation batch size & 32 \\
+Dataset & The Pile (monology/pile-uncopyrighted) \\
+Probing classifier & Logistic Regression ($C = 1.0$, L-BFGS, max\_iter=500) \\
+Probing train/test split & 80\% / 20\% \\
+Probing random seeds & 5 \\
+Steering amplification factor & $3\times$ \\
+Frequency-matched steering pairs & 30 consensus + 30 singleton \\
+\midrule
+\multicolumn{2}{l}{\emph{Hardware}} \\
+GPU & 1$\times$ NVIDIA RTX A6000 (48GB) \\
+Total experiment time & $\sim$8 hours \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Per-Layer Matching Statistics}
+\label{app:matching}
+
+\begin{table}[h]
+\caption{Feature matching statistics across layers. Feature identity counts reflect the full matching graph; active feature counts reflect the reference SAE (seed 42) restricted to features active on the evaluation set. ``Ratio'' is the ratio of mean causal importance between consensus and singleton tiers.}
+\label{tab:matching}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Layer & Total Identities & \consensus{} Identities & Active Features & Active \consensus{} & Active \singleton{} & Ratio \\
+\midrule
+2  & 102{,}727 & 2{,}371 & 15{,}409 & 2{,}781 & 11{,}710 & 2.03$\times$ \\
+6  & 105{,}983 & 2{,}001 & 13{,}138 & 2{,}570 & 10{,}036 & 2.48$\times$ \\
+10 & 109{,}070 & 1{,}658 & 14{,}101 & 2{,}197 & 11{,}325 & 2.33$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Manifold Tiling Analysis: Full Results}
+\label{app:manifold}
+
+\begin{table}[h]
+\caption{Manifold tiling analysis across layers. Density: mean number of features within cosine similarity $> 0.5$ of each feature. Cluster fraction: fraction of features assigned to a DBSCAN cluster (eps=0.4, min\_samples=5). Contrary to the manifold tiling hypothesis, consensus features have higher density than singletons, and cluster fractions are negligible for all tiers.}
+\label{tab:manifold}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Layer & Density (\consensus{}) & Density (\singleton{}) & Cluster Frac.\ (\consensus{}) & Cluster Frac.\ (\singleton{}) & $n_{\text{clusters}}$ \\
+\midrule
+2  & 0.383 & 0.039 & 1.74\% & 0.05\% & 4 \\
+6  & 0.117 & 0.017 & 0.00\% & 0.13\% & 1 \\
+10 & 0.190 & 0.012 & 1.14\% & 0.05\% & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The density $p$-values (testing whether singletons have higher density than consensus, as predicted by the manifold tiling hypothesis) are all 1.0, indicating no support for the hypothesis. The UMAP visualizations (Figure~\ref{fig:manifold}) show no clear spatial segregation by consensus tier.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure5_manifold_analysis.pdf}
+\caption{Manifold tiling analysis at layer 6. \textbf{(a)} UMAP projection of decoder weight vectors colored by consensus score. \textbf{(b)} Mean neighborhood density by tier---consensus features have higher density, contrary to the tiling hypothesis. \textbf{(c)} DBSCAN cluster membership fractions are negligible for all tiers.}
+\label{fig:manifold}
+\end{figure}
+
+\end{document}

@@ -1,0 +1,283 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for e-graph construction, treewidth computation, and extraction algorithms. Use CPU-only packages to stay within resource constraints.",
+    "steps": {
+      "step1": "Activate virtual environment: source .venv/bin/activate",
+      "step2": "Install core dependencies: pip install networkx numpy scipy pandas matplotlib",
+      "step3": "Install ILP solver: pip install pulp (for optimal extraction baseline)",
+      "step4": "Install treewidth library: pip install networkx[all] (for min-fill heuristics)",
+      "step5": "Verify installations: python -c 'import networkx; import pulp; import numpy; print(\"OK\")'",
+      "step6": "Create output directories: mkdir -p results/{treewidth,extraction,ablation,performance} figures/"
+    },
+    "estimated_time_minutes": 10,
+    "output_files": [".venv/installed_packages.txt"]
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Polybench/C Benchmarks",
+    "description": "Download Polybench/C 4.2.1 benchmark suite and extract kernel information for e-graph construction. Focus on linear algebra and stencil kernels where memory bandwidth matters.",
+    "steps": {
+      "step1": "Download Polybench/C: wget -q https://sourceforge.net/projects/polybench/files/polybench-c-4.2.1.tar.gz/download -O polybench.tar.gz",
+      "step2": "Extract: tar -xzf polybench.tar.gz && mv polybench-c-4.2.1 polybench",
+      "step3": "Select 10 kernels: gemm, 2mm, 3mm, gemver, gesummv, mvt, syrk, syr2k, jacobi-2d, fdtd-2d",
+      "step4": "Extract kernel metadata: python scripts/extract_kernels.py --kernels gemm,2mm,3mm,gemver,gesummv,mvt,syrk,syr2k,jacobi-2d,fdtd-2d --output data/kernels.json",
+      "step5": "Parse loop structures and array accesses from kernel sources",
+      "step6": "Generate kernel statistics: array dimensions, loop nests, memory access patterns"
+    },
+    "estimated_time_minutes": 15,
+    "output_files": ["data/kernels.json", "data/kernel_stats.json"]
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build Hierarchical E-Graph Representation",
+    "description": "Construct hierarchical e-graphs for each kernel at three levels: loop nest, function, and module. Apply computational and layout rewrite rules.",
+    "steps": {
+      "step1": "Implement core e-graph data structures: ENode, EClass, EGraph classes",
+      "step2": "Implement computational rewrite rules: algebraic simplification, loop interchange, distribution",
+      "step3": "Implement layout transformation rules: AoS↔SoA conversion, tiling, padding with correctness verification",
+      "step4": "Build Level-1 (Loop Nest) e-graphs: saturate each loop nest independently",
+      "step5": "Build Level-2 (Function) e-graphs: combine loop nests with function-level alternatives",
+      "step6": "Verify soundness: check that all rewrite rules preserve semantics via structural equivalence",
+      "step7": "Export e-graphs to JSON format for analysis"
+    },
+    "estimated_time_minutes": 45,
+    "output_files": ["data/egraphs/{kernel}_level1.json", "data/egraphs/{kernel}_level2.json"]
+  },
+  {
+    "category": "Main Experiment - H1",
+    "title": "Measure Treewidth of Hierarchical E-Graphs",
+    "description": "Test Hypothesis H1: Real-world program e-graphs exhibit low treewidth (≤10) when rewrite rules are applied hierarchically. Compute treewidth using min-fill-in heuristic.",
+    "steps": {
+      "step1": "Convert each e-graph to conflict graph: vertices=e-classes, edges=data dependencies",
+      "step2": "Compute treewidth using NetworkX: nx.algorithms.approximation.treewidth_min_fill_in()",
+      "step3": "Record treewidth, number of bags, and tree decomposition structure",
+      "step4": "Measure e-graph size: number of e-classes, e-nodes, edges",
+      "step5": "Compare flat vs. hierarchical: measure treewidth reduction from hierarchical decomposition",
+      "step6": "Run with 3 random seeds for rewrite rule application order (seeds: 42, 123, 456)",
+      "step7": "Compute statistics: mean, std treewidth per kernel; percentage with treewidth ≤10"
+    },
+    "estimated_time_minutes": 30,
+    "output_files": ["results/treewidth/treewidth_results.json"],
+    "success_criteria": "At least 70% of benchmark e-graphs have treewidth ≤ 10 under hierarchical decomposition"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Greedy Extraction",
+    "description": "Implement and run greedy extraction as simple baseline. Selects locally optimal e-node at each e-class without global optimization.",
+    "steps": {
+      "step1": "Implement greedy extraction: for each e-class, pick e-node with minimum local cost",
+      "step2": "Define instruction-count cost model: add=1, mul=1, load=1, store=1, div=3",
+      "step3": "Run greedy extraction on all 10 kernels at both hierarchy levels",
+      "step4": "Record extraction time and total cost for each kernel",
+      "step5": "Run with 3 random seeds (42, 123, 456) for rule application order",
+      "step6": "Compute mean and std for extraction time and solution cost"
+    },
+    "estimated_time_minutes": 15,
+    "output_files": ["results/extraction/greedy_results.json"]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: ILP-Based Extraction (Optimal)",
+    "description": "Implement ILP formulation for optimal extraction using PuLP. This provides the gold standard for solution quality comparison.",
+    "steps": {
+      "step1": "Implement ILP formulation: binary variable per e-node, constraints for single selection per e-class",
+      "step2": "Add parent-child constraints: if e-node selected, exactly one child from each child e-class",
+      "step3": "Set timeout to 60 seconds per extraction (limit for feasibility)",
+      "step4": "Run ILP on all kernels with instruction-count cost model",
+      "step5": "Record: solution cost, solve time, solver status (optimal/timeout/infeasible)",
+      "step6": "For timeouts, record best solution found within time limit",
+      "step7": "Run with 3 random seeds (42, 123, 456)"
+    },
+    "estimated_time_minutes": 45,
+    "output_files": ["results/extraction/ilp_results.json"],
+    "notes": "ILP may timeout on larger e-graphs; use best-effort solution when timeout occurs"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3: Sequential Optimization (Compute then Layout)",
+    "description": "Implement sequential optimization as strong baseline: first optimize computation, then apply data layout transformations separately.",
+    "steps": {
+      "step1": "Phase 1: Apply computational rewrites, extract with instruction-count cost model",
+      "step2": "Phase 2: Apply layout transformations to extracted program, optimize memory cost",
+      "step3": "Record total cost (compute + layout) for each kernel",
+      "step4": "Compare against joint optimization to measure benefit of unified approach",
+      "step5": "Run with 3 random seeds (42, 123, 456)"
+    },
+    "estimated_time_minutes": 20,
+    "output_files": ["results/extraction/sequential_results.json"]
+  },
+  {
+    "category": "Main Experiment - H3",
+    "title": "Treewidth-Aware Extraction Algorithm",
+    "description": "Test Hypothesis H3: Treewidth-aware extraction provides compile times competitive with greedy while achieving solution quality within 10% of optimal ILP.",
+    "steps": {
+      "step1": "Implement treewidth-aware extraction: dynamic programming on tree decomposition",
+      "step2": "For each bag in tree decomposition, enumerate valid selections (e-node per e-class)",
+      "step3": "Apply DP: for each bag, compute optimal cost given parent bag selection",
+      "step4": "Use memoization to avoid recomputation",
+      "step5": "Handle e-classes appearing in multiple bags via consistency constraints",
+      "step6": "Run on all kernels with instruction-count cost model",
+      "step7": "Record: extraction time, solution cost, treewidth used",
+      "step8": "Run with 3 random seeds (42, 123, 456)"
+    },
+    "estimated_time_minutes": 60,
+    "output_files": ["results/extraction/treewidth_aware_results.json"],
+    "fallback": "If DP implementation too complex, use beam search (width=10) as fallback"
+  },
+  {
+    "category": "Main Experiment - H2",
+    "title": "Joint Compute and Layout Optimization",
+    "description": "Test Hypothesis H2: Joint optimization of computation and data layout achieves better memory bandwidth utilization than sequential optimization.",
+    "steps": {
+      "step1": "Implement memory-aware cost model: Cost = compute_cost + memory_penalty",
+      "step2": "Memory cost components: spatial locality, temporal locality, stride pattern",
+      "step3": "Layout penalties: AoS=1.2, SoA=1.0, tiled=0.9 (normalized to cache behavior)",
+      "step4": "Apply joint optimization: use layout-aware rewrites during saturation, joint cost during extraction",
+      "step5": "Run joint optimization with treewidth-aware extraction on all kernels",
+      "step6": "Simulate memory bandwidth: estimate bytes accessed per useful computation",
+      "step7": "Record: total cost, memory cost component, compute cost component",
+      "step8": "Run with 3 random seeds (42, 123, 456)"
+    },
+    "estimated_time_minutes": 45,
+    "output_files": ["results/extraction/joint_optimization_results.json"],
+    "success_criteria": "Joint optimization achieves ≥10% lower total cost than sequential on memory-bound kernels"
+  },
+  {
+    "category": "Analysis Experiment - Ablation",
+    "title": "Ablation 1: Hierarchy Levels",
+    "description": "Measure impact of hierarchical decomposition by comparing flat vs. 2-level hierarchy.",
+    "steps": {
+      "step1": "Flat e-graph: build monolithic e-graph for entire function",
+      "step2": "2-level hierarchy: separate loop nest and function levels",
+      "step3": "Compare: treewidth, extraction time, solution quality",
+      "step4": "Run both configurations on all kernels",
+      "step5": "Report treewidth reduction from hierarchical decomposition"
+    },
+    "estimated_time_minutes": 30,
+    "output_files": ["results/ablation/hierarchy_ablation.json"]
+  },
+  {
+    "category": "Analysis Experiment - Ablation",
+    "title": "Ablation 2: Extraction Algorithms Comparison",
+    "description": "Compare all extraction algorithms: Greedy, Beam Search (fallback), Treewidth-Aware, and ILP.",
+    "steps": {
+      "step1": "Run all 4 extraction methods on same e-graphs",
+      "step2": "Metrics: extraction time (ms), solution cost, quality ratio vs ILP",
+      "step3": "Quality ratio = (algorithm_cost - ilp_cost) / ilp_cost (lower is better)",
+      "step4": "Time ratio = algorithm_time / greedy_time (lower is better)",
+      "step5": "Generate Pareto frontier: time vs quality tradeoff",
+      "step6": "Identify which algorithm provides best time/quality balance"
+    },
+    "estimated_time_minutes": 40,
+    "output_files": ["results/ablation/extraction_comparison.json"]
+  },
+  {
+    "category": "Analysis Experiment - Ablation",
+    "title": "Ablation 3: Layout Transformation Rules",
+    "description": "Measure impact of layout transformations by comparing with/without layout rules.",
+    "steps": {
+      "step1": "Without layout: apply only computational rewrite rules",
+      "step2": "With layout: apply both computational and layout transformation rules",
+      "step3": "Use memory-aware cost model for both configurations",
+      "step4": "Compare: total cost, memory cost component, solution diversity",
+      "step5": "Count: number of layout e-nodes created, unique layout alternatives explored"
+    },
+    "estimated_time_minutes": 25,
+    "output_files": ["results/ablation/layout_ablation.json"]
+  },
+  {
+    "category": "Analysis Experiment - Ablation",
+    "title": "Ablation 4: Cost Models",
+    "description": "Compare different cost models: instruction count vs. memory-aware vs. combined.",
+    "steps": {
+      "step1": "Instruction-count only: count arithmetic and memory instructions",
+      "step2": "Memory-aware only: focus on cache behavior and bandwidth",
+      "step3": "Combined: weighted sum with tunable parameter α",
+      "step4": "Vary α from 0 (pure compute) to 1 (pure memory) in 0.25 increments",
+      "step5": "Measure how different costs correlate with simulated performance",
+      "step6": "Identify optimal α for memory-bound vs compute-bound kernels"
+    },
+    "estimated_time_minutes": 30,
+    "output_files": ["results/ablation/cost_model_ablation.json"]
+  },
+  {
+    "category": "Analysis Experiment - Sensitivity",
+    "title": "Sensitivity Analysis: Rewrite Rule Application Order",
+    "description": "Test robustness to rewrite rule application order using multiple random seeds.",
+    "steps": {
+      "step1": "Run full pipeline with 5 random seeds: 42, 123, 456, 789, 101112",
+      "step2": "Measure variance in: e-graph size, treewidth, extraction time, solution cost",
+      "step3": "Report coefficient of variation (CV = std/mean) for each metric",
+      "step4": "High CV indicates sensitivity to rule order; low CV indicates robustness"
+    },
+    "estimated_time_minutes": 45,
+    "output_files": ["results/ablation/sensitivity_analysis.json"]
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis and Hypothesis Testing",
+    "description": "Perform statistical tests to validate hypotheses with appropriate significance levels.",
+    "steps": {
+      "step1": "Load all experimental results from previous steps",
+      "step2": "Compute mean, std, 95% confidence intervals for all metrics",
+      "step3": "H1 test: Binomial test for proportion of kernels with treewidth ≤ 10",
+      "step4": "H2 test: Paired t-test comparing joint vs sequential optimization costs",
+      "step5": "H3 test: One-sample t-test comparing solution quality ratio to 0.10 threshold",
+      "step6": "Effect size: compute Cohen's d for practical significance",
+      "step7": "Generate summary table with all statistical results"
+    },
+    "estimated_time_minutes": 20,
+    "output_files": ["results/statistical_analysis.json", "results/summary_table.csv"]
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Validation",
+    "description": "Validate all success criteria defined in the proposal and determine hypothesis confirmation/refutation.",
+    "steps": {
+      "step1": "H1 criterion: Check if ≥70% kernels have treewidth ≤ 10",
+      "step2": "H2 criterion: Check if joint optimization achieves ≥10% improvement over sequential",
+      "step3": "H3 criterion: Check if extraction is ≤5× slower than greedy with ≥90% ILP quality",
+      "step4": "Refutation check: Verify treewidth not >15, joint not worse than sequential",
+      "step5": "Document any limitations or confounding factors",
+      "step6": "Generate final hypothesis assessment report"
+    },
+    "estimated_time_minutes": 15,
+    "output_files": ["results/hypothesis_assessment.md"]
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the research paper.",
+    "steps": {
+      "step1": "Figure 1: Treewidth distribution across kernels (histogram + boxplot)",
+      "step2": "Figure 2: Treewidth comparison - flat vs hierarchical (bar chart)",
+      "step3": "Figure 3: Extraction time vs solution quality scatter plot (all methods)",
+      "step4": "Figure 4: Speedup over baselines (LLVM-style bar chart with error bars)",
+      "step5": "Figure 5: Ablation study results (grouped bar chart)",
+      "step6": "Figure 6: Cost model comparison - compute vs memory cost breakdown",
+      "step7": "Table 1: Main results table with all metrics (LaTeX format)",
+      "step8": "Table 2: Statistical significance table (p-values, confidence intervals)"
+    },
+    "estimated_time_minutes": 30,
+    "output_files": ["figures/figure_*.pdf", "figures/table_*.tex"]
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Report",
+    "description": "Create comprehensive markdown report summarizing all experiments and findings.",
+    "steps": {
+      "step1": "Summarize experimental setup: benchmarks, baselines, metrics",
+      "step2": "Report H1 results: treewidth measurements with statistics",
+      "step3": "Report H2 results: joint vs sequential optimization comparison",
+      "step4": "Report H3 results: extraction time/quality tradeoff analysis",
+      "step5": "Present ablation study findings",
+      "step6": "State final hypothesis confirmation/refutation",
+      "step7": "Discuss limitations and future work",
+      "step8": "Export to results/EXPERIMENT_REPORT.md"
+    },
+    "estimated_time_minutes": 15,
+    "output_files": ["results/EXPERIMENT_REPORT.md"]
+  }
+]

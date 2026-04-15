@@ -1,0 +1,390 @@
+\documentclass[10pt,twocolumn]{article}
+
+\IfFileExists{neurips_2025.sty}{\usepackage[preprint]{neurips_2025}}{\usepackage[margin=1in]{geometry}}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{url}
+
+\newcommand{\method}{CoSBC}
+\newcommand{\R}{R}
+\newcommand{\M}{M}
+\newcommand{\B}{B}
+\newcommand{\1}{\mathbf{1}}
+
+\title{CoSBC: Dependence-Specialized Enriched SBC with Symmetric Pooled Ranking}
+\author{Anonymous Author(s)}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Simulation-based calibration (SBC) is exact under calibrated Bayesian inference, but its sensitivity depends on which quantities are ranked. In practice, coordinate-wise SBC can miss covariance and joint-tail failures that matter for approximate posteriors. We study a narrow question: if the dependence summaries, family aggregation, and Monte Carlo calibration are held fixed, does symmetric pooled multivariate ranking improve enriched SBC? We instantiate this idea in \method, which applies randomized pooled coordinate ranks, builds covariance and tail feature families, and ranks candidates with a permutation-equivariant multivariate score. To keep the evidence auditable, every table row reported in the paper is materialized in \texttt{exp/aggregate/results.json} and linked there to the detailed CSV artifacts from which it was derived. The main outcome is not a stronger diagnostic claim, but a careful enriched-SBC instantiation with limited synthetic gains and an unresolved null-calibration problem. On the synthetic Gaussian power study, \method\ exceeds a feature-matched enriched-SBC baseline by $0.3333$ absolute rejection on three dimension-condition settings: \texttt{Shrink(0.75)} at $d=8$, and \texttt{Shrink(0.25)} and \texttt{Shrink(0.75)} at $d=16$. However, across null settings mean global rejection is $0.1333$ at both $\alpha=0.05$ and $\alpha=0.10$, above the preregistered target band, and in the fixed-data posterior-SBC radon study both \method\ and matched enriched SBC reject $0.0000$ of the time for mean-field ADVI, full-rank ADVI, and Laplace. We therefore position \method\ as a dependence-focused enriched-SBC construction whose per-family symmetry argument is clear, but whose end-to-end global calibration and practical value remain limited in the present evidence.
+\end{abstract}
+
+\section{Introduction}
+Simulation-based calibration (SBC) checks Bayesian computation through exchangeability: conditional on each simulated dataset, the planted parameter draw should be exchangeable with posterior draws from a calibrated inference algorithm \cite{Talts2018}. This makes SBC attractive because the null logic is exact and finite-sample. The main practical weakness is sensitivity. Standard SBC is often run coordinate-wise or on a few scalar summaries, so it can miss the covariance and joint-tail distortions that dominate many approximate-posterior failures.
+
+This paper studies a narrow extension of enriched SBC \cite{Modrak2023}. We do not propose a new calibration principle. Instead, we ask whether pooled symmetric multivariate ranking helps once the dependence summaries and calibration pipeline are already fixed. The comparison is deliberately controlled: \method\ and the closest baseline use the same pooled coordinate transform, the same covariance and tail feature bank, and the same Monte Carlo randomization for family and global calibration. The only difference is whether the dependence features are ranked one scalar at a time or through a symmetric multivariate candidate score. To make that comparison auditable, the paper-facing table rows are copied into \texttt{exp/aggregate/results.json}, with pointers back to the detailed metric CSVs in \texttt{results/}.
+
+The answer is mixed. \method\ shows synthetic gains on several correlation-shrinkage settings, but the strongest unresolved issue is null calibration: the empirical global rejection rate misses the target band even though the per-family symmetry argument and tiny exhaustive check are straightforward. The fixed-data posterior-SBC study also shows no rejection advantage over matched enriched SBC, and localization is inconsistent. The result is still useful, because it isolates what pooled ranking does and does not add once enriched SBC is already feature-matched.
+
+Our contributions are:
+\begin{itemize}
+\item We formulate \method, a dependence-specialized enriched-SBC construction based on randomized pooled coordinate ranks, covariance and tail feature families, and permutation-equivariant multivariate candidate scoring.
+\item We state the exact-valid per-family rank argument for pooled multivariate scoring under exchangeability and pair it with a practical Monte Carlo max-family calibration procedure, while explicitly separating that symmetry argument from the unresolved end-to-end null-calibration behavior seen in the experiments.
+\item We evaluate \method\ against scalar SBC, feature-matched enriched SBC, discriminative calibration, and an energy-distance check on synthetic Gaussian benchmarks and a fixed-data posterior-SBC radon model.
+\item We report a restrained empirical conclusion: pooled ranking can help on some synthetic dependence perturbations, but the present evidence does not support a broad advantage over carefully matched enriched SBC.
+\end{itemize}
+
+Section~\ref{sec:related} reviews the closest prior work. Section~\ref{sec:method} presents the construction. Section~\ref{sec:experiments} reports the experiments. Section~\ref{sec:discussion} discusses the implications and limitations. Appendix~\ref{sec:appendix_repro} summarizes reproducibility details.
+
+\section{Related Work}
+\label{sec:related}
+Talts et al.\ \cite{Talts2018} established SBC as an exchangeability-based validation tool for Bayesian inference algorithms. Their finite-sample rank-uniformity argument is the starting point here: under calibrated inference, the planted draw and posterior draws are exchangeable, so randomized ranks are exactly uniform. Standard SBC is usually deployed on coordinates or a few scalar summaries, which is precisely the sensitivity bottleneck that motivates this paper. \method\ does not alter SBC's null logic; it changes only the ranked quantity.
+
+The next step in this lineage is enriched SBC by Modr\'ak et al.\ \cite{Modrak2023}, who show that the choice of test quantities strongly shapes sensitivity. Our work should therefore be read as a dependence-specialized instantiation of enriched SBC rather than a new framework. The central question is comparative: once the feature bank and aggregation are matched, does pooled multivariate ranking still help?
+
+Posterior SBC extends the calibration idea to a fixed observed dataset by using reference posterior draws as planted values \cite{Sailynoja2025}. We adopt that setting for the radon study because it is a realistic posterior-checking workflow and a stronger practical test than closed-form Gaussian benchmarks alone.
+
+Several diagnostics motivate multivariate or targeted checks outside SBC's exact rank-uniform interpretation. Discriminative calibration replaces rank tests with flexible classification-based divergence estimates \cite{YaoDomke2023}. Wang et al.\ \cite{Wang2023} propose targeted diagnostics for variational approximations, and Zhao and Marriott \cite{ZhaoMarriott2013} study diagnostics for variational Bayes with special attention to covariance structure. These works reinforce the need for dependence-focused diagnostics, but they do not preserve SBC's randomized-rank semantics.
+
+Our pooled candidate score uses multivariate discrepancies related to energy statistics \cite{SzekelyRizzo2013} and, in an ablation, a Gaussian-kernel score related to kernel two-sample testing \cite{GrettonEtAl2012}. We also draw motivation from dependence-specific discrepancy design from a copula perspective \cite{AichAich2025}. Unlike generic discrepancy tests, however, our target is an SBC-compatible ranking rule.
+
+\section{Method}
+\label{sec:method}
+\subsection{Setup}
+For replicate $i \in \{1,\dots,\R\}$, we draw a planted parameter-data pair $(\theta_i^\star, y_i)$ either from the prior predictive distribution or, in posterior SBC, by drawing $\theta_i^\star$ from a stored reference posterior on fixed data. We then draw $\M$ approximate posterior samples $\theta_{i1},\dots,\theta_{i\M}$ from $q(\theta \mid y_i)$ and form the candidate pool
+\[
+X_i = (X_{i0}, \dots, X_{i\M}) = (\theta_i^\star, \theta_{i1}, \dots, \theta_{i\M}).
+\]
+Under exact inference, conditional on $y_i$, these $\M+1$ candidates are exchangeable.
+
+\subsection{Randomized pooled transform}
+For each coordinate $j$ and candidate $r$, \method\ computes a randomized pooled rank of $X_{irj}$ among $\{X_{isj}\}_{s=0}^{\M}$. The rank is converted to a pseudo-uniform value and then Gaussianized:
+\[
+U_{irj} = \frac{\widetilde R_{irj}+1/2}{\M+1},
+\qquad
+Z_{irj} = \Phi^{-1}(U_{irj}).
+\]
+Here $\widetilde R_{irj} \in \{0,\dots,\M\}$ is a \emph{0-based} randomized rank: after random tie-breaking, the smallest pooled value has rank $0$ and the largest has rank $\M$. The implementation uses uniform jitter at scale $10^{-9}$ before sorting. Because the transform is permutation-equivariant in the candidate labels, exchangeability is preserved.
+
+\subsection{Dependence feature families}
+We use two narrow, pre-registered feature families. The covariance family collects pairwise Gaussianized products
+\[
+\psi_{ir}^{\mathrm{cov}} = \left\{ Z_{irj} Z_{irk} : 1 \le j < k \le d \right\},
+\]
+and the tail family collects upper- and lower-tail co-occurrence indicators
+\[
+\psi_{ir}^{\mathrm{tail}} =
+\left\{
+\begin{aligned}
+&\1\{U_{irj}>0.9,\ U_{irk}>0.9\},\\
+&\1\{U_{irj}<0.1,\ U_{irk}<0.1\}
+:\ 1 \le j < k \le d
+\end{aligned}
+\right\}.
+\]
+The goal is not omnibus posterior checking. It is targeted sensitivity to covariance and joint-tail misspecification.
+
+\subsection{Symmetric pooled ranking}
+For family $\ell \in \{\mathrm{cov}, \mathrm{tail}\}$, let $\psi_{ir}^{(\ell)}$ be candidate $r$'s family feature vector. \method\ computes a leave-one-out multivariate score
+\[
+A_{ir}^{(\ell)} =
+\frac{1}{\M}
+\sum_{s \neq r}
+\left\|
+\psi_{ir}^{(\ell)} - \psi_{is}^{(\ell)}
+\right\|_2.
+\]
+The planted family statistic is the randomized rank of $A_{i0}^{(\ell)}$ among $\{A_{ir}^{(\ell)}\}_{r=0}^{\M}$. The feature-matched enriched-SBC baseline uses the same pooled transform and feature bank, but ranks each scalar feature separately and then aggregates the resulting scalar-rank dispersion scores.
+
+\subsection{Feature-matched enriched-SBC baseline}
+The matched enriched-SBC comparator is designed so that pooled multivariate scoring is the \emph{only} moving part. For a family $\ell$ with scalar features $\psi_{irk}^{(\ell)}$, $k=1,\dots,K_\ell$, the baseline first computes, for each feature $k$, the randomized rank of $\psi_{i0k}^{(\ell)}$ among $\{\psi_{irk}^{(\ell)}\}_{r=0}^{\M}$ exactly as in ordinary SBC. Equivalently, at the candidate level it converts each scalar feature into a candidate-by-feature PIT matrix
+\[
+V_{irk}^{(\ell)} = \frac{\widetilde R_{irk}^{(\ell)} + 1/2}{\M+1},
+\]
+where $\widetilde R_{irk}^{(\ell)}$ is the randomized rank of candidate $r$ on scalar feature $k$. The baseline then assigns candidate $r$ the within-family score
+\[
+\bar A_{ir}^{(\ell)} = \frac{1}{K_\ell}\sum_{k=1}^{K_\ell}\left(V_{irk}^{(\ell)}-\frac{1}{2}\right)^2.
+\]
+This is the exact aggregation implemented in \texttt{exp/shared/core.py}: it averages squared centered scalar PITs across all features in the family, then randomized-ranks the candidate scores $\{\bar A_{ir}^{(\ell)}\}_{r=0}^{\M}$ to obtain the planted family PIT for replicate $i$. Family p-values are computed from the same quadratic statistic $S_\ell=\sum_i(V_i^{(\ell)}-1/2)^2$ as \method, and the default global p-value uses the same shared Monte Carlo relabelings and $T_{\max}$ calibration. The Bonferroni and Fisher variants in the ablation table reuse the same family p-values and differ only in the final family-combination rule.
+
+\subsection{Validity and global calibration}
+The exact-validity claim is modest and only concerns the randomized planted rank within a family.
+
+\textbf{Claim 1.} If the pooled transform, any tuning rule used inside it, and the final candidate score are all measurable and permutation-equivariant in the candidate labels, then the randomized planted rank is exactly uniform on $\{0,\dots,\M\}$ under exchangeability.
+
+This is the standard SBC symmetry argument applied to pooled multivariate scores. It does not, by itself, guarantee that the finite-$\B$ Monte Carlo global procedure will behave near nominal levels in a practical implementation; that issue is evaluated empirically in Section~\ref{sec:experiments}. For family-level inference, let $V_i^{(\ell)} \in (0,1)$ be the PIT-scaled planted rank for family $\ell$, and define
+\[
+S_\ell = \sum_{i=1}^{\R}\left(V_i^{(\ell)}-\frac{1}{2}\right)^2.
+\]
+The global statistic is
+\[
+T_{\max} = \max_{\ell \in \{\mathrm{cov}, \mathrm{tail}\}} S_\ell.
+\]
+We calibrate $T_{\max}$ by Monte Carlo relabeling of the planted candidate index within each replicate using $\B=199$ shared relabelings and the plus-one correction. A tiny implementation check uses $\R=4$, $\M=7$, and exhaustive comparison against all $8^4=4096$ global relabelings.
+
+\subsection{Baselines}
+We compare against four baselines.
+\begin{itemize}
+\item \textbf{Scalar SBC}: coordinate families plus a Gaussianized Mahalanobis-radius family.
+\item \textbf{Feature-matched enriched SBC}: the same pooled transform, covariance and tail feature bank, and the same family/global randomization calibration as \method.
+\item \textbf{Discriminative calibration}: logistic regression on simulated positive versus negative examples built from the same feature families \cite{YaoDomke2023}.
+\item \textbf{Energy distance}: an energy two-sample statistic applied to the same family features.
+\end{itemize}
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+All runs are CPU-only with thread pinning \texttt{OMP\_NUM\_THREADS = MKL\_NUM\_THREADS = OPENBLAS\_NUM\_THREADS = NUMEXPR\_NUM\_THREADS = 1}. The scheduled budget in \texttt{results/runtime/schedule.json} is 2 CPU cores, 128\,GB RAM, no GPU, and 8 hours total. We use seeds $\{11,23,37\}$ throughout.
+
+The synthetic studies use conjugate multivariate Gaussian mean models with exact posteriors. Main settings use $\R=100$ replicates, $\M=24$ approximate posterior draws, and $\B=199$ relabelings. We evaluate null settings at $d \in \{8,16\}$, a quantized tie-handling null, diagonal approximations, correlation shrinkage \texttt{Shrink(0.25)}, \texttt{Shrink(0.50)}, and \texttt{Shrink(0.75)}, and a heavy-tail mixture approximation \texttt{TailMix}. Localization uses block-pair covariance models with one corrupted pair under \texttt{ZeroPair} or \texttt{FlipPair}.
+
+The fixed-data study uses posterior SBC on a prepared Minnesota radon subset with $518$ observations from the 12 counties with the most measurements. Both the raw file \texttt{data/radon.csv} and the prepared subset \texttt{data/radon\_top12.csv} are present in the workspace, and \texttt{exp/setup/results.json} records their paths together with the retained county list. The model is a Gaussian varying-intercept regression with county intercepts and a floor effect. The stored reference posterior in \texttt{results/fixed\_data/reference/reference\_idata.nc} is obtained by NUTS with 4 chains, 750 warmup draws, 750 retained draws, target acceptance $0.9$, runtime 11.8892 seconds, and 0 divergences. We then compare mean-field ADVI, full-rank ADVI, and Laplace approximations, each represented by 2000 samples.
+
+The paper uses a two-level provenance contract. Detailed per-run metrics remain in \texttt{results/*.csv}; paper-facing table rows are materialized in \texttt{exp/aggregate/results.json}, which stores the exact rows used in the manuscript together with the CSV path and SHA-256 digest from which each row was derived. Study-level summaries such as mean null rejection and preregistration booleans continue to come from the coarse \texttt{exp/null\_checks/results.json}, \texttt{exp/power/results.json}, \texttt{exp/fixed\_data/results.json}, and \texttt{results/hypothesis\_check.json} artifacts.
+
+\subsection{Null calibration}
+Table~\ref{tab:null} summarizes null behavior. The tiny exact check behaves as intended: the mean absolute gap between exhaustive and Monte Carlo global p-values is $0.0121$. However, the broader null-validity target is not met. Across null settings, the mean global rejection rate is $0.1333$ at both $\alpha=0.05$ and $\alpha=0.10$, above the preregistered target band of $[0.03, 0.07]$. This is the central unresolved issue in the paper and blocks the strongest methodological claim.
+
+The null mismatch is also structured rather than diffuse. Across the four full null settings in Table~\ref{tab:null}, covariance-family mean p-values range from $0.2950$ to $0.8067$, whereas tail-family mean p-values are consistently lower, from $0.1733$ to $0.2750$. This suggests that the inflation is concentrated in the tail family and then inherited by the max-family global test. That statement is an empirical inference from \texttt{results/null\_checks/null\_metrics.csv}, not a proof of the underlying mechanism, but it is the clearest explanation supported by the present artifacts.
+
+\begin{table}[t]
+\caption{Null calibration for \method. Values are means across seeds. The tiny exact check compares Monte Carlo and exhaustive global calibration at $\R=4$, $\M=7$.}
+\label{tab:null}
+\centering
+\small
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+Setting & Global p-value mean & Covariance p-value mean & Tail p-value mean \\
+\midrule
+\texttt{toeplitz\_null\_d8} & 0.2967 & 0.4617 & 0.1900 \\
+\texttt{toeplitz\_null\_d16} & 0.2783 & 0.2950 & 0.1733 \\
+\texttt{tie\_quantized\_d8} & 0.4233 & 0.8067 & 0.2750 \\
+\texttt{kernel\_null\_d8} & 0.3433 & 0.6133 & 0.2067 \\
+\texttt{tiny\_exact\_check} & 0.4373 & --- & --- \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_null_histograms.pdf}
+\caption{Null-study p-value histograms stratified by setting, regenerated from \texttt{results/null\_checks/null\_metrics.csv}. Each panel corresponds to one null configuration; blue, brown, and red traces denote covariance-family, tail-family, and global p-values, respectively. The tiny exact-check panel contains only the global p-value because that run is an implementation check rather than a full family-wise null study.}
+\label{fig:null}
+\end{figure}
+
+\subsection{Synthetic power}
+Table~\ref{tab:power} is taken from the \texttt{table2\_synthetic\_power\_by\_dimension} block inside \texttt{exp/aggregate/results.json}, whose derivation trail points to \texttt{results/paper\_table2\_power\_by\_dimension.csv}. The corrected numbers preserve the study-level conclusion but materially change several individual rows from the earlier draft. Relative to feature-matched enriched SBC, \method\ gains $0.3333$ absolute rejection on exactly three dimension-condition settings: \texttt{Shrink(0.75)} at $d=8$, and \texttt{Shrink(0.25)} and \texttt{Shrink(0.75)} at $d=16$. Outside those settings, the two methods tie at $0.0000$ or $0.3333$. Energy distance is the strongest contextual baseline on several rows, reaching $1.0000$ for \texttt{Shrink(0.25)} and \texttt{TailMix} at $d=16$.
+
+Figure~\ref{fig:power} now shows the same synthetic power results split by dimension, matching the dimension-specific claims in Table~\ref{tab:power}.
+
+\begin{table*}[t]
+\caption{Synthetic rejection rates at $\alpha=0.05$, regenerated from \texttt{results/power/power\_metrics.csv} by grouping over both dimension and condition. Best rejection rate within each row is shown in \textbf{bold}. Runtime is the mean \method\ runtime in minutes for that dimension-condition setting.}
+\label{tab:power}
+\centering
+\small
+\begin{tabular}{llcccccc}
+\toprule
+Condition & $d$ & \method & Enriched & Scalar & Discriminative & Energy distance & \method\ runtime \\
+\midrule
+\texttt{Diag} & 8 & 0.3333 & 0.3333 & 0.0000 & 0.3333 & \textbf{0.6667} & 0.0021 \\
+\texttt{Shrink(0.25)} & 8 & 0.0000 & 0.0000 & 0.0000 & \textbf{0.6667} & 0.3333 & 0.0021 \\
+\texttt{Shrink(0.50)} & 8 & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0021 \\
+\texttt{Shrink(0.75)} & 8 & \textbf{0.3333} & 0.0000 & \textbf{0.3333} & 0.0000 & 0.0000 & 0.0021 \\
+\texttt{TailMix} & 8 & 0.0000 & 0.0000 & 0.0000 & 0.3333 & \textbf{0.6667} & 0.0021 \\
+\midrule
+\texttt{Diag} & 16 & 0.0000 & 0.0000 & 0.3333 & 0.0000 & \textbf{0.6667} & 0.0042 \\
+\texttt{Shrink(0.25)} & 16 & 0.3333 & 0.0000 & 0.3333 & 0.6667 & \textbf{1.0000} & 0.0042 \\
+\texttt{Shrink(0.50)} & 16 & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0042 \\
+\texttt{Shrink(0.75)} & 16 & \textbf{0.3333} & 0.0000 & 0.0000 & \textbf{0.3333} & 0.0000 & 0.0043 \\
+\texttt{TailMix} & 16 & 0.0000 & 0.0000 & 0.0000 & 0.3333 & \textbf{1.0000} & 0.0043 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_synthetic_power_by_dimension.pdf}
+\caption{Synthetic rejection rates at $\alpha=0.05$ split into separate $d=8$ and $d=16$ panels. Curves correspond to CoSBC, matched enriched SBC, scalar SBC, discriminative calibration, and energy distance. The figure is generated from \texttt{results/paper\_table2\_power\_by\_dimension.csv}, which is computed directly from \texttt{results/power/power\_metrics.csv}.}
+\label{fig:power}
+\end{figure}
+
+\subsection{Pair localization}
+Localization remains mixed to negative. Table~\ref{tab:localization} is materialized in \texttt{exp/aggregate/results.json} from \texttt{results/paper\_table3\_localization\_by\_dimension.csv}. It shows that \method\ never reaches top-1 recovery above $0.0000$ in any dimension-condition setting. Matched enriched SBC is substantially stronger on \texttt{FlipPair}, reaching top-1 recovery $1.0000$ at $d=8$ and $0.6667$ at $d=16$. \method\ improves on enriched SBC only on \texttt{ZeroPair} at $d=8$ in the weaker top-3 metric, where it achieves $0.6667$ versus $0.3333$.
+
+Figure~\ref{fig:localization} now reports top-1 recovery with separate panels for $d=8$ and $d=16$, matching the table.
+
+\begin{table}[t]
+\caption{Pair-localization results from \texttt{results/localization/localization\_metrics.csv}, grouped by both dimension and corruption mode. Values are means across seeds.}
+\label{tab:localization}
+\centering
+\small
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llccc}
+\toprule
+Condition & Method & Top-1 & Top-3 & Mean rank \\
+\midrule
+\texttt{FlipPair}, $d=8$ & \method & 0.0000 & 0.0000 & 5.6667 \\
+\texttt{FlipPair}, $d=8$ & Enriched & 1.0000 & 1.0000 & 1.0000 \\
+\texttt{ZeroPair}, $d=8$ & \method & 0.0000 & 0.6667 & 4.3333 \\
+\texttt{ZeroPair}, $d=8$ & Enriched & 0.3333 & 0.3333 & 8.6667 \\
+\texttt{FlipPair}, $d=16$ & \method & 0.0000 & 0.0000 & 15.6667 \\
+\texttt{FlipPair}, $d=16$ & Enriched & 0.6667 & 0.6667 & 2.0000 \\
+\texttt{ZeroPair}, $d=16$ & \method & 0.0000 & 0.0000 & 39.3333 \\
+\texttt{ZeroPair}, $d=16$ & Enriched & 0.0000 & 0.0000 & 49.6667 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_localization_by_dimension.pdf}
+\caption{Top-1 corrupted-pair recovery for the localization study, shown separately for $d=8$ and $d=16$ with bars for CoSBC, matched enriched SBC, and scalar SBC. The figure is generated from \texttt{results/paper\_table3\_localization\_by\_dimension.csv}.}
+\label{fig:localization}
+\end{figure}
+
+\subsection{Fixed-data posterior SBC on radon}
+Table~\ref{tab:fixed} is materialized in \texttt{exp/aggregate/results.json} from \texttt{results/table4\_fixed\_data.csv}. The three approximation families have clearly different covariance errors relative to the NUTS reference: mean Frobenius covariance error is $2.2142$ for mean-field ADVI, $21.2219$ for full-rank ADVI, and $0.6956$ for Laplace. Yet \method\ and matched enriched SBC both have rejection rate $0.0000$ for all three approximations. The fixed-data criterion therefore fails exactly.
+
+Among the four diagnostics, scalar SBC has the strongest Kendall correlation between its global statistic and covariance error severity, $0.3889$, followed by \method\ at $0.2778$, enriched SBC at $0.1667$, and discriminative calibration at $0.1451$. Figure~\ref{fig:fixeddata} is therefore best read as a severity scatter plot rather than evidence of a rejection advantage for \method.
+
+The row-level artifacts give a plausible explanation for why the study is entirely null. For \method, the covariance-family p-value is $1.0$ in eight of the nine fixed-data runs and $0.98$ in the remaining run, while the tail-family p-value stays between $0.400$ and $1.0$. A reasonable interpretation is that, after the pooled marginal rank transform, the pairwise covariance and tail-co-occurrence families used here are largely insensitive to the approximation errors present in this radon setup, even when the covariance Frobenius error is large. This interpretation is again inferential rather than definitive, but it is more consistent with the stored artifacts than claiming that the approximations are practically equivalent to the reference posterior.
+
+\begin{table*}[t]
+\caption{Fixed-data posterior-SBC results on the radon model. Rejection rates are at $\alpha=0.05$. End-to-end runtime includes approximation fitting plus diagnostic evaluation.}
+\label{tab:fixed}
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Approximation & Method & Reject@0.05 & Global stat mean & Runtime (min) & Covariance error \\
+\midrule
+Mean-field ADVI & \method & 0.0000 & 2.4592 & 0.0403 & 2.2142 \\
+Mean-field ADVI & Enriched & 0.0000 & 4.5141 & 0.0446 & 2.2142 \\
+Mean-field ADVI & Scalar & 0.0000 & 4.9589 & 0.0392 & 2.2142 \\
+Mean-field ADVI & Discriminative & \textbf{1.0000} & 1.0000 & 0.0747 & 2.2142 \\
+\midrule
+Full-rank ADVI & \method & 0.0000 & 4.6411 & 0.0576 & 21.2219 \\
+Full-rank ADVI & Enriched & 0.0000 & 4.9813 & 0.0619 & 21.2219 \\
+Full-rank ADVI & Scalar & 0.0000 & 5.6331 & 0.0565 & 21.2219 \\
+Full-rank ADVI & Discriminative & \textbf{1.0000} & 0.9421 & 0.0914 & 21.2219 \\
+\midrule
+Laplace & \method & 0.0000 & 4.2491 & 0.1524 & 0.6956 \\
+Laplace & Enriched & 0.0000 & 4.7664 & 0.1567 & 0.6956 \\
+Laplace & Scalar & 0.0000 & 5.2117 & 0.1513 & 0.6956 \\
+Laplace & Discriminative & \textbf{1.0000} & 0.8843 & 0.1843 & 0.6956 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_fixed_data.pdf}
+\caption{Fixed-data posterior-SBC severity plot regenerated from \texttt{results/fixed\_data/fixed\_data\_metrics.csv}. Panels correspond to mean-field ADVI, full-rank ADVI, and Laplace; each point is one seed, with x-axis equal to Frobenius covariance error relative to the NUTS reference posterior and y-axis equal to the diagnostic's global statistic. The plot shows severity ordering but no rejection advantage for \method\ over matched enriched SBC.}
+\label{fig:fixeddata}
+\end{figure}
+
+\subsection{Ablations and budget sensitivity}
+The ablations support the restrained interpretation. On \texttt{Shrink(0.50)} at $d=16$, all three seeds are non-rejecting for both \method\ and enriched SBC under the default $T_{\max}$ aggregation, and most alternative aggregation variants remain non-rejecting as well. On \texttt{TailMix} at $d=16$, the \method\ feature-family variants remain entirely non-rejecting. The kernel-score null ablation produces one rejection at seed 11 with p-value $0.04$, which is directionally consistent with the broader null-calibration concern.
+
+Budget sensitivity is also mixed. In the ablation rows for \texttt{Shrink(0.50)} at $d=8$, \method\ rejects once at \texttt{R80\_M16} and once at \texttt{R100\_M24}, but not at \texttt{R140\_M32}; enriched SBC remains non-rejecting in all nine corresponding runs while taking roughly twice the runtime. Figure~\ref{fig:budget} summarizes this tradeoff.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure5_budget_sensitivity.pdf}
+\caption{Budget-sensitivity summary from \texttt{results/table6\_budget\_sensitivity.csv}. Points show mean runtime and mean rejection rate across the three seeds for the \texttt{Shrink(0.50)}, $d=8$ ablation; horizontal and vertical error bars are 95\% confidence intervals across seeds. \method\ is consistently cheaper than matched enriched SBC, but the rejection pattern is unstable and does not improve monotonically with budget.}
+\label{fig:budget}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main lesson is not that pooled ranking is useless. It helps in some synthetic correlation-shrinkage settings and remains computationally cheap. But the present study does not justify the stronger claim that pooled symmetric ranking is broadly better than feature-matched enriched SBC.
+
+First, null calibration misses the preregistered target. The exact symmetry argument applies to the per-family rank construction, and the tiny exhaustive check confirms that the Monte Carlo implementation is numerically faithful. Yet the end-to-end null study still yields mean global rejection $0.1333$ at $\alpha=0.05$, with the strongest low-p-value skew appearing in the tail family. That discrepancy needs to be understood before making a strong validity claim about the full diagnostic.
+
+Second, the fixed-data study is decisive for practical relevance. The three approximate posteriors differ materially in covariance error, but \method\ and matched enriched SBC remain tied at rejection $0.0000$ for all of them. The stored row-level p-values suggest that the current covariance and tail families are simply not reacting to the radon approximation errors after marginal rank pooling. Once the dependence summaries and calibration are matched, pooled ranking does not add measurable value on this realistic posterior-SBC task.
+
+Third, localization is not improved. The dependence-specialized construction was intended not only to detect dependence failures but also to help identify where they occur. That does not happen reliably here: enriched SBC dominates \method\ on \texttt{FlipPair} in both dimensions.
+
+The study also has broader limitations. The synthetic benchmarks are analytically convenient Gaussian models. The fixed-data benchmark is one small hierarchical radon model with 16 latent dimensions after flattening. The contextual baselines do not share SBC's exact rank semantics, so they provide context rather than directly comparable guarantees. The manuscript provenance is now auditable through \texttt{exp/aggregate/results.json}, but it still inherits any upstream mistakes in the experiment pipeline and has not been independently rerun after drafting.
+
+\section{Conclusion}
+\method\ is a dependence-specialized enriched-SBC construction built from randomized pooled coordinate ranks, covariance and tail feature families, and symmetric multivariate candidate scoring. In controlled synthetic settings it sometimes improves on feature-matched enriched SBC, with a $0.3333$ absolute rejection gain on three dimension-condition settings. However, the broader case for a stronger method is not supported: mean null rejection is $0.1333$ at both $\alpha=0.05$ and $\alpha=0.10$, fixed-data posterior-SBC rejection remains $0.0000$ for both \method\ and enriched SBC across all three approximations, and localization does not improve.
+
+The practical conclusion is narrower. Rich dependence summaries matter, and pooled symmetric ranking may help in specific synthetic regimes, but this study does not show that pooled ranking itself is the main practical improvement over a carefully matched enriched-SBC baseline. Future work should focus on explaining the null-calibration mismatch, broadening the fixed-data evaluation, and designing localization scores that preserve exchangeability while ranking corrupted substructures more reliably.
+
+\appendix
+\section{Reproducibility Details}
+\label{sec:appendix_repro}
+\textbf{Environment.} The experiment schedule in \texttt{results/runtime/schedule.json} records a CPU-only budget of 2 cores, 128\,GB RAM, and no GPU. Threading is pinned through \texttt{OMP\_NUM\_THREADS=1}, \texttt{MKL\_NUM\_THREADS=1}, \texttt{OPENBLAS\_NUM\_THREADS=1}, and \texttt{NUMEXPR\_NUM\_THREADS=1}. The shared experiment seeds are 11, 23, and 37, as recorded in \texttt{exp/setup/results.json}.
+
+\textbf{Datasets and stored artifacts.} The shared synthetic specifications live in \texttt{results/setup/seed\_<seed>\_spec.json} for seeds 11, 23, and 37. The fixed-data reference posterior artifacts live under \texttt{results/fixed\_data/reference/}, notably \texttt{reference\_idata.nc}, \texttt{reference\_summary.csv}, and \texttt{nuts\_log.jsonl}. The workspace also includes the raw and prepared radon files, \texttt{data/radon.csv} and \texttt{data/radon\_top12.csv}; \texttt{exp/setup/results.json} records these paths, the retained counties, and the dataset row count.
+
+\textbf{How the reported tables are generated.} The auditable source of truth for paper-facing rows is \texttt{exp/aggregate/results.json}. Each manuscript table block in that file stores the exact row values used in \texttt{paper.tex}, the detailed CSV from which the row was derived, and the SHA-256 digest of that CSV. Null calibration points to \texttt{results/table1\_null.csv}; synthetic power and localization point to \texttt{results/paper\_table2\_power\_by\_dimension.csv} and \texttt{results/paper\_table3\_localization\_by\_dimension.csv}; fixed-data numbers point to \texttt{results/table4\_fixed\_data.csv}; budget sensitivity points to \texttt{results/table6\_budget\_sensitivity.csv}; and ablation-only text claims point to \texttt{results/table5\_ablations.csv}. The coarse \texttt{exp/null\_checks/results.json}, \texttt{exp/power/results.json}, \texttt{exp/localization/results.json}, and \texttt{exp/fixed\_data/results.json} files are used only for study-level summaries that are recorded verbatim in the \texttt{manuscript\_text\_claims} section of \texttt{exp/aggregate/results.json}.
+
+\textbf{How the figures are generated.} Figures~\ref{fig:null}, \ref{fig:power}, \ref{fig:localization}, \ref{fig:fixeddata}, and \ref{fig:budget} were regenerated for this draft with
+\begin{quote}
+\texttt{python3 scripts/generate\_paper\_assets.py}
+\end{quote}
+which reads the raw CSVs in \texttt{results/} and writes the paper figures under \texttt{figures/}, including \texttt{figure1\_null\_histograms.pdf}, \texttt{figure2\_synthetic\_power\_by\_dimension.pdf}, \texttt{figure3\_localization\_by\_dimension.pdf}, \texttt{figure4\_fixed\_data.pdf}, and \texttt{figure5\_budget\_sensitivity.pdf}.
+
+\begin{thebibliography}{10}
+
+\bibitem{AichAich2025}
+Agnideep Aich and Ashit Baran Aich.
+\newblock Copula discrepancy: Benchmarking dependence structure.
+\newblock {\em arXiv preprint arXiv:2507.21434}, 2025.
+
+\bibitem{GrettonEtAl2012}
+Arthur Gretton, Karsten Borgwardt, Malte~J. Rasch, Bernhard Sch{\"o}lkopf, and Alexander Smola.
+\newblock A kernel two-sample test.
+\newblock {\em Journal of Machine Learning Research}, 13:723--773, 2012.
+
+\bibitem{Modrak2023}
+Martin Modr\'ak, Angie~H. Moon, Shinyoung Kim, Paul-Christian B{\"u}rkner, Niko Huurre, Kate\v{r}ina Faltejskov\'a, Andrew Gelman, and Aki Vehtari.
+\newblock Simulation-based calibration checking for Bayesian computation: The choice of test quantities shapes sensitivity.
+\newblock {\em arXiv preprint arXiv:2211.02383}, 2022.
+
+\bibitem{Sailynoja2025}
+Teemu S\"ailynoja, Marvin Schmitt, Paul-Christian B{\"u}rkner, and Aki Vehtari.
+\newblock Posterior {SBC}: Simulation-based calibration checking conditional on data.
+\newblock {\em arXiv preprint arXiv:2502.03279}, 2025.
+
+\bibitem{SzekelyRizzo2013}
+G\'abor~J. Sz\'ekely and Maria~L. Rizzo.
+\newblock Energy statistics: A class of statistics based on distances.
+\newblock {\em Journal of Statistical Planning and Inference}, 143(8):1249--1272, 2013.
+
+\bibitem{Talts2018}
+Sean Talts, Michael Betancourt, Daniel Simpson, Aki Vehtari, and Andrew Gelman.
+\newblock Validating Bayesian inference algorithms with simulation-based calibration.
+\newblock {\em arXiv preprint arXiv:1804.06788}, 2018.
+
+\bibitem{Wang2023}
+Yu Wang, Miko{\l}aj Kasprzak, and Jonathan~H. Huggins.
+\newblock A targeted accuracy diagnostic for variational approximations.
+\newblock {\em Proceedings of The 26th International Conference on Artificial Intelligence and Statistics}, 206:8351--8372, 2023.
+
+\bibitem{YaoDomke2023}
+Yuling Yao and Justin Domke.
+\newblock Discriminative calibration: Check Bayesian computation from simulations and flexible classifier.
+\newblock In {\em Advances in Neural Information Processing Systems 36}, pages 57939--57974, 2023.
+
+\bibitem{ZhaoMarriott2013}
+Hui Zhao and Paul Marriott.
+\newblock Diagnostics for variational Bayes approximations.
+\newblock {\em arXiv preprint arXiv:1309.5117}, 2013.
+
+\end{thebibliography}
+
+\end{document}

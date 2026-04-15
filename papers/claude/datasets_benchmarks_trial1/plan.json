@@ -1,0 +1,141 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python environment and dependencies",
+    "description": "Install all required packages for dataset generation, model inference, evaluation, and visualization. Use vLLM for efficient batched inference on the A6000 GPU.",
+    "steps": {
+      "step1": "Create a conda environment or use the system Python (3.10+). Install core packages: pip install vllm>=0.4.0 transformers>=4.40 torch>=2.1 datasets numpy pandas scipy scikit-learn matplotlib seaborn tqdm jsonlines",
+      "step2": "Install additional utilities: pip install accelerate bitsandbytes sentencepiece protobuf",
+      "step3": "Verify GPU availability: run `python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\"` and confirm RTX A6000 is detected",
+      "step4": "Create the project directory structure: mkdir -p data/{seed_42,seed_123,seed_456} results/{raw,parsed,aggregated} figures logs",
+      "step5": "Download model weights in advance to avoid timeout during inference. Pre-download: microsoft/Phi-3.5-mini-instruct, meta-llama/Llama-3.1-8B-Instruct, Qwen/Qwen2.5-7B-Instruct, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, Qwen/Qwen2.5-32B-Instruct-AWQ"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate FlipBench dataset (3 seeds)",
+    "description": "Programmatically generate 1,200 matched forward-backward reasoning pairs across 4 domains (propositional logic, arithmetic, relational reasoning, function computation), each with 3 difficulty levels (100 pairs per level). Generate 3 independent dataset versions using seeds 42, 123, and 456 for statistical robustness. Every instance must have a verified ground-truth answer.",
+    "steps": {
+      "step1": "Implement the Propositional Logic generator (generate_logic.py): Generate rule sets over a vocabulary of 8-12 propositions (P, Q, R, S, ...). Difficulty 1: 1-hop (1 rule, 1 fact, derive conclusion). Difficulty 2: 2-hop (2 chained rules, 1 starting fact). Difficulty 3: 3-hop (3 chained rules plus 2-3 distractor rules). Forward: given rules + facts, determine if target proposition is True/False. Backward: given rules + target truth value, determine what initial fact(s) must hold. Ensure unique solutions by construction. Output format: JSON with fields {id, domain, difficulty, direction, problem_text, answer, matched_pair_id, rules, facts}.",
+      "step2": "Implement the Arithmetic Reasoning generator (generate_arithmetic.py): Generate word problems involving basic operations (+, -, *, /). Difficulty 1: single operation (e.g., compute 7*3+4). Difficulty 2: two chained operations. Difficulty 3: three chained operations with mixed operators. Forward: given all operands + operations, compute result. Backward: given result + all-but-one operand, find missing operand. Use integers only (range 1-100 for operands, ensure clean division). Verify unique solvability. Same JSON output format.",
+      "step3": "Implement the Relational/Causal Reasoning generator (generate_relational.py): Generate entity-relation graphs using family relationships (parent, child, sibling, grandparent, uncle/aunt, cousin). Difficulty 1: single-hop (A is B's parent, what is B to A?). Difficulty 2: two-hop transitive (A is B's parent, B is C's parent, what is A to C?). Difficulty 3: three-hop with 3-5 distractor entities. Forward: given relationships, derive target relation. Backward: given relationships + target relation, identify the entity. Use a name pool of 20 common names. Verify unique answers.",
+      "step4": "Implement the Function Computation generator (generate_functions.py): Generate simple Python functions using operations: multiply, add, subtract, modulo, integer divide. Difficulty 1: single operation (f(x) = a*x + b). Difficulty 2: two composed operations (f(x) = a*(x+b) + c). Difficulty 3: three composed operations with conditionals (if x > threshold: path_a else: path_b). Forward: given function + input, compute output. Backward: given function + output, find input. Ensure invertibility by restricting to bijective functions on the integer domain [1, 50]. Verify unique inverse.",
+      "step5": "Run all 4 generators for each of the 3 seeds (42, 123, 456). Save each seed's dataset as data/seed_{N}/flipbench.json. Each file should contain exactly 2,400 instances (1,200 pairs × 2 directions). Run verification: for every pair, confirm that the forward answer and backward answer are both correct by re-solving programmatically.",
+      "step6": "Compute and log dataset statistics: total instances per domain/difficulty/direction, answer distribution (check for class imbalance in True/False answers for logic), numeric answer range for arithmetic, unique entity counts for relational. Save to data/dataset_stats.json.",
+      "step7": "Create a random-guessing baseline: for each instance type, compute the expected accuracy of random guessing. Logic (binary True/False): 50%. Arithmetic (open-ended integer): ~0%. Relational (choose from N entities): 1/N. Function (open-ended integer): ~0%. Save baseline expectations to results/random_baseline.json."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Design evaluation prompts and answer parser",
+    "description": "Create standardized prompt templates for each domain and a robust answer parser that extracts final answers from model outputs. The prompt must be identical for forward and backward variants (aside from the problem text itself) to ensure fair comparison.",
+    "steps": {
+      "step1": "Design prompt templates (prompts.py). Each prompt follows the format: System message setting the role ('You are a precise reasoning assistant. Answer the question below. Give your final answer on the last line in the format: ANSWER: <your answer>'), followed by the problem text. No few-shot examples (zero-shot evaluation). The template is domain-agnostic to avoid giving direction-specific hints.",
+      "step2": "Implement answer parser (parse_answers.py). Extract the text after 'ANSWER:' from model output. For logic: parse 'True'/'False' (case-insensitive, also accept 'Yes'/'No'). For arithmetic: parse integer (strip whitespace, handle negative). For relational: parse entity name (fuzzy match against valid entities). For function: parse integer. Log parsing failures separately.",
+      "step3": "Implement a Chain-of-Thought (CoT) prompt variant for ablation: same as above but add 'Think step by step before giving your final answer.' after the problem text. Save as a separate prompt template.",
+      "step4": "Test prompts + parser on 5 hand-crafted examples per domain to verify correctness before running full evaluation."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate simple baselines",
+    "description": "Establish lower bounds with two simple baselines: (1) random guessing and (2) a regex/heuristic pattern-matching baseline that uses surface-level cues without reasoning.",
+    "steps": {
+      "step1": "Random baseline: for each instance, sample a random answer from the valid answer space. Logic: random choice from {True, False}. Arithmetic: random integer from [1, 100]. Relational: random choice from mentioned entities. Function: random integer from [1, 50]. Run with 3 seeds, compute mean accuracy per domain/direction/difficulty. Save to results/random_baseline_results.json.",
+      "step2": "Heuristic baseline: implement simple pattern-matching rules. Logic: always answer 'True' (majority class bias check). Arithmetic forward: attempt to evaluate any expression found in the text using regex + eval. Arithmetic backward: always guess the median of operand range. Relational: guess the first mentioned entity. Function forward: attempt to eval the function string. Function backward: always guess 25 (midpoint of [1,50]). Save to results/heuristic_baseline_results.json.",
+      "step3": "Compute baseline metrics: forward accuracy, backward accuracy, DRG, and consistency rate for both baselines across all domains and difficulty levels. These serve as sanity checks — any model should significantly outperform these."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate standard instruction-tuned models (strong baselines)",
+    "description": "Evaluate standard (non-reasoning-optimized) instruction-tuned LLMs as strong baselines. These represent the current state-of-the-art for general-purpose models without specialized reasoning training.",
+    "steps": {
+      "step1": "Evaluate Phi-3.5-mini-instruct (3.8B) on seed_42 dataset using vLLM. Load model with vLLM (LLM class, dtype=float16, gpu_memory_utilization=0.85). Use SamplingParams(temperature=0, max_tokens=512, stop=['\\n\\nQuestion:', '\\n\\nProblem:']). Process all 2,400 instances in batches. Save raw outputs to results/raw/phi35_seed42.jsonl. Parse answers and save to results/parsed/phi35_seed42.json. Log inference time.",
+      "step2": "Evaluate Llama-3.1-8B-Instruct on seed_42 dataset. Same vLLM configuration. Apply the Llama chat template. Save raw outputs to results/raw/llama31_8b_seed42.jsonl. Parse and save to results/parsed/llama31_8b_seed42.json.",
+      "step3": "Evaluate Qwen2.5-7B-Instruct on seed_42 dataset. Same vLLM configuration. Apply Qwen chat template. Save raw outputs to results/raw/qwen25_7b_seed42.jsonl. Parse and save to results/parsed/qwen25_7b_seed42.json.",
+      "step4": "Evaluate Qwen2.5-32B-Instruct-AWQ (4-bit quantized) on seed_42 dataset. Load with vLLM using quantization='awq'. This tests scaling to a larger model within memory constraints. Save to results/raw/qwen25_32b_seed42.jsonl and results/parsed/qwen25_32b_seed42.json.",
+      "step5": "For cross-seed variance estimation: evaluate Llama-3.1-8B-Instruct on seed_123 and seed_456 datasets. Save to results/raw/llama31_8b_seed{123,456}.jsonl and parsed equivalents."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate reasoning-optimized model",
+    "description": "Evaluate the reasoning-optimized model (DeepSeek-R1-Distill-Qwen-7B) which was trained with reinforcement learning on reasoning tasks. This is the key comparison: does reasoning-focused training reduce the Directional Reasoning Gap?",
+    "steps": {
+      "step1": "Evaluate DeepSeek-R1-Distill-Qwen-7B on seed_42 dataset using vLLM. Use max_tokens=1024 (R1 models produce longer chain-of-thought outputs). Save raw outputs to results/raw/deepseek_r1_7b_seed42.jsonl. Parse final answers (the R1 model wraps its answer in <answer> tags or after 'ANSWER:') and save to results/parsed/deepseek_r1_7b_seed42.json.",
+      "step2": "For cross-seed variance: evaluate DeepSeek-R1-Distill-Qwen-7B on seed_123 and seed_456 datasets. Save to results/raw/deepseek_r1_7b_seed{123,456}.jsonl and parsed equivalents.",
+      "step3": "Compare DRG between DeepSeek-R1-Distill-Qwen-7B and size-matched standard models (Qwen2.5-7B-Instruct, Llama-3.1-8B-Instruct). Test hypothesis: reasoning-optimized models have significantly smaller DRG. Use paired comparison on the same problem instances."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Effect of Chain-of-Thought prompting on DRG",
+    "description": "Test whether adding a 'think step by step' instruction reduces the directional reasoning gap. This ablates the prompt format — if CoT reduces DRG, it suggests the gap is partly due to the model not spontaneously applying backward reasoning strategies.",
+    "steps": {
+      "step1": "Re-evaluate Llama-3.1-8B-Instruct on seed_42 using the CoT prompt template (from prompts.py). Use max_tokens=1024 to accommodate longer reasoning chains. Save to results/raw/llama31_8b_cot_seed42.jsonl.",
+      "step2": "Re-evaluate DeepSeek-R1-Distill-Qwen-7B on seed_42 using the CoT prompt template. Save to results/raw/deepseek_r1_7b_cot_seed42.jsonl.",
+      "step3": "Parse CoT outputs and compare: (a) DRG with vs. without CoT for each model, (b) whether CoT disproportionately helps backward problems, (c) whether CoT + reasoning-optimized model further reduces DRG. Save comparison to results/aggregated/cot_ablation.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: DRG across difficulty levels",
+    "description": "Analyze how the Directional Reasoning Gap scales with problem difficulty within each domain. This tests the hypothesis that DRG amplifies with complexity.",
+    "steps": {
+      "step1": "For each model evaluated on seed_42, compute DRG broken down by domain AND difficulty level (4 domains × 3 difficulty levels = 12 cells per model). Save to results/aggregated/drg_by_difficulty.json.",
+      "step2": "Test the trend: within each domain, does DRG(difficulty_3) > DRG(difficulty_2) > DRG(difficulty_1)? Use a one-sided paired t-test (or Wilcoxon signed-rank test if non-normal) across models. Report p-values.",
+      "step3": "Compute the difficulty amplification factor: DRG(hard) / DRG(easy) for each domain. A factor > 1 supports the hypothesis."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Domain-specific DRG analysis",
+    "description": "Analyze which reasoning domains exhibit the largest directional asymmetry and whether cross-domain DRG correlations exist.",
+    "steps": {
+      "step1": "Compute per-domain DRG for each model. Rank domains by average DRG across all models. Test whether the ranking matches our hypothesis: logic > relational > function > arithmetic.",
+      "step2": "Compute cross-domain DRG correlation: for each pair of domains, compute Pearson correlation of per-model DRG values. If models symmetric in one domain tend to be symmetric in others, this suggests a shared underlying ability.",
+      "step3": "Error analysis: for each domain, categorize backward-reasoning errors into types. Logic: failure to apply contraposition, incorrect negation propagation, distractor confusion. Arithmetic: incorrect inverse operation, wrong operand identification. Relational: incorrect traversal direction, entity confusion. Function: inability to invert, incorrect compositional inversion. Sample 50 errors per domain from the worst-performing model and manually categorize. Save to results/aggregated/error_analysis.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Apply rigorous statistical tests to determine whether observed DRGs are significant and evaluate all success criteria from the proposal.",
+    "steps": {
+      "step1": "For each model × domain combination, test whether DRG > 0 using a one-sided McNemar's test (comparing paired forward vs. backward accuracy on the same problem instances). Apply Bonferroni correction for multiple comparisons (5 models × 4 domains = 20 tests). Report corrected p-values.",
+      "step2": "Test primary success criterion 1: 'DRG > 5pp in at least 3/4 domains across majority of models'. Count how many model-domain pairs have DRG > 5pp with p < 0.05.",
+      "step3": "Test primary success criterion 2: 'DRG increases with difficulty in at least 2 domains'. Use the results from Ablation 2.",
+      "step4": "Test primary success criterion 3: 'Benchmark reveals meaningful differences between model families'. Compute effect size (Cohen's d) for DRG between standard vs. reasoning-optimized models.",
+      "step5": "Test secondary criterion: 'Consistency rate < min(FA, BA)'. For each model × domain, compute consistency rate and compare to min(FA, BA). If CR < min(FA, BA), it means the model fails different instances in each direction (not just uniformly worse).",
+      "step6": "Cross-seed stability: using the 2 models evaluated on all 3 seeds, compute the standard deviation of DRG across seeds for each domain. Report mean ± std. If std < 3pp, the benchmark is stable.",
+      "step7": "Save all statistical results to results/aggregated/statistical_tests.json. Create a summary table with all metrics for the paper."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables summarizing all results. Target: 5-7 figures for the paper.",
+    "steps": {
+      "step1": "Figure 1 — Overview heatmap: Create a heatmap (models × domains) showing DRG values. Color scale: green (low DRG) to red (high DRG). Annotate each cell with the DRG value. Include a separate panel or row for CoT results. Save as figures/fig1_drg_heatmap.pdf and .png.",
+      "step2": "Figure 2 — Forward vs. Backward accuracy scatter: For each model × domain, plot a scatter point with FA on x-axis and BA on y-axis. The diagonal line represents DRG=0 (perfect symmetry). Points below the diagonal indicate forward bias. Color by model, shape by domain. Save as figures/fig2_forward_vs_backward.pdf.",
+      "step3": "Figure 3 — DRG vs. difficulty: Grouped bar chart. X-axis: difficulty levels (1, 2, 3). Y-axis: DRG. Grouped by domain, with error bars from cross-seed variance. One panel per domain (2×2 subplot). Save as figures/fig3_drg_by_difficulty.pdf.",
+      "step4": "Figure 4 — Standard vs. reasoning-optimized comparison: Side-by-side bar chart comparing DRG of Qwen2.5-7B-Instruct vs. DeepSeek-R1-Distill-Qwen-7B (same architecture family, different training) across all 4 domains. Include error bars. Save as figures/fig4_standard_vs_reasoning.pdf.",
+      "step5": "Figure 5 — CoT ablation: Bar chart showing DRG with and without CoT prompting for Llama-3.1-8B-Instruct and DeepSeek-R1-7B, broken down by domain. Save as figures/fig5_cot_ablation.pdf.",
+      "step6": "Figure 6 — Consistency analysis: Stacked bar chart per model showing: (a) both correct, (b) forward only correct, (c) backward only correct, (d) both wrong. Broken down by domain. Save as figures/fig6_consistency.pdf.",
+      "step7": "Figure 7 — Error type distribution: Pie charts or horizontal bar charts showing the distribution of backward error types per domain (from error analysis). Save as figures/fig7_error_types.pdf.",
+      "step8": "Table 1 — Main results table: LaTeX-formatted table with columns: Model, Domain, FA, BA, DRG, CR, p-value. Bold the largest DRG per domain. Save as figures/table1_main_results.tex.",
+      "step9": "Table 2 — Cross-seed stability: Table showing DRG mean ± std across 3 seeds for the 2 models evaluated on all seeds. Save as figures/table2_seed_stability.tex."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime estimation and execution schedule",
+    "description": "Estimate total runtime and plan sequential execution order to fit within the 8-hour budget on 1x A6000 GPU.",
+    "steps": {
+      "step1": "Estimated runtime breakdown: (a) Environment setup + model download: 30 min. (b) Dataset generation (3 seeds, all 4 domains): 20 min (CPU-only). (c) Simple baselines (random + heuristic): 5 min (CPU-only). (d) Model inference — Phi-3.5-mini (3.8B): ~15 min for 2,400 instances. (e) Llama-3.1-8B: ~25 min × 3 seeds = 75 min. (f) Qwen2.5-7B: ~25 min. (g) DeepSeek-R1-7B: ~35 min × 3 seeds = 105 min (longer due to CoT output). (h) Qwen2.5-32B-AWQ: ~50 min. (i) CoT ablation (2 models): ~60 min. (j) Analysis + statistical tests: 15 min. (k) Visualization: 20 min. TOTAL ESTIMATE: ~7 hours.",
+      "step2": "Execution order (sequential on 1 GPU): 1. Setup → 2. Data generation → 3. Simple baselines → 4. Phi-3.5-mini → 5. Llama-3.1-8B (seed_42) → 6. Qwen2.5-7B → 7. DeepSeek-R1-7B (seed_42) → 8. Qwen2.5-32B-AWQ → 9. Llama-3.1-8B (seeds 123, 456) → 10. DeepSeek-R1-7B (seeds 123, 456) → 11. CoT ablation → 12. Analysis → 13. Visualization. Note: data generation and simple baselines are CPU-only and can overlap with model downloads.",
+      "step3": "Contingency: if inference runs slower than estimated, drop Phi-3.5-mini (least informative model) and/or reduce CoT ablation to 1 model. If running ahead of schedule, add Mistral-7B-Instruct-v0.3 as an additional baseline."
+    }
+  }
+]

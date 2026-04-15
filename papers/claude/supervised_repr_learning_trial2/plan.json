@@ -1,0 +1,137 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for training, evaluation, and visualization. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: torch, torchvision, numpy, scipy, scikit-learn, matplotlib, seaborn, pandas, tqdm",
+      "step2": "Verify CUDA is available and confirm GPU type (RTX A6000, 48GB). Run: python -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_properties(0).total_mem)\"",
+      "step3": "Create directory structure: results/{cifar10,cifar100,tinyimagenet}/{ce,label_smoothing,mixup,ccr_adaptive,ccr_fixed,ccr_spectral}/{seed_0,seed_1,seed_2}/ for checkpoints and logs",
+      "step4": "Create a shared config.py defining all hyperparameters, paths, and constants used across experiments"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare CIFAR-10, CIFAR-100, and TinyImageNet",
+    "description": "Download all three datasets, apply standard preprocessing, and verify data loading works correctly. Also download OOD evaluation datasets (SVHN).",
+    "steps": {
+      "step1": "Download CIFAR-10 and CIFAR-100 via torchvision.datasets (automatic download). Apply standard normalization: CIFAR-10/100 mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]",
+      "step2": "Download TinyImageNet from the official source (http://cs231n.stanford.edu/tiny-imagenet-200.zip). Parse the val annotations to create proper val loader. Apply normalization: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]",
+      "step3": "Define training augmentation: RandomCrop(32, padding=4) + RandomHorizontalFlip for CIFAR; RandomCrop(64, padding=8) + RandomHorizontalFlip for TinyImageNet. Test augmentation: only normalization",
+      "step4": "Download SVHN test set via torchvision for OOD evaluation (to be used as OOD data for CIFAR models)",
+      "step5": "Verify all dataloaders: print dataset sizes, sample shapes, number of classes. CIFAR-10: 50K/10K, 10 classes. CIFAR-100: 50K/10K, 100 classes. TinyImageNet: 100K/10K, 200 classes",
+      "step6": "Create a data_utils.py module that returns train/test loaders for any dataset given batch_size=256 and num_workers=4"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement the CCR training framework",
+    "description": "Implement the core training infrastructure including the Calibrated Collapse Regularizer (CCR) and all its variants. This single codebase supports all methods (CE, label smoothing, Mixup, CCR variants) via configuration flags.",
+    "steps": {
+      "step1": "Implement a ResNet-18 model (from torchvision.models.resnet18) modified to expose the penultimate layer features. Add a hook or modify forward() to return both logits and the 512-dim features before the final FC layer. Do the same for ResNet-50 (2048-dim features).",
+      "step2": "Implement the CCR module with three variants in ccr.py: (a) CCR-fixed: L_CCR = mean_c max(0, tau - S_c) where S_c = mean_i ||z_i - mu_c||^2 for class c. Use tau=1.0 as default. (b) CCR-adaptive: tau = gamma * min_{c!=c'} ||mu_c - mu_c'||^2, with gamma=0.1 as default. (c) CCR-S (spectral): L_CCR_S = -mean_c EffRank(Sigma_c) where EffRank = exp(-sum p_k log p_k), p_k = lambda_k / sum lambda_j. Maintain running class prototypes with EMA momentum alpha=0.999.",
+      "step3": "Implement the unified training loop in train.py that accepts config flags: --method {ce, label_smoothing, mixup, ccr_fixed, ccr_adaptive, ccr_spectral} --dataset {cifar10, cifar100, tinyimagenet} --arch {resnet18, resnet50} --seed INT --lambda_ccr FLOAT --gamma FLOAT --tau FLOAT --epochs INT --lr FLOAT --batch_size INT --output_dir PATH",
+      "step4": "Training details: SGD with momentum=0.9, weight_decay=5e-4. Cosine annealing LR from 0.1 to 0. Label smoothing: epsilon=0.1. Mixup: alpha=0.2 applied at input level. CCR: lambda_ccr=0.1 (default), applied to penultimate features.",
+      "step5": "Save checkpoints every 50 epochs (for NC tracking) and the final model. Each checkpoint saves: model state_dict, optimizer state_dict, epoch, running class prototypes. Also save a training log (JSON lines) with per-epoch: train_loss, train_acc, test_acc, test_loss, and CCR-specific metrics (mean within-class spread, min inter-class distance, CCR loss value).",
+      "step6": "Implement NC metric computation in nc_metrics.py. After training, compute on the full training set in eval mode: NC1 = tr(Sigma_W @ Sigma_B_inv) / K, NC2 = std of pairwise cosine similarities of centered class means, NC3 = ||W_hat - M_hat||_F (normalized classifier vs normalized class means), NC4 = NCC accuracy vs network accuracy. Save all NC metrics to results JSON.",
+      "step7": "Implement calibration evaluation in calibration.py. Compute on test set: ECE (15 equal-width bins), MCE, AdaECE (15 equal-mass bins), NLL, Brier score. Also compute per-bin reliability data for reliability diagrams. Save all metrics to results JSON.",
+      "step8": "Implement temperature scaling in temperature_scaling.py. After training, learn optimal temperature T on a held-out validation set (use 10% of training data as val, split with fixed seed). Apply T to logits and recompute all calibration metrics. Save T and post-TS metrics."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train baselines on all datasets (3 seeds)",
+    "description": "Train Standard CE, Label Smoothing, and Mixup baselines on CIFAR-10, CIFAR-100 (3 seeds each) and TinyImageNet (1 seed) using ResNet-18. These provide the comparison points for our method. Estimated time: ~4.5 hours.",
+    "steps": {
+      "step1": "Train Standard CE baseline: ResNet-18 on CIFAR-10 with seeds [0, 1, 2], 200 epochs each. Expected: ~12 min/run × 3 = 36 min. Command template: python train.py --method ce --dataset cifar10 --arch resnet18 --seed {0,1,2} --epochs 200 --batch_size 256 --lr 0.1 --output_dir results/cifar10/ce/seed_{s}",
+      "step2": "Train Standard CE baseline: ResNet-18 on CIFAR-100 with seeds [0, 1, 2], 200 epochs. ~12 min/run × 3 = 36 min.",
+      "step3": "Train Label Smoothing baseline: ResNet-18 on CIFAR-10 and CIFAR-100 with seeds [0, 1, 2], 200 epochs. epsilon=0.1. ~12 min/run × 6 = 72 min.",
+      "step4": "Train Mixup baseline: ResNet-18 on CIFAR-10 and CIFAR-100 with seeds [0, 1, 2], 200 epochs. alpha=0.2. ~12 min/run × 6 = 72 min.",
+      "step5": "Train all three baselines on TinyImageNet with seed 0 only, 100 epochs. ~20 min/run × 3 = 60 min.",
+      "step6": "After all baseline training, run evaluate.py on each checkpoint to compute: test accuracy, top-5 accuracy (CIFAR-100/TinyImageNet), all calibration metrics (ECE, MCE, AdaECE, NLL, Brier), all NC metrics (NC1-NC4), and temperature scaling. Save results to results/{dataset}/{method}/seed_{s}/metrics.json",
+      "step7": "Verify baseline results are reasonable: CIFAR-10 CE accuracy ~93-95%, CIFAR-100 CE accuracy ~75-78%, TinyImageNet CE accuracy ~55-60%. If results are significantly off, debug before proceeding.",
+      "step8": "Total estimated time for baselines: CIFAR (36+36+72+72) = 216 min + TinyImageNet 60 min + evaluation 20 min ≈ 5 hrs. Run sequentially on single GPU."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train CCR-adaptive on all datasets (3 seeds)",
+    "description": "Train our primary method (CCR with adaptive threshold) on all three datasets. This is the main comparison against baselines. Estimated time: ~1.5 hours.",
+    "steps": {
+      "step1": "Train CCR-adaptive: ResNet-18 on CIFAR-10 with seeds [0, 1, 2], 200 epochs. lambda_ccr=0.1, gamma=0.1, momentum alpha=0.999. ~12 min/run × 3 = 36 min. Command: python train.py --method ccr_adaptive --dataset cifar10 --arch resnet18 --seed {0,1,2} --lambda_ccr 0.1 --gamma 0.1 --epochs 200 --output_dir results/cifar10/ccr_adaptive/seed_{s}",
+      "step2": "Train CCR-adaptive: ResNet-18 on CIFAR-100 with seeds [0, 1, 2], 200 epochs. Same hyperparameters. ~12 min/run × 3 = 36 min.",
+      "step3": "Train CCR-adaptive: ResNet-18 on TinyImageNet with seed 0 only, 100 epochs. ~20 min.",
+      "step4": "Run full evaluation (accuracy, calibration, NC metrics, temperature scaling) on all CCR-adaptive checkpoints.",
+      "step5": "Quick sanity check: CCR-adaptive accuracy should be within 1-2% of CE baseline. If accuracy drops >3%, the lambda_ccr is too high — reduce to 0.05 and retrain on one seed before proceeding.",
+      "step6": "Total estimated time: 36+36+20 = 92 min + evaluation 10 min ≈ 1.7 hrs"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies: CCR variants and hyperparameter sensitivity",
+    "description": "Ablation studies to isolate the contribution of each novel component. Run on CIFAR-100 with ResNet-18 (single seed) to save compute. Estimated time: ~1 hour.",
+    "steps": {
+      "step1": "CCR-fixed vs CCR-adaptive ablation: Train CCR-fixed (tau=1.0) on CIFAR-100 with seed 0, 200 epochs. Compare against CCR-adaptive (already trained). This tests whether the adaptive threshold is better than a fixed one. ~12 min.",
+      "step2": "CCR-S (spectral) ablation: Train CCR-S on CIFAR-100 with seed 0, 200 epochs. lambda_ccr=0.1. Compare against CCR-adaptive. This tests whether controlling effective dimensionality helps beyond controlling total variance. ~12 min.",
+      "step3": "Lambda sensitivity sweep: Train CCR-adaptive on CIFAR-100 with seed 0 at lambda_ccr values [0.01, 0.05, 0.1, 0.5, 1.0]. The lambda=0.1 run is already done. Need 4 additional runs × 12 min = 48 min. This maps the accuracy-ECE Pareto frontier.",
+      "step4": "Gamma sensitivity: Train CCR-adaptive on CIFAR-100 with seed 0 at gamma values [0.01, 0.05, 0.1, 0.25, 0.5]. The gamma=0.1 run is already done. Need 4 additional runs × 12 min = 48 min. However, to save time, only run gamma=[0.05, 0.25] (2 extra runs, 24 min) in addition to the lambda sweep.",
+      "step5": "Post-hoc combination: Apply temperature scaling to all CCR-adaptive models (already done in main eval). Compare CCR+TS vs CE+TS to show that better representations help post-hoc calibration.",
+      "step6": "Evaluate all ablation models with full metrics suite (accuracy, calibration, NC metrics). Save to respective results directories.",
+      "step7": "Total estimated time: 12+12+48+24 = 96 min + evaluation 10 min ≈ 1.8 hrs"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Neural collapse tracking during training",
+    "description": "Analyze how NC metrics evolve during training for CE vs CCR-adaptive. Uses checkpoints saved every 50 epochs (no additional training needed).",
+    "steps": {
+      "step1": "For CIFAR-100 seed 0, load checkpoints at epochs [50, 100, 150, 200] for both CE and CCR-adaptive models.",
+      "step2": "At each checkpoint, compute full NC metrics (NC1, NC2, NC3, NC4) on the training set. Also compute within-class spread per class and inter-class distances.",
+      "step3": "Verify that CCR-adaptive shows higher NC1 (less collapsed within-class variability) while maintaining similar NC2 (ETF structure) and NC3 (self-duality) compared to CE.",
+      "step4": "Compute calibration metrics at each checkpoint epoch on the test set to track how calibration evolves with NC degree during training.",
+      "step5": "Save all per-epoch metrics to results/cifar100/nc_tracking.json for visualization."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical evaluation and success criteria verification",
+    "description": "Aggregate all results, compute statistics across seeds, and verify whether the pre-defined success criteria are met.",
+    "steps": {
+      "step1": "Create results_table.py that aggregates all metrics.json files and produces: (a) Main results table: mean ± std across 3 seeds for each method × dataset combination. Columns: Accuracy, Top-5 Acc, ECE, MCE, AdaECE, NLL. (b) NC metrics table: NC1, NC2, NC3, NC4 for each method.",
+      "step2": "Check PRIMARY success criteria: (a) CCR reduces ECE by ≥20% relative to CE on at least 2/3 datasets. Compute: (ECE_ce - ECE_ccr) / ECE_ce × 100 for each dataset. (b) NC1 metric is measurably higher under CCR while NC2 within 10% of CE. Compute relative differences.",
+      "step3": "Check SECONDARY success criteria: (a) CCR Pareto-dominates label smoothing and Mixup on accuracy-ECE. For the lambda sweep, plot the frontier and check if any CCR point achieves both higher accuracy and lower ECE. (b) CCR+TS outperforms CE+TS. (c) Rank correlation between NC1 and ECE across the lambda sweep (compute Spearman's rho, expect |rho| > 0.5).",
+      "step4": "Check REFUTATION conditions: (a) Is Spearman's rho between NC1 and ECE < 0.3? (b) Is accuracy drop > 3%? (c) Does CE+TS match or beat CCR? If any refutation condition is met, note it honestly.",
+      "step5": "Compute statistical significance: paired t-test or Wilcoxon signed-rank test between CE and CCR-adaptive across seeds, for ECE and accuracy. Report p-values.",
+      "step6": "Save comprehensive results summary to results/summary.json with all tables, statistics, and success criteria verdicts."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate all paper figures and tables",
+    "description": "Create publication-quality figures for the paper. All figures saved as both PDF and PNG.",
+    "steps": {
+      "step1": "Figure 1 (Conceptual): Create a 2D illustration showing the key idea: (a) full neural collapse — all class features collapsed to points, all predictions maximally confident; (b) partial collapse with CCR — features maintain spread proportional to boundary proximity, enabling calibrated confidence. Use synthetic 2D Gaussian clusters for clarity.",
+      "step2": "Figure 2 (Main results bar chart): Grouped bar chart showing ECE (primary) and accuracy (secondary axis) for CE, Label Smoothing, Mixup, CCR-adaptive across CIFAR-10, CIFAR-100, TinyImageNet. Include error bars (std across seeds). Style: seaborn, publication-quality, no gridlines clutter.",
+      "step3": "Figure 3 (Reliability diagrams): 3×4 grid of reliability diagrams (rows=datasets, columns=methods). Each panel shows expected accuracy vs confidence with 15 bins, identity line, and ECE annotation. Highlight that CCR diagrams are closer to the identity line.",
+      "step4": "Figure 4 (NC metrics during training): 2×2 subplot showing NC1, NC2, NC3, NC4 vs epoch for CE and CCR-adaptive on CIFAR-100. Show that CCR selectively controls NC1 while NC2/NC3/NC4 are preserved.",
+      "step5": "Figure 5 (Pareto frontier): Scatter plot of accuracy vs ECE for the lambda sweep (CCR-adaptive). Overlay label smoothing epsilon sweep and Mixup alpha sweep if available, otherwise overlay the 3-seed mean points for each baseline. Show that CCR achieves a superior frontier.",
+      "step6": "Figure 6 (Ablation heatmap or bar chart): Compare CCR-fixed, CCR-adaptive, CCR-S on CIFAR-100. Show ECE and accuracy for each variant.",
+      "step7": "Figure 7 (CCR+TS combination): Bar chart showing ECE for CE, CE+TS, CCR, CCR+TS across datasets. Demonstrate that CCR+TS is the best combination.",
+      "step8": "Table 1 (Main results): LaTeX-formatted table with accuracy, ECE, MCE, NLL for all methods × datasets. Bold best, underline second best. Include ± std from 3 seeds.",
+      "step9": "Table 2 (NC metrics): LaTeX-formatted table showing NC1, NC2, NC3, NC4 for each method on CIFAR-100.",
+      "step10": "Table 3 (Ablation): LaTeX-formatted table comparing CCR variants and sensitivity to lambda/gamma.",
+      "step11": "Save all figures to figures/ directory as PDF and PNG (dpi=300). Save LaTeX tables to tables/ directory."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime budget verification",
+    "description": "Verify the total experiment plan fits within the 8-hour budget on 1 GPU.",
+    "steps": {
+      "step1": "Estimated sequential runtime breakdown: (1) Env+Data: 15 min. (2) Baselines [CE×3seeds×2datasets + LS×3seeds×2datasets + Mixup×3seeds×2datasets + 3methods×1seed×TinyImageNet]: 18 CIFAR runs × 12 min + 3 TinyImageNet runs × 20 min = 216 + 60 = 276 min ≈ 4.6 hrs. (3) CCR-adaptive [3seeds×2datasets + 1seed×TinyImageNet]: 6 CIFAR runs × 12 min + 1 TinyImageNet × 20 min = 92 min ≈ 1.5 hrs. (4) Ablations [CCR-fixed + CCR-S + 4 lambda + 2 gamma = 8 runs on CIFAR-100]: 8 × 12 = 96 min ≈ 1.6 hrs. (5) Analysis+Vis: 30 min. TOTAL: 15 + 276 + 92 + 96 + 30 = 509 min ≈ 8.5 hrs.",
+      "step2": "This is slightly over budget. Mitigation strategies: (a) Reduce CIFAR epochs from 200 to 150 (saves ~25% → ~6.4 hrs for training). (b) Or reduce ablation lambda sweep from 4 to 2 extra values (saves ~24 min). (c) Or run TinyImageNet baselines with seed 0 only (already planned). Apply strategy (a) if initial runs suggest 200 epochs is slow, otherwise apply (b).",
+      "step3": "Fallback priority if running out of time: (1) MUST complete: CE+CCR-adaptive on CIFAR-10/100 with 3 seeds + full evaluation. (2) HIGH: Label smoothing + Mixup baselines with 3 seeds. (3) MEDIUM: TinyImageNet experiments. (4) MEDIUM: Ablation studies. (5) LOW: Extra lambda/gamma sweep points. (6) LOW: ResNet-50 experiments.",
+      "step4": "Seeds to use: [42, 123, 456] for reproducibility across all experiments."
+    }
+  }
+]

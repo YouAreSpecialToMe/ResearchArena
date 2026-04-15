@@ -1,0 +1,312 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2025.sty}{
+  \usepackage[preprint]{neurips_2025}
+}{
+  \usepackage[margin=1in]{geometry}
+  \usepackage{natbib}
+}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{hyperref}
+
+\title{How Far Does Probe-Only Recalibration Transfer in Bayesian Quadrature?}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\bq}{\ensuremath{\mathrm{BQ}}}
+\newcommand{\gp}{\ensuremath{\mathrm{GP}}}
+\newcommand{\wis}{\ensuremath{\mathrm{WIS}}}
+\newcommand{\E}{\mathbb{E}}
+\input{paper_artifacts/paper_numbers.tex}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Bayesian quadrature (BQ) returns both an integral estimate and a posterior variance, but that variance is often miscalibrated under kernel misspecification and empirical-Bayes hyperparameter fitting. We study whether interval calibration can be improved externally, using only a fixed bank of analytic probe integrands and no target-side labels for tuning. The base BQ mean is held fixed throughout; we compare three probe-only variance inflation rules: global scaling, monotone isotonic inflation, and monotone stepwise inflation. In the executed benchmark, which contains \CalibrationProbeCount{} calibration probes, \HeldoutProbeCount{} held-out probes, and \TargetCount{} held-out targets across two measures, three dimensions, two node budgets, and three seeds, the measure-wise cross-validated external rule improves misspecified-target 95\% empirical coverage from \MissUncalCoverage{} to \MissSelectedCoverage{}. The paired bootstrap mean coverage gain is \SelectedVsUncalCoverageDiffMean{} with 95\% interval [\SelectedVsUncalCoverageDiffLower{}, \SelectedVsUncalCoverageDiffUpper{}]. The gain is not free: misspecified-target mean width inflation rises from \MissUncalWidthInfl{}$\times$ to \MissSelectedWidthInfl{}$\times$ and mean weighted interval score (\wis) worsens from \MissUncalWIS{} to \MissSelectedWIS{}. Global scaling reaches the same mean coverage but is much less efficient, with \wis\ \MissGlobalWIS{} and width inflation \MissGlobalWidthInfl{}$\times$. The main result is therefore cautionary rather than triumphant: probe-only recalibration can recover undercoverage, but transferred coverage gains do not by themselves imply useful uncertainty.
+\end{abstract}
+
+\section{Introduction}
+Bayesian quadrature casts numerical integration as posterior inference under a Gaussian process prior and therefore returns both a point estimate and an uncertainty statement \citep{ohagan1991bayes,briol2019probabilistic}. In practice, the mean estimate can remain useful even when the reported variance is not. Kernel misspecification, aggressive marginal-likelihood fitting, and localized roughness can make nominal 90\% and 95\% intervals substantially overconfident in the low-budget regime.
+
+This paper studies a deliberately narrow question: can \emph{external} recalibration of BQ intervals transfer from a pre-registered bank of analytic probes to unseen target integrands, without using target labels for tuning? We do not propose a new quadrature rule. Instead, we attach a post-hoc variance correction layer to a fixed GP-BQ backend and measure when that layer helps, when it fails, and how it compares with stronger internal alternatives such as Bayes-Sard cubature and kernel marginalization.
+
+The answer is mixed. On misspecified targets at 95\% nominal coverage, the selected external rule improves empirical coverage from \MissUncalCoverage{} to \MissSelectedCoverage{}, while global scaling reaches the same mean coverage. But both improvements come from materially wider intervals, and the selected rule still worsens mean \wis\ from \MissUncalWIS{} to \MissSelectedWIS{}. Bayes-Sard remains narrower and achieves lower \wis\ than the external rules, but its misspecified-target coverage is lower at \MissBayesCoverage{}. The practical contribution is therefore not a new best method; it is an explicit transfer study that separates coverage recovery from decision-useful uncertainty.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate BQ interval repair as a probe-to-target transfer problem and evaluate global, isotonic, and stepwise variance inflation rules trained only on analytic probes.
+  \item We show that probe-only recalibration can recover substantial misspecified-target undercoverage, improving 95\% coverage by \SelectedVsUncalCoverageDiffMean{} in paired bootstrap mean difference over uncalibrated BQ, while also documenting the associated width and \wis\ penalties.
+  \item We provide bank-mismatch and severity-focused sensitivity analyses, including leave-one-family-out and severity-holdout studies, which show that transferred calibration is far less reliable when probe support is structurally mismatched to the target family.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the benchmark and recalibration rules, Section~\ref{sec:experiments} presents the empirical study, Section~\ref{sec:repro} documents reproducibility and artifact provenance, and Sections~\ref{sec:discussion} and \ref{sec:conclusion} discuss implications and limitations.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Probabilistic integration.}
+The classical starting point is Bayes-Hermite quadrature \citep{ohagan1991bayes}, later broadened into the probabilistic integration perspective of \citet{briol2019probabilistic}. More recent work studies broader and more scalable probabilistic numerics pipelines, including black-box probabilistic numerics \citep{teymur2021black} and faster Bayesian quadrature approximations \citep{warren2024fast}. Our study keeps that estimator family fixed and focuses only on whether the reported interval width is trustworthy after fitting.
+
+\paragraph{Misspecification and internal robustness.}
+Kernel quadrature under smoothness misspecification has been analyzed theoretically by \citet{kanagawa2018convergence}. Bayes-Sard cubature modifies the internal prior mean space to improve robustness \citep{karvonen2018bayes}, while \citet{hamid22a} marginalize over stationary kernels inside the BQ model. These are internal repairs. Our contribution is orthogonal: an external recalibration layer applied after fitting.
+
+\paragraph{Filtering-side calibration precursors.}
+The closest conceptual precedents are in sigma-point filtering. \citet{pruher2015nonlinear} and \citet{pruher2016variance} show that BQ uncertainty matters inside nonlinear filters, and \citet{pruher2021improved} improve calibration through Bayes-Sard structure. Those papers establish the importance of quadrature uncertainty calibration, but they do not study stand-alone BQ with probe-only transfer to unseen target integrands.
+
+\paragraph{Post-hoc calibration outside probabilistic numerics.}
+\citet{syring2019calibrating} study general posterior calibration, and \citet{pion2025bayesian} study post-hoc calibration for GP predictive distributions. On the evaluation side, \citet{adachi2025fixing} show that kernel quadrature can materially change probabilistic forecasting assessment. These works support the broader premise that uncertainty statements and their evaluation can be repaired after fitting, but they do not answer whether such recalibration transfers in BQ without target labels.
+
+Methodologically, our paper is intentionally modest: the recalibration rules are simple and mostly adapted from generic post-hoc calibration ideas. The empirical novelty is the probe-to-target transfer benchmark, the bank-mismatch analyses, and the direct comparison between external correction and internal robustness baselines under a shared executed pipeline.
+
+\section{Method}
+\label{sec:method}
+\subsection{Base Bayesian quadrature backend}
+For an integrand $f$ and design $X_n=\{x_i\}_{i=1}^n$, the backend returns
+\[
+I(f)\mid f(X_n) \approx \mathcal{N}(\mu_f,s_f^2).
+\]
+Design points are Sobol sequences transformed to either the uniform measure on $[0,1]^d$ or the standard Gaussian measure. The executed benchmark uses two measures, dimensions $d\in\{1,2,3\}$, budgets $n\in\{16,32\}$, and seeds $\{11,23,37\}$.
+
+The GP-BQ backend searches over three kernels (RBF, Mat\'ern-$3/2$, Mat\'ern-$5/2$) and seven log-lengthscales in $[-2.0,1.0]$, with amplitude estimated from the data and kernel selection by log marginal likelihood. Numerical stability uses a jitter schedule of $10^{-8}$, $10^{-6}$, and $10^{-4}$. Bayes-Sard uses the same kernel search space but augments the prior mean with degree-1 polynomial features.
+
+\subsection{Probe bank and targets}
+The executed benchmark contains 144 analytic probe tasks across both measures: 96 calibration probes and 48 held-out probes. Probe families are polynomial, oscillatory, and localized bump functions. The same benchmark contains 48 target tasks: two instances for each combination of measure, dimension, and target family \{matched, oscillatory, bump, kinked\}. Exact reference integrals are analytic for every probe and target through closed-form formulas or deterministic quadrature in the evaluation pipeline.
+
+Matched targets combine low-order polynomial structure with a low-frequency oscillatory term. Oscillatory targets increase frequency relative to the matched regime. Bump targets mix a localized Gaussian bump with a small oscillatory component. Kinked targets add absolute-value singularities with powers $1.0$ or $0.6$.
+
+\subsection{Diagnostics and recalibration rules}
+We keep $\mu_f$ fixed and recalibrate only the reported variance:
+\[
+I(f)\mid f(X_n)\leadsto \mathcal{N}\!\left(\mu_f,\tau(r_f)^2 s_f^2\right),
+\]
+where $r_f$ is a roughness score computed from nearest-neighbor finite differences on the design. For each probe instance we define
+\[
+z_f=\frac{|I(f)-\mu_f|}{\max(s_f,\varepsilon)}.
+\]
+Calibration uses grouped probe records aggregated by probe identity and budget. Three rule families are compared:
+\begin{enumerate}
+  \item \textbf{Global scaling:} a single inflation factor $\tau$ estimated from the empirical $z$ quantile.
+  \item \textbf{Isotonic inflation:} a nondecreasing map from roughness to $\tau(r)$, clipped to a fixed maximum.
+  \item \textbf{Stepwise inflation:} a monotone histogram in roughness with 2--4 bins.
+\end{enumerate}
+All rules enforce $\tau(r)\geq 1$. Local rules fall back to the global factor when a target roughness lies outside the supported probe range.
+
+Throughout the paper, \emph{selected external rule} means the rule family chosen by grouped leave-one-probe-out cross-validation separately for each measure and nominal level, then refit on the full calibration bank for that measure. In the executed 95\% run, the selected rule is isotonic for the uniform measure and a stepwise rule with two roughness bins, clip $3.0$, and global fallback $\tau=\SelectedRuleGaussianFallbackTau$ for the Gaussian measure.
+
+\subsection{Probe-only model selection}
+Selection is done separately for each measure and nominal level by grouped leave-one-probe-out cross-validation. Each candidate is scored by held-out probe coverage gap and \wis. The pipeline first filters for candidates with mean coverage gap at most $0.05$ when available, then selects the lowest-\wis\ candidate within that pool; otherwise it selects the smallest coverage gap and breaks ties by \wis.
+
+\subsection{Evaluation protocol}
+The main evaluation focuses on 95\% nominal intervals. We report empirical coverage, absolute coverage gap, mean interval width, mean \wis, width inflation relative to uncalibrated BQ, fallback rate, median absolute integration error, and runtime. For an interval $[l,u]$ at miscoverage level $\alpha$ and realized integral $y$, the interval score is
+\[
+\mathrm{IS}_{\alpha}(l,u;y)=(u-l)+\frac{2}{\alpha}(l-y)\mathbf{1}\{y<l\}+\frac{2}{\alpha}(y-u)\mathbf{1}\{y>u\}.
+\]
+Because the paper reports one nominal level at a time, \wis\ is this interval score evaluated at the corresponding $\alpha$; for the main 95\% benchmark, $\alpha=0.05$. For paired method comparisons on held-out targets we use 2000 bootstrap resamples over target identity, keeping all seed-specific evaluations for a target together.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+All runs were executed on 2 CPU cores and 0 GPUs. The canonical runtime ledger in \texttt{results/summary/runtime\_accounting.csv} reports a planned budget of \RuntimePlannedHours{} hours and an actual total wall-clock time of \RuntimeActualHours{} hours (\RuntimeActualMinutes{} minutes). The largest blocks are the aggregate stage at 0.040462 hours, matched-generator analysis at 0.038745 hours, ablations at 0.032646 hours, and core fits at 0.029936 hours. We quote wall-clock time from this file throughout and do not mix it with summed per-fit runtimes.
+
+The benchmark contains 48 target tasks and 144 probe tasks, each evaluated at two budgets and three seeds. External recalibration leaves the BQ mean untouched, so its median absolute error is identical to uncalibrated BQ; only interval metrics change.
+
+The executed counts reconcile directly with the proposal once per-measure and pooled totals are separated. The proposal specified a 72-probe bank \emph{per measure}, split into 48 calibration and 24 held-out probes. The executed paper reports the pooled totals across both measures: \CalibrationProbeCount{} calibration probes and \HeldoutProbeCount{} held-out probes. After the two budgets and three seeds are expanded, this corresponds to 288 calibration probe instances and 144 held-out probe instances per measure, exactly as planned. One planned analysis did change materially: the preregistered matched-generator severity-ladder study in \texttt{plan.json} was not run exactly as planned. Figure~\ref{fig:severity} is a smaller surrogate analysis based on the executed \texttt{exp/matched\_generator} outputs, so it should not be read as a full execution of the preregistered ladder experiment.
+
+\subsection{Main target-side results}
+Table~\ref{tab:main} summarizes the main target-side benchmark at 95\% nominal coverage. On the misspecified union, uncalibrated BQ undercovers, reaching only \MissUncalCoverage{}. The selected external rule improves that to \MissSelectedCoverage{}, with paired bootstrap mean coverage gain \SelectedVsUncalCoverageDiffMean{} and 95\% interval [\SelectedVsUncalCoverageDiffLower{}, \SelectedVsUncalCoverageDiffUpper{}]. Global scaling reaches the same mean coverage. The caveat is efficiency: selected recalibration raises mean \wis\ from \MissUncalWIS{} to \MissSelectedWIS{}, while global scaling raises it to \MissGlobalWIS{}. Mean width inflation rises to \MissSelectedWidthInfl{}$\times$ for the selected rule and \MissGlobalWidthInfl{}$\times$ for global scaling. Bayes-Sard remains narrower (\MissBayesWidthInfl{}$\times$ width inflation) and has lower \wis\ (\MissBayesWIS{}) than the external methods, but its misspecified-target coverage is lower at \MissBayesCoverage{}.
+
+Matched controls tell the same story in a cleaner regime. Uncalibrated BQ covers only \MatchedUncalCoverage{}, while the selected external rule reaches \MatchedSelectedCoverage{} with \wis\ \MatchedSelectedWIS{} and width inflation \MatchedSelectedWidthInfl{}$\times$. Bayes-Sard is the most efficient method on matched controls, with \wis\ \MatchedBayesWIS{} and width inflation \MatchedBayesWidthInfl{}$\times$, but it reaches lower coverage (\MatchedBayesCoverage{}) than the selected external rule.
+
+Figure~\ref{fig:coverage} breaks target coverage down by measure and family. The largest gains occur on Gaussian matched, bump, and kinked families; uniform families are already closer to nominal coverage, so recalibration mainly widens intervals there. Figure~\ref{fig:wiswidth} complements Table~\ref{tab:main} by plotting misspecified-target width inflation against \wis. The selected external rule lies far closer to the efficient frontier than global scaling, but it remains substantially to the right of Bayes-Sard and uncalibrated BQ.
+
+Two paired bootstrap comparisons sharpen the interpretation. First, the selected external rule and global scaling have identical mean misspecified-target coverage, but the selected rule lowers \wis\ by \SelectedVsGlobalWISDiffMean{} with 95\% interval [\SelectedVsGlobalWISDiffLower{}, \SelectedVsGlobalWISDiffUpper{}] in selected-minus-global sign convention. Second, Bayes-Sard lowers \wis\ relative to the selected external rule by \BayesVsSelectedWISDiffMean{} with 95\% interval [\BayesVsSelectedWISDiffLower{}, \BayesVsSelectedWISDiffUpper{}], while losing \BayesVsSelectedCoverageDiffMean{} coverage on average.
+
+\input{paper_artifacts/table_main.tex}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/figure1_coverage.pdf}
+\caption{Bootstrap target-side 95\% coverage by measure and target family. Error bars are 95\% bootstrap intervals over target identity. The selected external rule mainly helps on Gaussian matched, bump, and kinked families; many uniform families are already close to nominal coverage before recalibration.}
+\label{fig:coverage}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{figures/figure2_wis_vs_width.pdf}
+\caption{Misspecified-target width inflation versus \wis\ at 95\% nominal coverage. Each point is a method-measure-dimension-budget aggregate from \texttt{results/summary/main\_results.csv}. Global scaling and kernel marginalization occupy the extreme-width region; the selected external rule is markedly more efficient than global scaling but remains substantially wider than uncalibrated BQ and Bayes-Sard.}
+\label{fig:wiswidth}
+\end{figure}
+
+\subsection{Held-out probe transfer}
+Held-out probes tell a similar story. Uncalibrated BQ achieves only \HeldoutUncalCoverage{} coverage at 95\% nominal coverage, while the selected external rule reaches \HeldoutSelectedCoverage{} and the global rule reaches \HeldoutGlobalCoverage{}. Again the difference is efficiency: held-out probe \wis\ is \HeldoutSelectedWIS{} for the selected rule and \HeldoutGlobalWIS{} for global scaling. Figure~\ref{fig:transfer} shows that target-side coverage behavior broadly tracks held-out probe behavior: methods that repair held-out probe coverage also repair target coverage, but with very different width costs.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{figures/figure3_transfer.pdf}
+\caption{Held-out probe versus held-out target transfer at 95\% nominal coverage. Each point corresponds to one method-measure pair. External recalibration methods that reduce held-out probe coverage gap also reduce target coverage gap, but the associated interval efficiency varies sharply across methods.}
+\label{fig:transfer}
+\end{figure}
+
+\subsection{Ablations and sensitivity}
+Table~\ref{tab:ablations} shows that the most important design choice is not merely ``local'' versus ``global'', but whether roughness conditioning preserves useful probe support. Replacing roughness with a constant collapses the method into global behavior, producing width inflation of \NoRoughnessWidthInfl{}$\times$ and \wis\ \NoRoughnessWIS{}. Restricting calibration to the $n=32$ probe groups preserves mean coverage (\ReducedCalCoverage{}) while reducing \wis\ to \ReducedCalWIS{} and width inflation to \ReducedCalWidthInfl{}$\times$, suggesting that the hardest low-budget probe settings drive much of the conservativeness.
+
+Probe-bank mismatch matters. Removing oscillatory probes and evaluating on oscillatory targets yields \wis\ \LeaveOutOscWIS{} and width inflation \LeaveOutOscWidthInfl{}$\times$. Removing the roughest oscillatory probes still leaves coverage high (\SeverityOscCoverage{}) but increases \wis\ to \SeverityOscWIS{} and fallback rate to \SeverityOscFallback{}. Removing the narrowest bump probes drops bump-target coverage to \SeverityBumpCoverage{} with \wis\ \SeverityBumpWIS{}.
+
+Figure~\ref{fig:halfbank} summarizes the random half-bank study. In this implementation the 20 half-bank draws produce identical aggregate coverage within each measure, so subset randomness is not the main instability source. The more important failure mode is structural mismatch between the probe bank and the target family.
+
+\input{paper_artifacts/table_ablations.tex}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{figures/figure4_halfbank.pdf}
+\caption{Random half-bank sensitivity at 95\% nominal coverage. Boxplots show the 20 random half-bank draws and dashed lines mark the full-bank result. In this benchmark, aggregate coverage is effectively unchanged across half-bank draws, indicating that structural probe-family mismatch matters more than random subset noise.}
+\label{fig:halfbank}
+\end{figure}
+
+\subsection{Hard-case subset and kernel marginalization}
+Table~\ref{tab:kernel} compares methods on the reduced hard-case subset used for kernel marginalization. Kernel marginalization achieves the highest coverage, \HardKernelCoverage{}, but at a prohibitive cost: \wis\ \HardKernelWIS{} and width inflation \HardKernelWidthInfl{}$\times$. The selected external rule reaches \HardSelectedCoverage{} coverage with \wis\ \HardSelectedWIS{}, global scaling reaches the same coverage with \wis\ \HardGlobalWIS{}, and Bayes-Sard remains the narrowest practical baseline with \wis\ \HardBayesWIS{} but only \HardBayesCoverage{} coverage. This subset reinforces the main message: extreme conservativeness can recover coverage, but not useful uncertainty.
+
+\input{paper_artifacts/table_kernel.tex}
+
+\subsection{Matched-generator surrogate severity summary}
+The preregistered shared severity-ladder study was not executed exactly as planned. Instead, we report the smaller matched-generator experiment produced by \texttt{exp/matched\_generator}: aligned oscillatory and bump mechanisms in dimensions 1 and 2, with severity levels $1$--$4$. Figure~\ref{fig:severity} is therefore a surrogate analysis, not the preregistered severity-ladder experiment from \texttt{plan.json}.
+
+Figure~\ref{fig:severity} shows only weak support for roughness-aware transfer under this surrogate alignment. The clearest positive association appears for Gaussian 2D oscillatory tasks, where the Spearman correlation between grouped probe $z$ and target coverage gap is \GaussianTwoDOscRho{} with reported $p=\GaussianTwoDOscPValue$. Uniform 2D oscillatory and bump ladders both yield correlation \UniformTwoDOscRho{} and \UniformTwoDBumpRho{}, respectively, and several settings are undefined because target coverage gaps are effectively flat across severity levels. This is a negative but informative result: a scalar roughness score does not robustly predict transfer quality even when probe and target generators are partially aligned.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure5_severity.pdf}
+\caption{Matched-generator surrogate severity summary. Severity is shared only within the executed oscillatory and bump surrogate generators in dimensions 1 and 2; this is not the full preregistered shared severity-ladder study. The relationship between grouped probe difficulty and target coverage gap is inconsistent: Gaussian 2D oscillatory settings show the clearest positive association, while several other panels are flat or undefined.}
+\label{fig:severity}
+\end{figure*}
+
+\section{Reproducibility and Artifact Provenance}
+\label{sec:repro}
+The executed environment uses Python 3.11.15 with NumPy 1.26.4, SciPy 1.12.0, scikit-learn 1.4.2, pandas 2.2.3, matplotlib 3.8.4, seaborn 0.13.2, statsmodels 0.14.6, and joblib 1.3.2. All experiments use seeds $\{11,23,37\}$ and budgets $\{16,32\}$. The pipeline records stage runtimes in \texttt{results/summary/runtime\_accounting.csv}. Some stages expose paper-facing \texttt{exp/*/results.json} summaries, but not every stage does: for example, \texttt{exp/stage\_a\_reference/} contains only \texttt{run.py} and no \texttt{results.json}. The paper therefore cites stage-level JSONs only where they actually exist.
+
+Aggregation scope is split deliberately across stages. \texttt{exp/main\_recalibration/results.json} is the canonical source for the full main stage before paper-level regrouping: it stores held-out probe aggregates and whole-target-pool 95\% aggregates together with the selected-rule definition. \texttt{exp/ablations/results.json} is the canonical source for Table~\ref{tab:ablations} and contains only the executed 95\% ablation and sensitivity rows. \texttt{exp/kernel\_marginalization/results.json} now has two scopes: per-cell kernel-marginalization outputs for the reduced hard subset, and a paper-facing cross-stage hard-subset summary (\texttt{aggregates.hard\_case\_table\_nominal\_95}) that matches the final Table~\ref{tab:kernel}. \texttt{exp/aggregate/results.json} is the canonical paper-level source for Table~\ref{tab:main}, the paper-wide scalar macros derived from matched and misspecified unions, selected-rule metadata, and the machine-readable artifact map in \texttt{results/summary/figure\_manifest.json}.
+
+To keep the manuscript artifact-consistent, every displayed table is generated by \texttt{scripts/render\_paper\_artifacts.py}, which reads those canonical stage-level summaries plus the bootstrap and runtime ledgers and writes the included LaTeX fragments in \texttt{paper\_artifacts/}. Table~\ref{tab:main} and the paper-level matched-versus-misspecified regime macros are rendered from \texttt{exp/aggregate/results.json}; held-out probe macros come from \texttt{exp/main\_recalibration/results.json}; ablation and sensitivity macros together with Table~\ref{tab:ablations} come from \texttt{exp/ablations/results.json}; and Table~\ref{tab:kernel} comes from \texttt{exp/kernel\_marginalization/results.json}. All displayed decimal values in tables and scalar macros are rounded mechanically to \PaperRoundingPolicy{} by that script; there are no hand-copied table entries. This also resolves the legacy naming issue by rendering the artifact label \texttt{ablation\_global\_only} as the canonical selected external rule only in contexts where \texttt{exp/aggregate/results.json} explicitly marks that alias.
+
+\begin{table}[t]
+\caption{Artifact map for the paper. The figure manifest in \texttt{results/summary/figure\_manifest.json} stores the same mapping in machine-readable form.}
+\label{tab:artifacts}
+\centering
+\small
+\begin{tabular}{lp{0.58\linewidth}}
+\toprule
+Item & Source file(s) \\
+\midrule
+Table~\ref{tab:main} & \texttt{exp/aggregate/results.json} (\texttt{aggregates.misspecified\_union\_nominal\_95}, \texttt{aggregates.matched\_controls\_nominal\_95}) \\
+Figure~\ref{fig:coverage} & \texttt{results/summary/figure1\_coverage\_bootstrap.csv} \\
+Figure~\ref{fig:wiswidth} & \texttt{results/summary/main\_results.csv}, filtered to misspecified target rows at 95\% \\
+Figure~\ref{fig:transfer} & \texttt{results/summary/main\_results.csv}, filtered to held-out probe and target rows at 95\% \\
+Table~\ref{tab:ablations} & \texttt{exp/ablations/results.json} (\texttt{aggregates.table2\_nominal\_95}) \\
+Figure~\ref{fig:halfbank} & \texttt{results/summary/halfbank\_summary.csv} \\
+Table~\ref{tab:kernel} & \texttt{exp/kernel\_marginalization/results.json} (\texttt{aggregates.hard\_case\_table\_nominal\_95}) \\
+Figure~\ref{fig:severity} & \texttt{results/summary/matched\_generator\_summary.csv} \\
+Bootstrap intervals & \texttt{results/summary/bootstrap\_summary.json} \\
+Paper-level scalar macros & \texttt{exp/aggregate/results.json} with held-out probe macros from \texttt{exp/main\_recalibration/results.json} \\
+Runtime claims & \texttt{results/summary/runtime\_accounting.csv} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main empirical result is straightforward: probe-only recalibration can recover coverage, but in this benchmark it does not recover \emph{efficient} uncertainty. The selected external rule passes the coverage-gain criterion on misspecified targets, yet fails an efficiency reading because \wis\ worsens from \MissUncalWIS{} to \MissSelectedWIS{} and matched-control width inflation rises to \MatchedSelectedWidthInfl{}$\times$. That is why the result is scientifically useful but methodologically modest.
+
+Several limitations matter. First, the benchmark is synthetic and low-dimensional, although every integral is exactly known and every comparison is fully paired. Second, the roughness signal is intentionally simple; more expressive diagnostics may transfer better, but that would be a different claim from the one tested here. Third, the external rules do not improve point estimates because they leave the BQ mean fixed by construction. Fourth, the strongest internal comparator, kernel marginalization, is only feasible on a reduced hard subset and becomes extremely conservative there. Fifth, and importantly for completeness, the preregistered severity-ladder experiment from \texttt{plan.json} was not executed as planned; Figure~\ref{fig:severity} is a surrogate matched-generator analysis, not the original preregistered ladder study.
+
+The most practical reading of the evidence is therefore conservative. If a practitioner only needs to repair severe undercoverage and can tolerate materially wider intervals, a probe-only external layer can help. If interval efficiency matters, Bayes-Sard or better internal model repair remains more attractive than crude global scaling, and our selected external rule is still not a strong default.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We studied probe-only recalibration for Bayesian quadrature as a transfer problem rather than a new quadrature method. Across the executed benchmark, the selected external rule improves misspecified-target 95\% coverage from \MissUncalCoverage{} to \MissSelectedCoverage{}, while global scaling reaches the same mean coverage. The price is substantial interval widening: mean width inflation rises to \MissSelectedWidthInfl{}$\times$ for the selected rule and \MissGlobalWidthInfl{}$\times$ for global scaling, and mean \wis\ worsens relative to uncalibrated BQ.
+
+These results sharpen the practical lesson. External recalibration can rescue coverage, but coverage alone is not enough to justify it. In this benchmark, probe-only transfer works best as a diagnostic baseline and a stress test for bank mismatch, not as a universally recommended replacement for internal robustness methods. The next step is not merely to fit more aggressive inflation maps; it is to learn better transfer diagnostics and to test whether the same story holds on higher-dimensional and less analytic integration problems.
+
+{\small
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[O'Hagan(1991)]{ohagan1991bayes}
+Anthony O'Hagan.
+\newblock Bayes-Hermite quadrature.
+\newblock \emph{Journal of Statistical Planning and Inference}, 29(3):245--260, 1991.
+
+\bibitem[Briol et~al.(2019)Briol, Oates, Girolami, Osborne, and Sejdinovic]{briol2019probabilistic}
+Francois-Xavier Briol, Chris~J. Oates, Mark Girolami, Michael~A. Osborne, and Dino Sejdinovic.
+\newblock Probabilistic integration: A role in statistical computation?
+\newblock \emph{Statistical Science}, 34(1):1--22, 2019.
+
+\bibitem[Teymur et~al.(2021)Teymur, Foley, Breen, Karvonen, and Oates]{teymur2021black}
+Onur Teymur, Christopher~N. Foley, Philip~G. Breen, Toni Karvonen, and Chris~J. Oates.
+\newblock Black box probabilistic numerics.
+\newblock In \emph{Advances in Neural Information Processing Systems 34}, 2021.
+
+\bibitem[Kanagawa et~al.(2018)Kanagawa, Sriperumbudur, and Fukumizu]{kanagawa2018convergence}
+Motonobu Kanagawa, Bharath~K. Sriperumbudur, and Kenji Fukumizu.
+\newblock Convergence analysis of deterministic kernel-based quadrature rules in misspecified settings.
+\newblock \emph{arXiv preprint arXiv:1709.00147}, 2018.
+
+\bibitem[Karvonen et~al.(2018)Karvonen, Oates, and Sarkka]{karvonen2018bayes}
+Toni Karvonen, Chris~J. Oates, and Simo Sarkka.
+\newblock A Bayes-Sard cubature method.
+\newblock In \emph{Advances in Neural Information Processing Systems 31}, pages 5886--5897, 2018.
+
+\bibitem[Hamid et~al.(2022)Hamid, Schulze, Osborne, and Roberts]{hamid22a}
+Saad Hamid, Sebastian Schulze, Michael~A. Osborne, and Stephen~J. Roberts.
+\newblock Marginalising over stationary kernels with Bayesian quadrature.
+\newblock In \emph{Proceedings of The 25th International Conference on Artificial Intelligence and Statistics}, volume 151 of \emph{Proceedings of Machine Learning Research}, pages 523--531. PMLR, 2022.
+
+\bibitem[Warren and Ramos(2024)]{warren2024fast}
+Houston Warren and Fabio Ramos.
+\newblock Fast Fourier Bayesian quadrature.
+\newblock In \emph{Proceedings of The 27th International Conference on Artificial Intelligence and Statistics}, pages 716--724, 2024.
+
+\bibitem[Pruher and Simandl(2015)]{pruher2015nonlinear}
+Jakub Pruher and Miroslav Simandl.
+\newblock Bayesian quadrature in nonlinear filtering.
+\newblock In \emph{Proceedings of the 12th International Conference on Informatics in Control, Automation and Robotics}, pages 380--387, 2015.
+
+\bibitem[Pruher and Simandl(2016)]{pruher2016variance}
+Jakub Pruher and Miroslav Simandl.
+\newblock Bayesian quadrature variance in sigma-point filtering.
+\newblock In \emph{Informatics in Control, Automation and Robotics}, volume 383 of \emph{Lecture Notes in Electrical Engineering}, pages 355--370. Springer, 2016.
+
+\bibitem[Pruher et~al.(2021)Pruher, Karvonen, Oates, Straka, and Sarkka]{pruher2021improved}
+Jakub Pruher, Toni Karvonen, Chris~J. Oates, Ondrej Straka, and Simo Sarkka.
+\newblock Improved calibration of numerical integration error in sigma-point filters.
+\newblock \emph{IEEE Transactions on Automatic Control}, 66(3):1286--1292, 2021.
+
+\bibitem[Syring and Martin(2019)]{syring2019calibrating}
+Nicholas Syring and Ryan Martin.
+\newblock Calibrating general posterior credible regions.
+\newblock \emph{Biometrika}, 106(2):479--486, 2019.
+
+\bibitem[Pion and Vazquez(2025)]{pion2025bayesian}
+Aur\'elien Pion and Emmanuel Vazquez.
+\newblock A Bayesian framework for calibrating Gaussian process predictive distributions.
+\newblock In \emph{Proceedings of the Fourteenth Symposium on Conformal and Probabilistic Prediction with Applications}, volume 266 of \emph{Proceedings of Machine Learning Research}, pages 748--750. PMLR, 2025.
+
+\bibitem[Adachi et~al.(2025)Adachi, Fujisawa, and Osborne]{adachi2025fixing}
+Masaki Adachi, Masahiro Fujisawa, and Michael~A. Osborne.
+\newblock Fixing the pitfalls of probabilistic time-series forecasting evaluation by kernel quadrature.
+\newblock In \emph{Proceedings of the First International Conference on Probabilistic Numerics}, pages 1--11, 2025.
+
+\end{thebibliography}
+}
+
+\end{document}

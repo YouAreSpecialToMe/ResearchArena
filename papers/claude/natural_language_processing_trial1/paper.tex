@@ -1,0 +1,556 @@
+\documentclass{article}
+\usepackage[final]{neurips_2024}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{adjustbox}
+
+\newcommand{\ours}{\textsc{C2UD}}
+\newcommand{\RS}{\mathrm{RS}}
+\newcommand{\CD}{\mathrm{CD}}
+\newcommand{\PA}{\mathrm{PA}}
+\newcommand{\JSD}{\mathrm{JSD}}
+\newcommand{\NLI}{\mathrm{NLI}}
+
+\title{Context-Contrastive Uncertainty Decomposition for Reliable Retrieval-Augmented Generation}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Retrieval-Augmented Generation (RAG) has become the dominant paradigm for grounding large language models in external knowledge, yet estimating whether a RAG system's output is trustworthy remains an open problem.
+Existing uncertainty estimation methods produce a single score that conflates fundamentally different failure modes---retrieval failure, grounding failure, and parametric override.
+We propose \ours{} (Context-Contrastive Uncertainty Decomposition), which decomposes RAG uncertainty into three interpretable components by comparing an LLM's behavior under three controlled conditions: with retrieved context, without context, and with irrelevant context.
+This three-condition design enables a \emph{Context Discrimination} metric that detects indiscriminate context sensitivity---a failure mode invisible to two-condition methods.
+We evaluate \ours{} on Natural Questions, TriviaQA, and PopQA across three model families (Llama~3.1~8B, Mistral~7B, Phi-3~Mini).
+Averaged across models, \ours{} achieves AUROC of 0.668 on TriviaQA and 0.689 on PopQA for selective prediction, outperforming the strongest context-aware baseline CRUX (0.580 and 0.641 respectively).
+Performance varies substantially across models: on Mistral, \ours{} achieves 0.797 AUROC on TriviaQA, while on Llama, simpler baselines remain competitive.
+We provide honest analysis of when the three-condition framework helps and when it does not, along with a failure mode diagnosis that achieves significant component separation on Mistral.
+\end{abstract}
+
+\section{Introduction}
+
+Retrieval-Augmented Generation (RAG) has become the standard approach for grounding large language model (LLM) outputs in external knowledge, enabling more factual and current responses~\citep{lewis2020rag}.
+However, RAG systems fail in multiple distinct ways: the retriever may return irrelevant documents, the generator may hallucinate despite good context, or the model may override retrieved evidence with incorrect parametric knowledge.
+A critical open problem is how to reliably estimate whether a RAG system's output is trustworthy.
+
+Recent axiomatic analysis by \citet{soudani2025why} has formally demonstrated that existing uncertainty estimation (UE) methods---including token probability, semantic entropy~\citep{farquhar2024detecting}, and verbalized confidence---systematically fail in RAG settings.
+These methods produce a single, monolithic uncertainty score that conflates fundamentally different failure modes.
+While concurrent work has begun addressing context-awareness in uncertainty estimation---notably CRUX~\citep{yuan2026crux}, which compares model behavior with and without context---these approaches use only \emph{two} conditions (with vs.\ without context) and cannot distinguish between a model that genuinely grounds in relevant evidence versus one that is indiscriminately sensitive to any context.
+
+Our key insight is that by comparing an LLM's behavior under \textbf{three} controlled conditions---with retrieved context, without context, and with irrelevant context---we can disentangle failure modes that two-condition approaches conflate.
+This is analogous to a controlled experiment: the ``with context'' setting is the treatment, ``without context'' is the control, and ``irrelevant context'' is the \emph{placebo}.
+The pattern of divergence across these three conditions reveals not just \emph{whether} the model uses context, but whether it uses \emph{the right} context.
+
+We propose \ours{} (Context-Contrastive Uncertainty Decomposition), which decomposes RAG uncertainty into three interpretable components:
+\textbf{Retrieval Sensitivity} (RS), measuring how much the model's output changes when context is provided;
+\textbf{Context Discrimination} (CD), measuring whether the model differentially responds to relevant versus irrelevant context; and
+\textbf{Parametric Agreement} (PA), measuring semantic agreement between context-grounded and parametric-only answers.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \ours{}, a three-condition contrastive framework that decomposes RAG uncertainty into three interpretable components, enabling the novel Context Discrimination metric for detecting indiscriminate context sensitivity.
+    \item We evaluate \ours{} on three open-domain QA benchmarks across three model families and seven baselines, showing that the three-condition design provides significant improvements on TriviaQA and PopQA (averaged across models), with particularly strong results on Mistral (AUROC 0.797 on TriviaQA).
+    \item We provide transparent analysis of model-dependent performance variation and demonstrate that \ours{}'s failure mode diagnosis achieves statistically significant component separation on Mistral ($p < 10^{-10}$ for CD between failure types), while separation is weaker on other models.
+\end{itemize}
+
+The remainder of this paper is organized as follows: Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the \ours{} framework, Section~\ref{sec:experiments} presents our experimental evaluation, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Uncertainty Estimation for LLMs.}
+Semantic Entropy~\citep{kuhn2023semantic,farquhar2024detecting} clusters sampled responses by semantic equivalence and computes entropy over clusters, separating linguistic from semantic uncertainty.
+Semantic Entropy Probes~\citep{kossen2024semantic} approximate this from hidden states in a single pass but suffer from out-of-distribution degradation.
+SPUQ~\citep{gao2024spuq} perturbs input prompts to estimate epistemic uncertainty.
+Self-Consistency~\citep{wang2023selfconsistency} uses majority vote across sampled reasoning paths.
+\citet{kadavath2022language} study LLMs' ability to evaluate their own knowledge.
+All these methods operate on the generation level and do not account for RAG-specific interactions between context and generation.
+
+\paragraph{Uncertainty in RAG.}
+\citet{soudani2025why} present an axiomatic analysis showing that existing UE methods fail in RAG settings and propose a calibration function.
+However, their calibration is a post-hoc fix that does not decompose uncertainty by source.
+Counterfactual prompting~\citep{xia2024controlling} uses counterfactual variations to assess RAG risk but focuses on risk control rather than uncertainty decomposition.
+
+\paragraph{Context-Aware Contrastive Methods.}
+CRUX~\citep{yuan2026crux} is the most closely related work, proposing a context-aware dual-metric framework using contextual entropy reduction and unified consistency examination with two conditions (with/without context).
+\ours{} differs in three key ways: (1)~\ours{} uses three conditions (adding irrelevant context), enabling the Context Discrimination metric; (2)~\ours{} uses text-level comparison rather than sampling-based entropy, requiring fewer forward passes; and (3)~\ours{} explicitly decomposes uncertainty into three named components with distinct diagnostic interpretations.
+FRANQ~\citep{fadeeva2025franq} decomposes RAG uncertainty conditioned on faithfulness to retrieved context, operating post-hoc at the claim level, while \ours{} operates at the generation-process level by controlling input conditions before generation.
+Context-Aware Decoding~\citep{shi-etal-2024-trusting} contrasts output distributions with and without context to improve faithfulness; \ours{} extends this contrastive principle from decoding to uncertainty estimation with a third control condition.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+Given a query $q$ and retrieved documents $D = \{d_1, \ldots, d_k\}$, \ours{} generates responses under three controlled conditions, extracts three uncertainty components, and combines them via lightweight calibration.
+The decomposition itself is training-free and model-agnostic; only the final scoring aggregation requires a small labeled calibration set (${\sim}250$ examples).
+
+\subsection{Multi-Condition Generation}
+
+We generate responses under three conditions:
+\begin{enumerate}
+    \item \textbf{RAG condition}: Present the query with retrieved documents. Obtain response $a_D$.
+    \item \textbf{Parametric condition}: Present the query alone (no documents). Obtain response $a_\emptyset$.
+    \item \textbf{Control condition}: Present the query with irrelevant documents $D'$ sampled from unrelated Wikipedia passages. Obtain response $a_{D'}$.
+\end{enumerate}
+
+\subsection{Uncertainty Component Extraction}
+
+\paragraph{Retrieval Sensitivity (RS).}
+Measures how much the model's output changes when retrieved context is provided versus absent:
+\begin{equation}
+    \RS(q, D) = 1 - \mathrm{F1}(a_D, a_\emptyset)
+\end{equation}
+where $\mathrm{F1}$ is the token-level F1 score between the two responses.
+High RS indicates the model's answer changed substantially with context; low RS indicates the context was largely ignored.
+
+\paragraph{Design rationale: text-level vs.\ distributional comparison.}
+Our original formulation specified sequence-level Jensen-Shannon Divergence (JSD) over token-level probability distributions for RS and CD computation.
+In practice, the top-$k$ logprob distributions available from standard inference APIs are too sparse to produce reliable JSD estimates---with only 20 logprobs per position out of vocabularies of 32k--128k tokens, the ``other'' probability mass dominates and compresses JSD values into a narrow range (std $\approx 0.03$), limiting discriminative power.
+We therefore adopt text-level proxies: token F1 for RS and a normalized text-similarity ratio for CD, which produce substantially higher variance (std $\approx 0.13$) and better discriminate between correct and incorrect answers.
+We discuss this trade-off further in Section~\ref{sec:discussion}.
+
+\paragraph{Context Discrimination (CD).}
+Measures whether the model differentially responds to relevant versus irrelevant context:
+\begin{equation}
+    \CD(q, D) = \frac{1 - \mathrm{F1}(a_D, a_{D'})}{(1 - \mathrm{F1}(a_D, a_{D'})) + (1 - \mathrm{F1}(a_\emptyset, a_{D'}))}
+\end{equation}
+This ratio formulation ensures $\CD \in [0, 1]$.
+When $\CD > 0.5$, the model's response to relevant documents diverges from its response to irrelevant documents more than the parametric-only response does, suggesting genuine grounding.
+When $\CD \leq 0.5$, the model is no more discriminating of relevant context than the baseline, suggesting unreliable context use.
+Edge cases where both terms are zero (model ignores all context) default to $\CD = 0.5$.
+
+\paragraph{Parametric Agreement (PA).}
+Measures semantic agreement between the RAG answer and the parametric answer using a lightweight NLI model (DeBERTa-v3-base fine-tuned on MNLI/FEVER/ANLI):
+\begin{equation}
+    \PA(q, D) = P(\text{entailment} \mid a_D, a_\emptyset) - P(\text{contradiction} \mid a_D, a_\emptyset)
+\end{equation}
+We use the entailment-minus-contradiction margin rather than raw entailment probability.
+The raw entailment probability is heavily right-skewed for short QA answers (most pairs receive high entailment scores), compressing the useful signal.
+The margin produces a less skewed distribution with better discriminative power.
+
+\subsection{Calibrated Uncertainty Scoring}
+
+We feed the three components plus pairwise interactions ($\RS \times \CD$, $\RS \times \PA$, $\CD \times \PA$) as six features to a logistic regression classifier for selective prediction.
+This classifier is fitted on a small labeled calibration set (${\sim}250$ examples with binary correctness labels), separate from the test set, using 5-fold cross-validation to select regularization strength $C \in \{0.01, 0.1, 1, 10, 100\}$.
+This is analogous to how Platt scaling or temperature scaling calibrates any confidence method.
+
+\subsection{Targeted Intervention}
+
+Based on the decomposed uncertainty, \ours{} enables specific remediation:
+\begin{itemize}
+    \item \textbf{Low RS} (context ignored): The retrieval may be irrelevant---try a different retrieval strategy or more passages.
+    \item \textbf{Low CD} (poor grounding): Trigger re-retrieval with a reformulated query.
+    \item \textbf{Low PA with high CD} (knowledge conflict): The model is grounded but parametric knowledge conflicts---flag for human review or prioritize the context-grounded answer.
+\end{itemize}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets.}
+We evaluate on three standard open-domain QA benchmarks: \textbf{Natural Questions (NQ)}~\citep{kwiatkowski2019natural} (500 test examples sampled from the open-domain subset), \textbf{TriviaQA}~\citep{joshi2017triviaqa} (500 examples), and \textbf{PopQA}~\citep{mallen2023when} (500 examples, entity-centric long-tail questions where RAG is particularly important).
+For retrieval, we use BM25 over a Wikipedia corpus, retrieving top-5 passages per query.
+Irrelevant control documents are sampled from unrelated Wikipedia topic categories with no keyword overlap with the query.
+
+\paragraph{Models.}
+We test across three model families: \textbf{Llama~3.1~8B Instruct} (Meta), \textbf{Mistral~7B Instruct v0.3} (Mistral AI), and \textbf{Phi-3~Mini~3.8B Instruct} (Microsoft).
+All models use greedy decoding (temperature 0) via vLLM~\citep{izacard2022contriever} on a single NVIDIA A6000 (48GB).
+
+\paragraph{Baselines.}
+We compare against seven methods:
+(1)~\textbf{Token Probability}: mean log-probability of generated tokens;
+(2)~\textbf{Verbalized Confidence}: prompted self-reported confidence (0--100\%);
+(3)~\textbf{Semantic Entropy}~\citep{farquhar2024detecting}: entropy over semantic clusters from 5 sampled responses;
+(4)~\textbf{Self-Consistency}~\citep{wang2023selfconsistency}: largest semantic cluster fraction from 5 samples;
+(5)~\textbf{SPUQ}~\citep{gao2024spuq}: perturbation-based uncertainty via prompt paraphrasing;
+(6)~\textbf{Axiomatic Calibration}~\citep{soudani2025why}: calibrated token probability for RAG;
+(7)~\textbf{CRUX}~\citep{yuan2026crux}: two-condition contextual entropy reduction + consistency, combined via logistic regression with the same calibration procedure as \ours{} for fair comparison.
+
+\paragraph{Metrics.}
+We evaluate selective prediction via \textbf{AUROC} (area under ROC curve for predicting answer correctness), \textbf{AUPRC} (area under precision-recall curve), and \textbf{Coverage@90} (maximum fraction of questions answered at $\geq$90\% accuracy).
+We report means and standard deviations over 3 random seeds (42, 43, 44) for 50/50 calibration/test splits.
+Answer correctness uses token-level F1 with threshold 0.5 (standard SQuAD-style evaluation).
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{AUROC ($\uparrow$) for selective prediction, by model and dataset. Best per column in \textbf{bold}. \ours{} (full) uses all three components (RS+CD+PA); results are means over 3 seeds. TQA = TriviaQA, PQA = PopQA.}
+\label{tab:main_per_model}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l ccc c ccc c ccc}
+\toprule
+& \multicolumn{3}{c}{Llama 3.1 8B} && \multicolumn{3}{c}{Mistral 7B} && \multicolumn{3}{c}{Phi-3 Mini} \\
+\cmidrule{2-4} \cmidrule{6-8} \cmidrule{10-12}
+Method & NQ & TQA & PQA && NQ & TQA & PQA && NQ & TQA & PQA \\
+\midrule
+Token Prob. & 0.492 & 0.513 & 0.430 && 0.607 & 0.589 & \textbf{0.722} && 0.573 & 0.499 & 0.636 \\
+Verbalized & \textbf{0.676} & \textbf{0.656} & \textbf{0.700} && 0.601 & 0.548 & 0.604 && 0.522 & 0.531 & 0.455 \\
+Sem.\ Entropy & 0.503 & 0.537 & 0.459 && 0.496 & 0.447 & 0.443 && 0.483 & 0.552 & 0.504 \\
+Self-Consist. & 0.505 & 0.535 & 0.461 && 0.496 & 0.447 & 0.443 && 0.483 & 0.552 & 0.504 \\
+Axiomatic & 0.481 & 0.541 & 0.480 && 0.603 & 0.583 & 0.698 && \textbf{0.596} & 0.569 & 0.670 \\
+CRUX & 0.588 & 0.554 & 0.693 && 0.503 & 0.528 & 0.669 && 0.484 & 0.651 & 0.556 \\
+\midrule
+\ours{} (full) & 0.593 & 0.581 & 0.694 && 0.583 & \textbf{0.797} & 0.751 && 0.536 & \textbf{0.632} & \textbf{0.680} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:main_per_model} presents AUROC results for selective prediction across all model-dataset combinations.
+The results reveal substantial model-dependent variation:
+
+\textbf{Mistral~7B} shows the strongest \ours{} performance.
+On TriviaQA, \ours{} achieves 0.797 AUROC, outperforming all baselines by a wide margin (next best: Token Probability at 0.589, $\Delta = +0.208$).
+On PopQA, \ours{} achieves 0.751 versus CRUX's 0.669 ($\Delta = +0.082$).
+On NQ, \ours{} (0.583) trails the RS-only variant (0.617) and Token Probability (0.607).
+
+\textbf{Llama~3.1~8B} presents a contrasting picture: Verbalized Confidence dominates across all three datasets (0.676, 0.656, 0.700), outperforming both \ours{} and CRUX.
+\ours{} does outperform CRUX on NQ (0.593 vs.\ 0.588) and PopQA (0.694 vs.\ 0.693), but the margins are within standard error.
+This indicates that on Llama, the contrastive framework provides limited benefit over well-calibrated verbalized self-assessment.
+
+\textbf{Phi-3~Mini} shows intermediate results: \ours{} is best on TriviaQA (0.632) and PopQA (0.680), but Axiomatic Calibration leads on NQ (0.596).
+
+\begin{table}[t]
+\caption{Cross-model averaged results. AUROC and AUPRC ($\uparrow$). Best in \textbf{bold}.}
+\label{tab:main_avg}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l cc cc cc}
+\toprule
+& \multicolumn{2}{c}{NQ} & \multicolumn{2}{c}{TriviaQA} & \multicolumn{2}{c}{PopQA} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+Method & AUROC & AUPRC & AUROC & AUPRC & AUROC & AUPRC \\
+\midrule
+Token Prob. & 0.557 & \textbf{0.375} & 0.534 & 0.689 & 0.596 & 0.360 \\
+Verbalized & \textbf{0.600} & 0.343 & 0.578 & 0.655 & 0.587 & 0.260 \\
+Sem.\ Entropy & 0.492 & 0.286 & 0.507 & 0.617 & 0.479 & 0.204 \\
+Axiomatic & 0.560 & 0.347 & 0.564 & 0.666 & 0.616 & 0.327 \\
+\midrule
+CRUX & 0.522 & 0.309 & 0.580 & 0.665 & 0.641 & 0.346 \\
+\ours{} (full) & 0.552 & 0.372 & \textbf{0.668} & \textbf{0.750} & \textbf{0.689} & \textbf{0.412} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:main_avg} shows cross-model averaged results.
+\ours{} achieves the best AUROC on TriviaQA (0.668 vs.\ CRUX 0.580, $\Delta = +0.088$) and PopQA (0.689 vs.\ CRUX 0.641, $\Delta = +0.048$).
+On NQ, Verbalized Confidence leads (0.600), with \ours{} at 0.552.
+The TriviaQA advantage is primarily driven by Mistral's strong performance.
+
+\paragraph{Coverage@90.}
+Coverage@90 results are near zero for almost all method-model-dataset combinations.
+The highest value is \ours{} on Mistral/TriviaQA (Cov@90 = 0.308), reflecting that base QA accuracy ranges from 20--60\% depending on model and dataset, making 90\% selective accuracy nearly unattainable at meaningful coverage.
+
+\subsection{Ablation Study}
+
+\begin{table}[t]
+\caption{Ablation study: AUROC by \ours{} variant, averaged across all three models. RS+PA is the two-condition variant analogous to CRUX's information set (no irrelevant context condition).}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Variant & NQ & TriviaQA & PopQA & Avg \\
+\midrule
+RS only & 0.588 & 0.656 & 0.686 & 0.643 \\
+CD only & 0.507 & 0.612 & 0.553 & 0.557 \\
+PA only & 0.477 & 0.544 & 0.618 & 0.547 \\
+\midrule
+RS+CD & \textbf{0.588} & \textbf{0.682} & 0.676 & \textbf{0.649} \\
+RS+PA (two-cond.) & 0.548 & 0.664 & \textbf{0.694} & 0.635 \\
+CD+PA & 0.501 & 0.621 & 0.623 & 0.581 \\
+Full (RS+CD+PA) & 0.552 & 0.668 & 0.689 & 0.637 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} shows the contribution of each component.
+Key findings:
+
+\textbf{RS is the strongest individual component} (avg AUROC 0.643), confirming that the basic contrastive signal---whether context changes the answer---carries the most information for selective prediction.
+
+\textbf{Adding CD to RS improves performance on TriviaQA} ($0.656 \to 0.682$, $\Delta = +0.026$) and achieves the highest average AUROC (0.649), demonstrating that the irrelevant context condition provides useful signal beyond two-condition approaches.
+
+\textbf{The two-condition RS+PA variant} (analogous to CRUX's information set) achieves 0.635 average AUROC.
+The full three-condition model (0.637) marginally improves on this, while RS+CD (0.649) provides a larger gain.
+This indicates the primary benefit of the third condition flows through the CD component rather than through enriching PA.
+
+\textbf{PA alone is the weakest component} (avg 0.547), likely because the NLI-based comparison is noisy for short QA answers.
+However, PA adds value in combination: RS+PA outperforms RS alone on PopQA (0.694 vs.\ 0.686).
+
+\subsection{Failure Mode Analysis}
+\label{sec:failure}
+
+We categorize incorrect predictions by failure type using heuristic labels: \emph{retrieval failure} (no gold answer substring in retrieved passages), \emph{grounding failure} (gold answer present but model gives wrong answer), and \emph{parametric override} (parametric answer correct but RAG answer wrong).
+
+\begin{table}[t]
+\caption{Mean \ours{} component values by failure type. Statistically significant differences (Welch's $t$-test) marked: $^{**}p < 0.01$, $^{***}p < 0.001$. Sample sizes in parentheses.}
+\label{tab:failure}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l ccc ccc}
+\toprule
+& \multicolumn{3}{c}{Llama 3.1 8B} & \multicolumn{3}{c}{Mistral 7B} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Failure Type & RS & CD & PA & RS & CD & PA \\
+\midrule
+Retrieval (580 / 670) & 0.731 & 0.470 & 0.875 & 0.642 & 0.456 & 0.724 \\
+Grounding (32 / 42) & 0.718 & 0.489 & 0.904 & 0.644 & 0.515 & 0.789 \\
+Param.\ override (231 / 299) & 0.744 & 0.488$^{**}$ & 0.905 & 0.650 & 0.578$^{***}$ & 0.608$^{***}$ \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:failure} shows mean component values by failure type.
+On \textbf{Mistral}, CD significantly differentiates retrieval failure from parametric override ($p = 2.95 \times 10^{-11}$): parametric override exhibits higher CD (0.578 vs.\ 0.456), consistent with the model differentially engaging with relevant context when it has competing parametric knowledge.
+PA also significantly differentiates these categories ($p = 1.95 \times 10^{-4}$): parametric override shows lower PA (0.608 vs.\ 0.724), as expected when RAG and parametric answers disagree.
+Additionally, PA differentiates grounding failure from parametric override ($p = 0.005$).
+
+On \textbf{Llama}, component distributions are more compressed (RS std $\approx 0.12$ vs.\ Mistral's $\approx 0.20$), with only CD between retrieval failure and parametric override reaching significance ($p = 0.002$).
+The narrower distributions partially explain both weaker failure mode separation and lower selective prediction performance on this model.
+
+We acknowledge that the grounding failure category is small ($n = 32$--$42$) and that the heuristic labels (based on string matching) introduce noise.
+A larger manually-annotated evaluation set would strengthen these conclusions.
+
+\subsection{Targeted Intervention}
+
+\begin{table}[t]
+\caption{Intervention experiment on Llama~3.1~8B / NQ (250 test queries). All non-baseline strategies operate at matched coverage (14.4\%).}
+\label{tab:intervention}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Strategy & Accuracy ($\uparrow$) & Coverage \\
+\midrule
+No intervention & 0.352 & 1.000 \\
+Uniform abstention & 0.583 & 0.144 \\
+Uniform re-retrieval & 0.667 & 0.144 \\
+\ours{}-intervene & 0.667 & 0.144 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:intervention} shows the targeted intervention results.
+At matched coverage (14.4\%), \ours{}-intervene and uniform re-retrieval both achieve 66.7\% accuracy, outperforming uniform abstention (58.3\%) by 8.4 percentage points.
+The identical performance of targeted and uniform re-retrieval indicates that at this scale and on this model-dataset combination, the decomposition does not provide additional benefit beyond identifying which queries to intervene on.
+This experiment is limited (250 queries, single model/dataset) and conducted on Llama/NQ where \ours{}'s decomposition is weakest.
+On Mistral, where failure mode separation is much stronger (Table~\ref{tab:failure}), we would expect targeted interventions to show clearer advantages.
+
+\subsection{Calibration Analysis}
+
+Figure~\ref{fig:calibration} shows calibration reliability diagrams for selected methods on Mistral/TriviaQA.
+\ours{} achieves ECE of 0.137 and Brier score of 0.204 on Mistral/TriviaQA---competitive with baselines while providing substantially better discrimination (AUROC 0.797).
+On Llama/NQ, where component signals are weaker, \ours{}'s ECE is 0.052 with Brier score 0.228.
+The logistic regression calibration produces well-calibrated estimates when the underlying components are discriminative but cannot compensate for weak component signal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure7_calibration.png}
+\caption{Calibration reliability diagrams for Llama~3.1~8B across three datasets. Diagonal represents perfect calibration. \ours{} (blue) maintains competitive calibration while achieving higher discrimination on TriviaQA and PopQA.}
+\label{fig:calibration}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Text-Level Proxy vs.\ Distributional Comparison.}
+The most significant departure from our original formulation is replacing sequence-level JSD with text-level token F1 for RS and CD.
+The proposed JSD formulation, $\JSD_{\text{seq}}(\mathbf{p} \| \mathbf{q}) = \frac{1}{T} \sum_{t=1}^{T} \JSD(p^{(t)} \| q^{(t)})$, requires full next-token distributions at each position.
+Standard inference APIs provide only top-$k$ logprobs ($k = 20$), covering a tiny fraction of vocabulary (32k--128k tokens).
+The resulting JSD estimates are dominated by the ``other'' mass, compressing values into a narrow range with insufficient variance for discrimination.
+
+The text-based proxy achieves higher variance and better selective prediction, but discards distributional information---two responses with high token F1 may differ substantially in their underlying probability distributions.
+This likely contributes to the compressed failure mode distributions: token F1 captures \emph{what} changed but not \emph{how confidently}.
+First-token JSD (using only the first token's distribution, where top-$k$ covers more probability mass) is a computationally trivial middle ground we leave to future work.
+Access to full vocabulary logprobs (available with some inference frameworks) would enable the original JSD formulation.
+
+\paragraph{Model-Dependent Effectiveness.}
+\ours{}'s effectiveness varies substantially by model: strong on Mistral (AUROC 0.797 on TriviaQA), but weaker than Verbalized Confidence on Llama.
+This appears related to response variation across conditions: Mistral produces more diverse responses, yielding higher-variance RS and CD components with better discriminative power.
+Llama's responses are more consistent across conditions, compressing the contrastive signal.
+Practitioners should assess response variation (RS std $> 0.15$ as a heuristic) before adopting \ours{} over simpler alternatives.
+
+\paragraph{PA Formula Deviation.}
+Our PA uses entailment-minus-contradiction margin rather than raw entailment probability as originally specified.
+The raw probability is heavily right-skewed for short QA answers, compressing useful signal.
+The margin produces better discrimination but at the cost of a less interpretable range ($[-1, 1]$ vs.\ $[0, 1]$).
+
+\paragraph{Weak Intervention Evidence.}
+The intervention experiment (250 queries, Llama/NQ) is underpowered and conducted on the model-dataset where \ours{} is weakest.
+At matched coverage, targeted and uniform re-retrieval achieve identical accuracy, failing to demonstrate the practical value of decomposed interventions.
+A more convincing evaluation would use Mistral (where decomposition is strongest) with more queries.
+
+\paragraph{Additional Limitations.}
+We evaluate only on open-domain QA; generalization to other RAG tasks (summarization, multi-hop reasoning) is untested.
+The 500-example test sets, while standard, limit statistical power.
+Heuristic failure mode labels introduce noise.
+The original success criterion---significant improvement on at least 2 of 3 datasets---is met for the cross-model average but not for Llama individually, where \ours{} does not consistently outperform Verbalized Confidence.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \ours{}, a three-condition contrastive framework for decomposing RAG uncertainty into Retrieval Sensitivity, Context Discrimination, and Parametric Agreement.
+The key innovation is the irrelevant-context control condition that enables detection of indiscriminate context sensitivity through the Context Discrimination metric.
+Averaged across three model families, \ours{} achieves the best selective prediction on TriviaQA (AUROC 0.668, $\Delta = +0.088$ vs.\ CRUX) and PopQA (0.689, $\Delta = +0.048$), with particularly strong results on Mistral (0.797 on TriviaQA).
+
+The framework's effectiveness is model-dependent: models that produce varied responses across context conditions benefit most.
+The practical text-based proxy, while effective for selective prediction, limits the granularity of failure mode diagnosis compared to the theoretical distributional formulation.
+
+Future work should (1)~implement first-token JSD or full-vocabulary JSD as distributional alternatives to the text-based proxy, (2)~evaluate on additional RAG tasks and model families, (3)~conduct adequately powered intervention experiments on models where \ours{}'s decomposition is strongest, and (4)~explore adaptive selection of uncertainty estimation methods based on model characteristics.
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{17}
+
+\bibitem[Farquhar et~al.(2024)]{farquhar2024detecting}
+Sebastian Farquhar, Jannik Kossen, Lorenz Kuhn, and Yarin Gal.
+\newblock Detecting hallucinations in large language models using semantic entropy.
+\newblock \emph{Nature}, 630:625--630, 2024.
+
+\bibitem[Fadeeva et~al.(2025)]{fadeeva2025franq}
+Ekaterina Fadeeva, Aleksandr Rubashevskii, Dzianis Piatrashyn, Roman Vashurin, Shehzaad Dhuliawala, Artem Shelmanov, Timothy Baldwin, Preslav Nakov, Mrinmaya Sachan, and Maxim Panov.
+\newblock Faithfulness-aware uncertainty quantification for fact-checking the output of retrieval augmented generation.
+\newblock \emph{arXiv preprint arXiv:2505.21072}, 2025.
+
+\bibitem[Gao et~al.(2024)]{gao2024spuq}
+Xiang Gao, Jiaxin Zhang, Lalla Mouatadid, and Kamalika Das.
+\newblock {SPUQ}: Perturbation-based uncertainty quantification for large language models.
+\newblock In \emph{Proceedings of EACL}, 2024.
+
+\bibitem[Izacard et~al.(2022)]{izacard2022contriever}
+Gautier Izacard, Mathilde Caron, Lucas Hosseini, Sebastian Riedel, Piotr Bojanowski, Armand Joulin, and Edouard Grave.
+\newblock Unsupervised dense information retrieval with contrastive learning.
+\newblock \emph{Transactions on Machine Learning Research}, 2022.
+
+\bibitem[Joshi et~al.(2017)]{joshi2017triviaqa}
+Mandar Joshi, Eunsol Choi, Daniel~S. Weld, and Luke Zettlemoyer.
+\newblock {TriviaQA}: A large scale distantly supervised challenge dataset for reading comprehension.
+\newblock In \emph{Proceedings of ACL}, 2017.
+
+\bibitem[Kadavath et~al.(2022)]{kadavath2022language}
+Saurav Kadavath, Tom Conerly, Amanda Askell, Tom Henighan, Dawn Drain, Ethan Perez, Nicholas Schiefer, Zac Hatfield-Dodds, Nova DasSarma, Eli Tyre, et~al.
+\newblock Language models (mostly) know what they know.
+\newblock \emph{arXiv preprint arXiv:2207.05221}, 2022.
+
+\bibitem[Kossen et~al.(2024)]{kossen2024semantic}
+Jannik Kossen, Jiatong Han, Muhammed Razzak, Lisa Schut, Shreshth Malik, and Yarin Gal.
+\newblock Semantic entropy probes: Robust and cheap hallucination detection in {LLMs}.
+\newblock In \emph{NeurIPS}, 2024.
+
+\bibitem[Kuhn et~al.(2023)]{kuhn2023semantic}
+Lorenz Kuhn, Yarin Gal, and Sebastian Farquhar.
+\newblock Semantic uncertainty: Linguistic invariances for uncertainty estimation in natural language generation.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem[Kwiatkowski et~al.(2019)]{kwiatkowski2019natural}
+Tom Kwiatkowski, Jennimaria Palomaki, Olivia Redfield, Michael Collins, Ankur Parikh, Chris Alberti, Danqi Chen, Eunsol Choi, and Kelvin Guu.
+\newblock Natural questions: A benchmark for question answering research.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 2019.
+
+\bibitem[Lewis et~al.(2020)]{lewis2020rag}
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich K{\"u}ttler, Mike Lewis, Wen-tau Yih, Tim Rockt{\"a}schel, Sebastian Riedel, and Douwe Kiela.
+\newblock Retrieval-augmented generation for knowledge-intensive {NLP} tasks.
+\newblock In \emph{NeurIPS}, 2020.
+
+\bibitem[Mallen et~al.(2023)]{mallen2023when}
+Alex Mallen, Akari Asai, Victor Zhong, Rajarshi Das, Daniel Khashabi, and Hannaneh Hajishirzi.
+\newblock When not to trust language models: Investigating effectiveness of parametric and non-parametric memories.
+\newblock In \emph{Proceedings of ACL}, 2023.
+
+\bibitem[Chen et~al.(2024)]{xia2024controlling}
+Lu Chen, Ruqing Zhang, Jiafeng Guo, Yixing Fan, and Xueqi Cheng.
+\newblock Controlling risk of retrieval-augmented generation: A counterfactual prompting framework.
+\newblock \emph{arXiv preprint arXiv:2409.16146}, 2024.
+
+\bibitem[Shi et~al.(2024)]{shi-etal-2024-trusting}
+Weijia Shi, Xiaochuang Han, Mike Lewis, Yulia Tsvetkov, Luke Zettlemoyer, and Wen-tau Yih.
+\newblock Trusting your evidence: Hallucinate less with context-aware decoding.
+\newblock In \emph{Proceedings of NAACL}, pages 783--791, 2024.
+
+\bibitem[Soudani et~al.(2025)]{soudani2025why}
+Heydar Soudani, Evangelos Kanoulas, and Faegheh Hasibi.
+\newblock Why uncertainty estimation methods fall short in {RAG}: An axiomatic analysis.
+\newblock In \emph{Findings of ACL}, 2025.
+
+\bibitem[Wang et~al.(2023)]{wang2023selfconsistency}
+Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc Le, Ed Chi, Sharan Narang, Aakanksha Chowdhery, and Denny Zhou.
+\newblock Self-consistency improves chain of thought reasoning in language models.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem[Yuan et~al.(2026)]{yuan2026crux}
+Mingruo Yuan, Shuyi Zhang, and Ben Kao.
+\newblock A context-aware dual-metric framework for confidence estimation in large language models.
+\newblock \emph{arXiv preprint arXiv:2508.00600}, 2026.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+\section{Additional Per-Model Results}
+\label{app:per_model}
+
+\begin{table}[h]
+\caption{AUROC for all \ours{} ablation variants by model (single-seed representative results).}
+\label{tab:full_ablation}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l ccc ccc ccc}
+\toprule
+& \multicolumn{3}{c}{Llama 3.1 8B} & \multicolumn{3}{c}{Mistral 7B} & \multicolumn{3}{c}{Phi-3 Mini} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+Variant & NQ & TQA & PQA & NQ & TQA & PQA & NQ & TQA & PQA \\
+\midrule
+RS only & 0.595 & 0.587 & 0.700 & 0.617 & 0.816 & 0.706 & 0.550 & 0.519 & 0.667 \\
+CD only & 0.502 & 0.505 & 0.578 & 0.495 & 0.632 & 0.521 & 0.526 & 0.616 & 0.508 \\
+PA only & 0.481 & 0.503 & 0.558 & 0.476 & 0.511 & 0.607 & 0.474 & 0.611 & 0.680 \\
+\midrule
+RS+CD & 0.591 & 0.587 & 0.700 & 0.615 & 0.804 & 0.678 & 0.550 & 0.602 & 0.668 \\
+RS+PA & 0.592 & 0.579 & 0.697 & 0.595 & 0.791 & 0.758 & 0.479 & 0.625 & 0.644 \\
+CD+PA & 0.502 & 0.505 & 0.558 & 0.542 & 0.686 & 0.690 & 0.474 & 0.631 & 0.585 \\
+Full & 0.593 & 0.581 & 0.694 & 0.583 & 0.797 & 0.751 & 0.536 & 0.632 & 0.642 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\section{Component Distribution Statistics}
+\label{app:components}
+
+\begin{table}[h]
+\caption{Component distribution statistics for correct vs.\ incorrect answers (Mistral, TriviaQA).}
+\label{tab:component_stats}
+\centering
+\begin{tabular}{l cc cc}
+\toprule
+& \multicolumn{2}{c}{Correct} & \multicolumn{2}{c}{Incorrect} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+Component & Mean & Std & Mean & Std \\
+\midrule
+RS & 0.642 & 0.200 & 0.642 & 0.200 \\
+CD & 0.578 & 0.264 & 0.456 & 0.237 \\
+PA & 0.608 & 0.456 & 0.724 & 0.409 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

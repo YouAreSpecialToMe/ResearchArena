@@ -1,0 +1,237 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for LLM inference, data processing, and visualization. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: pip install vllm>=0.6.0 transformers>=4.44.0 torch>=2.1.0 datasets>=2.19.0 accelerate>=0.33.0 autoawq",
+      "step2": "Install analysis packages: pip install pandas numpy scipy scikit-learn matplotlib seaborn",
+      "step3": "Install utility packages: pip install tqdm jsonlines rouge-score nltk fuzzywuzzy python-Levenshtein openai",
+      "step4": "Verify GPU: run nvidia-smi, confirm 1x A6000 with 48GB VRAM, verify torch.cuda.is_available()",
+      "step5": "Create directory structure: exp/data_preparation/, exp/baselines/, exp/main_experiments/, exp/ablations/, exp/shared/, exp/manual_validation/, figures/, results/",
+      "step6": "Create exp/shared/metrics.py with implementations of all consistency metrics (CFA, CPA, FCAG, CAR, PFI, DCS) and answer normalization utilities",
+      "step7": "Create exp/shared/utils.py with model loading helpers (vLLM engine initialization), prompt formatting templates for each format type, and answer extraction regex patterns",
+      "step8": "Create exp/shared/answer_equivalence.py with two-stage answer equivalence: (a) rule-based normalization + exact/fuzzy matching, (b) LLM-based semantic equivalence judge using a local model (Qwen2.5-7B-Instruct) to classify answer pairs as equivalent or not"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Curate base questions from open QA datasets",
+    "description": "Download and curate 1,000 base questions from 6 knowledge domains using established open QA datasets. Select questions with unambiguous, verifiable short answers. Stratify by domain and difficulty. This matches the proposal scope of ~1,000 questions.",
+    "steps": {
+      "step1": "Download datasets via HuggingFace datasets library: (1) cais/mmlu for science and humanities, (2) allenai/ai2_arc ARC-Challenge for science, (3) openai/gsm8k for math, (4) tau/commonsense_qa for commonsense, (5) mandarjoshi/trivia_qa for world knowledge, (6) lucasmccabe/logiqa for logic",
+      "step2": "From each domain, sample ~165 questions (1,000 total) with the following criteria: answer is a single short phrase or number (not multi-sentence), answer is unambiguous and verifiable, question is self-contained (no external context needed beyond the question text). Use random seed 42 for reproducibility.",
+      "step3": "Domain allocation: Science (MMLU science + ARC-Challenge): 165 questions, History/Social Science (MMLU humanities): 165 questions, Mathematics (GSM8K): 170 questions, Commonsense (CommonsenseQA): 165 questions, World Knowledge (TriviaQA): 170 questions, Logic (LogiQA): 165 questions. Total: 1,000.",
+      "step4": "For each question, extract and store: question_id, domain, source_dataset, question_text, correct_answer (normalized string), original_format, difficulty_label (easy/medium/hard based on source dataset metadata or original accuracy statistics)",
+      "step5": "Assign difficulty labels: For MMLU/ARC, use the test split performance from published results (>80% = easy, 50-80% = medium, <50% = hard). For GSM8K, use number of reasoning steps (1-2 = easy, 3-4 = medium, 5+ = hard). For others, assign based on question length and complexity heuristics to ensure roughly balanced tiers (~333 per difficulty).",
+      "step6": "Save as exp/data_preparation/base_questions.json with fields: question_id, domain, source_dataset, question_text, correct_answer, difficulty, original_choices (if MCQ source)",
+      "step7": "Print dataset statistics: count per domain, count per difficulty, average question length, answer type distribution. Save stats to exp/data_preparation/dataset_stats.json"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate cross-format variants",
+    "description": "For each of the 1,000 base questions, programmatically generate 5 format variants: MCQ (4 options), open-ended, yes/no, true/false, and fill-in-the-blank. This yields 5,000 format instances.",
+    "steps": {
+      "step1": "MCQ format: For questions already in MCQ format, keep original choices. For non-MCQ questions, generate 3 plausible distractors programmatically: (a) for factual questions, use other entities from the same category (e.g., other capitals, other elements), (b) for math questions, use common wrong answers (off-by-one, wrong operation), (c) randomize correct answer position (A/B/C/D) using seed-based shuffling. Template: 'Question: {q}\\nA) {opt1}\\nB) {opt2}\\nC) {opt3}\\nD) {opt4}\\nAnswer:'",
+      "step2": "Open-ended format: Present the question directly without any options. Template: 'Question: {q}\\nAnswer with a short, precise response.\\nAnswer:'",
+      "step3": "Yes/No format: Convert each question into a binary verification by embedding the correct answer. Template: 'Is it true that {statement_with_answer}? Answer yes or no.\\nAnswer:'. E.g., 'What is the capital of France?' -> 'Is it true that the capital of France is Paris? Answer yes or no.' For 50% of questions, embed a WRONG answer to create 'no' ground truths, ensuring balanced yes/no distribution.",
+      "step4": "True/False format: Convert into a declarative statement. Template: 'True or False: {declarative_statement}\\nAnswer:'. E.g., 'The capital of France is Paris.' (True) or 'The capital of France is Berlin.' (False). Use 50/50 true/false split.",
+      "step5": "Fill-in-the-blank format: Convert question into a cloze sentence with the answer blanked. Template: 'Complete the following: {sentence_with_blank}\\nAnswer:'. E.g., 'The capital of France is ____.'",
+      "step6": "For yes/no and true/false formats, track which questions use correct vs incorrect answers to ensure proper ground truth labeling. Store the mapping.",
+      "step7": "Save all format variants to exp/data_preparation/format_variants.json. Each entry: question_id, format_type (mcq/open/yesno/truefalse/fitb), prompt_text, correct_answer (normalized for that format), format_metadata. Validate: exactly 5 variants per question, 5,000 total instances."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate cross-phrasing variants using LLM",
+    "description": "For a subset of 300 base questions, generate paraphrase variants across 6 controlled types using a strong LLM (Qwen2.5-14B-Instruct loaded locally). This yields ~2,100 paraphrase instances (300 questions x 6 types + originals). Uses LLM generation with careful prompting for high-quality, diverse paraphrases, as described in the proposal.",
+    "steps": {
+      "step1": "Select 300 questions from the 1,000 base set, stratified by domain (50 per domain) and difficulty (balanced across easy/medium/hard within each domain). Use random seed 42. Prefer questions with clear, short phrasings that allow meaningful paraphrasing.",
+      "step2": "Load Qwen2.5-14B-Instruct via vLLM for paraphrase generation. For each question and each paraphrase type, use a type-specific prompt that includes: (a) the paraphrase type definition, (b) 3 examples of that paraphrase type, (c) explicit instruction to preserve the semantic meaning and correct answer. Use temperature=0.7 for diversity, max_tokens=150.",
+      "step3": "Lexical substitution prompt: 'Rephrase the following question by replacing key content words with synonyms. The meaning and correct answer must stay exactly the same. Only change vocabulary, not sentence structure. Original: {q} Rephrased:'",
+      "step4": "Syntactic restructuring prompt: 'Rephrase the following question by changing its grammatical structure (e.g., use cleft constructions, change word order, use relative clauses). The meaning and correct answer must stay exactly the same. Original: {q} Rephrased:'",
+      "step5": "Voice change prompt: 'Rephrase the following question by changing between active and passive voice. The meaning and correct answer must stay exactly the same. Original: {q} Rephrased:'",
+      "step6": "Formality shift prompt: 'Rephrase the following question to be much more casual/informal (use contractions, colloquial language). The meaning and correct answer must stay exactly the same. Original: {q} Rephrased:'",
+      "step7": "Negation framing prompt: 'Rephrase the following question using negation while keeping the same correct answer. For example, \"Which planet is largest?\" becomes \"Which planet is not smaller than any other?\". The correct answer must remain the same. Original: {q} Rephrased:'",
+      "step8": "Elaborative rephrasing prompt: 'Rephrase the following question by adding contextual detail or a preamble that does NOT give away the answer. The correct answer must remain the same. Original: {q} Rephrased:'",
+      "step9": "Validation pass: For each generated paraphrase, use a second LLM call (same model, temperature=0.0) to verify: 'Given the original question \"{q}\" with answer \"{a}\" and the paraphrased question \"{p}\", is the paraphrase semantically equivalent and does it have the same correct answer? Answer YES or NO with a brief explanation.' Discard paraphrases flagged as non-equivalent and regenerate (up to 2 retries).",
+      "step10": "Save to exp/data_preparation/phrasing_variants.json with fields: question_id, paraphrase_type, original_text, paraphrased_text, correct_answer, validation_status. Also compute and save quality statistics: success rate per paraphrase type, average edit distance per type, to exp/data_preparation/paraphrase_stats.json."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Manual validation of format conversions and paraphrases",
+    "description": "Conduct manual validation of 10% of format-converted questions (~100) and 10% of generated paraphrases (~180 instances) for semantic equivalence and naturalness, as promised in the proposal. This ensures dataset quality and provides human-validated ground truth for calibration.",
+    "steps": {
+      "step1": "Randomly sample 100 format-converted question sets (100 questions x 5 formats = 500 instances) using seed 42. For each, manually verify that all 5 formats ask semantically the same question with the same correct answer. Record verdict (pass/fail) and failure reason if any.",
+      "step2": "Randomly sample 180 paraphrase instances (30 per paraphrase type) using seed 42. For each, verify: (a) the paraphrase preserves the original meaning, (b) the correct answer is unchanged, (c) the paraphrase is grammatically natural, (d) the paraphrase actually reflects the intended type (e.g., a 'voice change' paraphrase actually changes voice). Record verdict and quality rating (1-3: poor/acceptable/good).",
+      "step3": "Compute validation statistics: (a) format conversion accuracy (fraction passing), (b) paraphrase quality per type (fraction passing, mean quality rating), (c) identify systematic failure patterns (e.g., certain question types that are hard to convert).",
+      "step4": "If format conversion accuracy is below 90% for any format type, revise the conversion logic and re-run for that format. If paraphrase quality is below 80% for any type, refine the LLM prompt and regenerate failed paraphrases.",
+      "step5": "Save validation results to exp/manual_validation/format_validation.json and exp/manual_validation/paraphrase_validation.json. Report aggregate statistics in exp/manual_validation/validation_summary.json."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare evaluation prompts and model configurations",
+    "description": "Create standardized prompt templates and configure all 7 models for evaluation. All models use identical prompt structures to ensure fair comparison. Model lineup spans 3.8B to 70B across 4 model families.",
+    "steps": {
+      "step1": "Define 7 models for evaluation: (1) microsoft/Phi-3.5-mini-instruct [3.8B, Phi family — smallest], (2) mistralai/Mistral-7B-Instruct-v0.3 [7B, Mistral family], (3) Qwen/Qwen2.5-7B-Instruct [7B, Qwen family], (4) meta-llama/Llama-3.1-8B-Instruct [8B, Llama family], (5) Qwen/Qwen2.5-14B-Instruct [14B, Qwen family — intra-family scaling], (6) Llama-3.1-70B-Instruct-AWQ [70B 4-bit quantized, Llama family — largest, ~40GB VRAM]. If the 70B model is too slow on the full 1,000 questions, evaluate it on a representative 500-question subset stratified by domain/difficulty.",
+      "step2": "Create standardized system prompt: 'You are a helpful assistant. Answer the question directly and concisely. Follow the specified answer format exactly.'",
+      "step3": "Create format-specific instruction suffixes: MCQ: 'Respond with only the letter (A, B, C, or D).', Open-ended: 'Respond with only the answer, no explanation.', Yes/No: 'Respond with only Yes or No.', True/False: 'Respond with only True or False.', Fill-in-the-blank: 'Respond with only the word or phrase that fills the blank.'",
+      "step4": "Configure vLLM generation parameters: temperature=0.0 (greedy decoding for deterministic output), max_tokens=50, top_p=1.0, repetition_penalty=1.0. These are fixed across all models for fair comparison.",
+      "step5": "Create answer extraction functions per format: MCQ: extract first letter A-D, Open-ended: full response stripped and lowered, Yes/No: extract yes/no, True/False: extract true/false, Fill-in-the-blank: full response stripped and lowered.",
+      "step6": "Create answer normalization pipeline in exp/shared/answer_normalization.py: lowercase, strip whitespace/punctuation, remove articles (a/an/the), normalize numbers (written-out to digits), handle common aliases (US/United States/USA).",
+      "step7": "Save model configs to exp/shared/model_configs.json with HuggingFace model IDs, GPU memory estimates, expected throughput, quantization settings (for 70B AWQ model), and any model-specific prompt formatting (chat templates)."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Calibrate LLM-based answer equivalence judge",
+    "description": "Set up and validate the LLM-based answer equivalence judge against human annotations, as described in the proposal. This is critical for accurate evaluation of open-ended and fill-in-the-blank formats where string matching alone would produce high false-negative rates.",
+    "steps": {
+      "step1": "Create a calibration set of ~200 answer pairs by running one model (Qwen2.5-7B-Instruct) on a 200-question subset across open-ended and fill-in-the-blank formats, producing answer pairs that need equivalence judgments. Include a mix of clearly equivalent (e.g., 'Paris' vs 'paris'), partially matching (e.g., 'Paris' vs 'Paris, France'), and clearly different pairs.",
+      "step2": "Manually annotate all ~200 answer pairs as: (a) equivalent — same semantic answer, (b) partially equivalent — contains the correct answer but with extra/different info, (c) not equivalent — different answer. This serves as the human ground truth for judge validation.",
+      "step3": "Implement the LLM-based equivalence judge using the already-loaded evaluation model (Qwen2.5-7B-Instruct). Prompt: 'Given the reference answer \"{ref}\" and the model answer \"{ans}\" for the question \"{q}\", are these answers semantically equivalent? Consider them equivalent if they convey the same core information, even if phrased differently. Answer EQUIVALENT or NOT_EQUIVALENT.' Use temperature=0.0.",
+      "step4": "Run the judge on all 200 human-annotated pairs. Compute: (a) accuracy vs human labels, (b) precision and recall for equivalence detection, (c) confusion matrix, (d) cases where judge disagrees with humans (qualitative error analysis).",
+      "step5": "If judge accuracy is below 85%, try alternative prompts or use a larger model (Qwen2.5-14B-Instruct) as the judge. Document the final judge prompt and model choice.",
+      "step6": "Save human annotations to exp/manual_validation/answer_equivalence_annotations.json, judge results to exp/manual_validation/judge_calibration.json, and validation summary (accuracy, precision, recall, F1) to exp/manual_validation/judge_validation_summary.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Random and majority-class consistency baselines",
+    "description": "Compute theoretical consistency baselines to contextualize model results. The random baseline gives expected consistency under uniform random answering; the majority-class baseline gives consistency when always outputting the most common answer type.",
+    "steps": {
+      "step1": "Random baseline for cross-format consistency: For MCQ (4 choices), P(same answer on 2 random attempts) = 1/4 = 0.25. For yes/no, P = 1/2 = 0.50. For true/false, P = 1/2 = 0.50. For open-ended and fill-in-the-blank, approximate random agreement as ~0.05 (large answer space). Compute expected CFA across all format pairs analytically.",
+      "step2": "Random baseline for cross-phrasing consistency: Same format across phrasings, so P(agreement) = 1/k where k is the number of possible answers in that format. Since phrasing variants use the same format (open-ended by default), random CPA ~ 0.05.",
+      "step3": "Majority-class baseline: For each format, identify the most common ground-truth answer. For MCQ, uniform distribution -> 0.25. For yes/no, 0.50 (balanced by design). For true/false, 0.50 (balanced). This baseline always outputs the same answer, so consistency = 1.0 but accuracy is low.",
+      "step4": "Accuracy-matched ceiling: Compute theoretical maximum consistency for a model with accuracy p: if a model answers correctly with probability p, and correctness is independent across formats/phrasings, then P(consistent) = p^2 + (1-p)^2 per pair. This gives the expected consistency if errors are random (not systematic).",
+      "step5": "Save all baseline values to results/baselines.json: random_cfa, random_cpa, majority_consistency, accuracy_ceiling_formula. These will be plotted as reference lines in all figures."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Cross-format consistency evaluation",
+    "description": "Evaluate all 7 models on all 5,000 format variant instances (1,000 questions x 5 formats). This is the primary experiment testing Hypothesis 1: LLMs exhibit significant cross-format inconsistency. Run models sequentially on the single A6000 GPU using vLLM for efficient batched inference. Use two-stage answer equivalence (rule-based + LLM judge) for open-ended and fill-in-the-blank formats.",
+    "steps": {
+      "step1": "For each model (sequentially, smallest to largest): Load model using vLLM with dtype=auto, gpu_memory_utilization=0.90, max_model_len=2048. For Llama-3.1-70B-AWQ, use quantization='awq' and gpu_memory_utilization=0.95.",
+      "step2": "Group all 5,000 prompts by format type (1,000 per format). Run inference in batches of 500-1000 using vLLM offline batching (LLM.generate()). Process all 5 formats for the current model before moving to the next model. For the 70B model, if inference is too slow on full 5,000 prompts, use a stratified 500-question subset (2,500 prompts).",
+      "step3": "Extract answers from raw model outputs using format-specific extractors. Log any extraction failures (e.g., model doesn't follow format instructions). Save raw outputs and extracted answers.",
+      "step4": "For open-ended and fill-in-the-blank formats, apply two-stage answer equivalence: (a) first, rule-based normalization + exact/fuzzy match (Levenshtein ratio > 0.85), (b) for pairs that fail rule-based matching, use the calibrated LLM-based equivalence judge from the calibration step. This avoids the systematic false-negative problem of pure string matching.",
+      "step5": "For each question, compute: (a) accuracy per format (does extracted answer match ground truth, using two-stage equivalence for open/FITB?), (b) pairwise format agreement (for all 10 format pairs, do the answers match?), (c) Cross-Format Agreement (CFA) = mean pairwise agreement across all questions.",
+      "step6": "Compute per-question metrics: CFA(q) for each question, format with highest/lowest accuracy per model, questions with perfect consistency (all 5 formats agree) vs. zero consistency.",
+      "step7": "Save results to results/cross_format_results.json per model: per-question accuracy per format, per-question CFA, pairwise format agreement matrix, aggregate CFA with 95% bootstrap CI (1000 bootstrap samples, seed=42).",
+      "step8": "Estimated time: ~15-20 min per 7-8B model (load + inference on 5000 prompts), ~30-40 min for 14B model, ~60-90 min for 70B AWQ model (or ~45 min on 2500-prompt subset). Total: ~3.5-4 hours for all 7 models."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Cross-phrasing consistency evaluation",
+    "description": "Evaluate all 7 models on all ~2,100 phrasing variant instances (300 questions x 7 versions including original). Tests Hypothesis 2: different paraphrase types cause non-uniform consistency degradation. Use open-ended format for all phrasing variants to isolate phrasing effects from format effects. Use two-stage answer equivalence for accurate comparison.",
+    "steps": {
+      "step1": "For each model (sequentially, reusing loaded model from format experiment or reloading): Run inference on all ~2,100 phrasing variant prompts in open-ended format using vLLM offline batching.",
+      "step2": "Extract and normalize answers. Use the two-stage answer equivalence system (rule-based + LLM judge) to determine if each variant's answer matches the original question's answer. This is critical for open-ended answers where string matching alone would undercount consistency.",
+      "step3": "For each question and paraphrase type, compute: (a) whether the paraphrased answer matches the original answer (binary, using two-stage equivalence), (b) whether the paraphrased answer is correct (accuracy), (c) Paraphrase Fragility Index (PFI) per type = fraction of questions where answer changes.",
+      "step4": "Compute Cross-Phrasing Agreement (CPA) per paraphrase type: for each type, the fraction of questions where original and paraphrased answers agree. Also compute all-pairs CPA within each question across all 7 variants.",
+      "step5": "Statistical testing: For each pair of paraphrase types, test whether PFI differs significantly using McNemar's test (paired binary data). Report p-values with Bonferroni correction for 15 pairwise comparisons.",
+      "step6": "Save results to results/cross_phrasing_results.json per model: per-question per-type agreement, PFI per type with bootstrap 95% CI, CPA per type, pairwise significance tests.",
+      "step7": "Estimated time: ~10-15 min per 7-8B model (2100 prompts), ~20 min for 14B, ~30-45 min for 70B AWQ. Total: ~1.5-2 hours for all 7 models."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Domain-stratified consistency analysis",
+    "description": "Analyze consistency metrics stratified by knowledge domain and difficulty level. Tests Hypothesis 3: consistency varies significantly across domains. This is an analysis of results from the format and phrasing experiments, not a separate inference run.",
+    "steps": {
+      "step1": "From cross-format results, compute CFA per domain (6 domains) per model. Create a domain x model matrix of CFA scores.",
+      "step2": "From cross-phrasing results, compute CPA per domain per model. Create a domain x model matrix of CPA scores.",
+      "step3": "Compute Domain Consistency Score (DCS) = mean(CFA, CPA) per domain per model.",
+      "step4": "Within each domain, stratify by difficulty (easy/medium/hard) and compute CFA and CPA per difficulty level.",
+      "step5": "Statistical testing: One-way ANOVA (or Kruskal-Wallis if non-normal) to test whether DCS differs significantly across domains, separately for each model. Report F-statistic and p-value.",
+      "step6": "Compute the spread: max(DCS across domains) - min(DCS across domains) per model. Hypothesis predicts >10 percentage point spread.",
+      "step7": "Save results to results/domain_analysis.json: DCS per domain per model, difficulty breakdown, ANOVA results, domain rankings."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: format subset analysis",
+    "description": "Ablation study examining which specific format pairs show the most/least consistency, and whether removing certain formats changes model rankings. This ablates the format axis of the benchmark.",
+    "steps": {
+      "step1": "From cross-format results, extract the 10 pairwise format agreement rates per model: MCQ-Open, MCQ-YesNo, MCQ-TrueFalse, MCQ-FITB, Open-YesNo, Open-TrueFalse, Open-FITB, YesNo-TrueFalse, YesNo-FITB, TrueFalse-FITB.",
+      "step2": "Identify the easiest format pair (highest agreement) and hardest format pair (lowest agreement) per model and overall.",
+      "step3": "Compute CFA using only constrained formats (MCQ + YesNo + TrueFalse) vs. only open formats (Open + FITB) vs. all 5. Compare model rankings under each subset.",
+      "step4": "Rank correlation analysis: Compute Kendall's tau between model rankings under different format subsets. If tau < 0.8, format selection meaningfully affects model ranking.",
+      "step5": "Save results to results/ablation_format_pairs.json: pairwise agreement matrix per model, CFA under format subsets, rank correlations."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: consistency-accuracy decoupling",
+    "description": "Ablation study testing whether consistency provides information beyond accuracy. Computes the Consistency-Accuracy Ratio (CAR) and Format-Conditional Accuracy Gap (FCAG) to show that similarly accurate models can have different consistency profiles.",
+    "steps": {
+      "step1": "For each model, compute overall accuracy (averaged across all formats) and CFA. Plot accuracy vs. CFA scatter. Compute Pearson and Spearman correlation.",
+      "step2": "Compute CAR = CFA / accuracy per model. A CAR of 1.0 means consistency equals accuracy; CAR < 1.0 means the model 'knows' answers inconsistently.",
+      "step3": "Compute FCAG per model: for questions answered correctly in at least one format, what is the accuracy gap between the best format (typically MCQ) and worst format (typically open-ended)?",
+      "step4": "Identify 'accuracy-matched' model pairs (models with accuracy within 2 percentage points) and compare their CFA and CAR. If CAR varies by >10% among accuracy-matched models, consistency provides independent diagnostic value.",
+      "step5": "Compute the Consistency-Accuracy Ratio per domain to see if the decoupling is domain-dependent.",
+      "step6": "Save results to results/ablation_consistency_accuracy.json: per-model accuracy, CFA, CAR, FCAG, correlation statistics, accuracy-matched pair analysis."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: model size scaling analysis",
+    "description": "Analyze how consistency scales with model size, using the Qwen family (7B vs 14B), the Llama family (8B vs 70B), and cross-family comparisons (3.8B Phi vs 7-8B models). The inclusion of a 70B model enables a meaningful 18x size range for scaling analysis.",
+    "steps": {
+      "step1": "Compare Qwen2.5-7B vs Qwen2.5-14B on all consistency metrics (CFA, CPA, PFI per type, DCS per domain). Compute improvement ratios. This is the cleanest intra-family comparison (same architecture, same training approach, 2x size).",
+      "step2": "Compare Llama-3.1-8B vs Llama-3.1-70B-AWQ on all consistency metrics. Compute improvement ratios. Note that the 70B model uses 4-bit quantization, which may slightly reduce consistency vs. full-precision — acknowledge this caveat.",
+      "step3": "Compare Phi-3.5-mini (3.8B) vs all 7-8B models. Assess whether the smaller model shows systematically lower consistency.",
+      "step4": "For each metric, fit a log-linear relationship across all 7 models: metric = a * log(params) + b. Report R^2 to quantify how well size predicts consistency. Plot both accuracy and CFA vs. log(params) on the same axes.",
+      "step5": "Compare size-scaling of accuracy vs. size-scaling of consistency. If consistency scales more slowly than accuracy, this supports the claim that consistency is a distinct challenge that does not automatically improve with scale.",
+      "step6": "Save results to results/ablation_size_scaling.json: per-model per-metric comparisons, scaling coefficients, R^2 values, intra-family comparison tables."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Robustness check: bootstrap stability and sample sensitivity",
+    "description": "Verify that findings are stable across different random subsamples of questions, serving as the equivalent of multi-seed evaluation for this benchmark study. Uses 3 random seeds as required.",
+    "steps": {
+      "step1": "Using 3 random seeds (42, 123, 456), draw 3 independent bootstrap samples of 80% of the 1,000 base questions (800 questions each).",
+      "step2": "For each subsample, recompute all main metrics (CFA, CPA per type, DCS per domain) using only the subsampled questions. No new inference needed — just filter existing results.",
+      "step3": "Compute stability statistics: standard deviation of each metric across the 3 subsamples. Report whether model rankings are stable (same top-3 across all subsamples).",
+      "step4": "Compute 95% bootstrap confidence intervals for all reported metrics using 1000 bootstrap iterations.",
+      "step5": "Save results to results/robustness_bootstrap.json: per-seed metrics, cross-seed standard deviations, rank stability."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate success criteria",
+    "description": "Systematically evaluate each of the 5 success criteria defined in the proposal to determine whether the hypothesis is supported.",
+    "steps": {
+      "step1": "Success Criterion 1 (CFA < 90%): For each model, check if CFA is below 90%. Report the fraction of models meeting this criterion. Hypothesis confirmed if majority (>= 4 of 7) of models have CFA < 90%.",
+      "step2": "Success Criterion 2 (paraphrase types differ): Run pairwise statistical tests between PFI for different paraphrase types. Report how many pairs show statistically significant differences (p < 0.05 after Bonferroni correction). Criterion met if at least 5 of 15 pairs differ significantly.",
+      "step3": "Success Criterion 3 (consistency != accuracy): Compute correlation between accuracy and CFA across models. Criterion met if R^2 < 0.9 (consistency not fully predicted by accuracy) OR if accuracy-matched models show CAR spread > 10%.",
+      "step4": "Success Criterion 4 (domain variation): Check if max(DCS) - min(DCS) > 10 percentage points for the majority of models. Report the actual spread per model.",
+      "step5": "Success Criterion 5 (size scaling): Compare 8B vs 70B Llama and 7B vs 14B Qwen. Criterion met if the larger model shows meaningfully higher consistency (>5pp CFA improvement) but still has substantial gaps (CFA < 95%).",
+      "step6": "Compile a summary table: model, size, family, accuracy, CFA, best/worst paraphrase type by PFI, best/worst domain by DCS, CAR.",
+      "step7": "Write narrative summary of findings to results/success_criteria_evaluation.md, including which hypotheses are supported, which are refuted, and unexpected findings.",
+      "step8": "Save structured results to results/success_criteria.json."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables needed for the paper. Generate publication-quality plots using matplotlib/seaborn with consistent styling.",
+    "steps": {
+      "step1": "Figure 1 — Main Results Table (LaTeX): Table with rows=models (7 models, sorted by size), columns=Accuracy (per format), CFA, CAR. Include 95% CI for CFA. Bold best result per column. Save as figures/table_main_results.tex and a rendered PNG version.",
+      "step2": "Figure 2 — Cross-Format Agreement Heatmap: For each model, create a 5x5 heatmap of pairwise format agreement rates (MCQ, Open, YesNo, TrueFalse, FITB). Use a shared colorscale (0.3-1.0). Arrange as a 2x4 subplot grid (7 models + colorbar). Save as figures/figure_format_heatmap.pdf and .png.",
+      "step3": "Figure 3 — Paraphrase Fragility Profile: Grouped bar chart with x-axis=paraphrase types (6 types), grouped bars=models (7 models), y-axis=PFI (higher=more fragile). Add error bars for 95% CI. Add horizontal line for random baseline. Save as figures/figure_paraphrase_fragility.pdf and .png.",
+      "step4": "Figure 4 — Domain Consistency Radar: Radar/spider chart with 6 axes (one per domain), one line per model, showing DCS per domain. Alternatively, grouped bar chart if radar is cluttered. Save as figures/figure_domain_consistency.pdf and .png.",
+      "step5": "Figure 5 — Consistency vs Accuracy Scatter: Scatter plot with x=accuracy, y=CFA, one point per model (color-coded by model family, size-coded by parameter count). Add diagonal line (CFA=accuracy) and random baseline horizontal line. Annotate each point with model name. Save as figures/figure_consistency_vs_accuracy.pdf and .png.",
+      "step6": "Figure 6 — Format-Conditional Accuracy Gap: Stacked/grouped bar chart showing accuracy per format per model, sorted by model size. Highlight the gap between best and worst format. Save as figures/figure_format_accuracy_gap.pdf and .png.",
+      "step7": "Figure 7 — Size Scaling: Line plot with x=model_size (log scale: 3.8B, 7B, 8B, 14B, 70B), y=metric, two lines: one for accuracy, one for CFA. Distinguish intra-family (Qwen 7B-14B, Llama 8B-70B) with solid lines and cross-family with dashed. Save as figures/figure_size_scaling.pdf and .png.",
+      "step8": "Figure 8 — Answer Equivalence Judge Validation: Confusion matrix showing judge performance vs human labels on the 200-pair calibration set. Include precision/recall/F1 annotation. Save as figures/figure_judge_validation.pdf and .png.",
+      "step9": "Set consistent plot style: matplotlib rcParams with font.size=12, axes.labelsize=14, figure.dpi=300, savefig.bbox_inches='tight'. Use colorblind-friendly palette (seaborn 'colorblind' or tab10)."
+    }
+  }
+]

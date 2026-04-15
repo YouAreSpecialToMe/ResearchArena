@@ -1,0 +1,454 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\ours}{EGTM}
+\newcommand{\rbase}{r_0}
+
+\title{Entropy-Guided Adaptive Token Merging for Robust and Efficient Vision Transformers}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Token merging methods like ToMe achieve significant speedups for Vision Transformers (ViTs) by gradually merging similar tokens during inference. However, their robustness under distribution shift---the conditions most relevant to real-world deployment---has never been systematically studied. We present the first comprehensive evaluation of token reduction robustness under common corruptions (ImageNet-C) and find that aggressive token merging causes \emph{disproportionate} accuracy degradation under distribution shift. On DeiT-B with merging ratio $r{=}16$, ToMe's relative accuracy drop under corruption exceeds that of the uncompressed model by 11.6 percentage points---a gap far larger than the 1.5 percentage points observed on the smaller DeiT-S with $r{=}8$. To address this, we propose Entropy-Guided Token Merging (\ours{}), a training-free method that adapts the merging ratio based on per-layer CLS-row attention entropy. When attention entropy indicates distribution shift, \ours{} reduces merging to preserve accuracy. On DeiT-B, \ours{} fully recovers the disproportionate degradation gap (reducing it from 11.6\% to $-0.2\%$) while maintaining a $1.15\times$ throughput improvement. We find that \ours{}'s primary value lies in larger models with aggressive merging ratios; on smaller models with conservative ratios, the degradation gap is modest and simpler fixed-ratio reduction suffices. We release our benchmark and code to facilitate future research on robust token reduction.
+\end{abstract}
+
+\section{Introduction}
+
+Vision Transformers (ViTs)~\citep{dosovitskiy2021image} have become the dominant architecture for image recognition. However, their quadratic attention complexity motivates extensive work on \emph{token reduction}---methods that prune or merge tokens during inference. Token Merging (ToMe)~\citep{bolya2023token} is the most widely adopted approach, using bipartite soft matching on key cosine similarity to merge similar tokens with a fixed ratio per layer, achieving $2\times$+ throughput with minimal accuracy loss on clean data. Recent surveys argue that token reduction should transcend its traditional efficiency role, influencing robustness and alignment~\citep{kong2025token}.
+
+Despite their widespread deployment, \textbf{token reduction methods have never been systematically evaluated under distribution shift}---the very conditions that deployed vision systems must handle. Real-world inputs regularly contain corruptions (noise, blur, weather artifacts), and we hypothesize that token merging suffers \emph{disproportionate} accuracy degradation under these conditions for three reasons: (1) input perturbations distort the cosine similarity structure used for bipartite matching~\citep{guo2023robustifying}; (2) token merging can amplify the ``token overfocusing'' phenomenon where attention concentrates on non-robust tokens under corruption; and (3) fixed merging ratios fail to account for input difficulty.
+
+We propose \textbf{Entropy-Guided Token Merging (\ours{})}, a training-free, drop-in replacement for ToMe that adapts the merging ratio based on per-layer CLS-row attention entropy. Under clean inputs where attention is sharp (low entropy), \ours{} merges aggressively for efficiency; under corrupted inputs where attention becomes diffuse (high entropy), it reduces merging to preserve accuracy. The method requires only a lightweight calibration step on clean data and adds negligible computational overhead.
+
+Our contributions are:
+\begin{itemize}
+    \item We present the \textbf{first systematic study} of token reduction robustness under distribution shift, evaluating five token reduction methods across 12 corruption types on DeiT-S and DeiT-B. We find that aggressive token merging (DeiT-B, $r{=}16$) causes an 11.6\% disproportionate degradation gap, while conservative merging (DeiT-S, $r{=}8$) shows a modest 1.5\% gap.
+    \item We propose \ours{}, a \textbf{training-free, shift-aware} token merging method that uses CLS-row attention entropy to adapt the merging ratio at inference time.
+    \item On DeiT-B, \ours{} \textbf{fully recovers} the disproportionate degradation (gap: $-0.2\%$) while retaining a $1.15\times$ speedup. We honestly characterize the limitations: on DeiT-S, the entropy computation overhead exceeds merging savings, and a fixed reduced ratio ($r{=}4$) achieves comparable robustness with better throughput.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes \ours{}. Section~\ref{sec:experiments} presents experiments. Section~\ref{sec:discussion} discusses limitations and implications.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Token Reduction for Vision Transformers.}
+Token reduction methods broadly fall into pruning and merging approaches. EViT~\citep{liang2022evit} keeps top-$k$ attentive tokens and fuses the rest; DynamicViT~\citep{rao2021dynamicvit} learns importance prediction modules; A-ViT~\citep{yin2022avit} uses adaptive halting per token. ToMe~\citep{bolya2023token} introduced training-free bipartite soft matching for token merging and remains the most widely adopted method. Token Fusion~\citep{kim2024token} bridges pruning and merging. None of these methods study robustness under distribution shift.
+
+\paragraph{Image-Adaptive Token Merging.}
+AToM~\citep{shin2025atom} proposes image-adaptive, fine-grained token merging with algorithm-architecture co-design. AdapTiV~\citep{yoo2024adaptiv} uses sign-similarity based image-adaptive merging with hardware co-design. Both adapt \emph{which} tokens to merge for better clean-data efficiency but do not study behavior under distribution shift. In contrast, \ours{} adapts \emph{how many} tokens to merge based on a shift-detection signal. The approaches are complementary.
+
+\paragraph{Robustness of Vision Transformers.}
+Zhang et al.~\citep{zhang2022delving} showed ViTs generalize better than CNNs under distribution shift. Guo et al.~\citep{guo2023robustifying} identified ``token overfocusing'' under corruption and proposed attention diversification during training. SATA~\citep{nikzad2025sata} enhances ViT robustness through spatial autocorrelation analysis of tokens before the FFN block, without retraining. Unlike SATA, which modifies FFN computation, we address degradation of token \emph{merging} decisions. The two approaches are complementary.
+
+\paragraph{Entropy in Vision Transformers.}
+Zhai et al.~\citep{zhai2023stabilizing} established attention entropy as a diagnostic of transformer behavior, showing that entropy collapse correlates with training instability. Lin et al.~\citep{lin2026entropy} use transfer entropy for layer-wise condensation during training. We use CLS-row attention entropy at \emph{inference time} for a different purpose: detecting distribution shift to adapt token merging.
+
+\paragraph{Test-Time Adaptation with Tokens.}
+TCA~\citep{wang2025tca} explores token condensation for test-time adaptation in vision-language models (CLIP). Our work differs in targeting standard ViTs and making token reduction itself robust, rather than using tokens for model adaptation.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: Token Merging (ToMe)}
+
+ToMe~\citep{bolya2023token} reduces the token count in each transformer layer by merging similar tokens using bipartite soft matching on key cosine similarity. Given a fixed merging ratio $r$ (tokens merged per layer), ToMe partitions tokens into two sets via alternating assignment, computes pairwise key similarities between sets, and greedily merges the $r$ most similar pairs by averaging their features (weighted by token size). This is applied identically at every layer regardless of input difficulty.
+
+\subsection{Entropy-Guided Token Merging (\ours{})}
+
+\ours{} modifies ToMe with a single core component: an \textbf{adaptive merging ratio} driven by attention entropy. The key insight is that CLS-row attention entropy increases under distribution shift, providing a lightweight signal to reduce merging when merging decisions become unreliable.
+
+\paragraph{Step 1: Calibration.}
+Given a small set of clean images ($n{=}500$), we run forward passes through the ViT with standard ToMe and record per-layer CLS-row attention entropy statistics. At each transformer layer $l$, we compute:
+\begin{equation}
+H_l = -\frac{1}{N_h} \sum_{h=1}^{N_h} \sum_{j} A^{(h)}_{\text{CLS},j} \log A^{(h)}_{\text{CLS},j}
+\end{equation}
+where $A^{(h)}_{\text{CLS},j}$ is the attention weight from the CLS token to token $j$ in head $h$, and $N_h$ is the number of attention heads. This requires only the CLS row of the attention matrix ($1 \times N$ per head), which is already computed during the forward pass. We store the per-layer mean $\bar{H}_l$ and standard deviation $\sigma_l$ from the calibration set.
+
+\paragraph{Step 2: Inference-Time Adaptation.}
+At inference, for each input and each layer, we compute $H_l$ and derive an entropy deviation score:
+\begin{equation}
+\delta_l = \max\!\left(0,\; \frac{H_l - \bar{H}_l}{\sigma_l}\right)
+\end{equation}
+The adaptive merging ratio is:
+\begin{equation}
+r_l = \left\lfloor r_0 \cdot \max\!\left(\alpha,\; \exp(-\beta \cdot \delta_l)\right) \right\rceil
+\label{eq:adaptive_ratio}
+\end{equation}
+where $r_0$ is the base merging ratio (e.g., $r_0{=}8$ for DeiT-S, $r_0{=}16$ for DeiT-B), $\alpha \in (0,1)$ is a minimum ratio floor ensuring some merging always occurs, $\beta > 0$ controls sensitivity to entropy deviation, and $\lfloor \cdot \rceil$ denotes rounding to the nearest integer. When entropy is normal ($\delta_l \approx 0$), the ratio is close to $r_0$; when entropy is elevated (shift detected), the ratio decreases exponentially.
+
+\paragraph{Computational Overhead.}
+The CLS-row entropy computation adds $O(N)$ per head per layer, where $N$ is the current token count. Since attention scores are already computed in the forward pass, the additional cost is one entropy computation over a pre-existing softmax output. In our experiments, this adds $<2\%$ latency overhead when computed at every third layer (stride-3 variant), and approximately 35\% when computed at every layer due to the overhead of attention hook registration. We discuss this tradeoff in Section~\ref{sec:experiments}.
+
+\paragraph{Design Rationale.}
+The CLS token aggregates global information and its attention distribution reflects overall input uncertainty. Under corruption, CLS attention becomes more diffuse as the model struggles to identify reliable tokens~\citep{guo2023robustifying}. By monitoring this entropy, \ours{} naturally allocates more computation (less merging) to harder inputs. This is a form of input-adaptive computation that emerges from the shift-detection signal without explicit difficulty estimation.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Models.}
+We use pretrained DeiT-Small (22M parameters, 12 layers)~\citep{touvron2021training} and DeiT-Base (86M parameters, 12 layers) from the \texttt{timm} library. No fine-tuning is performed.
+
+\paragraph{Datasets.}
+We evaluate on a stratified 5,000-image subset of ImageNet-1K validation (5 images per class) for clean accuracy, and apply 12 of the 15 standard ImageNet-C corruptions~\citep{hendrycks2019benchmarking} at severity 5. The three omitted corruptions (glass blur, zoom blur, fog) were excluded due to computational budget constraints. All corruptions are generated on-the-fly using the \texttt{imagecorruptions} library. We acknowledge that evaluation on the full 50K validation set and all 15 corruptions would strengthen confidence in generalizability (see Section~\ref{sec:discussion}).
+
+\paragraph{Token Reduction Methods.}
+We compare five methods, all training-free:
+\begin{itemize}
+    \item \textbf{No Reduction}: Full ViT inference (accuracy upper bound).
+    \item \textbf{ToMe}~\citep{bolya2023token}: Fixed ratio $r{=}8$ (DeiT-S) / $r{=}16$ (DeiT-B).
+    \item \textbf{Random Drop}: Randomly removes $r$ tokens per layer (CLS preserved). Lower bound on intelligent reduction.
+    \item \textbf{EViT-style} (training-free): Applies EViT's token selection criterion~\citep{liang2022evit}---keep top-$k$ tokens by CLS attention, fuse rest---\emph{without} the fine-tuning step. Performance gap versus fine-tuned EViT is expected and discussed.
+    \item \textbf{\ours{}} (ours): Entropy-guided adaptive merging with $\alpha{=}0.3$, $\beta{=}1.0$, applied at all 12 layers. Run with 3 calibration seeds (42, 43, 44); we report mean $\pm$ std.
+\end{itemize}
+
+\paragraph{Metrics.}
+\begin{itemize}
+    \item \textbf{Clean Accuracy}: Top-1 on clean ImageNet validation subset.
+    \item \textbf{Mean Corrupt Accuracy}: Average top-1 across 12 corruption types at severity 5.
+    \item \textbf{Relative Accuracy Drop}: $\text{RelDrop} = (\text{Acc}_{\text{clean}} - \text{Acc}_{\text{corrupt}}) / \text{Acc}_{\text{clean}}$, computed per-method (each method's own clean accuracy as reference).
+    \item \textbf{Degradation Gap}: $\text{Gap} = \text{RelDrop}_{\text{method}} - \text{RelDrop}_{\text{no-reduction}}$. Positive values indicate the method degrades \emph{more} than the uncompressed baseline under corruption. This is the core quantity measuring disproportionate degradation from token reduction.
+    \item \textbf{Throughput}: Images/second on a single NVIDIA RTX A6000 GPU.
+\end{itemize}
+
+\paragraph{Implementation.}
+All experiments use batch size 128 (DeiT-S) or 64 (DeiT-B), 4 data workers, and PyTorch 2.1 with CUDA. Throughput is measured with 20 warmup + 100 timed batches using \texttt{torch.cuda.synchronize()}.
+
+\subsection{Main Results}
+
+\paragraph{DeiT-S ($r{=}8$): Conservative Merging.}
+Table~\ref{tab:main_deit_s} presents results on DeiT-S. The disproportionate degradation gap from ToMe is \textbf{1.47\%}---below our pre-registered hypothesis threshold of 2\%. This indicates that with conservative merging ($r{=}8$, merging 8 of ${\sim}197$ tokens per layer), token merging does not substantially harm robustness on DeiT-S. \ours{} reduces the gap to 0.29\% (80.5\% recovery) but at the cost of throughput: \ours{}'s throughput (1,221 img/s) is actually \emph{lower} than the uncompressed baseline (1,444 img/s), because the entropy computation overhead exceeds the savings from merging ${\sim}6$ tokens per layer on average.
+
+\begin{table}[t]
+\caption{Results on DeiT-Small with $r{=}8$. ``Gap'' measures disproportionate degradation relative to No Reduction (Gap $= \text{RelDrop}_{\text{method}} - \text{RelDrop}_{\text{no-red.}}$). $\uparrow$~higher is better, $\downarrow$~closer to 0 is better. \ours{} reports mean $\pm$ std over 3 calibration seeds.}
+\label{tab:main_deit_s}
+\centering
+\small
+\begin{tabular}{lccccr}
+\toprule
+Method & Clean $\uparrow$ & Corrupt $\uparrow$ & Rel.\ Drop & Gap $\downarrow$ & Thru.\ $\uparrow$ \\
+\midrule
+No Reduction    & 77.86 & 43.14 & 44.59\% & ---   & 1,444 \\
+Random Drop     & 76.12 & 39.24 & 48.44\% & +3.85 & 1,981 \\
+EViT-style$^\dag$      & 76.80 & 42.21 & 45.04\% & +0.45 & 1,801 \\
+ToMe $r{=}8$   & 77.16 & 41.62 & 46.06\% & +1.47 & 1,573 \\
+\textbf{\ours{}} & 77.64{\scriptsize$\pm$0.00} & 42.80{\scriptsize$\pm$0.07} & 44.88\% & \textbf{+0.29} & 1,221 \\
+\bottomrule
+\end{tabular}
+\vspace{-2mm}
+\begin{flushleft}
+{\footnotesize $^\dag$Training-free variant of EViT; gap versus fine-tuned EViT is expected.\\
+Accuracies reported as percentages (\%). Throughput in images/second.}
+\end{flushleft}
+\end{table}
+
+\paragraph{DeiT-B ($r{=}16$): Aggressive Merging.}
+Table~\ref{tab:main_deit_b} shows that DeiT-B with aggressive merging ($r{=}16$) reveals a dramatically different picture. ToMe's degradation gap is \textbf{11.57\%}---nearly 8$\times$ larger than DeiT-S and well above the 2\% threshold. Random dropping is even worse (22.34\% gap), confirming that intelligent merging partially mitigates degradation but is insufficient. EViT-style shows a moderate gap (2.65\%).
+
+\ours{} \textbf{fully recovers} the disproportionate degradation, achieving a gap of $-0.20\%$ (slightly \emph{better} than no reduction in terms of relative drop). This comes at a throughput cost: \ours{} achieves 510 img/s versus ToMe's 773 img/s. However, \ours{} still provides a $1.15\times$ speedup over the uncompressed baseline (442 img/s), demonstrating that adaptive merging can simultaneously provide both efficiency and robustness benefits on larger models.
+
+\begin{table}[t]
+\caption{Results on DeiT-Base with $r{=}16$. Aggressive merging causes severe disproportionate degradation (ToMe gap: +11.57\%), which \ours{} fully recovers (gap: $-0.20\%$).}
+\label{tab:main_deit_b}
+\centering
+\small
+\begin{tabular}{lccccr}
+\toprule
+Method & Clean $\uparrow$ & Corrupt $\uparrow$ & Rel.\ Drop & Gap $\downarrow$ & Thru.\ $\uparrow$ \\
+\midrule
+No Reduction    & 79.30 & 50.62 & 36.17\% & ---    & 442 \\
+Random Drop     & 62.50 & 25.93 & 58.51\% & +22.34 & 936 \\
+EViT-style$^\dag$      & 78.66 & 48.12 & 38.82\% & +2.65  & 555 \\
+ToMe $r{=}16$  & 75.00 & 39.19 & 47.74\% & +11.57 & 773 \\
+\textbf{\ours{}} & 76.77{\scriptsize$\pm$0.02} & \textbf{49.16}{\scriptsize$\pm$0.03} & 35.97\% & \textbf{$-$0.20} & 510 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Scaling Behavior.}
+The results reveal a clear scaling pattern: the disproportionate degradation from token merging grows with model size and merging aggressiveness. With DeiT-S ($r{=}8$), only 4\% of tokens are merged per layer and the gap is 1.47\%. With DeiT-B ($r{=}16$), approximately 8\% of tokens are merged per layer and the gap jumps to 11.57\%. This suggests that \ours{}'s adaptive mechanism becomes increasingly valuable as models grow larger and merging ratios more aggressive---precisely the regime where token merging provides the largest efficiency gains.
+
+\subsection{Per-Corruption Analysis}
+
+Table~\ref{tab:per_corruption_b} breaks down results by corruption type for DeiT-B, where the effects are most pronounced.
+
+\begin{table}[t]
+\caption{Per-corruption degradation gap on DeiT-B ($r{=}16$). Gap $=$ RelDrop$_{\text{method}} -$ RelDrop$_{\text{no-red.}}$. Negative \ours{} gap (bold) means it degrades \emph{less} than no reduction.}
+\label{tab:per_corruption_b}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Corruption & No Red.\ Acc & ToMe Acc & \ours{} Acc & ToMe Gap / \ours{} Gap \\
+\midrule
+\multicolumn{5}{l}{\textit{Noise}} \\
+Gaussian noise      & 48.50 & 31.88 & 45.96 & +18.65 / +1.30 \\
+Shot noise          & 48.38 & 32.16 & 45.73 & +18.13 / +1.44 \\
+Impulse noise       & 48.70 & 32.26 & 46.35 & +18.40 / +1.04 \\
+\midrule
+\multicolumn{5}{l}{\textit{Blur}} \\
+Defocus blur        & 30.92 & 22.60 & 29.16 & +8.86 / +1.01 \\
+Motion blur         & 36.82 & 26.74 & 35.73 & +10.78 / \textbf{$-$0.10} \\
+\midrule
+\multicolumn{5}{l}{\textit{Weather}} \\
+Snow                & 58.78 & 47.80 & 58.59 & +10.39 / \textbf{$-$2.20} \\
+Frost               & 62.36 & 47.42 & 61.53 & +15.41 / \textbf{$-$1.51} \\
+Brightness          & 72.04 & 64.62 & 69.55 & +4.68 / +0.25 \\
+\midrule
+\multicolumn{5}{l}{\textit{Digital}} \\
+Contrast            & 73.46 & 66.22 & 71.51 & +4.34 / \textbf{$-$0.51} \\
+Elastic transform   & 26.00 & 17.96 & 26.05 & +8.84 / \textbf{$-$1.14} \\
+Pixelate            & 43.70 & 30.80 & 42.62 & +14.04 / \textbf{$-$0.41} \\
+JPEG compression    & 57.74 & 49.86 & 57.11 & +6.33 / \textbf{$-$1.57} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+ToMe shows substantial degradation across all corruption types, with noise corruptions causing the largest gaps (18--19\%). \ours{} reduces the gap to near zero or negative across all corruptions. In 7 of 12 corruptions, \ours{}'s gap is negative, meaning it actually preserves robustness \emph{better} than the uncompressed model---likely because the reduced merging under corruption preserves discriminative tokens that would otherwise be merged.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure3_per_corruption.pdf}
+\caption{EGTM recovery over ToMe per corruption type on DeiT-S (severity 5). Bars show the percentage of ToMe's disproportionate degradation gap that \ours{} recovers. Colors indicate entropy direction: blue = entropy increases under corruption, orange = entropy decreases, gray = neutral. Dashed line marks 50\% recovery. \ours{} achieves $>$60\% recovery on most corruption types.}
+\label{fig:per_corruption}
+\end{figure}
+
+\subsection{Entropy-Severity Correlation}
+
+We analyze the relationship between CLS-row attention entropy and corruption severity using Spearman rank correlation on DeiT-S across 5 severity levels (Table~\ref{tab:entropy_corr}). Of 8 tested corruption types, 5 show statistically significant positive correlations ($p < 0.05$): Gaussian noise ($\rho{=}1.0$), shot noise ($\rho{=}1.0$), impulse noise ($\rho{=}0.9$), snow ($\rho{=}1.0$), and brightness ($\rho{=}0.9$). Three corruptions---defocus blur, motion blur, and frost---show positive but \emph{non-significant} correlations ($\rho{=}0.7$, $p{=}0.188$). The non-significance stems from the small sample size (5 severity levels) and non-monotonic entropy behavior at intermediate severities. Importantly, all 8 tested corruptions show positive $\rho$, suggesting the general trend holds even where statistical significance is lacking.
+
+\paragraph{Note on Success Criterion.} Our proposal set a success criterion of $\rho > 0.5$ for $>$10 of 15 corruption types. Only 8 of 12 evaluated corruptions were tested for entropy-severity correlation (the remaining 4 were omitted due to compute constraints), and 3 of the original 15 corruption types were excluded entirely from evaluation. Therefore, this criterion cannot be fully assessed. Among the 8 tested, all show $\rho \geq 0.7$ (all exceed the 0.5 threshold), and 5 of 8 reach statistical significance. While these results are encouraging, they do not constitute a definitive test of the proposed criterion. Full evaluation across all 15 corruption types with finer severity granularity is needed.
+
+\begin{table}[t]
+\caption{Entropy-severity correlation (Spearman $\rho$) on DeiT-S across 5 severity levels. $^*$: $p < 0.05$; $^\dagger$: $p \geq 0.05$ (not statistically significant at the 0.05 level).}
+\label{tab:entropy_corr}
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Corruption & Spearman $\rho$ & $p$-value \\
+\midrule
+Gaussian noise$^*$   & 1.00 & $< 0.001$ \\
+Shot noise$^*$       & 1.00 & $< 0.001$ \\
+Impulse noise$^*$    & 0.90 & 0.037 \\
+Snow$^*$             & 1.00 & $< 0.001$ \\
+Brightness$^*$       & 0.90 & 0.037 \\
+Defocus blur$^\dagger$ & 0.70 & 0.188 \\
+Motion blur$^\dagger$  & 0.70 & 0.188 \\
+Frost$^\dagger$        & 0.70 & 0.188 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Entropy Direction Analysis.}
+Among the 12 corruptions evaluated for accuracy, the per-corruption analysis shows that most corruptions either increase or maintain CLS-row entropy relative to clean inputs. Brightness shows a decrease in mean entropy ($\Delta = -1.25\sigma$), classified as a ``decrease'' direction---a predicted failure mode where the model becomes overconfident rather than uncertain. Despite this, \ours{} still performs well on brightness (gap: $-0.22\%$ on DeiT-S) because the entropy floor parameter $\alpha$ ensures a minimum merging reduction is always applied.
+
+\subsection{Adaptive Merging Behavior}
+
+Figure~\ref{fig:adaptive_ratio} shows how \ours{} adapts its merging ratio. On DeiT-S, the average merging ratio drops from 6.2 (clean) to 5.5 (corrupted)---an 11\% reduction. On DeiT-B, the drop is more pronounced: from 14.3 (clean) to 11.7 (corrupted)---an 18\% reduction. The adaptation is corruption-dependent: elastic transform triggers the strongest reduction (avg $r \approx 9.8$ on DeiT-B vs.\ base $r_0{=}16$), while brightness triggers minimal adaptation ($r \approx 14.4$), consistent with the entropy direction analysis.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/figure2_adaptive_ratio.pdf}
+\caption{Average merging ratio for \ours{} on clean vs.\ corrupted inputs across layers (DeiT-S). The method automatically merges fewer tokens under corruption.}
+\label{fig:adaptive_ratio}
+\end{figure}
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} presents ablation results on DeiT-S with three representative corruptions (Gaussian noise, motion blur, snow) at severity 5.
+
+\begin{table}[t]
+\caption{Ablation study on DeiT-S. ``Corrupt Acc'' is the mean over Gaussian noise, motion blur, and snow at severity 5. Avg.\ $r$ shows mean tokens merged per layer.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lcccr}
+\toprule
+Variant & Clean Acc & Corrupt Acc & Avg.\ $r$ & Thru.\ (img/s) \\
+\midrule
+ToMe $r{=}8$ (base)         & 77.16 & 39.21 & 8.0 & 1,573 \\
+ToMe $r{=}4$ (conservative) & 77.72 & 40.19 & 4.0 & 1,340 \\
+Importance prot.\ only       & 77.82 & 40.06 & 8.0 &   718 \\
+\ours{} (CLS entropy)       & 77.64 & 40.15 & 5.4 & 1,221 \\
+\ours{} + importance prot.  & 77.64 & 40.15 & 5.4 & 1,219 \\
+\ours{} (full entropy)      & 77.64 & 39.61 & 5.0 & 1,119 \\
+\ours{} (CLS variance)      & 77.54 & 40.27 & 3.8 &   975 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{enumerate}
+    \item \textbf{Fixed conservative ratio is competitive on DeiT-S.} ToMe $r{=}4$ achieves 40.19\% corrupt accuracy with 1,340 img/s throughput, compared to \ours{}'s 40.15\% at 1,221 img/s. On DeiT-S with small merging ratios, simply halving the ratio is a simpler and faster alternative.
+    \item \textbf{Adaptive ratio is the primary contributor.} Adding importance protection to \ours{} provides negligible additional benefit (40.15\% in both cases), suggesting the adaptive ratio alone captures the key mechanism.
+    \item \textbf{CLS-row entropy is the best proxy.} The CLS-row entropy variant achieves the best accuracy-throughput tradeoff. Full attention matrix entropy merges too aggressively (avg $r{=}5.0$) with lower throughput. CLS variance is overly conservative (avg $r{=}3.8$) and slowest.
+    \item \textbf{The value of adaptiveness emerges on larger models.} The ablation on DeiT-S shows marginal differences because the degradation gap is small (1.47\%). On DeiT-B (Table~\ref{tab:main_deit_b}), where the gap is 11.57\%, \ours{}'s adaptive behavior is critical---a fixed conservative ratio cannot match \ours{}'s ability to merge aggressively on clean inputs while preserving tokens under corruption.
+    \item \textbf{Stride-based entropy computation improves DeiT-S throughput.} Computing entropy at every 4th layer (stride-4 variant) instead of all 12 layers improves DeiT-S throughput from 1,221 to 1,372 img/s---closer to the uncompressed baseline (1,444 img/s)---with comparable robustness (mean corrupt accuracy: 42.2\% stride-4 vs.\ 42.8\% all-layers). For DeiT-S, the stride-4 variant offers a better practical tradeoff.
+\end{enumerate}
+
+\subsection{Hyperparameter Sensitivity}
+
+Figure~\ref{fig:sensitivity} shows sensitivity to $\alpha$ (minimum ratio floor) and $\beta$ (entropy sensitivity) on DeiT-S.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure5_sensitivity.pdf}
+\caption{Hyperparameter sensitivity on DeiT-S. Both clean and corrupt accuracy are robust to $\alpha \in [0.1, 0.5]$ and $\beta \in [0.3, 3.0]$.}
+\label{fig:sensitivity}
+\end{figure}
+
+\ours{} is robust to hyperparameter choices: corrupt accuracy varies by only 0.8 percentage points across the full $\alpha$ range $[0.1, 0.7]$ and 0.02 percentage points across $\beta \in [0.3, 3.0]$. The default $\alpha{=}0.3$, $\beta{=}1.0$ performs well across both settings. This stability arises because the $z$-score normalization already calibrates the entropy signal, making the exponential decay relatively insensitive to the exact $\beta$ value.
+
+\subsection{Entropy Distribution Visualization}
+
+Figure~\ref{fig:entropy_dist} shows the distribution of CLS-row attention entropy across layers for clean versus Gaussian noise-corrupted inputs on DeiT-S. Corrupted inputs consistently show higher entropy in later layers (6--11), where the model makes higher-level feature decisions. This layer-dependent pattern explains why \ours{}'s per-layer adaptation is effective: it preserves tokens precisely in the layers where corruption disrupts attention the most.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_entropy_distribution.pdf}
+\caption{CLS-row attention entropy distribution across DeiT-S layers for clean (blue) vs.\ Gaussian noise severity 5 (red). Corrupted inputs show elevated entropy, particularly in later layers.}
+\label{fig:entropy_dist}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{When \ours{} Helps and When It Does Not.}
+Our results reveal a clear dichotomy. On DeiT-B with aggressive merging ($r{=}16$), token merging causes severe disproportionate degradation (11.57\% gap) and \ours{} provides substantial value by fully recovering it. On DeiT-S with conservative merging ($r{=}8$), the degradation gap is modest (1.47\%, below our 2\% hypothesis threshold), \ours{}'s throughput overhead exceeds its merging savings, and a simple fixed $r{=}4$ achieves comparable robustness. \textbf{We recommend \ours{} for larger models with aggressive merging ratios}, where the efficiency-robustness tradeoff is most severe and adaptive behavior provides clear benefits.
+
+\paragraph{Throughput Tradeoffs.}
+\ours{}'s entropy computation adds overhead that is proportionally more costly for smaller, faster models. On DeiT-S, \ours{} (1,221 img/s) is 15\% slower than the uncompressed baseline (1,444 img/s), providing negative net efficiency. On DeiT-B, \ours{} achieves 510 img/s---a $1.15\times$ speedup over the baseline (442 img/s), modest compared to ToMe's $1.75\times$ but with dramatically better robustness. The throughput gain fraction (relative to ToMe's gain over baseline) is $(510-442)/(773-442) = 20.5\%$. Future work could reduce overhead via strided entropy computation (every $k$-th layer), fused CUDA kernels, or amortized calibration.
+
+\paragraph{SATA Comparison.}
+Our re-implementation of SATA~\citep{nikzad2025sata} using simplified spatial grouping yielded substantially degraded clean accuracy (46.7\% on DeiT-S vs.\ the 77.9\% expected for an unmodified model), indicating our spatial grouping approximation was insufficiently faithful to the original method. We exclude SATA from main comparisons to avoid unfair evaluation. A proper comparison using the authors' official implementation is important future work.
+
+\paragraph{Evaluation Scope.}
+Our evaluation uses a 5K-image subset (not the full 50K ImageNet validation), 12 of 15 corruption types, severity 5 only (not 3+5), and does not include ImageNet-R or ImageNet-Sketch. While the trends are clear and consistent across corruptions, confirming these results on the complete evaluation suite is necessary before drawing deployment recommendations. The evaluation on only severity 5 means we cannot characterize how the degradation gap scales with corruption severity.
+
+\paragraph{Failure Modes.}
+We identify two failure modes: (1) corruptions that \emph{decrease} attention entropy (e.g., brightness), where the model becomes overconfident and \ours{} does not trigger adaptation; and (2) calibration domain mismatch, where deployment on a domain substantially different from calibration data (e.g., medical imaging) could miscalibrate the entropy statistics. The $\alpha$ floor parameter and $z$-score normalization provide partial mitigation for both, but neither is a complete solution. Adversarial perturbations designed to reduce attention entropy could also potentially circumvent \ours{}'s mechanism.
+
+\paragraph{Statistical Significance of Entropy Correlations.}
+Three of eight tested entropy-severity correlations have $p = 0.188$, falling short of statistical significance. This is partly a sample-size limitation (only 5 severity levels per corruption), but also reflects genuine non-monotonicity in how some corruptions affect attention entropy at intermediate severities. We recommend that future work test on finer severity granularity to improve statistical power.
+
+\section{Conclusion}
+
+We presented the first systematic study of token reduction robustness under distribution shift, finding that aggressive token merging causes substantial disproportionate accuracy degradation---up to 11.6 percentage points additional relative accuracy drop on DeiT-B with $r{=}16$. We proposed \ours{}, a training-free method that adapts the merging ratio based on CLS-row attention entropy. On DeiT-B, \ours{} fully recovers the degradation gap while maintaining a $1.15\times$ speedup. We clearly characterized \ours{}'s limitations: on DeiT-S with conservative merging ($r{=}8$), the degradation is modest and \ours{}'s overhead exceeds its benefits.
+
+Our findings suggest practical implications for deploying efficient ViTs, though we emphasize that these recommendations are \emph{provisional} pending validation on the full 50K ImageNet validation set, all 15 corruption types, multiple severity levels, and additional distribution shift benchmarks (ImageNet-R, ImageNet-Sketch). Subject to this caveat: practitioners using aggressive token merging on large models should be aware of potential robustness degradation and consider adaptive approaches like \ours{}. For small models with conservative merging, standard ToMe with a moderately reduced ratio may suffice. Future work should evaluate on the complete evaluation suite, explore combinations with complementary robustness methods like SATA, and develop lower-overhead shift-detection signals for efficient models.
+
+\begin{thebibliography}{19}
+
+\bibitem[Bolya et~al.(2023)]{bolya2023token}
+Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman.
+\newblock Token merging: Your {ViT} but faster.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Dosovitskiy et~al.(2021)]{dosovitskiy2021image}
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby.
+\newblock An image is worth 16x16 words: Transformers for image recognition at scale.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Guo et~al.(2023)]{guo2023robustifying}
+Yong Guo, David Stutz, and Bernt Schiele.
+\newblock Robustifying token attention for vision transformers.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2023.
+
+\bibitem[Hendrycks \& Dietterich(2019)]{hendrycks2019benchmarking}
+Dan Hendrycks and Thomas Dietterich.
+\newblock Benchmarking neural network robustness to common corruptions and perturbations.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem[Kim et~al.(2024)]{kim2024token}
+Minchul Kim, Shangqian Gao, Yen-Chang Hsu, Yilin Shen, and Hongxia Jin.
+\newblock Token fusion: Bridging the gap between token pruning and token merging.
+\newblock In \emph{IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)}, 2024.
+
+\bibitem[Kong et~al.(2025)]{kong2025token}
+Zhenglun Kong, Yize Li, Fanhu Zeng, Lei Xin, Shvat Messica, Xue Lin, Pu Zhao, Manolis Kellis, Hao Tang, and Marinka Zitnik.
+\newblock Token reduction should go beyond efficiency in generative models---from vision, language to multimodality.
+\newblock \emph{arXiv preprint arXiv:2505.18227}, 2025.
+
+\bibitem[Liang et~al.(2022)]{liang2022evit}
+Youwei Liang, Chongjian Ge, Zhan Tong, Yibing Song, Jue Wang, and Pengtao Xie.
+\newblock Not all patches are what you need: Expediting vision transformers via token reorganizations.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2022.
+
+\bibitem[Lin et~al.(2026)]{lin2026entropy}
+Shangqun Lin, Peng Lyu, Dongliang Liu, et~al.
+\newblock Entropy-guided condensing for vision transformer.
+\newblock \emph{International Journal of Computer Vision}, 134:86, 2026.
+
+\bibitem[Nikzad et~al.(2025)]{nikzad2025sata}
+Nick Nikzad, Yi Liao, Yongsheng Gao, and Jun Zhou.
+\newblock {SATA}: Spatial autocorrelation token analysis for enhancing the robustness of vision transformers.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2025.
+
+\bibitem[Rao et~al.(2021)]{rao2021dynamicvit}
+Yongming Rao, Wenliang Zhao, Benlin Liu, Jiwen Lu, Jie Zhou, and Cho-Jui Hsieh.
+\newblock {DynamicViT}: Efficient vision transformers with dynamic token sparsification.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2021.
+
+\bibitem[Shin et~al.(2025)]{shin2025atom}
+J.~Shin, M.~Kang, Y.~Han, J.~Park, and L.-S. Kim.
+\newblock {AToM}: Adaptive token merging for efficient acceleration of vision transformer.
+\newblock \emph{IEEE Transactions on Computers}, 2025.
+
+\bibitem[Touvron et~al.(2021)]{touvron2021training}
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Herv{\'e} J{\'e}gou.
+\newblock Training data-efficient image transformers \& distillation through attention.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2021.
+
+\bibitem[Wang et~al.(2025)]{wang2025tca}
+Zixin Wang, Dong Gong, Sen Wang, Zi Huang, and Yadan Luo.
+\newblock Is less more? {E}xploring token condensation as training-free test-time adaptation.
+\newblock In \emph{IEEE/CVF International Conference on Computer Vision (ICCV)}, 2025.
+
+\bibitem[Yin et~al.(2022)]{yin2022avit}
+Hongxu Yin, Arash Vahdat, Jose~M. Alvarez, Arun Mallya, Jan Kautz, and Pavlo Molchanov.
+\newblock {A-ViT}: Adaptive tokens for efficient vision transformer.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem[Yoo et~al.(2024)]{yoo2024adaptiv}
+Seungjae Yoo, Hangyeol Kim, and Joo-Young Kim.
+\newblock {AdapTiV}: Sign-similarity based image-adaptive token merging for vision transformer acceleration.
+\newblock In \emph{Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture (MICRO)}, 2024.
+
+\bibitem[Zhai et~al.(2023)]{zhai2023stabilizing}
+Shuangfei Zhai, Tatiana Likhomanenko, Etai Littwin, Dan Busbridge, Jason Ramapuram, Yizhe Zhang, Jiatao Gu, and Joshua~M. Susskind.
+\newblock Stabilizing transformer training by preventing attention entropy collapse.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem[Zhang et~al.(2022)]{zhang2022delving}
+Chongzhi Zhang, Mingyuan Zhang, Shanghang Zhang, Daisheng Jin, Qiang Zhou, Zhongang Cai, Haiyu Zhao, Xianglong Liu, and Ziwei Liu.
+\newblock Delving deep into the generalization of vision transformers under distribution shifts.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,171 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for ESM-2 inference, GNN training, structural data processing, and evaluation. Verify CUDA availability and A6000 GPU access.",
+    "steps": {
+      "step1": "Create a conda environment or use the existing one with Python 3.10+",
+      "step2": "Install core ML packages: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 (or cu121 depending on CUDA version)",
+      "step3": "Install PyTorch Geometric and dependencies: pip install torch-geometric torch-scatter torch-sparse torch-cluster torch-spline-conv",
+      "step4": "Install ESM: pip install fair-esm (for ESM-2 650M model)",
+      "step5": "Install protein structure tools: pip install biopython mdtraj",
+      "step6": "Install data/evaluation packages: pip install pandas numpy scipy scikit-learn matplotlib seaborn tqdm requests",
+      "step7": "Verify GPU: run python -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_properties(0).total_mem / 1e9)\"",
+      "step8": "Verify ESM-2 loads: run python -c \"import esm; model, alphabet = esm.pretrained.esm2_t33_650M_UR50D(); print('ESM-2 650M loaded')\"",
+      "step9": "Verify PyG: run python -c \"import torch_geometric; print('PyG version:', torch_geometric.__version__)\""
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess ProteinGym multi-mutant datasets",
+    "description": "Download ProteinGym v1.3 multi-mutant substitution datasets with cross-validation folds. We focus on a curated subset of 15 representative assays spanning diverse protein families and epistasis magnitudes, plus the complete combinatorial landscapes (GB1, avGFP) for in-depth analysis. This keeps compute feasible while maintaining scientific rigor.",
+    "steps": {
+      "step1": "Download ProteinGym multi-mutant substitution benchmark CSV files from the official GitHub repository (https://github.com/OATML-Markslab/ProteinGym). Use the substitution_benchmark/DMS_substitutions directory. Download the reference file that maps assay names to UniProt IDs and wildtype sequences.",
+      "step2": "Download the pre-built cross-validation folds for multi-mutant evaluation from the ProteinGym repository (cv_folds_multiples_substitutions directory).",
+      "step3": "Select 15 representative assays for the main evaluation. Selection criteria: (a) contain at least 1000 multi-mutant variants, (b) span diverse protein families, (c) include both high-epistasis and low-epistasis proteins. Must include: GB1_Olson_2014 (pairwise), GB1_Wu_2016 (combinatorial 4-site), avGFP_Sarkisyan_2016, and at least 2 enzyme assays and 2 binding assays.",
+      "step4": "For each selected assay, compute summary statistics: number of variants, mutation order distribution (singles/doubles/triples/etc.), fitness value distribution (mean, std, range), and number of unique mutation sites.",
+      "step5": "Compute the 'epistasis magnitude' for each assay: for multi-mutant variants where all constituent single mutants are also measured, compute the deviation from additivity as epistasis_score = fitness_observed - sum(single_mutant_effects). Rank assays by median |epistasis_score| and partition into high-epistasis (top quartile) and low-epistasis (bottom quartile) groups. Save this classification for later stratified analysis.",
+      "step6": "Split each assay using the ProteinGym-provided CV folds (5-fold). For GB1_Wu_2016, additionally create order-stratified splits: train on singles+doubles, test on triples+quadruples (within-protein generalization test).",
+      "step7": "Save all processed data as parquet files in data/processed/ directory with columns: variant_id, mutant_string (e.g., 'A42G:L55V'), mutation_sites (list of ints), mutation_aas (list of chars), fitness, fold_id."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download AlphaFold structures and compute contact maps",
+    "description": "Obtain AlphaFold-predicted structures for all proteins in the evaluation set and compute residue-residue contact maps at multiple distance thresholds for use as GNN edge definitions.",
+    "steps": {
+      "step1": "For each protein in the evaluation set, look up the UniProt ID from ProteinGym metadata. Download the AlphaFold structure from the AlphaFold Protein Structure Database (https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb). If not available in AFDB, use ESMFold as fallback (lighter weight than running full AlphaFold).",
+      "step2": "Parse each PDB structure using BioPython. For each residue pair (i,j), compute Cb-Cb distance (Ca for glycine). Store as a distance matrix.",
+      "step3": "Extract per-residue pLDDT scores from the B-factor column of the AlphaFold PDB files. These will be used as edge features.",
+      "step4": "Compute binary contact maps at 4 distance thresholds: 8A, 10A, 12A, 15A. Store as sparse adjacency lists.",
+      "step5": "For each contact at the default 10A threshold, compute edge features: (a) Cb-Cb distance (continuous), (b) |i-j| sequence separation (integer), (c) pLDDT of residue i, (d) pLDDT of residue j.",
+      "step6": "Save all structural data as pickle files in data/structures/ directory. Each file contains: distance_matrix, contact_maps (dict keyed by threshold), edge_features, plddt_scores, sequence_length."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Compute ESM-2 embeddings and additive fitness predictions",
+    "description": "Run ESM-2 650M forward passes to obtain per-residue embeddings (node features for the GNN) and per-mutation log-likelihood ratios (additive baseline scores). This is the most compute-intensive data preparation step (~1 hour on A6000).",
+    "steps": {
+      "step1": "Load ESM-2 650M (esm2_t33_650M_UR50D) onto the A6000 GPU. This model uses ~2.5GB VRAM, leaving ample room for batch processing.",
+      "step2": "For each protein wildtype sequence: run a forward pass through ESM-2 to extract (a) the final-layer per-residue embeddings (shape: L x 1280, where L is sequence length), and (b) the masked marginal log-probabilities at each position.",
+      "step3": "For each mutation at position i from wildtype amino acid w to mutant amino acid m, compute the log-likelihood ratio: LLR(i, w->m) = log P(m | context) - log P(w | context) using the masked marginal probability approach (mask position i, predict, compare probabilities).",
+      "step4": "For each multi-mutant variant, compute the additive prediction: PLM_additive = sum of LLR values across all mutation sites. This is the zero-shot additive baseline.",
+      "step5": "For each assay, compute the Spearman correlation between PLM_additive and observed fitness. This gives us the baseline performance before any correction.",
+      "step6": "Compute the epistatic residual for each variant: residual = fitness_observed - PLM_additive. This is the training target for the GNN.",
+      "step7": "Save ESM-2 embeddings per protein in data/embeddings/ as .pt files (torch tensors). Save additive predictions and residuals as additional columns in the processed parquet files."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Simple baselines: Ridge regression and additive+pairwise models",
+    "description": "Implement and evaluate simple baseline models to establish a performance floor. These test whether a simple statistical model can capture epistasis without structural information, and whether a linear pairwise interaction model suffices.",
+    "steps": {
+      "step1": "Baseline 1 — Ridge Regression on One-Hot: For each assay, encode each variant as a binary vector (one-hot over mutation sites x amino acids). Train ridge regression (sklearn) with alpha selected by inner CV (5 values: 0.01, 0.1, 1.0, 10, 100) to predict fitness. Evaluate Spearman correlation on each CV fold. Run with 3 seeds (42, 123, 456) — seeds affect the inner CV split only.",
+      "step2": "Baseline 2 — Additive + Pairwise Interaction: Extend the one-hot encoding with all pairwise interaction terms (products of one-hot features for each pair of mutation sites). Train ridge regression on this expanded feature set. This tests whether simple pairwise terms capture epistasis. For assays with >20 mutation sites, use random feature sampling (10,000 pairwise features) to keep memory tractable.",
+      "step3": "Baseline 3 — Global Epistasis Model: Implement the global epistasis model: predict additive_score = sum(beta_i * x_i) for mutation features, then apply a learned nonlinear sigmoid transformation: fitness = a * sigmoid(b * additive_score + c) + d. Train with scipy.optimize.minimize using MSE loss. This tests whether a single global nonlinearity suffices.",
+      "step4": "For all baselines, evaluate on each CV fold and compute: (a) overall Spearman rho, (b) epistasis-specific Spearman rho (correlation on the non-additive residual component), (c) NDCG@100 for top variant ranking.",
+      "step5": "Save all baseline results in results/baselines/ as CSV files with columns: assay, fold, seed, method, spearman_rho, epistasis_spearman, ndcg100. Also save per-variant predictions for later comparison."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Strong baseline: ESM-2 additive zero-shot",
+    "description": "Formalize the ESM-2 additive zero-shot predictions as the primary strong baseline. This is already computed in the data preparation step, but here we conduct the full evaluation protocol including per-assay metrics, order-stratified analysis, and statistical summaries.",
+    "steps": {
+      "step1": "Using the additive predictions computed in the ESM-2 embedding step, evaluate per-assay Spearman correlation on each CV fold's test set. Note: the zero-shot baseline requires no training, so 'fold' only affects which variants are evaluated.",
+      "step2": "Compute order-stratified Spearman: for each assay, separately evaluate on doubles, triples, quadruples (where available). Record the number of variants in each stratum.",
+      "step3": "Compute epistasis-specific Spearman: correlate PLM_additive with observed fitness MINUS the true additive component (estimated from measured single-mutant effects where available, or from the PLM additive scores otherwise).",
+      "step4": "Compute NDCG@100 and NDCG@10 for protein engineering-relevant ranking evaluation.",
+      "step5": "Compute the per-assay epistasis magnitude (from Data Preparation step 5) and correlate it with the PLM baseline performance. This establishes that PLMs struggle more on high-epistasis proteins — the gap REN aims to fill.",
+      "step6": "Save results in results/baselines/esm2_additive.csv with the same format as other baselines."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train and evaluate Residual Epistasis Network (REN)",
+    "description": "Implement and train the core REN model: a 3-layer GAT that takes ESM-2 embeddings as node features on the AlphaFold contact graph and predicts the epistatic residual (observed fitness - PLM additive prediction). This is the central experiment testing our hypothesis.",
+    "steps": {
+      "step1": "Implement the REN model in PyTorch/PyG with the following architecture: (a) Input: ESM-2 1280-dim per-residue embeddings + 21-dim mutation identity encoding (20 AA + 'no mutation') = 1301-dim node features. (b) 3 GAT layers with 8 attention heads, hidden dimension 256, ELU activation, dropout 0.1 between layers. (c) For each variant, extract node embeddings at mutation sites and apply attention-weighted pooling: compute attention scores over mutation-site nodes using a learned query vector, then weighted-sum to get a single 256-dim variant representation. (d) 2-layer MLP head: 256 -> 128 -> 1 with ReLU and dropout 0.1. (e) Output: predicted epistatic residual epsilon(v).",
+      "step2": "Implement the training loop: (a) Loss: MSE on epistatic residuals (target = observed_fitness - PLM_additive). (b) Optimizer: AdamW with lr=1e-3, weight_decay=1e-4. (c) LR scheduler: cosine annealing over 100 epochs. (d) Batch by protein: each protein's full graph is loaded, and variants are batched (batch size 512 variants per protein). (e) Early stopping: patience 15 epochs on validation loss (use one CV fold as validation within the training folds).",
+      "step3": "Implement the within-protein training mode for GB1: load the full protein graph once, train on residuals from singles+doubles variants, validate on a held-out 10% of doubles, test on triples+quadruples.",
+      "step4": "Run REN training on all 15 evaluation assays using 5-fold CV and 3 random seeds (42, 123, 456). For each (assay, fold, seed), train the model and save: (a) best model checkpoint, (b) per-variant predictions on the test fold, (c) training loss curve. Total: 15 assays x 5 folds x 3 seeds = 225 training runs. Each run ~2-3 minutes on A6000, total ~8-11 hours sequential. Optimization: run 5 folds in sequence per assay (shared graph), 3 seeds can be parallelized via different processes if memory allows, else sequential. Estimated wall time: ~3-4 hours with efficient batching.",
+      "step5": "Compute final predictions: fitness_predicted = PLM_additive + epsilon_predicted. Evaluate Spearman rho, epistasis-specific Spearman, NDCG@100, and order-stratified Spearman on each test fold.",
+      "step6": "Run within-protein generalization on GB1_Wu_2016: train on singles+doubles (with 3 seeds), predict triples+quadruples. Evaluate Spearman rho on each order separately.",
+      "step7": "Save all results in results/ren/ as CSV files with columns: assay, fold, seed, method, spearman_rho, epistasis_spearman, ndcg100, plus order-stratified results in a separate file."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Contact distance threshold",
+    "description": "Evaluate how the contact distance threshold for graph construction affects REN performance. This tests whether the choice of structural resolution matters and identifies the optimal scale for capturing epistatic interactions.",
+    "steps": {
+      "step1": "Using the pre-computed contact maps at 8A, 10A, 12A, and 15A thresholds, train REN models with identical hyperparameters but different graph structures.",
+      "step2": "Run on a subset of 5 representative assays (2 high-epistasis, 2 low-epistasis, 1 medium) with 5-fold CV and seed=42 only (to save compute). Total: 5 assays x 5 folds x 4 thresholds = 100 runs.",
+      "step3": "Also test a 'sequence-only' baseline graph: connect residues within |i-j| <= 5 sequence positions (no structural information). This tests whether structure adds value over sequence proximity.",
+      "step4": "Report mean Spearman rho across assays and folds for each threshold. Plot threshold vs. performance with error bars.",
+      "step5": "Save results in results/ablations/contact_threshold.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Node feature components",
+    "description": "Test the contribution of each node feature component to REN performance. This identifies which information sources (PLM embeddings, mutation identity, PSSM) are most important for epistasis prediction.",
+    "steps": {
+      "step1": "Define 4 node feature configurations: (a) Full: ESM-2 embeddings + mutation identity encoding (1301-dim, the default). (b) ESM-2 only: just ESM-2 embeddings (1280-dim), no mutation identity. (c) Mutation identity only: just the 21-dim one-hot encoding, no ESM-2 embeddings. (d) Random node features: 1301-dim random vectors (negative control to verify the model uses node features meaningfully).",
+      "step2": "Train REN with each configuration on the same 5-assay subset, 5-fold CV, seed=42. Total: 5 assays x 5 folds x 4 configs = 100 runs.",
+      "step3": "Report mean Spearman rho for each configuration. The difference between (a) and (b) measures the value of mutation identity; between (a) and (c) measures the value of PLM embeddings.",
+      "step4": "Save results in results/ablations/node_features.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: GNN depth and architecture",
+    "description": "Test how GNN depth affects performance, to determine whether multi-hop message passing (capturing long-range structural epistasis) helps beyond local contacts.",
+    "steps": {
+      "step1": "Train REN variants with 1, 2, 3, and 4 GAT layers on the 5-assay subset, 5-fold CV, seed=42. Keep all other hyperparameters identical (hidden dim 256, 8 heads).",
+      "step2": "Additionally test: (a) GCN layers instead of GAT (to test whether attention is important), (b) no GNN (MLP-only baseline that pools mutation-site ESM-2 embeddings directly without message passing). Total: 5 assays x 5 folds x 6 variants = 150 runs.",
+      "step3": "Report mean Spearman rho for each architecture variant. The MLP-only comparison isolates the value of structural message passing.",
+      "step4": "Save results in results/ablations/architecture.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Edge features",
+    "description": "Test whether continuous edge features (distance, pLDDT) improve over binary contact edges.",
+    "steps": {
+      "step1": "Define 3 edge feature configurations: (a) Full: distance + sequence separation + pLDDT (4-dim, the default). (b) Distance only: just Cb-Cb distance (1-dim). (c) None: binary edges only (no edge features). For configurations with edge features, modify the GAT to use edge-conditioned attention (TransformerConv from PyG, or concatenate edge features to the attention computation).",
+      "step2": "Train on the 5-assay subset, 5-fold CV, seed=42. Total: 5 assays x 5 folds x 3 configs = 75 runs.",
+      "step3": "Report results in results/ablations/edge_features.csv."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and stratified analysis",
+    "description": "Perform rigorous statistical tests to determine whether REN's improvements are significant, and conduct stratified analyses to understand where and why the method helps.",
+    "steps": {
+      "step1": "Paired Wilcoxon signed-rank test: For each (assay, fold) pair across all 15 assays, compare REN Spearman rho vs. ESM-2 additive Spearman rho. Use the 15 x 5 = 75 paired observations (averaged over seeds). Report p-value and effect size (rank-biserial correlation). Primary success criterion: p < 0.05.",
+      "step2": "Stratified analysis by epistasis magnitude: Split the 15 assays into high-epistasis (top quartile by epistasis magnitude) and low-epistasis (bottom quartile). Compute mean improvement (REN minus ESM-2 additive) for each group. Test whether improvement is significantly larger for high-epistasis group (one-sided Mann-Whitney U test). Second success criterion: larger improvement on high-epistasis proteins.",
+      "step3": "Order-stratified analysis: For assays with multiple mutation orders, compute per-order Spearman rho for both ESM-2 additive and REN. Plot improvement (delta Spearman) vs. mutation order. Test whether improvement increases with order (Spearman correlation between order and delta). Fourth success criterion: increasing gains with mutation order.",
+      "step4": "GB1 attention analysis: For the GB1 protein, extract the learned GAT attention weights from the trained REN model. For each pair of mutation sites, compute the mean attention weight. Correlate these attention-derived interaction scores with experimentally measured pairwise epistasis from GB1_Olson_2014. Report Spearman rho. Third success criterion: rho > 0.3.",
+      "step5": "Compute summary statistics: mean and std of Spearman rho across assays for each method, with 95% confidence intervals from the 3 seeds. Create a summary table comparing all methods.",
+      "step6": "Save all statistical test results in results/evaluation/statistical_tests.csv and the summary table in results/evaluation/summary_table.csv."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures",
+    "description": "Create publication-quality figures for the research paper. All figures should use consistent styling (matplotlib with seaborn, font size 12+, colorblind-friendly palette).",
+    "steps": {
+      "step1": "Figure 1 — Method overview: Create a schematic diagram showing the REN pipeline: (a) protein sequence -> ESM-2 -> additive scores, (b) AlphaFold structure -> contact graph, (c) ESM-2 embeddings + mutation encoding -> GAT -> epistatic correction, (d) final prediction = additive + correction. Use matplotlib patches/arrows or save as a description for manual creation.",
+      "step2": "Figure 2 — Main results bar chart: Per-assay Spearman rho comparison between ESM-2 additive, Ridge regression, Additive+Pairwise, Global Epistasis, and REN. Grouped bar chart with assays on x-axis, Spearman rho on y-axis, error bars from 3 seeds. Highlight high-epistasis assays with a different background color. Save as figures/main_results.pdf.",
+      "step3": "Figure 3 — Epistasis-stratified improvement: Scatter plot of assay epistasis magnitude (x-axis) vs. Spearman improvement of REN over ESM-2 additive (y-axis). Color points by protein family. Add a trend line with Pearson/Spearman correlation annotation. Save as figures/epistasis_stratified.pdf.",
+      "step4": "Figure 4 — Order-stratified generalization: Line plot showing Spearman rho vs. mutation order for ESM-2 additive and REN on GB1_Wu_2016. Show the growing gap between methods at higher orders. Include error bars from 3 seeds. Save as figures/order_stratified.pdf.",
+      "step5": "Figure 5 — Ablation results: Multi-panel figure showing ablation results: (a) contact threshold, (b) node features, (c) GNN depth, (d) edge features. Each panel is a bar chart or line plot with error bars. Save as figures/ablations.pdf.",
+      "step6": "Figure 6 — Attention analysis on GB1: (a) Heatmap of learned GAT attention weights between mutation sites on the GB1 structure, overlaid on a contact map. (b) Scatter plot of attention weight vs. measured pairwise epistasis, with Spearman rho annotation. (c) 3D protein structure visualization (if pymol/py3Dmol available) showing attention-highlighted residue pairs. Save as figures/attention_analysis.pdf.",
+      "step7": "Figure 7 — Residual analysis: (a) Distribution of epistatic residuals (true targets) vs. REN predictions. (b) Scatter plot of true vs. predicted residuals, colored by mutation order. (c) Examples of specific variants where REN most improves over additive baseline (positive epistasis) and where it fails. Save as figures/residual_analysis.pdf.",
+      "step8": "Table 1 — Main results summary table: LaTeX-formatted table with rows = methods, columns = mean Spearman rho (all assays), mean Spearman rho (high-epistasis), mean Spearman rho (low-epistasis), epistasis-specific Spearman, NDCG@100. Bold best values. Save as figures/table_main_results.tex.",
+      "step9": "Table 2 — Ablation summary table: LaTeX-formatted table summarizing all ablation results. Save as figures/table_ablations.tex."
+    }
+  }
+]

@@ -1,0 +1,205 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "System Setup and Verification",
+    "description": "Set up the experimental environment, verify hardware capabilities, and install necessary tools for energy monitoring and scheduler development.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Verify Linux kernel version >= 6.12 by running 'uname -r'. If older, sched_ext may not be available.",
+      "step2": "Check for RAPL energy monitoring support: 'ls /sys/class/powercap/intel-rapl' or 'ls /sys/class/powercap/'. Document available energy domains (package, core, dram).",
+      "step3": "Verify sched_ext availability: check '/sys/kernel/sched_ext' exists and schedulers can be loaded via bpftool.",
+      "step4": "Install required packages: clang, llvm, libbpf-dev, linux-headers-$(uname -r), bpftool, perf, sysstat, jq.",
+      "step5": "Clone sched_ext scheduler repository (https://github.com/sched-ext/scx) for reference implementations and build system.",
+      "step6": "Check CPU topology: 'lscpu -e' to identify core types (P-cores/E-cores on Intel or big.LITTLE on ARM). Document heterogeneous capabilities.",
+      "step7": "Verify hardware performance counter (PMC) availability: 'perf list' should show cycles, instructions, cache-misses, etc.",
+      "step8": "Create output directory structure: mkdir -p results/{baseline,main,ablation,overhead}/{raw,processed}"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Workload Benchmark Preparation",
+    "description": "Prepare and validate benchmark workloads representing different workload classes (CPU-bound, memory-bound, mixed, I/O-bound).",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Install sysbench: 'apt-get install sysbench' or build from source. This provides CPU and memory benchmarks.",
+      "step2": "Create CPU-bound synthetic workload: compile a program that performs intensive computation (e.g., matrix multiplication, prime calculation). Source code in benchmarks/cpu_bound.c.",
+      "step3": "Create memory-bound synthetic workload: compile a program with random memory access patterns causing high cache miss rates. Source code in benchmarks/memory_bound.c.",
+      "step4": "Create mixed workload: combine CPU and memory operations with configurable ratio (50/50 default). Source code in benchmarks/mixed.c.",
+      "step5": "Create I/O-bound workload: simple program reading/writing files in bursts with sleep periods. Source code in benchmarks/io_bound.c.",
+      "step6": "Install nginx and wrk for web server benchmarking: 'apt-get install nginx' and build wrk from source.",
+      "step7": "Download and build llama.cpp (lightweight CPU-based LLM inference) from https://github.com/ggerganov/llama.cpp for real-world mixed workload.",
+      "step8": "Download a small transformer model (e.g., TinyLlama-1.1B Q4_0 quantized, ~600MB) for inference testing.",
+      "step9": "Validate all workloads run correctly without scheduler modifications and document baseline execution characteristics.",
+      "step10": "Create workload configuration files defining duration, intensity, and resource demands for each benchmark."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Linux EEVDF Baseline Collection",
+    "description": "Collect comprehensive baseline measurements using the default Linux EEVDF scheduler across all workload types.",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "step1": "Ensure default EEVDF scheduler is active: 'cat /sys/kernel/sched_ext/current' should show 'ext' not loaded or system using default.",
+      "step2": "For each workload type (CPU-bound, memory-bound, mixed, I/O-bound), run with 3 random seeds: 42, 123, 999.",
+      "step3": "Single workload execution: Run each workload type in isolation for 60 seconds. Record: total energy (Joules via RAPL), execution time, instructions retired, cache misses.",
+      "step4": "Mixed workload execution: Run pairs of workloads concurrently (CPU+memory, CPU+mixed, memory+mixed) for 60 seconds each. Record total system energy and per-process metrics.",
+      "step5": "Multi-process scalability: Run 4, 8, 16, 32 concurrent instances of CPU-bound and memory-bound workloads for 60 seconds each.",
+      "step6": "Web server workload: Start nginx, run wrk with 100 connections, 4 threads for 60 seconds. Measure throughput (req/sec), latency (p50, p99), and total energy.",
+      "step7": "LLM inference workload: Run llama.cpp with batch sizes 1, 4, 8 for 60 seconds each. Measure tokens/sec and energy per token.",
+      "step8": "For all runs, use perf stat to collect: cycles, instructions, cache-references, cache-misses, LLC-load-misses.",
+      "step9": "Save all results to results/baseline/raw/ with naming convention: eevdf_{workload}_{seed}_{timestamp}.json",
+      "step10": "Calculate and document baseline statistics: mean energy, std dev, energy per instruction, performance variability."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Simple Energy-Aware Baseline (Wattmeter-style)",
+    "description": "Implement and evaluate a simple energy-fair scheduler (equal energy per process) as a second baseline for comparison.",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Implement simple_energy_scheduler.c using sched_ext: tracks per-process energy via RAPL, attempts to equalize energy consumption across processes.",
+      "step2": "Compile scheduler: 'clang -O2 -target bpf -c simple_energy_scheduler.c -o simple_energy_scheduler.o' and load with 'bpftool struct_ops load'.",
+      "step3": "Verify scheduler loads correctly and sched_ext watchdog does not trigger.",
+      "step4": "Run the same experiment suite as EEVDF baseline (single workloads, mixed pairs, scalability, web server, LLM) with 3 seeds.",
+      "step5": "Record metrics: total energy, execution time, fairness (energy variance across processes), scheduling latency.",
+      "step6": "Save results to results/baseline/raw/simple_energy_{workload}_{seed}.json",
+      "step7": "Compare simple energy-fair scheduler vs EEVDF: document where simple energy awareness helps or hurts performance."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "WattSched Full Implementation",
+    "description": "Implement the complete WattSched scheduler with all components: energy monitoring, workload classification, and topology-aware scheduling.",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "step1": "Implement energy_monitor.c BPF program: Uses perf_event_open to read RAPL energy counters on context switch, stores per-process energy in BPF map 'pid_to_energy'.",
+      "step2": "Implement workload_classifier.c BPF program: Reads PMCs (cycles, instructions, cache-misses), calculates IPC and cache miss rate, classifies into CPU-bound (IPC>1.5, miss<5%), memory-bound (IPC<0.5, miss>20%), mixed, or I/O-bound (sleep time > 50%). Uses EWMA with alpha=0.3 for smoothing.",
+      "step3": "Implement scheduler_core.c: sched_ext callbacks (enqueue, dispatch, running, stopping), maintains per-CPU runqueues, implements topology-aware placement.",
+      "step4": "Implement topology policy: On heterogeneous systems, CPU-bound tasks prefer P-cores/big cores, memory-bound tasks prefer E-cores/little cores. Use CPU affinity hints via sched_ext.",
+      "step5": "Implement adaptive time slicing: CPU-bound get 8ms slices, memory-bound get 3ms slices, I/O-bound get 1ms slices. Adjust based on energy efficiency tracking.",
+      "step6": "Integrate all components into wattsched.bpf.c and userspace loader wattsched.c for map initialization and scheduler loading.",
+      "step7": "Compile with: 'make wattsched' using standard sched_ext build infrastructure.",
+      "step8": "Load scheduler and verify no compilation errors or verifier rejections.",
+      "step9": "Run smoke test: Start scheduler, run 4 CPU-bound and 4 memory-bound tasks for 30 seconds, verify stable operation without watchdog triggers.",
+      "step10": "Debug and fix any BPF verifier issues or runtime errors. Document any simplifications made."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "WattSched Performance Evaluation",
+    "description": "Evaluate WattSched against baselines across all workload scenarios.",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "step1": "Load WattSched scheduler via 'bpftool struct_ops load wattsched.bpf.o /sys/kernel/sched_ext'.",
+      "step2": "Verify scheduler is active: 'cat /sys/kernel/sched_ext/current' should show 'wattsched'.",
+      "step3": "Run single workload experiments (CPU, memory, mixed, I/O) for 60 seconds each with seeds 42, 123, 999. Record total energy, execution time, classification accuracy.",
+      "step4": "Run mixed workload pairs (CPU+memory, CPU+mixed, memory+mixed, CPU+CPU, memory+memory) for 60 seconds each with 3 seeds. Record energy savings vs baselines.",
+      "step5": "Run scalability test: 4, 8, 16, 32 concurrent processes of each type for 60 seconds. Measure energy efficiency and scheduling fairness.",
+      "step6": "Run web server benchmark: nginx + wrk for 60 seconds. Compare throughput, latency, and energy vs baselines.",
+      "step7": "Run LLM inference: llama.cpp with batch sizes 1, 4, 8 for 60 seconds each. Measure tokens/sec and energy per token.",
+      "step8": "For each run, capture classification decisions: log transitions between workload classes and migration decisions.",
+      "step9": "Save results to results/main/raw/wattsched_{workload}_{seed}.json",
+      "step10": "Unload scheduler between runs to ensure clean state: 'echo disable > /sys/kernel/sched_ext/control'"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Workload Classification Ablation",
+    "description": "Remove workload classification to isolate its contribution to energy savings.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Create wattsched_no_classify.c: Same as WattSched but with classification disabled - treats all workloads as 'mixed' type.",
+      "step2": "Compile and load the ablated scheduler.",
+      "step3": "Run subset of key experiments: mixed CPU+memory pairs, scalability (8 processes), and web server workload.",
+      "step4": "Run with 3 seeds (42, 123, 999), 60 seconds each.",
+      "step5": "Record energy consumption, execution time, and compare to full WattSched.",
+      "step6": "Calculate classification contribution: (energy_no_classify - energy_full) / energy_no_classify * 100%.",
+      "step7": "Save results to results/ablation/raw/no_classification_{workload}_{seed}.json",
+      "step8": "Document whether classification enables heterogeneous core assignment benefits."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Topology Optimization Ablation",
+    "description": "Remove heterogeneous core assignment to measure its specific contribution.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Create wattsched_no_topology.c: Same classification but no core-type preference - schedule on any available core.",
+      "step2": "Only meaningful on heterogeneous systems. Skip if system is homogeneous (all cores identical).",
+      "step3": "Compile and load the ablated scheduler.",
+      "step4": "Run same subset as classification ablation: mixed pairs, scalability, web server with 3 seeds.",
+      "step5": "Record energy and performance metrics.",
+      "step6": "Calculate topology optimization contribution vs full WattSched.",
+      "step7": "Save results to results/ablation/raw/no_topology_{workload}_{seed}.json",
+      "step8": "Analyze whether memory-bound tasks on little cores actually save energy as hypothesized."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Adaptive Time Slicing Ablation",
+    "description": "Test with uniform time slices instead of workload-adaptive slicing.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Create wattsched_uniform_slice.c: All workload types get 4ms time slices (uniform average of adaptive slices).",
+      "step2": "Compile and load the ablated scheduler.",
+      "step3": "Run reduced experiment set: mixed CPU+memory pairs with 3 seeds, 60 seconds each.",
+      "step4": "Focus on context switch rate and scheduling overhead metrics.",
+      "step5": "Compare energy and performance vs full WattSched.",
+      "step6": "Save results to results/ablation/raw/uniform_slice_{workload}_{seed}.json",
+      "step7": "Document impact of adaptive slicing on context switch overhead and cache efficiency."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Overhead Analysis",
+    "description": "Measure the runtime overhead of energy monitoring, classification, and BPF execution.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Implement microbenchmark: Empty sched_ext scheduler (scx_simple) that does minimal work - serves as 'no overhead' baseline.",
+      "step2": "Measure scheduling latency: Use ftrace or bpftrace to record time from enqueue to running callback.",
+      "step3": "Compare latencies: EEVDF (in-kernel CFS) vs scx_simple vs WattSched.",
+      "step4": "Measure BPF execution time: Use bpftrace to time BPF program execution on context switches.",
+      "step5": "Measure PMC read overhead: Compare running with/without perf_event counter reads.",
+      "step6": "Run CPU-bound workload (max scheduling frequency) and record context switches per second.",
+      "step7": "Calculate overhead percentage: (WattSched_time - EEVDF_time) / EEVDF_time * 100%.",
+      "step8": "Verify overhead remains under 2% as per success criteria.",
+      "step9": "Save results to results/overhead/raw/overhead_analysis.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis and Success Criteria",
+    "description": "Analyze all experimental results, compute statistical significance, and verify success criteria.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Aggregate all raw results from results/*/raw/ into structured data format (JSON/CSV).",
+      "step2": "Calculate mean and standard deviation for energy consumption across 3 seeds for each configuration.",
+      "step3": "Compute energy reduction percentage: (EEVDF_energy - WattSched_energy) / EEVDF_energy * 100% for each workload.",
+      "step4": "Compute performance degradation: (WattSched_time - EEVDF_time) / EEVDF_time * 100%.",
+      "step5": "Perform paired t-test between EEVDF and WattSched results to verify statistical significance (p < 0.05).",
+      "step6": "Check success criteria: (1) ≥15% energy reduction on mixed workloads, (2) <5% performance degradation, (3) <2% overhead, (4) no instability.",
+      "step7": "Check refutation criteria: If energy reduction <10%, performance degradation >10%, overhead >5%, or instability occurs.",
+      "step8": "Generate summary table: scheduler vs workload vs energy vs performance vs p-value.",
+      "step9": "Save processed results to results/processed/summary_stats.json and results/processed/success_criteria.json",
+      "step10": "Write conclusion: Which hypotheses are confirmed, which are refuted, and why."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Figure Generation for Paper",
+    "description": "Generate publication-quality figures showing energy savings, performance tradeoffs, and ablation results.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Create Figure 1 - Energy Comparison Bar Chart: X-axis = workload type, Y-axis = energy (Joules), grouped bars for EEVDF, Simple Energy, WattSched. Include error bars for 3 seeds.",
+      "step2": "Create Figure 2 - Performance-Energy Tradeoff: Scatter plot with X=execution time (normalized), Y=energy (normalized), points for each scheduler. Lower-left is better.",
+      "step3": "Create Figure 3 - Ablation Study: Bar chart showing energy consumption for full WattSched vs no-classification vs no-topology vs uniform-slice. Percentage labels showing contribution.",
+      "step4": "Create Figure 4 - Scalability Analysis: X-axis = number of processes, Y-axis = energy per instruction (efficiency), lines for each scheduler.",
+      "step5": "Create Figure 5 - Workload Classification Accuracy: Confusion matrix showing predicted vs actual workload types on synthetic benchmarks.",
+      "step6": "Create Figure 6 - Overhead Breakdown: Stacked bar showing time spent in BPF execution, PMC reading, classification, and scheduling decisions.",
+      "step7": "Use matplotlib or gnuplot for figure generation. Save as PDF and PNG (300 DPI minimum).",
+      "step8": "Save figures to results/visualizations/ with descriptive filenames.",
+      "step9": "Create summary table for paper: Scheduler comparison with energy, performance, overhead metrics.",
+      "step10": "Verify all figures have proper labels, legends, and captions suitable for academic paper."
+    }
+  }
+]

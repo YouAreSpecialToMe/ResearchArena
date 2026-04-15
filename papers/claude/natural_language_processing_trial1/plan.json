@@ -1,0 +1,245 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for LLM inference, retrieval, NLI evaluation, and metrics computation.",
+    "steps": {
+      "step1": "Install core packages: pip install torch transformers vllm accelerate datasets sentencepiece protobuf",
+      "step2": "Install evaluation packages: pip install scikit-learn scipy numpy pandas matplotlib seaborn",
+      "step3": "Install NLI model package: pip install transformers (DeBERTa-v3-base-mnli-fever-anli from HuggingFace for NLI; cross-encoder/nli-deberta-v3-base)",
+      "step4": "Install retrieval packages: pip install faiss-gpu sentence-transformers rank_bm25",
+      "step5": "Verify GPU availability: torch.cuda.is_available(), print GPU name and memory (expect 1x A6000 48GB VRAM)",
+      "step6": "Verify vLLM can load a small test model to confirm batched inference works",
+      "step7": "Set global random seeds: SEEDS = [42, 43, 44] used throughout all experiments for reproducibility"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess QA datasets",
+    "description": "Download Natural Questions, TriviaQA, and PopQA test sets. Sample 500 examples per dataset (1500 total) for tractable evaluation within compute budget. Prepare retrieval corpus, generate retrieved passages, and prepare irrelevant control passages.",
+    "steps": {
+      "step1": "Download NQ open-domain test split from HuggingFace (nq_open). Sample 500 random examples with seed=42.",
+      "step2": "Download TriviaQA test split from HuggingFace (trivia_qa, rc.nocontext). Sample 500 random examples with seed=42.",
+      "step3": "Download PopQA from HuggingFace (akariasai/PopQA). Sample 500 random examples with seed=42.",
+      "step4": "For each query, format as: {question, gold_answers (list of acceptable answers), dataset_name, query_id}.",
+      "step5": "Download pre-built Contriever index and Wikipedia passages from facebook/contriever-msmarco. If full index is too large (>60GB RAM), fallback to BM25 retrieval via rank_bm25 on a subset of Wikipedia passages (first 1M passages from HuggingFace wikipedia dataset). Retrieve top-5 passages per query.",
+      "step6": "For the control condition (irrelevant context), prepare a pool of 1000 random Wikipedia passages from topic categories verified to have no keyword overlap with any test query (e.g., sample from 'geography of Antarctica', 'history of pottery', 'botany' categories). For each query, sample 5 random passages from this pool as the irrelevant context D'.",
+      "step7": "Save all prepared data as JSON files: nq_data.json, triviaqa_data.json, popqa_data.json. Each entry contains: question, gold_answers, retrieved_passages (top-5), irrelevant_passages (5 random).",
+      "step8": "Print dataset statistics: number of examples, average question length, average passage length, answer type distribution."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare answer correctness evaluation",
+    "description": "Set up the answer correctness evaluation pipeline. For open-domain QA, we use exact match (EM) and token-level F1 with normalization, consistent with standard QA evaluation (SQuAD-style).",
+    "steps": {
+      "step1": "Implement normalize_answer(text) function: lowercase, strip articles/punctuation/whitespace, following the standard SQuAD evaluation script.",
+      "step2": "Implement exact_match(prediction, gold_answers) -> bool: returns True if normalized prediction matches any normalized gold answer.",
+      "step3": "Implement token_f1(prediction, gold_answers) -> float: compute token-level F1 between prediction and best-matching gold answer.",
+      "step4": "Implement is_correct(prediction, gold_answers, threshold=0.5) -> bool: returns True if EM is True OR token F1 >= threshold. This is the binary correctness label for selective prediction.",
+      "step5": "Save evaluation utilities to exp/shared/eval_utils.py."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Generate LLM responses under three conditions for all three models",
+    "description": "For each query, generate responses under three conditions: (1) with retrieved documents (RAG), (2) without documents (parametric), (3) with irrelevant documents (control). Run for three models: Llama 3.1 8B Instruct, Mistral 7B Instruct v0.3, and Phi-3 Mini 3.8B Instruct. Models are loaded and processed sequentially since we have 1 GPU. For each generation, we store full per-token log-probability distributions (top-20 logprobs at each position) to enable sequence-level JSD computation. Estimated time: ~1.5h for Llama, ~1.5h for Mistral, ~0.8h for Phi-3 = ~3.8h total.",
+    "steps": {
+      "step1": "Create prompt templates for each condition: (a) RAG prompt: 'Given the following documents:\\n{passages}\\n\\nAnswer the question: {question}\\nAnswer:', (b) Parametric prompt: 'Answer the question: {question}\\nAnswer:', (c) Control prompt: same as RAG but with irrelevant passages. Apply each model's chat template where applicable.",
+      "step2": "Load Llama 3.1 8B Instruct (meta-llama/Meta-Llama-3.1-8B-Instruct) via vLLM with SamplingParams(temperature=0, max_tokens=100, logprobs=20). Use greedy decoding for deterministic outputs.",
+      "step3": "For Llama, run all 1500 queries x 3 conditions = 4500 generations using vLLM batch inference. For each generation, store: (a) generated text, (b) per-token log-probability distributions (top-20 logprobs at each token position), (c) token IDs. This is essential for sequence-level JSD computation across all token positions. Save to exp/llama_generations.json.",
+      "step4": "For Semantic Entropy and Self-Consistency baselines, also generate 5 additional sampled responses per query under the RAG condition using temperature=0.7, top_p=0.9. Total: 1500 x 5 = 7500 additional generations. Save to exp/llama_samples.json.",
+      "step5": "For CRUX baseline, the with-context and without-context generations are already collected in step 3 (RAG and parametric conditions). No additional generations needed — CRUX reuses our conditions (1) and (2). Additionally, generate 5 sampled responses under the parametric condition (temperature=0.7) for CRUX's consistency metric. Total: 1500 x 5 = 7500 parametric samples. Save to exp/llama_crux_samples.json.",
+      "step6": "Unload Llama model. Load Mistral 7B Instruct v0.3 (mistralai/Mistral-7B-Instruct-v0.3) via vLLM. Repeat steps 3-5 for Mistral. Save to exp/mistral_generations.json, exp/mistral_samples.json, exp/mistral_crux_samples.json.",
+      "step7": "Unload Mistral model. Load Phi-3 Mini 3.8B Instruct (microsoft/Phi-3-mini-4k-instruct) via vLLM. Repeat steps 3-5 for Phi-3. Save to exp/phi3_generations.json, exp/phi3_samples.json, exp/phi3_crux_samples.json.",
+      "step8": "For each model, compute answer correctness labels using the eval_utils functions. Save correctness labels alongside generations.",
+      "step9": "Print generation statistics: total tokens generated, average response length, fraction of correct answers per dataset per model."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute C2UD uncertainty components with sequence-level JSD",
+    "description": "Extract the three C2UD uncertainty components from the generated responses: Retrieval Sensitivity (RS), Context Discrimination (CD), and Parametric Agreement (PA). IMPORTANT: Use sequence-level JSD (average JSD across all generated token positions) rather than first-token approximation, as specified in the proposal. The first-token approximation would be a significant simplification that may not capture distributional differences throughout the response.",
+    "steps": {
+      "step1": "Implement sequence-level JSD computation: JSD_seq(p, q) = (1/T) * sum_{t=1}^{T} JSD(p^(t) || q^(t)), where p^(t) and q^(t) are the next-token probability distributions at position t. Since we stored top-20 logprobs at each position, construct the distributions using these (assign remaining probability mass to an 'other' category). When generated sequences differ in length across conditions, use teacher-forcing: feed the tokens from one condition's output through the other condition's prompt to obtain aligned distributions at matching positions. Use min(len_a, len_b) positions if teacher-forcing is not feasible within compute budget, and document this choice.",
+      "step2": "Compute Retrieval Sensitivity (RS): RS(q,D) = JSD_seq(p_D || p_empty) for each query. This measures how much the output distribution shifts across the full response when context is added.",
+      "step3": "Compute Context Discrimination (CD) using the RATIO formulation (not subtraction): CD(q,D) = JSD_seq(p_D || p_D') / (JSD_seq(p_D || p_D') + JSD_seq(p_empty || p_D')). This ensures CD is in [0,1] and avoids the negativity issues of the raw subtraction form. CD > 0.5 indicates the model differentially responds to relevant vs irrelevant context more than the parametric baseline does. CD <= 0.5 suggests unreliable context use.",
+      "step4": "Handle edge cases in CD computation: If both JSD terms in the denominator are zero (model ignores all context), set CD = 0.5 (uninformative). Add epsilon=1e-10 for numerical stability.",
+      "step5": "Load DeBERTa-v3-base-mnli-fever-anli NLI model from HuggingFace (cross-encoder/nli-deberta-v3-base). For each query, compute NLI scores between the RAG answer a_D and parametric answer a_empty. Extract: P(entailment), P(contradiction), P(neutral).",
+      "step6": "Compute Parametric Agreement (PA): PA = P(entailment). Use the raw entailment probability as the agreement score, following the proposal definition. PA ranges from 0 (disagreement) to 1 (strong agreement).",
+      "step7": "Save all three component scores (RS, CD, PA) per query per model to exp/{model}_c2ud_components.json.",
+      "step8": "Print component statistics: mean, std, min, max, and Pearson correlation matrix of (RS, CD, PA) for each dataset and model."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train C2UD composite scorer via logistic regression calibration",
+    "description": "Combine the three C2UD components into a single confidence score using logistic regression. This is a lightweight supervised calibration step fitted on a small labeled calibration set — analogous to Platt scaling. The decomposition itself (RS, CD, PA) is training-free and model-agnostic; only the aggregation requires calibration. Use 3 random seeds for the calibration/test split to compute confidence intervals.",
+    "steps": {
+      "step1": "For each dataset, create feature matrix X with 6 features: [RS, CD, PA, RS*CD, RS*PA, CD*PA] (components + pairwise interactions).",
+      "step2": "Create binary labels y: 1 if answer is correct, 0 otherwise (using is_correct from eval_utils).",
+      "step3": "For each of 3 random seeds (42, 43, 44): Split each dataset 50/50 into calibration/test sets. On the calibration set, fit logistic regression with 5-fold cross-validation to select regularization strength C from [0.01, 0.1, 1, 10, 100]. Evaluate on the held-out test set.",
+      "step4": "Store predicted probabilities P(correct) as the C2UD confidence score.",
+      "step5": "Also store component-only variants for ablation: fit separate logistic regressions using (a) RS only, (b) CD only, (c) PA only, (d) RS+CD (+ RS*CD interaction), (e) RS+PA (+ RS*PA interaction) -- NOTE: this two-condition variant is analogous to CRUX and directly tests the value of the third condition, (f) CD+PA (+ CD*PA interaction), (g) RS+CD+PA (full C2UD with all interactions).",
+      "step6": "Save all scores and model coefficients to exp/{model}_c2ud_scores.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute Token Probability baseline",
+    "description": "Simple baseline: use average token log-probability of the RAG-condition response as confidence score. This is the simplest uncertainty method and serves as the 'simple baseline'.",
+    "steps": {
+      "step1": "For each query, compute the mean log-probability across all generated tokens in the RAG condition response.",
+      "step2": "Use mean log-prob as confidence (higher = more confident). This will be used directly as the score for AUROC/AUPRC evaluation.",
+      "step3": "Save scores to exp/{model}_baseline_tokenprob.json for all three models."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute Verbalized Confidence baseline",
+    "description": "Prompt the LLM to verbalize its confidence after answering. This tests whether self-reported confidence is reliable in RAG settings.",
+    "steps": {
+      "step1": "For each query, use a two-turn prompt: first present the RAG prompt and get the answer (reuse from main generation), then follow up with: 'On a scale of 0 to 100, how confident are you in the above answer? Respond with just a number.'",
+      "step2": "Run 1500 confidence elicitation prompts per model using vLLM (temperature=0, max_tokens=10). Run sequentially after main generation for each model to avoid reloading.",
+      "step3": "Parse the numeric confidence from the response using regex. If parsing fails, assign confidence=50 (neutral). Report the parse failure rate.",
+      "step4": "Save scores to exp/{model}_baseline_verbalized.json for all three models."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute Semantic Entropy baseline",
+    "description": "Strong baseline: compute semantic entropy over 5 sampled responses (Kuhn et al., 2023) adapted for RAG by including retrieved context in the prompt. Uses the sampled responses from the main generation step.",
+    "steps": {
+      "step1": "For each query, take the 5 sampled responses from the RAG condition (temperature=0.7).",
+      "step2": "Cluster responses by semantic equivalence: Use the NLI model (DeBERTa) to compute pairwise entailment. Two responses are semantically equivalent if they mutually entail each other (both NLI directions have P(entailment) > 0.5).",
+      "step3": "Compute semantic entropy: For each cluster, the probability is (number of samples in cluster / total samples). Entropy = -sum(p * log(p)) over clusters.",
+      "step4": "Use negative entropy as confidence (lower entropy = more confident).",
+      "step5": "Save semantic entropy scores to exp/{model}_baseline_semanticentropy.json for all three models."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute Self-Consistency baseline",
+    "description": "Baseline using majority vote consistency across sampled responses (Wang et al., 2023). Higher agreement among samples indicates lower uncertainty.",
+    "steps": {
+      "step1": "For each query, take the 5 sampled responses (reuse from semantic entropy step).",
+      "step2": "Cluster by semantic equivalence (reuse clusters from semantic entropy step).",
+      "step3": "Confidence = size of largest cluster / total samples. E.g., if 4 out of 5 agree, confidence = 0.8.",
+      "step4": "Save scores to exp/{model}_baseline_selfconsistency.json for all three models."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute CRUX baseline",
+    "description": "Implement CRUX (Yuan et al., 2026, arXiv:2508.00600) as a strong context-aware baseline. CRUX uses two conditions (with/without context) to compute: (1) Contextual Entropy Reduction (CER) — information gain from context via entropy difference, and (2) Unified Consistency Examination (UCE) — consistency of answers with and without context. We combine CRUX's two metrics via the same logistic regression calibration used for C2UD for fair comparison.",
+    "steps": {
+      "step1": "Compute Contextual Entropy Reduction (CER): For each query, compute Shannon entropy H(p_empty) of the parametric response distribution and H(p_D) of the RAG response distribution (using the top-20 logprobs at each token position, averaged across positions for sequence-level). CER = H(p_empty) - H(p_D). Higher CER means context reduced uncertainty.",
+      "step2": "Compute Unified Consistency Examination (UCE): For each query, take the 5 sampled parametric responses and the 5 sampled RAG responses. Use NLI-based semantic clustering (reuse from semantic entropy). UCE = fraction of (parametric, RAG) sample pairs that are semantically consistent (mutual entailment). This measures whether the model gives the same answer with and without context across stochastic samples.",
+      "step3": "Combine CER and UCE via logistic regression: feature matrix [CER, UCE, CER*UCE], using the same 50/50 calibration/test split and 3 seeds as C2UD. This ensures a fair comparison — both methods use the same calibration procedure.",
+      "step4": "Save CRUX scores to exp/{model}_baseline_crux.json for all three models."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute Axiomatic Calibration baseline (Soudani et al., 2025)",
+    "description": "Implement the calibration function from Soudani et al. (2025, ACL Findings), which post-hoc calibrates token probabilities for RAG settings. This serves as the published RAG-specific baseline.",
+    "steps": {
+      "step1": "Compute the base confidence as mean token log-probability (reuse from Token Probability baseline).",
+      "step2": "Apply the calibration function from Soudani et al.: fit isotonic regression or Platt scaling on the calibration set mapping token probability to correctness probability. Use the same 50/50 calibration/test split for fairness.",
+      "step3": "Save calibrated scores to exp/{model}_baseline_axiomatic.json for all three models."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study on C2UD components",
+    "description": "Evaluate each C2UD component individually and in combination to determine the contribution of each novel element. The critical comparison is C2UD-RS+PA (two-condition, no irrelevant context — analogous to CRUX's information) vs C2UD-full (three-condition), which directly tests the value of the third irrelevant-context condition.",
+    "steps": {
+      "step1": "Define ablation variants: (a) RS-only, (b) CD-only, (c) PA-only, (d) RS+CD (+ interaction), (e) RS+PA (+ interaction) — this two-condition variant is the key comparison against CRUX, (f) CD+PA (+ interaction), (g) RS+CD+PA (full C2UD with all interactions).",
+      "step2": "For each variant, use the same 3-seed 50/50 calibration/test split as the main experiment. Fit logistic regression with the same CV regularization procedure.",
+      "step3": "Compute AUROC, AUPRC, Coverage@90 for each variant on each dataset and model.",
+      "step4": "Report the logistic regression coefficients (mean across seeds) to show which components and interactions contribute most.",
+      "step5": "Specifically highlight: Does C2UD-full outperform C2UD-RS+PA? This is the key test of the three-condition design's value.",
+      "step6": "Save ablation results to exp/{model}_ablation_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Failure mode diagnosis analysis",
+    "description": "Validate that C2UD components correctly identify different failure modes. Categorize incorrect predictions by failure type using heuristic labels and check whether C2UD component distributions differentiate them.",
+    "steps": {
+      "step1": "For each incorrect answer in the test set, categorize the likely failure mode based on heuristic signals: (a) Retrieval failure: retrieved passages have low lexical overlap (BM25 score < median, or no gold answer substring found in any passage) with the gold answer. (b) Grounding failure: at least one retrieved passage contains the gold answer (substring match after normalization) but the model generated a different answer. (c) Parametric override: the parametric (no-context) answer matches the gold answer but the RAG answer does not (model had correct knowledge but context led it astray).",
+      "step2": "For each failure category, compute the mean and std of RS, CD, PA components.",
+      "step3": "Expected patterns: Retrieval failure -> low RS, low CD. Grounding failure -> high RS, low CD. Parametric override -> high RS, low PA, disagreement between RAG and parametric answers.",
+      "step4": "Compute statistical significance of component differences between failure categories using Welch's t-test (pairwise between all category pairs for each component).",
+      "step5": "Report the number of examples per failure category to validate that the heuristic labeling produces reasonable category sizes.",
+      "step6": "Save failure mode analysis to exp/{model}_failure_analysis.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Calibration analysis",
+    "description": "Evaluate the calibration quality of C2UD vs baselines using ECE and Brier score. Well-calibrated confidence scores are important for reliable abstention decisions in production RAG systems.",
+    "steps": {
+      "step1": "For each method, normalize scores to [0,1] range: For logistic-regression-based methods (C2UD, CRUX, Axiomatic), outputs are already probabilities. For others (Token Prob, Semantic Entropy, Self-Consistency), apply Platt scaling on the calibration set.",
+      "step2": "Compute Expected Calibration Error (ECE) with 10 equally-spaced bins: ECE = sum_b (|bin_b| / N) * |accuracy_b - confidence_b|.",
+      "step3": "Compute Brier Score = mean((confidence - correctness)^2) where correctness is binary.",
+      "step4": "Compute these metrics for each method, dataset, model, and seed (3 seeds).",
+      "step5": "Save calibration results to exp/{model}_calibration_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Targeted intervention experiment",
+    "description": "Demonstrate that C2UD's decomposition enables targeted interventions that improve end-to-end QA accuracy compared to uniform strategies. This experiment is scoped to 1 model (Llama 3.1 8B) and 1 dataset (NQ, 500 queries) to fit within compute budget. Estimated additional compute: ~0.5h for re-retrieval forward passes.",
+    "steps": {
+      "step1": "Define intervention strategies based on C2UD decomposition: (a) If RS < threshold_RS (context ignored): trigger re-retrieval with query expansion (append key terms from top passage). (b) If CD < 0.5 (poor grounding despite context sensitivity): trigger re-retrieval with a reformulated query (use LLM to rephrase). (c) If PA < threshold_PA and CD > 0.5 (knowledge conflict with genuine grounding): trust the context-grounded answer (no intervention needed, but flag the conflict). (d) If overall C2UD confidence < threshold_conf: abstain. Set thresholds using calibration set: threshold_RS = 25th percentile of RS on calibration set, threshold_PA = 25th percentile of PA, threshold_conf = value achieving 90% precision on calibration set.",
+      "step2": "Implement re-retrieval intervention: For flagged queries (low RS or low CD), retrieve top-5 NEW passages using BM25 with the reformulated query. Re-run the RAG generation with new passages.",
+      "step3": "Implement C2UD-intervene pipeline: For each test query, compute C2UD components. Apply intervention logic from step 1. If re-retrieval is triggered, use the new answer. Otherwise use the original answer. If abstention is triggered, mark as abstained.",
+      "step4": "Implement comparison strategies: (a) Uniform re-retrieval: re-retrieve for ALL queries with C2UD confidence below the abstention threshold (same number of re-retrievals as C2UD-intervene for fair comparison). (b) Uniform abstention: abstain on all queries with C2UD confidence below the abstention threshold. (c) No intervention: use original RAG answers for all queries. (d) Oracle intervention: use ground-truth correctness labels to decide which queries need re-retrieval.",
+      "step5": "Evaluate: For each strategy, compute (a) accuracy on answered queries, (b) coverage (fraction of queries answered, i.e., not abstained), (c) accuracy@coverage_X for X in [0.7, 0.8, 0.9, 1.0]. Compare C2UD-intervene vs uniform strategies.",
+      "step6": "Save intervention results to exp/llama_intervention_results.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute selective prediction metrics and statistical tests",
+    "description": "Compute AUROC, AUPRC, and Coverage@90 for all methods across all datasets, models, and seeds. Run paired bootstrap tests to determine statistical significance of C2UD improvements over each baseline, especially CRUX.",
+    "steps": {
+      "step1": "For each method, model, dataset, and seed: Compute AUROC using sklearn.metrics.roc_auc_score. Compute AUPRC using sklearn.metrics.average_precision_score. Compute Coverage@90: sort queries by confidence (descending), find the maximum coverage such that accuracy on covered queries >= 90%.",
+      "step2": "Aggregate results across 3 seeds: report mean and standard deviation for each metric.",
+      "step3": "Run paired bootstrap test (10000 resamples) comparing C2UD vs each baseline on AUROC for each dataset and model. Report p-values. Specifically report C2UD vs CRUX p-values since this is the most important comparison.",
+      "step4": "Create a summary results table with all methods x datasets x models x metrics, with means +/- std. Bold the best method per column, underline second best.",
+      "step5": "Save complete results to exp/results_summary.json and a formatted table to exp/results_table.csv."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Create paper figures and tables",
+    "description": "Generate publication-quality figures for the paper: main results table, ablation table, calibration plots, failure mode analysis, component visualizations, and intervention results.",
+    "steps": {
+      "step1": "Table 1 - Main Results: Create a LaTeX-formatted table showing AUROC, AUPRC, Coverage@90 for all methods (Token Prob, Verbalized Conf, Semantic Entropy, Self-Consistency, Axiomatic Calib, CRUX, C2UD) across 3 datasets and 3 models. Include mean +/- std across seeds. Bold best, underline second best. Save to figures/table1_main_results.tex and .csv.",
+      "step2": "Table 2 - Ablation: Create a table showing AUROC for each ablation variant (RS, CD, PA, RS+CD, RS+PA, CD+PA, Full) across datasets, averaged over models. Highlight the RS+PA vs Full comparison (two-condition vs three-condition). Save to figures/table2_ablation.tex and .csv.",
+      "step3": "Figure 1 - Method Overview: (Placeholder — will be a diagram in the paper, not auto-generated.) Describe the three-condition design schematically.",
+      "step4": "Figure 2 - Calibration Reliability Diagrams: For Llama (primary model), create reliability diagrams (predicted confidence vs actual accuracy in 10 bins) for C2UD, CRUX, Semantic Entropy, and Token Probability. One panel per dataset. Use matplotlib with publication styling (font size 12, tight layout). Save to figures/figure2_calibration.pdf and .png.",
+      "step5": "Figure 3 - Failure Mode Analysis: Grouped bar chart showing mean RS, CD, PA values for each failure category (retrieval failure, grounding failure, parametric override) with error bars (std). One panel per model or combined. Save to figures/figure3_failure_modes.pdf and .png.",
+      "step6": "Figure 4 - Component Distributions: 2D scatter plots of (RS, CD) colored by correctness (correct=blue, incorrect=red), with marginal histograms. Show for the primary model (Llama) on NQ. Save to figures/figure4_components.pdf and .png.",
+      "step7": "Figure 5 - Coverage vs Accuracy Curves: Plot accuracy as a function of coverage (fraction of queries answered) for C2UD, CRUX, Semantic Entropy, and Token Probability on each dataset. Show for the primary model (Llama). Save to figures/figure5_coverage_accuracy.pdf and .png.",
+      "step8": "Figure 6 - Intervention Results: Bar chart comparing accuracy and coverage for C2UD-intervene vs uniform re-retrieval vs uniform abstention vs no intervention on NQ/Llama. Save to figures/figure6_intervention.pdf and .png.",
+      "step9": "Save all figures with dpi=300 for print quality. Use consistent color scheme: C2UD in blue (#2196F3), CRUX in orange (#FF9800), Semantic Entropy in green (#4CAF50), Token Prob in gray (#9E9E9E)."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final results aggregation and success criteria check",
+    "description": "Aggregate all results and check against the defined success criteria from the proposal. Report honestly including negative results.",
+    "steps": {
+      "step1": "Check success criterion 1: Does C2UD achieve statistically significant (p < 0.05, paired bootstrap) AUROC improvement over CRUX and other baselines on at least 2 of 3 datasets?",
+      "step2": "Check success criterion 2: Does the ablation show the three-condition C2UD-full outperforms the two-condition C2UD-RS+PA ablation? Does each component contribute (removing any single component degrades performance)?",
+      "step3": "Check success criterion 3: Does C2UD maintain competitive performance across all three model families (Llama, Mistral, Phi-3)?",
+      "step4": "Check success criterion 4: Do the C2UD component distributions differ significantly between failure categories?",
+      "step5": "Check success criterion 5: Does C2UD-intervene (targeted intervention) outperform uniform strategies?",
+      "step6": "Write a comprehensive results summary to results.json including: all metrics, statistical tests, success criteria outcomes, key findings, logistic regression coefficients, and runtime statistics.",
+      "step7": "If any success criterion is not met, document the negative result honestly and analyze why. Specifically, if C2UD does not beat CRUX, analyze whether the irrelevant context condition adds signal and why/why not."
+    }
+  }
+]

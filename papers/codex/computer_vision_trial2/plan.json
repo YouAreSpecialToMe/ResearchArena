@@ -1,0 +1,128 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze the narrow update-safety evaluation stack",
+    "description": "Build one reproducible environment for testing whether object-centric evidence is a better update-safety signal than standard reliability filters for StatA-style online adaptation, without expanding into a broader new-method claim.",
+    "steps": {
+      "step1": "Create a Python 3.12 environment and install pinned packages. The executed stack is recorded with an explicit `pip freeze` and `conda env export` manifest instead of relying on an assumed package list.",
+      "step2": "Record `nvidia-smi`, `free -h`, and `nproc` to `artifacts/results/hardware.json`. Treat the machine as `1` GPU for all model runs and `4` CPU workers for dataloading, mask post-processing, stream-file creation, and plotting; there is no GPU parallelism to exploit beyond overlapping CPU preprocessing with GPU inference.",
+      "step3": "Use one frozen backbone everywhere: Hugging Face `transformers` CLIP `openai/clip-vit-base-patch16`, image resolution `224`, the processor's default resize/crop pipeline, and the prompt template `a photo of a {class_name}`.",
+      "step4": "Predefine seeds `[7, 17]` as the mandatory full-study seeds and seed `[27]` as a low-cost confirmation seed used only after hyperparameters are frozen. This keeps the initial budget feasible while still reserving a third random seed for final robustness checking.",
+      "step5": "Create `artifacts/cache/`, `artifacts/streams/`, `artifacts/pilot/`, `artifacts/results/`, `artifacts/figures/`, and `artifacts/reporting/`. Every experiment must emit `.json` or `.csv` outputs with exact config fields so results can be audited without terminal logs.",
+      "step6": "Run image encoding in automatic mixed precision, store cached image and text embeddings in `fp16`, and store online StatA statistics, thresholds, and evaluation summaries in `fp32`. Start with batch size `256` for full-image encoding and `160` for foreground/background encoding; reduce only if peak memory exceeds `44 GB`."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare the small mandatory benchmark and fixed online streams",
+    "description": "Use a deliberately small but relevant benchmark that directly tests context-sensitive harmful updates in realistic online streams under the 8-hour budget.",
+    "steps": {
+      "step1": "Load Waterbirds from the local WILDS installation when available; otherwise use the documented Hugging Face mirror fallback. Preserve the 4 group labels so the plan can report overall accuracy, balanced accuracy, average-group accuracy, and worst-group accuracy.",
+      "step2": "Load CounterAnimal from the Hugging Face mirror. If the mirror exposes official validation and test splits, use them directly; otherwise build deterministic class-balanced validation and test subsets with sizes `1024` and `1536` using seed `2026`, and save the image lists to `artifacts/results/counteranimal_subset_files.json`.",
+      "step3": "Do not include ImageNet-R or any extra benchmark in the mandatory plan. The benchmark is predefined as only `Waterbirds + CounterAnimal`, because the claim is about update safety on context-sensitive realistic StatA streams rather than generic distribution shift.",
+      "step4": "Generate realistic online streams following the StatA paper's online protocol: stream length `1024` for Waterbirds and `1536` for CounterAnimal, stream batch size `128`, temporal correlation parameter `gamma=0.3`, and one stream per dataset per seed. Save each stream to `artifacts/streams/<dataset>_gamma0.3_seed<seed>.csv` with columns `stream_index,image_id,true_label,group_or_null,batch_index`.",
+      "step5": "Use the exact same stream files for zero-shot CLIP, plain StatA, all matched-rate StatA gates, and all ablations. Hyperparameters may only use the validation streams from seeds `[7,17]`; the test streams are touched once after thresholds are frozen.",
+      "step6": "Cache text embeddings once per dataset to `artifacts/cache/text_<dataset>.pt`. Cache full-image embeddings and logits for every validation and test image to `artifacts/cache/full_<dataset>_{val|test}.pt` before any online experiment. Cache foreground and background view embeddings only after the mask pilot passes its sanity threshold.",
+      "step7": "Write `artifacts/results/dataset_protocol.json` containing dataset sources, subset sizes, class counts, group metadata, stream-generation parameters, prompt templates, and the explicit rationale for the reduced benchmark: the mandatory benchmark is intentionally small to make matched-rate baselines, ablations, and counterfactual labels feasible on one RTX A6000 within roughly 8 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run the mask and harmful-update pilot before the full study",
+    "description": "Directly test the fragile assumption in the proposal: cheap object-centric views must provide a useful write-safety signal before they are used in the full benchmark.",
+    "steps": {
+      "step1": "Build a pilot validation stream of exactly `256` images: `128` Waterbirds validation images stratified across the 4 groups and `128` CounterAnimal validation images sampled uniformly over classes. Labels are used only offline for pilot analysis and never exposed to the adaptation code.",
+      "step2": "Generate a CLIP attention-rollout saliency map from the last `6` transformer blocks of `ViT-B-16`, average heads, normalize to `[0,1]`, threshold at the `70th` percentile of saliency mass, keep the largest connected component, fill holes, and enlarge the resulting crop box by `10%`. If the mask is empty, fall back to the full image and log `empty_mask_fallback=true`.",
+      "step3": "Create three views per image: full image, foreground crop resized to `224x224`, and a complementary background image made by suppressing the foreground region and filling it with a neutral gray canvas while preserving the original image size.",
+      "step4": "Collect pilot diagnostics: empty-mask rate, mean foreground area ratio, number of connected components before cleanup, per-image rollout time, per-image crop/background construction time, and total extra CLIP forward-pass time for the foreground/background views. Save them to `artifacts/pilot/mask_diagnostics.csv`.",
+      "step5": "Run zero-shot CLIP on the three views and compute `k = argmax(z_full)`, agreement `a(x) = 1[argmax z_full = argmax z_fg]`, foreground support `f(x) = p_fg(k)`, background dominance `b(x) = max softmax(z_bg)`, and provisional FOCUS score `s(x) = a(x) * (f(x) - 0.75 * b(x) - 0.05)`.",
+      "step6": "Construct sparse direct harmful-update labels on the pilot stream using StatA only. Probe every `4`th position in the first `256` pilot samples, clone the current StatA state once, branch into `update` versus `skip`, and compare mean labeled accuracy over the next `W=16` stream samples. Label the candidate step harmful if the update branch is worse than skip by at least `0.25` absolute accuracy points.",
+      "step7": "Compute a secondary cheap proxy label `pseudo_label_wrong = 1[predicted_label != true_label]` for the same candidate update points. Report both the direct sparse counterfactual label and the proxy label, but make the direct label the primary pilot target.",
+      "step8": "Compare FOCUS score, entropy, max-softmax, and a ReTA-style consistency score as harmful-update predictors under identical acceptance rates `{0.3, 0.5, 0.7}`. The consistency score uses exactly `2` light augmentations per image: `random resized crop [0.9,1.0]` and `horizontal flip`, and scores each image by average KL stability between the base prediction and the augmented predictions.",
+      "step9": "Advance to the full benchmark only if at least one of the two datasets shows all three conditions: empty-mask fallback below `15%`, FOCUS accepted-update precision at least `3` points above entropy at one matched acceptance rate, and FOCUS direct harmful-update AUPRC no worse than the ReTA-style consistency score by more than `0.02`. If the pilot fails, continue with the benchmark but record the study as a likely negative result."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run fair matched-rate baselines for StatA update gating",
+    "description": "Compare the proposed gate against both simple and strong existing alternatives while controlling update frequency so any gain cannot be explained by more conservative filtering alone.",
+    "steps": {
+      "step1": "Prediction-only baselines: evaluate zero-shot CLIP and plain StatA on every validation and test stream. These establish the no-adaptation and always-update references.",
+      "step2": "Simple matched-rate gate baseline: `StatA + entropy gate`. For each acceptance target in `{0.3, 0.5, 0.7}`, choose an entropy threshold on validation streams so the realized acceptance rate is within `+-0.03` of target, then freeze that threshold for test streams.",
+      "step3": "Second simple gate baseline: `StatA + max-softmax gate`, tuned and frozen with the same target acceptance rates and realized-rate tolerance as the entropy gate.",
+      "step4": "Strong reliability baseline: `StatA + CER gate`, where CER is the ReTA-style consistency score from the pilot. Use the same 2 augmentations, the same frozen backbone, and no extra adaptation head so the comparison isolates update selection rather than architectural changes.",
+      "step5": "Stronger fairness-control baseline: `StatA + CER gate + exact acceptance-rate control`, implemented by calibrating the CER threshold on validation streams and, if needed, applying per-stream percentile correction so its realized acceptance rate matches the target grid as closely as FOCUS. This baseline is mandatory because reviewers can otherwise attribute gains to conservative filtering rather than the object-centric signal.",
+      "step6": "Optional reference prior-art baseline: run SegDebias only if its released implementation can reuse the same frozen CLIP backbone and complete Waterbirds plus CounterAnimal evaluation within `<=1.25` GPU hours after caching. If not, evaluate it on Waterbirds only and mark it explicitly as a qualitative reference, not a matched-rate online gate baseline.",
+      "step7": "Execute all mandatory baselines for the full-study seeds `[7,17]` on Waterbirds and CounterAnimal test streams. After thresholds are frozen and the main comparison is complete, run the third seed `27` only for plain StatA, entropy gate, CER gate, and FOCUS at the single best common acceptance rate selected on validation streams."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate FOCUS as an object-centric write-safety gate",
+    "description": "Test the narrow hypothesis that object-centric evidence is a better update-safety signal for realistic StatA streams than standard reliability scores under the same acceptance-rate budget.",
+    "steps": {
+      "step1": "Use the base StatA prediction pipeline unchanged. Only the update decision is modified by FOCUS. For each test image, compute the full, foreground, and background embeddings with the frozen CLIP encoder and predict with the full-image view exactly as plain StatA does.",
+      "step2": "Define the default FOCUS score as `s_focus(x) = a(x) * (f(x) - lambda * b(x) - tau)`, where `a(x)` is full/foreground class agreement, `f(x)` is foreground support for the full-image predicted class, and `b(x)` is background dominance. The mandatory hyperparameter search space on validation streams is `lambda in {0.5, 0.75, 1.0}` and `tau in {0.0, 0.05, 0.1}`.",
+      "step3": "Use hard gating as the main method: update StatA only when `s_focus(x)` exceeds a threshold calibrated to match each target acceptance rate `{0.3, 0.5, 0.7}` on validation streams. Prediction always uses the standard full-image StatA pipeline; the object-centric views never replace the prediction feature.",
+      "step4": "Run FOCUS-StatA on Waterbirds and CounterAnimal for seeds `[7,17]` at all three matched acceptance rates. Choose one best common acceptance rate using only validation performance and then run the low-cost confirmation seed `27` only at that frozen rate.",
+      "step5": "Record for every stream batch: realized acceptance rate, accepted-update precision, rejected-update error rate, cumulative online accuracy, cumulative worst-group accuracy for Waterbirds, running mean and covariance norms of the StatA state, mean per-image latency, and peak GPU memory. Save all batch-level traces to `artifacts/results/focus_traces_<dataset>.csv`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate every novel component and rule out simple reproductions",
+    "description": "Test whether the observed gain is genuinely tied to the combined object-centric signal rather than any single component or a trivial reliability surrogate.",
+    "steps": {
+      "step1": "Ablation A, agreement-only: replace the FOCUS score with `a(x)` and calibrate its threshold to the same target acceptance rates. This tests whether foreground/full-label agreement alone explains the gain.",
+      "step2": "Ablation B, foreground-only: replace the score with `f(x)` and match acceptance rate exactly as in FOCUS. This tests whether simple high-confidence foreground evidence is sufficient.",
+      "step3": "Ablation C, background-only: use `-b(x)` as the gate score under the same acceptance-rate control. This tests whether rejecting strong-background samples alone reproduces the effect.",
+      "step4": "Ablation D, no-background combination: use `a(x) * f(x)` with the same thresholding. This isolates the effect of explicit background suppression in the full score.",
+      "step5": "Ablation E, soft weighting: replace hard gating with `w(x) = sigmoid(alpha * s_focus(x))`, tune `alpha in {5, 10, 20}`, and use the weight to scale the StatA update magnitude instead of skipping updates. This tests whether the hard gate itself matters.",
+      "step6": "Ablation F, independent mask sanity check: on exactly `128` validation images (`64` per dataset), recompute the foreground crop using one independent frozen saliency source such as DINOv2 attention or spectral residual saliency. Re-evaluate only FOCUS and plain StatA at the best validation-selected acceptance rate to test whether the signal disappears when the mask cue is not derived from CLIP attention.",
+      "step7": "Run Ablations A-D on both Waterbirds and CounterAnimal for seeds `[7,17]`. Run Ablations E-F on Waterbirds only unless the cumulative runtime after the main comparison is still below `7.25` hours. Never drop Ablations A-D, because they are the direct evidence that no simple variant reproduces the gain."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Use explicit success criteria, failure criteria, and seed policy",
+    "description": "Evaluate the study as a narrow empirical claim about update safety, not as a new general-purpose debiasing or reliability method.",
+    "steps": {
+      "step1": "Primary claim metric: on the sparse direct harmful-update labels, FOCUS must beat both entropy and max-softmax in mean AUPRC across Waterbirds and CounterAnimal at one matched acceptance rate, and it must be no worse than the CER gate by more than `0.02` AUPRC. If CER is clearly better, the central hypothesis is not supported.",
+      "step2": "Main downstream metric: averaged over the mandatory seeds `[7,17]`, FOCUS-StatA must improve over plain StatA by at least `1.0` absolute point on Waterbirds worst-group accuracy or CounterAnimal balanced accuracy at the chosen common acceptance rate. Smaller gains are reported but do not count as positive evidence for the proposal's claim.",
+      "step3": "Conservative-filtering check: at the same realized acceptance rate, FOCUS must outperform the exact-rate-controlled CER baseline or else the paper must conclude that object-centric evidence does not provide unique value beyond existing reliability filtering.",
+      "step4": "Simple-variant check: none of Ablations A-D may match FOCUS within `0.3` absolute points on both the primary harmful-update AUPRC metric and the main downstream metric. If any simple variant does, the full combined score is not justified.",
+      "step5": "Mask-validity check: if empty-mask fallback exceeds `20%` on either dataset or the independent-mask sanity check reverses the gain entirely, state clearly that the method is unstable because the object cue is too noisy or too self-confirming.",
+      "step6": "Seed policy: report all per-seed values, then mean and standard deviation over the mandatory seeds `[7,17]`. Use seed `27` only as a frozen-protocol confirmation run on the best common acceptance rate; if it disagrees with the 2-seed trend, report the inconsistency explicitly instead of averaging it away.",
+      "step7": "Save the final verdict to `artifacts/results/claim_check.json` with fields `pilot_pass`, `focus_beats_entropy`, `focus_beats_maxprob`, `focus_matches_or_beats_cer`, `simple_variants_fail_to_reproduce`, `runtime_within_budget`, and `overall_conclusion`."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate compact paper-ready evidence for the narrow claim",
+    "description": "Produce only the tables and figures needed to support or refute the update-safety claim and to position the work correctly against recent adjacent methods.",
+    "steps": {
+      "step1": "Table 1: main benchmark results on Waterbirds and CounterAnimal for zero-shot CLIP, plain StatA, entropy gate, max-softmax gate, CER gate, exact-rate-controlled CER gate, and FOCUS. Report overall accuracy, balanced accuracy, Waterbirds worst-group accuracy, realized acceptance rate, direct harmful-update AUPRC, accepted-update precision, per-image latency, and total runtime.",
+      "step2": "Table 2: ablations A-F with the same metrics, highlighting whether any simple object-centric component or soft weighting reproduces the full score.",
+      "step3": "Figure 1: cumulative online accuracy versus stream index for plain StatA, entropy gate, exact-rate-controlled CER gate, and FOCUS on the median Waterbirds seed. Overlay accepted-update counts per batch for the gated methods.",
+      "step4": "Figure 2: precision-recall curves for harmful-update prediction on the sparse direct labels, comparing entropy, max-softmax, CER, and FOCUS at the chosen common acceptance rate for Waterbirds and CounterAnimal.",
+      "step5": "Figure 3: qualitative grid of `12` examples showing full image, foreground crop, background image, predicted logits from each view, gate scores, and whether the update was accepted. Include at least `4` accepted-safe, `4` rejected-harmful, and `4` failure cases.",
+      "step6": "Figure 4: runtime breakdown bar chart separating rollout generation, extra-view encoding, gate scoring, and StatA update time, so the cost of object-centric evidence is visible instead of hidden.",
+      "step7": "Create `artifacts/reporting/related_work_matrix.csv` with rows `SegDebias`, `GS-Bias`, `ReTA`, `ACE`, `CRG`, `Fair Context Learning`, and `FOCUS`, and columns `uses_object_views`, `uses_reliability_filter`, `matched_acceptance_control`, `realistic_online_streams`, `targets_update_safety`, and `main_claim_scope`. This keeps the novelty positioning narrow and explicit."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Pre-commit the runtime budget and drop order",
+    "description": "Allocate the 8-hour envelope before execution so the core comparison survives even if optional stages are slower than expected.",
+    "steps": {
+      "step1": "Reserve `0.5` hours for environment checks, dependency verification, prompt caching, subset-file generation, and online stream creation.",
+      "step2": "Reserve `1.0` hours for the pilot: rollout masks, view construction, sparse harmful-update labels, and pilot matched-rate predictor comparison.",
+      "step3": "Reserve `1.0` hours for one-time embedding and logit caching on Waterbirds and CounterAnimal validation/test pools. Use the 4 CPU cores to overlap image loading, mask post-processing, and serialization while the GPU encodes images.",
+      "step4": "Reserve `1.75` hours for mandatory baselines on seeds `[7,17]`: zero-shot CLIP, plain StatA, entropy gate, and max-softmax gate across both datasets and the full acceptance-rate grid.",
+      "step5": "Reserve `1.25` hours for the strong reliability baselines on seeds `[7,17]`: CER and exact-rate-controlled CER. If these runs overrun, reduce the acceptance-rate grid from `{0.3, 0.5, 0.7}` to `{0.3, 0.5}` before dropping any baseline.",
+      "step6": "Reserve `1.0` hours for FOCUS on seeds `[7,17]` across the same acceptance-rate grid and for the single frozen-rate confirmation seed `27` on StatA, entropy, CER, and FOCUS.",
+      "step7": "Reserve `1.0` hours for ablations and the independent-mask sanity check. If runtime exceeds `7.5` hours, drop in this order only: Ablation F on CounterAnimal, soft-weighting Ablation E on CounterAnimal, SegDebias on CounterAnimal, SegDebias on Waterbirds. Never drop the exact-rate-controlled CER baseline, Ablations A-D, or the sparse direct harmful-update analysis.",
+      "step8": "Reserve the final `0.5` hours for tables, figures, `claim_check.json`, and `runtime_accounting.json`. Save actual wall-clock time per stage and any triggered drop-order decision so the final report documents budget-driven pruning honestly."
+    }
+  }
+]

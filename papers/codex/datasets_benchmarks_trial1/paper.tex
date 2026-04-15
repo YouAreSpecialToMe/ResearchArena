@@ -1,0 +1,328 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2023}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+
+\title{DriftAnswer-Py: A 12-Item Executable Pilot of Accepted Python Stack Overflow Answers Under Documented Library Drift}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\dataset}{\textsc{DriftAnswer-Py}}
+\newcommand{\valid}{\texttt{valid}}
+\newcommand{\needsupdate}{\texttt{needs\_update}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Accepted Stack Overflow answers remain a high-trust programming resource, but library evolution can silently age even highly upvoted code. We present \dataset, a small executable pilot benchmark centered on accepted Python answers whose breakage can be tied to documented \texttt{pandas} or \texttt{scikit-learn} drift. The benchmark is deliberately narrow: 12 accepted-answer items, deterministic harnesses, old/current version execution, official evidence packets, and reference repairs for stale cases. The released pilot contains 8 \needsupdate{} items and 4 \valid{} items; 10 items target \texttt{pandas} and 2 target \texttt{scikit-learn}. We evaluate a single local repair model, Qwen2.5-Coder-7B-Instruct, under closed-book, thread-only, authority-aware, and no-version authority-aware prompting, plus a deterministic evidence-derived baseline. The benchmark artifact succeeded, but the main modeling hypothesis did not: all four LLM prompting conditions achieved 0.000 needs-update repair pass rate, whereas the deterministic baseline reached 0.500 on \needsupdate{} items. This negative result matters for benchmark design: on this pilot, executable validation and official evidence were sufficient to expose stale accepted answers, but merely supplying the evidence to a 7B repair model did not translate into successful current-version repairs.
+\end{abstract}
+
+\section{Introduction}
+
+Stack Overflow answers remain a routine source of copied code, and accepted answers receive especially high trust. That trust is fragile under library evolution. API removals, renamings, and migration-induced behavior changes can turn an accepted answer into a stale artifact even when the answer was correct at publication time. Prior work has already established that Stack Overflow answers age \citep{Zhang2019}, that comments often contain maintenance signals \citep{Sheikhaei2023URC}, and that automated post updating is now a live research topic \citep{Mai2025TowardsBetterAnswers, Bappon2026}. At the same time, recent software-evolution benchmarks have shown the value of executable update artifacts grounded in reproducible environments \citep{reyes2024bump, reyes2025byam}.
+
+This leaves a narrow but still useful gap. We do not claim a new general task for answer updating. Instead, we target a specific benchmark unit: an accepted Python Stack Overflow answer whose status under library drift can be reproduced, justified from official documentation, and checked with a deterministic harness in both an old and a current environment. The resulting contribution is an artifact paper with a lightweight evaluation component, not a broad claim about Stack Overflow maintenance.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.5em]
+  \item We release \dataset, a 12-item executable pilot benchmark of accepted Python Stack Overflow answers tied to documented \texttt{pandas} or \texttt{scikit-learn} drift, with per-item thread snapshots, official evidence, old/current run results, and reference repairs.
+  \item We define a conservative evaluation protocol for this setting: a primary binary label (\valid{} versus \needsupdate{}), deterministic harness-based scoring, and paired prompt conditions that isolate closed-book, thread-only, and official-evidence context.
+  \item We show a clear negative result on this pilot: authority-aware prompting did not improve executable repair over closed-book or thread-only prompting, while a deterministic evidence-derived baseline repaired 50.0\% of \needsupdate{} items.
+\end{itemize}
+
+The benchmark is intentionally small and should be read as a pilot. From 20 screened candidates, 12 were retained, and the final release is pandas-heavy (10 \texttt{pandas}, 2 \texttt{scikit-learn}). All 8 \needsupdate{} items fell into the exploratory subtype \texttt{partially\_stale}, not \texttt{obsolete}. These choices narrow the claims, but they also keep the artifact reproducible and reviewer-verifiable.
+
+Section~\ref{sec:related} positions the benchmark against adjacent work on obsolete answers, Stack Overflow updating, and executable update benchmarks. Section~\ref{sec:method} describes the benchmark design and evaluation protocol. Section~\ref{sec:experiments} reports construction statistics, main results, and the version-anchoring ablation. Section~\ref{sec:discussion} discusses what the negative result implies and where the pilot remains limited.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Obsolete and maintainable Stack Overflow content.}
+\citet{Zhang2019} showed that Stack Overflow answers do become obsolete, establishing the basic motivation for answer-maintenance research. \citet{Sheikhaei2023URC} studied update-request comments in Stack Overflow answer posts, showing that comments can act as maintenance signals. These papers motivate our task setting, but neither produces a small executable benchmark in which accepted answers are validated in both old and current library environments with official evidence packets.
+
+\paragraph{Automated Stack Overflow post updating and answer enhancement.}
+\citet{Mai2025TowardsBetterAnswers} introduce Soup, a system for automated Stack Overflow post updating guided by thread context. \citet{Bappon2026} study feedback-guided enhancement of programming answers with LLMs. These works are broader and more ambitious than ours: they target post updating or enhancement as a modeling problem. By contrast, \dataset{} is narrower and artifact-first. Our benchmark unit is the accepted answer under documented library drift, and our strongest claim is only about the value of releasing executable old/current adjudication for that unit.
+
+\paragraph{Executable software-update benchmarks and API evolution.}
+Recent work has built executable benchmarks for breaking dependency updates \citep{reyes2024bump, reyes2025byam} and evaluated LLMs under API evolution \citep{Wang2025, zhuo2025apimisuse, Liu2025}. These are the closest methodological precedents for our executable setup. However, their unit of analysis is generated code, project-level dependency breakage, or API-update editing in general, rather than accepted Stack Overflow answers with preserved thread context. Table~\ref{tab:positioning} summarizes this positioning.
+
+\paragraph{Coding-assistance benchmarks.}
+General coding-assistance benchmarks such as StackEval \citep{Shah2024} and CAB \citep{Kim2026} evaluate broader assistant behavior. They are useful context for model evaluation, but they do not isolate accepted-answer trust under library drift. Unlike this broader benchmark family, our pilot emphasizes old/current execution, official drift evidence, and minimal reference repairs.
+
+\begin{table}[t]
+\caption{Positioning of \dataset{} relative to closely related benchmark families.}
+\label{tab:positioning}
+\centering
+\small
+\begin{tabular}{p{0.28\linewidth}cccc}
+\toprule
+Work & Accepted-answer focus & Official drift evidence & Old/current execution & Reference repairs \\
+\midrule
+\dataset{} & yes & yes & yes & yes \\
+Obsolete SO answer studies & partial & no & no & no \\
+Soup \citep{Mai2025TowardsBetterAnswers} & no & comments & no & generated \\
+ReSOlve/AUTOCOMBAT \citep{Bappon2026} & no & feedback & no & generated \\
+BUMP-like executable update benchmarks & no & project artifacts & yes & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Benchmark Unit and Inclusion Criteria}
+
+Each \dataset{} item is an accepted Stack Overflow answer tagged with Python plus exactly one target library, paired with a deterministic harness and official evidence packet. The release focuses on \texttt{pandas} and \texttt{scikit-learn}. An item is retained only if the answer code is compact enough to execute locally, the intended behavior can be checked deterministically, and the current failure mode can be justified from official library sources rather than third-party commentary.
+
+The final release contains, for each item, a thread snapshot, metadata, evidence links and summaries, old/current dependency requirements, old/current execution outputs, and a minimal reference repair for \needsupdate{} cases. Old/current versions were fixed per library family in the released artifact: \texttt{pandas~1.5.3} versus \texttt{pandas~2.3.3}, and \texttt{scikit-learn~1.1.3} versus \texttt{scikit-learn~1.7.2}.
+
+\subsection{Labels and Execution Protocol}
+
+The primary label space is binary:
+\begin{itemize}[leftmargin=1.5em]
+  \item \valid: the accepted answer still works as intended in the current environment without material code changes.
+  \item \needsupdate: the accepted answer no longer works as intended in the current environment, but a minimal working repair is available.
+\end{itemize}
+
+The benchmark also stores an exploratory secondary label. In this pilot, all 8 \needsupdate{} items were marked \texttt{partially\_stale}; none required an \texttt{obsolete} label. This outcome further supports treating the binary label as the main task.
+
+Item execution is deterministic. Let $x_i$ denote item $i$, let $a_i$ denote the accepted answer code, and let $h_i(\cdot)$ be the item-specific harness. The artifact stores three canonical runs when available:
+\begin{align*}
+h_i(a_i; v_i^{\text{old}}), \quad h_i(a_i; v_i^{\text{cur}}), \quad h_i(r_i; v_i^{\text{cur}}),
+\end{align*}
+where $r_i$ is the minimal reference repair. The primary benchmark label is determined from the current run, but the old/current pair and official evidence make the drift rationale auditable.
+
+\subsection{Prompt Conditions}
+
+We evaluate one deterministic baseline and four model conditions.
+
+\paragraph{Rule baseline.}
+The deterministic baseline first executes the accepted answer unchanged in the current environment. If it passes, the baseline predicts \valid. Otherwise it predicts \needsupdate{} and performs BM25 retrieval over the item's official evidence snippets. It emits a templated repair only when the evidence exposes a direct, safe replacement such as \texttt{append} $\rightarrow$ \texttt{concat}, \texttt{iteritems()} $\rightarrow$ \texttt{items()}, or \texttt{get\_feature\_names()} $\rightarrow$ \texttt{get\_feature\_names\_out()}.
+
+\paragraph{Closed-book.}
+The model receives the thread snapshot and the accepted answer code, but no selected comments, version strings, or official evidence.
+
+\paragraph{Thread-only.}
+The model receives the thread snapshot plus selected comments when they were retained in the item metadata, but no official evidence.
+
+\paragraph{Authority-aware.}
+The model receives the thread snapshot, the accepted answer code, the old/current version strings, and the top-3 BM25-ranked official evidence snippets from the per-item evidence packet.
+
+\paragraph{Authority-aware without version strings.}
+This ablation removes the explicit old/current version strings while leaving the same evidence snippets in place.
+
+All LLM conditions use the same model and decoding settings: Qwen2.5-Coder-7B-Instruct served through vLLM with tensor parallelism $=1$, \texttt{float16}, maximum context length 8192, GPU memory utilization 0.85, temperature 0.2, top-$p$ 0.95, and a 512-token generation cap. Runs are repeated with seeds 17, 23, and 42. Outputs must be valid JSON with fields for the predicted binary label, repaired code, and rationale; one automatic retry is allowed for malformed JSON.
+
+\subsection{Metrics}
+
+For each condition $c$, let $\mathcal{D}_{nu}$ be the set of items labeled \needsupdate. We report:
+\begin{align*}
+\text{BinaryAcc}(c) &= \frac{1}{|\mathcal{D}|}\sum_{i \in \mathcal{D}} \mathbf{1}[\hat{y}_{i,c}=y_i], \\
+\text{RepairPass}_{nu}(c) &= \frac{1}{|\mathcal{D}_{nu}|}\sum_{i \in \mathcal{D}_{nu}} \mathbf{1}[\hat{y}_{i,c}=\texttt{needs\_update} \land h_i(\hat{r}_{i,c}; v_i^{\text{cur}})=1].
+\end{align*}
+We also report valid-label accuracy, malformed-output rate, no-repair rate, edit distance to the reference repair, and mean latency. Because the benchmark is tiny and fixed, we report Wilson intervals for pooled rates and paired bootstrap confidence intervals for differences in \text{RepairPass}$_{nu}$ rather than null-hypothesis significance tests.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{figures/benchmark_flow.pdf}
+\caption{Benchmark construction overview. The pilot screens 20 candidate threads, retains 12 release items, and explicitly records both backups and screening failures in the candidate log.}
+\label{fig:flow}
+\end{figure}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Construction Report}
+
+Figure~\ref{fig:flow} and Table~\ref{tab:benchmark} summarize the released artifact. We screened 20 candidates and retained 12 release items, with 4 additional backups and 4 screened-out cases recorded in the candidate log. Among the screen-outs, one item failed because its historical runnable version was not reconstructed on the Python~3.11 host, while the others were excluded because the accepted answer was too expository or insufficiently harnessable. The final pilot is heavily skewed toward \texttt{pandas} (10 items) with only 2 \texttt{scikit-learn} items. The binary label distribution is 8 \needsupdate{} and 4 \valid.
+
+Annotation was intentionally lightweight and honest. One primary annotator reviewed all 12 items, and a calibration subset of 4 items was revisited in annotation notes. Because subtype confidence was highest for local API migrations, all 8 stale items were retained as \texttt{partially\_stale}. No train/test split was created; the 12-item release is the fixed evaluation set.
+
+\begin{table}[t]
+\caption{Released benchmark statistics for \dataset{}.}
+\label{tab:benchmark}
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Statistic & Value \\
+\midrule
+Screened candidates & 20 \\
+Selected release items & 12 \\
+Backups in candidate log & 4 \\
+Screened-out candidates & 4 \\
+\texttt{pandas} items & 10 \\
+\texttt{scikit-learn} items & 2 \\
+\needsupdate{} items & 8 \\
+\valid{} items & 4 \\
+\texttt{partially\_stale} items & 8 \\
+\texttt{obsolete} items & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experimental Setup}
+
+Experiments were run in a Python~3.11.15 environment on a single NVIDIA RTX A6000 GPU with 49{,}140~MiB of VRAM, using \texttt{torch~2.4.0+cu121}, \texttt{vllm~0.6.3.post1}, and \texttt{transformers~4.46.3}. The host exposed 32 CPU cores, but the recorded effective CPU budget was 4 cores. This setup differs slightly from the original plan because the planned \texttt{numpy~2.1.*} pin was incompatible with the chosen vLLM stack; the released environment records the closest feasible Python~3.11 configuration rather than hiding the mismatch.
+
+All evaluation metrics are computed by replaying the same deterministic harnesses used for benchmark adjudication. A model repair receives credit only if the model predicts \needsupdate{}, emits executable replacement code, and that replacement passes the current harness. This stricter scorer matters because it removes inflated interpretations that would otherwise count a correct \valid{} prediction as repair success on stale items.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main-results} reports the main results. The benchmark artifact succeeded, but the main modeling hypothesis failed. The authority-aware condition achieved the same binary accuracy as closed-book and thread-only prompting (0.333) and the same \needsupdate{} repair pass rate (0.000). The version-free authority ablation performed slightly worse in binary accuracy (0.306) and introduced a 0.028 malformed-output rate, but it also repaired none of the stale items.
+
+The deterministic rule baseline sharply outperformed the LLM conditions on this pilot. It achieved perfect binary accuracy and repaired 4 of 8 \needsupdate{} items, yielding a \needsupdate{} repair pass rate of 0.500. This is still far from solved, but it shows that a narrow evidence-grounded baseline can be more effective than a general 7B repair model when the benchmark is dominated by direct, documented API migrations.
+
+The LLM pattern is especially stark. All LLM conditions had valid-label accuracy 1.000 and \needsupdate{} label accuracy 0.000. This implies that, on this pilot, the model effectively trusted the accepted answer on every item. No LLM condition over-edited any gold-\valid{} item, but none of them attempted a successful repair on a stale one.
+
+\begin{table*}[t]
+\caption{Main results on \dataset{}. Best values in each column are in \textbf{bold}. Higher is better for accuracy and repair pass rate; lower is better for malformed rate and latency. Wilson intervals are pooled over all item-seed outcomes.}
+\label{tab:main-results}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Condition & Binary Acc. $\uparrow$ & Needs-update Acc. $\uparrow$ & Needs-update Repair Pass $\uparrow$ & Malformed $\downarrow$ & Mean Latency (s) $\downarrow$ \\
+\midrule
+rule baseline & \textbf{1.000} & \textbf{1.000} & \textbf{0.500} & \textbf{0.000} & \textbf{0.000} \\
+closed-book & 0.333 & 0.000 & 0.000 & 0.000 & 1.997 \\
+thread-only & 0.333 & 0.000 & 0.000 & 0.000 & 1.972 \\
+authority-aware & 0.333 & 0.000 & 0.000 & 0.000 & 2.054 \\
+authority-aware, no versions & 0.306 & 0.000 & 0.000 & 0.028 & 2.903 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Ablation and Item-Level Analysis}
+
+The version-anchoring ablation does not rescue the main hypothesis. Authority-aware prompting and authority-aware prompting without version strings both achieve 0.000 \needsupdate{} repair pass rate. The paired bootstrap difference between authority-aware and thread-only prompting is exactly 0.000 with a 95\% confidence interval of [0.000, 0.000]; the same holds for authority-aware versus closed-book and authority-aware versus the no-version ablation. On this release, there is therefore no item-level evidence that official evidence improved executable repair for the chosen model.
+
+Figure~\ref{fig:heatmap} visualizes the per-item outcome pattern for \needsupdate{} cases. The zero-pass rows across LLM conditions are not an artifact of averaging: none of the stale items were repaired in any seed. By contrast, the deterministic baseline succeeds on a subset of direct replacement cases such as \texttt{append} $\rightarrow$ \texttt{concat} and \texttt{get\_feature\_names} $\rightarrow$ \texttt{get\_feature\_names\_out}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/needs_update_heatmap.pdf}
+\caption{Per-item repair outcomes on the 8 \needsupdate{} items. The deterministic baseline succeeds on a subset of direct migration cases, while all LLM prompting conditions remain at zero executable repairs across seeds.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Qualitative Cases}
+
+Table~\ref{tab:qualitative} shows representative cases. The stale items are largely local migration problems, not open-ended reimplementations. This partly explains why a templated evidence-derived baseline can succeed. It also sharpens the negative result for the LLM conditions: even when the evidence packet names the replacement directly, merely exposing those snippets in the prompt did not induce an executable repair.
+
+\begin{table*}[t]
+\caption{Representative benchmark items. All quoted code snippets are abbreviated from the released artifact.}
+\label{tab:qualitative}
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{0.19\linewidth}p{0.12\linewidth}p{0.24\linewidth}X}
+\toprule
+Item & Label & Current outcome & Reference repair / evidence \\
+\midrule
+\texttt{pandas\_append\_rbind} & \needsupdate{} & \texttt{AttributeError} from \texttt{Frame.append(...)} under current \texttt{pandas} & Replace \texttt{append} with \texttt{pd.concat([...], ignore\_index=True)}; supported by \texttt{append\_deprecation} and \texttt{append\_removal}. \\
+\texttt{pandas\_lookup\_subset\_string} & \needsupdate{} & \texttt{AttributeError} from \texttt{DataFrame.lookup} & Replace \texttt{lookup} with explicit NumPy indexing after column alignment; supported by \texttt{lookup\_deprecation} and \texttt{lookup\_removal}. \\
+\texttt{sklearn\_get\_feature\_names\_ct} & \needsupdate{} & \texttt{AttributeError} from \texttt{get\_feature\_names(...)} & Replace \texttt{get\_feature\_names} with \texttt{get\_feature\_names\_out}; supported by \texttt{gfn\_deprecation} and \texttt{gfn\_removal}. \\
+\texttt{pandas\_rolling\_mean\_replacement} & \valid{} & Current harness passes using \texttt{ts\_log.rolling(12).mean()} & This is a preserved valid migration answer rather than a stale accepted answer; evidence notes the move away from top-level \texttt{rolling\_mean}. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The central result of this paper is negative but still informative. On this pilot, official evidence packets were useful for benchmark construction and for a narrow deterministic baseline, yet they did not help a 7B LLM execute successful current-version repairs. The most plausible interpretation is not that documentation is irrelevant, but that this prompting setup failed to turn evidence retrieval into action. Because all LLM conditions achieved perfect valid-label accuracy and zero stale-item accuracy, the model appears to have defaulted to trusting the accepted answer rather than using the evidence to challenge it.
+
+The release has several obvious limitations. First, it is small: only 12 items. Second, it is imbalanced: 10 items come from \texttt{pandas}, so the current evidence is predominantly about pandas-style API migration rather than cross-library generalization. Third, all stale items are \texttt{partially\_stale}; the pilot does not meaningfully test harder \texttt{obsolete} cases where the full solution path must change. Fourth, only one LLM family was evaluated, so the negative result should not be generalized to all repair-capable models.
+
+There are also benchmark-construction limits. Historical reconstruction was intentionally pragmatic rather than exhaustive, and one plausible candidate was screened out because its old environment was not rebuilt on the Python~3.11 host. The annotation protocol used one primary annotator plus a small calibration subset, not full dataset-wide dual adjudication. These are acceptable compromises for a pilot artifact paper, but they matter for any attempt to scale the benchmark into a community resource.
+
+Finally, the benchmark design itself may favor deterministic baselines on some items. Direct API replacements are real maintenance problems, but they are also a best-case scenario for template-driven repair. Future expansions should deliberately include more semantically involved drifts, broader library coverage, and richer failure taxonomies.
+
+\section{Conclusion}
+
+This paper introduced \dataset, a 12-item executable pilot benchmark of accepted Python Stack Overflow answers under documented library drift. The artifact combines accepted-answer focus, official evidence packets, old/current execution, and reference repairs in a way that is narrow but reproducible. In the released pilot, 8 of 12 items require updates and 4 remain valid; the retained set is pandas-heavy, with 10 \texttt{pandas} items and 2 \texttt{scikit-learn} items.
+
+The benchmark-level conclusion is positive: it is feasible to package accepted-answer drift as a reviewer-auditable executable artifact. The modeling conclusion is negative: on this pilot, authority-aware prompting did not improve executable repair over closed-book or thread-only prompting, and all LLM conditions remained at 0.000 \needsupdate{} repair pass rate. The deterministic evidence-derived baseline reached 0.500 on stale items, suggesting that strong progress in this setting may require tighter integration between evidence retrieval, migration-specific reasoning, and executable validation rather than simply adding documentation snippets to a prompt.
+
+The most useful next step is not to overclaim from 12 items, but to scale the artifact carefully: broaden library coverage, add harder obsolete cases, strengthen multi-annotator review, and test whether stronger repair models can actually exploit the evidence packets that this pilot makes explicit.
+
+\begin{thebibliography}{99}
+
+\bibitem[Bappon et~al.(2026)Bappon, Mondal, Roy, and Schneider]{Bappon2026}
+Suborno Deb Bappon, Saikat Mondal, Chanchal K. Roy, and Kevin Schneider.
+\newblock Human-aligned enhancement of programming answers with LLMs guided by user feedback.
+\newblock \emph{arXiv preprint arXiv:2601.17604}, 2026.
+
+\bibitem[Kim et~al.(2026)Kim, Garg, Ray, Kumar, and Deoras]{Kim2026}
+Myeongsoo Kim, Shweta Garg, Baishakhi Ray, Varun Kumar, and Anoop Deoras.
+\newblock CodeAssistBench (CAB): Dataset \& benchmarking for multi-turn chat-based code assistance.
+\newblock \emph{arXiv preprint arXiv:2507.10646}, 2026.
+
+\bibitem[Liu et~al.(2025)Liu, Pandit, Ye, Choi, and Durrett]{Liu2025}
+Zeyu Leo Liu, Shrey Pandit, Xi Ye, Eunsol Choi, and Greg Durrett.
+\newblock CodeUpdateArena: Benchmarking knowledge editing on API updates.
+\newblock \emph{arXiv preprint arXiv:2407.06249}, 2025.
+
+\bibitem[Mai et~al.(2025)Mai, Gao, Wang, Bi, Hu, Xia, and Sun]{Mai2025TowardsBetterAnswers}
+Yubo Mai, Zhipeng Gao, Haoye Wang, Tingting Bi, Xing Hu, Xin Xia, and Jianling Sun.
+\newblock Towards better answers: Automated Stack Overflow post updating.
+\newblock In \emph{Proceedings of the IEEE/ACM International Conference on Software Engineering (ICSE) Research Track}, 2025.
+
+\bibitem[Ramos et~al.(2023)Ramos, Mitchell, Lynce, Manquinho, Martins, and Le~Goues]{ramos2023melt}
+Daniel Ramos, Hailie Mitchell, In{\^e}s Lynce, Vasco Manquinho, Ruben Martins, and Claire Le Goues.
+\newblock MELT: Mining effective lightweight transformations from pull requests.
+\newblock In \emph{Proceedings of the IEEE/ACM International Conference on Automated Software Engineering (ASE)}, 2023.
+
+\bibitem[Reyes et~al.(2024)Reyes, Gamage, Skoglund, Baudry, and Monperrus]{reyes2024bump}
+Frank Reyes, Yogya Gamage, Gabriel Skoglund, Benoit Baudry, and Martin Monperrus.
+\newblock BUMP: A benchmark of reproducible breaking dependency updates.
+\newblock In \emph{Proceedings of the IEEE International Conference on Software Analysis, Evolution and Reengineering (SANER)}, 2024.
+
+\bibitem[Reyes et~al.(2025)Reyes, Mahmoud, Bono, Nadi, Baudry, and Monperrus]{reyes2025byam}
+Frank Reyes, May Mahmoud, Federico Bono, Sarah Nadi, Benoit Baudry, and Martin Monperrus.
+\newblock Byam: Fixing breaking dependency updates with large language models.
+\newblock \emph{arXiv preprint arXiv:2505.07522}, 2025.
+
+\bibitem[Shah et~al.(2024)Shah, Genc, and Araci]{Shah2024}
+Nidhish Shah, Zulkuf Genc, and Dogu Araci.
+\newblock StackEval: Benchmarking LLMs in coding assistance.
+\newblock \emph{arXiv preprint arXiv:2412.05288}, 2024.
+
+\bibitem[Sheikhaei et~al.(2023)Sheikhaei, Tian, and Wang]{Sheikhaei2023URC}
+Mohammad Sadegh Sheikhaei, Yuan Tian, and Shaowei Wang.
+\newblock A study of update request comments in Stack Overflow answer posts.
+\newblock \emph{Journal of Systems and Software}, 198, 2023.
+
+\bibitem[Wang et~al.(2025)Wang, Huang, Zhang, Feng, Zhang, Liu, and Peng]{Wang2025}
+Chong Wang, Kaifeng Huang, Jian Zhang, Yebo Feng, Lyuye Zhang, Yang Liu, and Xin Peng.
+\newblock LLMs meet library evolution: Evaluating deprecated API usage in LLM-based code completion.
+\newblock \emph{arXiv preprint arXiv:2406.09834}, 2025.
+
+\bibitem[Zhang et~al.(2019)Zhang, Wang, Chen, Zou, and Hassan]{Zhang2019}
+Haoxiang Zhang, Shaowei Wang, Tse-Hsun Chen, Ying Zou, and Ahmed E. Hassan.
+\newblock An empirical study of obsolete answers on Stack Overflow.
+\newblock \emph{arXiv preprint arXiv:1903.12282}, 2019.
+
+\bibitem[Zhuo et~al.(2025)Zhuo, He, Sun, Xing, Lo, Grundy, and Du]{zhuo2025apimisuse}
+Terry Yue Zhuo, Junda He, Jiamou Sun, Zhenchang Xing, David Lo, John Grundy, and Xiaoning Du.
+\newblock Identifying and mitigating API misuse in large language models.
+\newblock \emph{IEEE Transactions on Software Engineering}, 2025.
+
+\end{thebibliography}
+
+\end{document}

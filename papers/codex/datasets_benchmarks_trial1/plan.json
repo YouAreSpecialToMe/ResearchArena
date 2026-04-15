@@ -1,0 +1,153 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Prepare Reproducible Host And Inference Environment",
+    "description": "Set up one reproducible software environment for benchmark construction, local inference, harness execution, scoring, and plotting within the single-machine budget.",
+    "steps": {
+      "step1": "Create one host Python 3.11 environment with pinned packages for all non-item-specific work: torch==2.4.*, vllm==0.6.*, transformers==4.46.*, accelerate==0.34.*, pandas==2.2.*, scikit-learn==1.5.*, numpy==2.1.*, scipy==1.14.*, matplotlib==3.9.*, seaborn==0.13.*, rank-bm25==0.2.*, jsonschema==4.23.*, pytest==8.3.*, and requests==2.32.*.",
+      "step2": "Record machine metadata in results/env_config.json including GPU model, VRAM, CUDA version, CPU count, RAM, OS, Python version, package versions, git commit hash, and current date March 21, 2026.",
+      "step3": "Cache exactly one local model for all LLM conditions to keep comparisons fair and feasible: Qwen2.5-Coder-7B-Instruct served with vLLM using tensor_parallel_size=1, dtype=float16, max_model_len=8192, and GPU memory utilization capped conservatively at 0.85 for the RTX A6000 48GB.",
+      "step4": "Use the same generation settings for every LLM condition and every seed: temperature=0.2, top_p=0.95, max_new_tokens=512, stop strings matching the JSON schema terminator, and one automatic retry only for malformed JSON outputs.",
+      "step5": "Fix the random seeds to [17, 23, 42] for all stochastic runs. Because the machine has only 1 GPU, run GPU inference conditions sequentially and overlap only CPU-side artifact validation, scoring, and plotting across the 4 CPU cores."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Mine And Triage A Small Candidate Pool",
+    "description": "Collect only enough Stack Overflow threads to support a 12-item executable pilot, avoiding oversized screening promises that do not fit the budget.",
+    "steps": {
+      "step1": "Restrict the benchmark to two libraries only: pandas and scikit-learn. Require thread tags to include python and exactly one target library tag from {pandas, scikit-learn}.",
+      "step2": "Retrieve candidates from Stack Exchange metadata sources for coarse filtering, Stack Exchange API for accepted-answer linkage and timestamps, and StackPrinter for stable exports of question text, accepted answer text, and selected comments.",
+      "step3": "Keep a candidate only if the accepted answer contains one main Python code block of roughly 5-35 lines, the answer is at least 18 months old, the task can be executed locally without network access, and the suspected failure can plausibly be tied to documented library evolution rather than unrelated dependency breakage.",
+      "step4": "Rank candidates with explicit stale-signal heuristics: comments mentioning deprecated, removed, renamed, changed, no longer works, version strings, or migration hints; answer snippets containing APIs listed in official release notes; and older answers attached to historically high-churn APIs in pandas or scikit-learn.",
+      "step5": "Screen only 20-30 candidates and stop once 12 executable items plus at most 3 backup items appear feasible. Save benchmark/candidate_log.jsonl with post IDs, library, answer date, suspected drift API, screening decision, and exclusion reason."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build The 12-Item Executable Pilot Artifact",
+    "description": "Construct a narrow benchmark artifact whose primary label space is binary valid versus needs_update, with exploratory three-way subtype labels only when confidence is high.",
+    "steps": {
+      "step1": "Fix the release target at exactly 12 core items, not 15-18. Aim for roughly balanced library coverage, such as 6 pandas and 6 scikit-learn items when available, but do not force artificial class balancing.",
+      "step2": "For each retained item, choose one historically plausible old version aligned with the answer timestamp and documented API availability, and one current version corresponding to the stable March 21, 2026 release line used during collection.",
+      "step3": "Use only official authority sources to justify drift: pandas and scikit-learn API docs, whats-new pages, migration guides, deprecation notices, and official release notes. Use PyPI or project release pages only to confirm version timing.",
+      "step4": "Create one deterministic offline harness per item that executes the accepted-answer code against fixed bundled inputs and returns a structured verdict. The harness must record pass or fail, exception type if any, and task-relevant assertions such as output shape, column names, numeric values, or estimator behavior.",
+      "step5": "Require these files for every item: metadata.json, thread.md, evidence.md, label.json, old_requirements.txt, current_requirements.txt, harness.py, results_old.json, results_current.json, and reference_repair.py for items labeled needs_update. Include optional selected comments only if they contain explicit stale signals.",
+      "step6": "Drop any candidate that cannot be rebuilt in a plausible old environment within a short bounded effort, whose current failure cannot be linked to official documentation, or whose intended behavior is too ambiguous for a deterministic harness."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Assign Labels And Freeze Evaluation Items",
+    "description": "Use a feasible labeling protocol that matches the small-pilot claim and avoids overpromising full dual annotation.",
+    "steps": {
+      "step1": "Use one primary annotator for all 12 items. Assign the primary binary label valid if the accepted answer still works as intended in the current environment without material code changes, else needs_update if a minimal working repair can be demonstrated.",
+      "step2": "For needs_update items, add an exploratory secondary subtype only when confidence is high: partially_stale if the original strategy remains intact and only a local patch is needed, or obsolete if the current fix requires a materially different solution path.",
+      "step3": "Use one secondary reviewer only on a calibration subset of 3-4 items spanning both libraries and at least one candidate subtype boundary. Record agreement notes in benchmark/annotation_notes.md rather than promising dataset-wide two-annotator adjudication.",
+      "step4": "If subtype agreement on the calibration subset is weak or ambiguous, keep the public release focused on the binary label and treat partially_stale versus obsolete only as non-core metadata in label.json.",
+      "step5": "Do not create train or test splits for the benchmark items because 12 items is too small for stable split-based claims. Freeze the full 12-item set as the evaluation set, and use at most 2 non-release backup items for prompt-format debugging only."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Simple Executable And Rule-Based Baseline",
+    "description": "Provide a low-cost baseline that does not depend on generative model reasoning and establishes the minimum value of simple execution checks and templated repairs.",
+    "steps": {
+      "step1": "First apply the accepted answer unchanged in the current environment. Predict valid if the original answer passes the current harness exactly; otherwise predict needs_update.",
+      "step2": "For items predicted needs_update, run a deterministic BM25 retrieval over the per-item official evidence packet and extract the single highest-ranked documented replacement or migration hint if one exists.",
+      "step3": "Emit a templated repair only when the evidence packet names a direct API replacement, rename, or parameter migration; otherwise return no repair. This keeps the simple baseline honest rather than pretending to solve open-ended repairs.",
+      "step4": "Score the baseline on binary label accuracy, current-environment repair pass rate, needs_update-only repair pass rate, no-repair rate, and mean CPU runtime per item."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run True Closed-Book LLM Baseline",
+    "description": "Test the proposal's explicit closed-book hypothesis with no comments and no official documentation.",
+    "steps": {
+      "step1": "Prompt Qwen2.5-Coder-7B-Instruct with only the Stack Overflow question, the accepted answer, and the required output schema. Do not include selected comments, documentation snippets, or evidence identifiers in this condition.",
+      "step2": "Require JSON output with fields predicted_binary_label, repaired_code, and rationale. Allow repaired_code to be empty only when the model predicts valid or explicitly cannot repair the item.",
+      "step3": "Run all 12 items for each seed in [17, 23, 42] using the shared decoding settings, validate JSON automatically, and execute any emitted repaired code in the current environment with the same harness used for the benchmark labels.",
+      "step4": "Report binary label accuracy, overall repair pass rate, needs_update-only repair pass rate, malformed-output rate, mean latency per item, and the number of items for which the model changes code despite the gold label being valid."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Strong Thread-Only LLM Baseline",
+    "description": "Measure how much improvement comes from Stack Overflow thread context alone without official documentation.",
+    "steps": {
+      "step1": "Prompt the same Qwen2.5-Coder-7B-Instruct model with the question, accepted answer, and up to 3 selected comments with the strongest stale-signal heuristics. Exclude all official documentation snippets in this condition.",
+      "step2": "Keep the output schema identical to the closed-book baseline so the manipulated variable is only the availability of thread comments.",
+      "step3": "Run the same 12 items and 3 seeds with the same decoding hyperparameters and the same one-retry JSON repair policy. Store outputs in results/thread_only/seed_<seed>/predictions.jsonl and execution.jsonl.",
+      "step4": "Report the same metrics as the closed-book baseline so comparisons are directly paired at the item level."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run Authority-Aware LLM Condition",
+    "description": "Test the main artifact claim that official evidence packets help current-version repair beyond closed-book and thread-only prompting.",
+    "steps": {
+      "step1": "Prompt Qwen2.5-Coder-7B-Instruct with the question, accepted answer, current version string, old version string, and top-k official evidence snippets only. Exclude Stack Overflow comments so the comparison against thread-only stays interpretable.",
+      "step2": "Fix k=3 official snippets per item unless the evidence packet is shorter. Choose snippets by BM25 over the item-specific evidence.md using API names from the accepted answer as queries; do not tune k on the 12 release items.",
+      "step3": "Use the same JSON schema, the same decoding settings, and the same 3 random seeds as the closed-book and thread-only conditions. Store outputs in results/authority_aware/seed_<seed>/predictions.jsonl and execution.jsonl.",
+      "step4": "Evaluate binary label accuracy, overall repair pass rate, needs_update-only repair pass rate, malformed-output rate, mean latency, and per-library repair pass rate. The core claim is supported only if this condition improves on both closed-book and thread-only prompting for needs_update items."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate The Claimed Information Sources",
+    "description": "Measure whether any improvement is actually attributable to official documentation, thread comments, and explicit version anchoring rather than uncontrolled prompt changes.",
+    "steps": {
+      "step1": "Ablation A, documentation effect: compare authority-aware against the true closed-book baseline to test whether adding official evidence improves repair over no external context.",
+      "step2": "Ablation B, docs versus thread context: compare authority-aware against the thread-only baseline to test whether official evidence is more useful than selected comments for this benchmark.",
+      "step3": "Ablation C, version anchoring: rerun the authority-aware prompt once per seed with the old and current version strings removed while leaving the same official snippets in place. Use this to test whether explicit dual-version context matters beyond raw documentation.",
+      "step4": "Treat any hybrid comments-plus-docs prompt as optional exploratory analysis only if time remains after the core three conditions and the version-anchoring ablation complete. Do not include a hybrid result in the main success criteria."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Score The Benchmark Artifact And Model Conditions",
+    "description": "Evaluate both the released benchmark and the LLM repair conditions using metrics that are realistic for a 12-item pilot artifact.",
+    "steps": {
+      "step1": "Benchmark construction metrics: number of mined candidates, number screened, number dropped for ambiguity, number dropped for irreproducible historical environments, final item count, per-library counts, binary label counts, and optional exploratory subtype counts if subtype confidence is strong.",
+      "step2": "Primary method metrics: binary label accuracy on valid versus needs_update, overall current-version repair pass rate, and needs_update-only repair pass rate. Treat needs_update-only repair pass rate as the main method metric because it directly tests the repair claim.",
+      "step3": "Secondary method metrics: malformed-output rate, no-repair rate, mean latency per item, per-library repair pass rate, and mean edit distance between model repair and reference repair for items labeled needs_update.",
+      "step4": "For each metric, report per-seed values and the mean across seeds. Because the benchmark items are fixed and small, do not overclaim statistical power; instead use paired item-level comparisons and 95 percent bootstrap confidence intervals with 5000 resamples for differences in repair pass rate between conditions.",
+      "step5": "Define explicit failure criteria: the central hypothesis is not supported if authority-aware prompting fails to beat both closed-book and thread-only baselines on needs_update-only repair pass rate, or if any observed gain comes only from over-editing items whose gold label is valid."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Compact Artifact And Results Figures",
+    "description": "Generate figures and tables that support the paper's narrow pilot-benchmark framing rather than overstating generality.",
+    "steps": {
+      "step1": "Create a benchmark construction flow figure showing counts from mining to screened candidates to 12 released items, with exclusion categories such as ambiguous intent, historical environment not reconstructable, non-library breakage, and unsupported documentation evidence.",
+      "step2": "Create a prior-work positioning table comparing the pilot artifact against obsolete-answer studies, Soup, ReSOlve/AUTOCOMBAT, and executable dependency-update benchmarks across accepted-answer focus, official drift evidence, old/current execution, and reference repairs.",
+      "step3": "Create the main results table for the rule-based baseline, true closed-book LLM baseline, thread-only LLM baseline, authority-aware LLM condition, and version-anchoring ablation. Report binary accuracy, overall repair pass rate, needs_update-only repair pass rate, malformed-output rate, and mean latency.",
+      "step4": "Plot per-item pass or fail heatmaps for needs_update items across the main LLM conditions so the small-sample results remain interpretable without pretending to have large-N power.",
+      "step5": "Prepare a short qualitative table with 4 cases covering at least one valid item, one partially_stale item if subtype confidence is strong, and one obsolete item if available, showing the accepted answer behavior, current failure mode, reference repair, and supporting documentation identifiers."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Enforce A Credible Eight-Hour Runtime Budget",
+    "description": "Separate benchmark construction time from model evaluation time and cap the full workflow so it fits on one RTX A6000 with 4 CPU cores.",
+    "steps": {
+      "step1": "Budget benchmark construction at 5.0 to 6.0 hours total: about 1.0 hour for mining and triage of 20-30 candidates, about 3.5 to 4.0 hours for building 12 deterministic harnesses plus old/current requirements and evidence packets, and about 0.5 to 1.0 hour for labeling notes and artifact sanity checks.",
+      "step2": "Budget model evaluation at 1.5 to 2.0 hours total: three core LLM conditions times 12 items times 3 seeds on one 7B model, plus harness execution and scoring. Keep total GPU inference under about 90 minutes by using one model, one prompt schema, and no training or fine-tuning.",
+      "step3": "Budget the rule-based baseline, bootstrap confidence intervals, and figure generation at under 1.0 CPU hour total, overlapping CPU-heavy steps with GPU inference where possible.",
+      "step4": "Reserve at least 0.5 hour of slack for one failed environment reconstruction or one rerun of a malformed-output batch. If the slack is consumed early, stop at the 12-item core artifact and skip any optional hybrid comments-plus-docs analysis.",
+      "step5": "Do not claim that the entire benchmark can be built with full dual-human annotation, broad candidate screening, or more than 12 executable items within the single 8-hour run. Any such expansion belongs to future work, not this plan."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Freeze Success Criteria For The Pilot Artifact",
+    "description": "Keep the paper falsifiable, narrow, and consistent with the proposal's pilot-benchmark framing.",
+    "steps": {
+      "step1": "Artifact success requires releasing exactly 12 executable items with complete metadata, thread text, official evidence packets, old and current requirements, deterministic harnesses, structured run outputs, and reference repairs for all needs_update items.",
+      "step2": "Labeling success requires a defensible binary valid versus needs_update label for every released item. Three-way subtype labels count only as secondary metadata and may be omitted from headline claims if calibration agreement is weak.",
+      "step3": "Method success requires authority-aware prompting to repair more needs_update items than both the true closed-book baseline and the thread-only baseline when averaged across the three seeds, without increasing incorrect edits on gold-valid items.",
+      "step4": "Honest negative outcomes to report are: fewer than 12 executable items survive, historical versions cannot be reconstructed for too many candidates, subtype labeling is not stable enough to report, or official documentation does not outperform thread-only context on executable repair."
+    }
+  }
+]

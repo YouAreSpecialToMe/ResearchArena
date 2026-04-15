@@ -1,0 +1,263 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up all required packages for ViT inference, token merging, and robustness evaluation. Verify CUDA availability and A6000 GPU.",
+    "steps": {
+      "step1": "Install core packages: pip install torch>=2.1 torchvision timm>=0.9.12 numpy scipy scikit-learn matplotlib seaborn pandas tqdm pillow",
+      "step2": "Install ToMe: pip install tome (official Token Merging library by Bolya et al., ICLR 2023)",
+      "step3": "Install corruption utilities: pip install imagecorruptions (provides the 15 standard ImageNet-C corruption functions from Hendrycks & Dietterich 2019)",
+      "step4": "Verify GPU: python -c \"import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem // 1e9, 'GB')\" — expect NVIDIA RTX A6000, ~48GB",
+      "step5": "Verify model loading: python -c \"import timm; m = timm.create_model('deit_small_patch16_224', pretrained=True); print(sum(p.numel() for p in m.parameters()) // 1e6, 'M params')\" — expect ~22M",
+      "step6": "Create directory structure: exp/shared/, exp/pilot/, exp/calibration/, exp/baselines/, exp/egtm/, exp/ablations/, figures/, tables/, results/",
+      "step7": "Estimated time: 10 minutes"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare ImageNet validation and corruption datasets",
+    "description": "Set up ImageNet-1K validation, on-the-fly ImageNet-C corruptions, and ImageNet-R. Corruptions are generated programmatically to save disk space. If full ImageNet val is unavailable, use a stratified 5K-image subset.",
+    "steps": {
+      "step1": "Locate ImageNet-1K validation set (50K images) at standard paths (/datasets/imagenet, ~/data/imagenet, IMAGENET_DIR env var). If unavailable, download via torchvision.datasets.ImageNet or huggingface datasets. If download is infeasible within time budget, use a 5000-image stratified subset (5 images per class) and document this clearly.",
+      "step2": "Create exp/shared/data_loader.py with: (a) get_imagenet_val_loader(batch_size, num_workers=4, subset_size=None, seed=42) — returns DataLoader with standard ViT preprocessing (resize 256, center crop 224, normalize mean=[0.485,0.456,0.406] std=[0.229,0.224,0.225]), (b) get_corrupted_loader(corruption_type, severity, batch_size, ...) — applies corruption on-the-fly using imagecorruptions library, (c) get_imagenetr_loader(...) — loads ImageNet-R with 200-class mapping.",
+      "step3": "Define corruption types dict: CORRUPTIONS = {'noise': ['gaussian_noise', 'shot_noise', 'impulse_noise'], 'blur': ['defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur'], 'weather': ['snow', 'frost', 'fog', 'brightness'], 'digital': ['contrast', 'elastic_transform', 'pixelate', 'jpeg_compression']}",
+      "step4": "Download ImageNet-R (~30K images, 200 classes) from huggingface or official source. If unavailable, note as future work and focus on ImageNet-C.",
+      "step5": "Validate pipeline: load 1 batch clean, apply gaussian_noise severity 3, verify output shape [B,3,224,224] and value range.",
+      "step6": "Estimated time: 20 minutes"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement shared utilities and model wrappers",
+    "description": "Build core infrastructure: model loading with attention hooks, token merging implementations, CLS-row entropy computation, evaluation loop, and metric computation.",
+    "steps": {
+      "step1": "Create exp/shared/models.py: (a) load_model(name, pretrained=True) — loads DeiT-S or DeiT-B from timm, (b) AttentionHook class — registers forward hooks on all attention layers to capture the softmax attention output A [batch, heads, N, N]. Provide a method get_cls_row_entropy(layer_idx) that returns H_l = -1/N_h * sum_h sum_j A_CLS,j * log(A_CLS,j + 1e-10) using only the CLS row A[:,:,0,:], which is O(N) per head. Also provide get_full_entropy(layer_idx) for ablation comparison (O(N^2) per head).",
+      "step2": "Create exp/shared/token_merging.py: (a) apply_tome(model, r) — wraps tome.patch(), (b) apply_random_drop(model, r) — at each layer, randomly remove r tokens (preserving CLS), (c) apply_evit_style(model, keep_rate, apply_layers) — training-free EViT: at specified layers, rank tokens by CLS attention score, keep top-k, mean-pool the rest into one fused token. Clearly labeled 'EViT-style (training-free)' — NOT the original fine-tuned EViT.",
+      "step3": "Create exp/shared/sata.py: Implement simplified SATA baseline — at each layer before FFN, compute spatial autocorrelation (Moran's I) of token features using their 2D grid positions, group spatially correlated tokens, apply FFN to group representatives then broadcast. If full Moran's I is too expensive, use a simplified spatial grouping based on feature cosine similarity of spatially adjacent tokens. Document any simplifications vs. the CVPR 2025 paper.",
+      "step4": "Create exp/shared/egtm.py: (a) calibrate(model, dataloader, num_images=500, seed=42) — runs forward passes, computes per-layer CLS-row entropy mean and std, returns stats dict, (b) EGTMPatcher class — monkey-patches ToMe's merge function to use adaptive ratio: delta_l = max(0, (H_l - mean_l) / std_l), r_l = round(r_0 * max(alpha, exp(-beta * delta_l))). Default: alpha=0.3, beta=1.0. (c) Optional: ImportanceProtection — protects top-k tokens by column-sum importance from merging.",
+      "step5": "Create exp/shared/metrics.py: (a) evaluate_accuracy(model, loader) — returns top-1 accuracy, (b) compute_mce(per_corruption_errors, reference_errors) — mean Corruption Error, (c) compute_relative_accuracy_drop(clean_acc, corrupt_acc) — (clean-corrupt)/clean, (d) measure_throughput(model, loader, warmup=20, timed=100) — images/sec with torch.cuda.synchronize().",
+      "step6": "Create exp/shared/utils.py: set_seed(seed), save_results(results_dict, path), setup_logging().",
+      "step7": "Estimated time: 60 minutes"
+    }
+  },
+  {
+    "category": "Pilot Experiment",
+    "title": "Quick pilot — verify core hypothesis before full benchmark",
+    "description": "Run a fast pilot to verify: (1) ToMe degrades disproportionately under corruption vs. no-reduction, and (2) CLS-row attention entropy increases under corruption. This addresses feedback about strengthening hypothesis justification. If the hypothesis fails, we pivot to a benchmark-only paper.",
+    "steps": {
+      "step1": "Load DeiT-S pretrained. Evaluate on 2000 ImageNet val images (clean) with and without ToMe r=8. Record top-1 accuracy for both.",
+      "step2": "Evaluate both (no-reduction, ToMe r=8) on the same 2000 images corrupted with gaussian_noise severity 5, motion_blur severity 5, and contrast severity 5. Record top-1 accuracy.",
+      "step3": "Compute relative accuracy drop: rel_drop = (clean_acc - corrupt_acc) / clean_acc. Compute disproportionate degradation gap: gap = rel_drop_tome - rel_drop_noreduction for each corruption.",
+      "step4": "Compute mean CLS-row attention entropy per layer for 500 clean images vs. 500 images from each corruption at severity 5. Run paired t-test on per-image mean entropy (clean vs. corrupted). Compute Spearman correlation between severity (0=clean, 5=corrupted) and entropy.",
+      "step5": "CRITICAL: Also check contrast corruption specifically — this is a predicted failure mode where entropy may DECREASE (overconfident wrong attention). If entropy decreases for contrast, this validates our failure mode analysis and we should report it transparently.",
+      "step6": "Decision gate: If mean gap > 1%, proceed with full plan. If gap < 1%, the core hypothesis is weak — pivot to a systematic robustness benchmark paper (still valuable as first study of token reduction under shift). If entropy does not increase for majority of tested corruptions, reconsider entropy as the shift signal.",
+      "step7": "Save results to results/pilot_results.json.",
+      "step8": "Estimated time: 15 minutes"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "EGTM calibration — compute clean CLS-row entropy statistics",
+    "description": "Run forward passes on a calibration subset to compute per-layer CLS-row attention entropy statistics (mean, std) for DeiT-S and DeiT-B. These define the 'normal' entropy range. Uses CLS-row proxy (O(N) per head) not full matrix (O(N^2)) to avoid overhead — addressing feedback point 3.",
+    "steps": {
+      "step1": "For each seed in {42, 43, 44}: sample 500 images from ImageNet val (non-overlapping with evaluation set if using a subset). Save indices to results/calibration_indices_seed{seed}.json.",
+      "step2": "For each model (DeiT-S: 12 layers, DeiT-B: 12 layers) and each seed: run inference with ToMe r=8, extract CLS-row attention entropy H_l at every layer for every image. H_l = -1/N_h * sum_h sum_j A_CLS,j * log(A_CLS,j + 1e-10).",
+      "step3": "Also compute full-matrix entropy for seed=42 only (for ablation comparison later).",
+      "step4": "Store per-layer mean and std: results/calibration_stats_{model}_seed{seed}.json = {layer_l: {cls_mean, cls_std, [full_mean, full_std for seed=42]}}.",
+      "step5": "Sanity check: verify entropy generally decreases in deeper layers (sharper attention). Plot entropy profile across layers. Check coefficient of variation across 3 seeds — should be < 10% (stable calibration).",
+      "step6": "Estimated time: 10 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "No-reduction baseline (full ViT, accuracy upper bound)",
+    "description": "Evaluate unmodified DeiT-S and DeiT-B on all datasets. This is the reference for computing disproportionate degradation from token reduction.",
+    "steps": {
+      "step1": "Create exp/baselines/no_reduction.py. For each model (DeiT-S, DeiT-B):",
+      "step2": "Evaluate on ImageNet-1K val (clean). Record top-1 accuracy. Seed=42.",
+      "step3": "Evaluate on ImageNet-C severity 3 and 5 for all 15 corruption types. Record per-corruption top-1 accuracy.",
+      "step4": "Evaluate on ImageNet-R (200-class subset). Record top-1 accuracy.",
+      "step5": "Measure throughput: batch_size=128 (DeiT-S) or 64 (DeiT-B), 20 warmup + 100 timed batches.",
+      "step6": "Compute mCE and per-corruption relative accuracy drop.",
+      "step7": "Save to results/baseline_no_reduction_{model}.json.",
+      "step8": "Estimated time: 90 minutes (2 models, full ImageNet-C evaluation dominates)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "ToMe baseline (fixed-ratio token merging)",
+    "description": "Evaluate standard ToMe with fixed merging ratio. Primary strong baseline and the method EGTM builds upon. This directly tests whether ToMe degrades disproportionately under shift.",
+    "steps": {
+      "step1": "Create exp/baselines/tome.py. Apply tome.patch(model, r=8) for DeiT-S, r=16 for DeiT-B (standard settings from ToMe paper).",
+      "step2": "Evaluate on: ImageNet-1K val, ImageNet-C severity 3 and 5 (all 15 corruptions), ImageNet-R. Seed=42.",
+      "step3": "Measure throughput (same protocol as no-reduction).",
+      "step4": "Save to results/baseline_tome_{model}_r{r}.json.",
+      "step5": "Key analysis: compute relative accuracy drop and compare to no-reduction. The GAP (rel_drop_tome - rel_drop_noreduction) is the core quantity our paper studies.",
+      "step6": "Estimated time: 70 minutes (ToMe is faster than no-reduction, ~1.5-2x)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "EViT-style baseline (training-free attentive token keeping)",
+    "description": "Training-free variant of EViT. Important: the original EViT requires fine-tuning. We implement only the token selection criterion without fine-tuning and clearly label it 'EViT-style (training-free)' — addressing feedback point 4.",
+    "steps": {
+      "step1": "Create exp/baselines/evit_style.py. At layers [4, 7, 10] for DeiT-S/B (3 stages, following EViT paper), keep top-k tokens by CLS attention score. Set keep_rate=0.7 per application to match ~50% total token reduction (comparable to ToMe r=8). Fuse remaining tokens via mean pooling into one token.",
+      "step2": "Note in all results tables: 'EViT-style (training-free) — applies EViT token selection without the fine-tuning step from the original paper. Performance gap vs. fine-tuned EViT is expected and discussed as a limitation.'",
+      "step3": "Evaluate on: ImageNet-1K val, ImageNet-C severity 3 and 5 (all 15 corruptions), ImageNet-R. Seed=42.",
+      "step4": "Measure throughput.",
+      "step5": "Save to results/baseline_evit_style_{model}.json.",
+      "step6": "Estimated time: 35 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "SATA baseline (training-free robustness method)",
+    "description": "Evaluate SATA (Nikzad et al., CVPR 2025) as a training-free robustness baseline. SATA uses spatial autocorrelation (Moran's I) to group tokens before FFN, improving robustness without retraining. Directly comparable to EGTM as both are training-free and target ViT robustness. Addresses feedback point 1.",
+    "steps": {
+      "step1": "Create exp/baselines/sata.py. Implement SATA: at each transformer layer before FFN, compute Moran's I spatial autocorrelation of token features using their 2D grid positions (14x14 for 224px input with patch size 16). Group tokens with high spatial autocorrelation. Apply FFN to group-averaged features, then add residuals.",
+      "step2": "If full Moran's I implementation is too complex or slow, implement a faithful approximation: (a) compute pairwise cosine similarity of spatially adjacent tokens (4-connected grid), (b) group tokens above a threshold, (c) average features within groups before FFN. Document this as a simplified re-implementation.",
+      "step3": "Evaluate on: ImageNet-1K val, ImageNet-C severity 3 and 5 (all 15 corruptions), ImageNet-R. Seed=42.",
+      "step4": "Measure throughput. Note: SATA does NOT reduce token count (it groups for FFN but keeps all tokens), so throughput impact is different from ToMe/EGTM.",
+      "step5": "Save to results/baseline_sata_{model}.json.",
+      "step6": "Discuss in paper: SATA and EGTM target different aspects of robustness (FFN computation vs. token merging decisions). They are complementary, not competing.",
+      "step7": "Estimated time: 45 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Random token dropping baseline (simple lower bound)",
+    "description": "Randomly drop tokens at the same rate as ToMe. This is the simple baseline that isolates intelligent merging from naive reduction. If random dropping performs similarly to ToMe under corruption, it suggests ToMe's matching is not the issue.",
+    "steps": {
+      "step1": "Create exp/baselines/random_drop.py. At each layer, randomly remove r tokens (CLS always preserved). r=8 for DeiT-S, r=16 for DeiT-B.",
+      "step2": "Run with seed=42. Evaluate on: ImageNet-1K val, ImageNet-C severity 3 and 5 (all 15 corruptions), ImageNet-R.",
+      "step3": "Measure throughput.",
+      "step4": "Save to results/baseline_random_drop_{model}.json.",
+      "step5": "Estimated time: 35 minutes"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "EGTM evaluation — main results with 3 seeds",
+    "description": "Evaluate EGTM (core: adaptive merging ratio with CLS-row entropy proxy) on the full benchmark. Run with 3 seeds (varying calibration subsets) to assess stability. Default hyperparameters: r_0=8/16, alpha=0.3, beta=1.0.",
+    "steps": {
+      "step1": "Create exp/egtm/run.py. For each model (DeiT-S with r_0=8, DeiT-B with r_0=16) and each seed {42, 43, 44}:",
+      "step2": "Load calibration stats for the corresponding seed and model. Apply EGTM: at each layer, compute CLS-row entropy, compute delta_l = max(0, (H_l - mean_l) / std_l), set r_l = round(r_0 * max(0.3, exp(-1.0 * delta_l))).",
+      "step3": "Evaluate on: ImageNet-1K val (clean), ImageNet-C severity 3 and 5 (all 15 corruptions), ImageNet-R.",
+      "step4": "Record per-image average merging ratio across layers. Aggregate: mean merging ratio for clean images vs. each corruption type at each severity. This verifies adaptive behavior (expect lower merging ratio on corrupted inputs).",
+      "step5": "Measure throughput separately on clean and corrupted (gaussian_noise sev 5) inputs.",
+      "step6": "Save to results/egtm_{model}_seed{seed}.json with: {per_corruption_acc, mCE, throughput, avg_merge_ratio_clean, avg_merge_ratio_corrupted}.",
+      "step7": "Estimated time: 90 minutes (2 models x 3 seeds, slightly slower than ToMe per-image due to entropy computation)"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Per-corruption analysis and failure mode investigation",
+    "description": "Break down results by corruption type. Critically: identify corruptions where entropy DECREASES (overconfident wrong attention) — the predicted failure mode. Also test whether EGTM hurts for these corruption types. Addresses feedback point 5.",
+    "steps": {
+      "step1": "Using data from the main experiment and calibration, compute for each of 15 corruption types at severity 5: (a) mean CLS-row entropy change vs. clean: delta_H_l per layer, (b) direction: classify as 'entropy-increase', 'entropy-decrease', or 'entropy-neutral' (within 1 std of clean).",
+      "step2": "For entropy-decrease corruptions (predicted: contrast, possibly brightness): verify that EGTM does NOT help and may hurt. If EGTM maintains aggressive merging on these (because entropy didn't increase), this confirms the failure mode. Report transparently.",
+      "step3": "Compute EGTM accuracy improvement over ToMe for each corruption type. Correlate with entropy change direction — expect improvement on entropy-increase corruptions and no improvement (or degradation) on entropy-decrease corruptions.",
+      "step4": "Compute Spearman rank correlation between corruption severity (1-5) and mean CLS-row entropy for all 15 corruption types. Use 500 images per corruption per severity level (reuse from main experiment). Report per-type rho and p-value. Success criterion: rho > 0.5 for > 10/15 types.",
+      "step5": "Save to results/per_corruption_analysis.json.",
+      "step6": "Estimated time: 20 minutes (reuses data from main experiments, computation only)"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study — EGTM components",
+    "description": "Ablate each novel component to understand contributions. Run on DeiT-S only with 3 representative corruptions (gaussian_noise, motion_blur, snow) at severity 5.",
+    "steps": {
+      "step1": "Ablation A — EGTM core only (adaptive ratio, no importance protection): Already evaluated in main experiment. Reference those results.",
+      "step2": "Ablation B — EGTM core + importance protection: Apply EGTM with use_importance_protection=True, top_k=10. Evaluate on DeiT-S, seed=42, ImageNet val + ImageNet-C sev 5 (gaussian_noise, motion_blur, snow).",
+      "step3": "Ablation C — Importance protection only (no adaptive ratio): Standard ToMe r=8 with importance protection (top_k=10 tokens excluded from merging). Isolates the contribution of importance protection without entropy guidance.",
+      "step4": "Ablation D — Conservative fixed ratio (r=4): Standard ToMe with r=4 (half the merging). Tests whether simply merging less is sufficient, or whether input-adaptive behavior is key.",
+      "step5": "Ablation E — Entropy proxy comparison: (a) CLS-row entropy (default, O(N)), (b) Full attention matrix entropy (O(N^2)), (c) CLS attention score variance (alternative cheap proxy). For each: measure accuracy AND entropy computation overhead (ms per forward pass).",
+      "step6": "Save to results/ablation_{variant}_deit_s.json.",
+      "step7": "Estimated time: 40 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Hyperparameter sensitivity — alpha and beta",
+    "description": "Sweep the two key hyperparameters of EGTM to show robustness to settings and guide practitioners.",
+    "steps": {
+      "step1": "Alpha sweep (minimum ratio floor): test alpha in {0.1, 0.2, 0.3, 0.5, 0.7}. Fix beta=1.0. Evaluate DeiT-S, seed=42, on ImageNet val (clean) + ImageNet-C severity 5 (mean over all 15 corruptions).",
+      "step2": "Beta sweep (entropy sensitivity): test beta in {0.3, 0.5, 1.0, 2.0, 3.0}. Fix alpha=0.3. Same evaluation.",
+      "step3": "For each setting record: clean accuracy, mean corrupted accuracy, throughput, mean merging ratio on clean and corrupted.",
+      "step4": "Save to results/sensitivity_alpha.json and results/sensitivity_beta.json.",
+      "step5": "Estimated time: 25 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Efficiency analysis — throughput and entropy overhead",
+    "description": "Carefully measure computational overhead of EGTM's CLS-row entropy computation. Addresses feedback point 3 about entropy overhead potentially negating throughput benefits. Compare CLS-row vs. full-matrix entropy overhead explicitly.",
+    "steps": {
+      "step1": "Benchmark all methods on DeiT-S and DeiT-B. Batch_size=128 (DeiT-S) or 64 (DeiT-B). 20 warmup + 200 timed batches with torch.cuda.Event timing.",
+      "step2": "Methods: No reduction, ToMe r=8/16, EViT-style, SATA, Random drop, EGTM (CLS-row entropy), EGTM (full-matrix entropy — expensive variant for comparison).",
+      "step3": "For EGTM, profile entropy overhead: measure wall-clock time for (a) CLS-row entropy computation only (1xN per head), (b) full-matrix entropy computation (NxN per head), (c) ratio adaptation + merging. Report each as fraction of total forward pass time.",
+      "step4": "Measure throughput on corrupted inputs (gaussian_noise sev 5) for EGTM — since it merges fewer tokens on corrupted inputs, throughput decreases. This is a feature (adaptive compute allocation) but must be reported.",
+      "step5": "Measure peak GPU memory (torch.cuda.max_memory_allocated()) for each method.",
+      "step6": "Save to results/efficiency_{model}.json.",
+      "step7": "Estimated time: 20 minutes"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables for all experimental results. Use matplotlib with seaborn styling, font size >= 12pt, colorblind-friendly palette.",
+    "steps": {
+      "step1": "Table 1 (Main Results): Rows = methods (No reduction, Random drop, ToMe r=8, EViT-style, SATA, EGTM). Columns = Clean Acc, mCE, Rel. Acc Drop (sev5), ImageNet-R Acc, Throughput. Sub-tables for DeiT-S and DeiT-B. EGTM shows mean +/- std (3 seeds). Bold best among token-reduction methods. Save as tables/table1_main_results.tex and .csv.",
+      "step2": "Table 2 (Ablation): Rows = ablation variants (ToMe, EGTM core, EGTM+protection, protection-only, fixed-r=4). Columns = Clean Acc, Corrupt Acc (mean 3 types), Throughput, Entropy Overhead. Save as tables/table2_ablation.tex.",
+      "step3": "Figure 1 (Motivation — Entropy Distribution): Violin/box plot of CLS-row attention entropy for clean vs. corrupted (gaussian_noise sev5) across layers. Shows the signal EGTM exploits. Save as figures/figure1_entropy_distribution.pdf and .png.",
+      "step4": "Figure 2 (Adaptive Merging Ratio): Line plot showing EGTM per-layer merging ratio for clean vs. corrupted inputs. Shows natural reduction of merging under corruption. Save as figures/figure2_adaptive_ratio.pdf and .png.",
+      "step5": "Figure 3 (Per-Corruption Breakdown): Grouped bar chart of EGTM improvement over ToMe per corruption type, colored by category (noise/blur/weather/digital). Mark entropy-decrease corruptions distinctly. Save as figures/figure3_per_corruption.pdf and .png.",
+      "step6": "Figure 4 (Accuracy-Throughput Pareto): Two panels: (a) clean accuracy vs. throughput, (b) corrupted accuracy vs. throughput. All methods as labeled scatter points. Save as figures/figure4_pareto.pdf and .png.",
+      "step7": "Figure 5 (Hyperparameter Sensitivity): 1x2 subplot: (a) accuracy vs. alpha, (b) accuracy vs. beta. Clean and corrupted on same axes. Save as figures/figure5_sensitivity.pdf and .png.",
+      "step8": "Create exp/create_figures.py script for reproducibility. Use matplotlib with seaborn, font size 12, NeurIPS-appropriate figure sizes. Save all as PDF + PNG.",
+      "step9": "Estimated time: 30 minutes"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate success criteria and compile final results",
+    "description": "Systematically check each success criterion from the proposal. Compile results summary with pass/fail status.",
+    "steps": {
+      "step1": "Criterion 1 — Disproportionate degradation: Compute mean(rel_drop_ToMe - rel_drop_NoReduction) across all 15 corruption types at severity 5. Run Wilcoxon signed-rank test. Pass if gap > 2% with p < 0.05.",
+      "step2": "Criterion 2 — EGTM recovery: Compute recovery = (gap_ToMe - gap_EGTM) / gap_ToMe where gap = rel_drop_method - rel_drop_NoReduction. Pass if recovery > 50%.",
+      "step3": "Criterion 3 — Efficiency retention: Compute (EGTM_throughput - NoReduction_throughput) / (ToMe_throughput - NoReduction_throughput) on clean images. Pass if > 80%.",
+      "step4": "Criterion 4 — Consistency: Verify criteria 1-3 hold independently for both DeiT-S and DeiT-B.",
+      "step5": "Criterion 5 — CLS-row proxy: Compare EGTM with CLS-row vs. full-matrix entropy from ablation E. Pass if accuracy difference < 1% with < 5% overhead ratio.",
+      "step6": "Criterion 6 — Ablation: Confirm adaptive ratio (core only) achieves > 70% of the full robustness gain.",
+      "step7": "Criterion 7 — Entropy correlation: Spearman rho > 0.5 for > 10/15 corruption types.",
+      "step8": "Criterion 8 — Failure modes: Report which corruptions show entropy-decrease behavior. No pass/fail — transparency criterion.",
+      "step9": "Save to results.json (project root) and RESULTS_SUMMARY.md with all criteria, exact values, and pass/fail.",
+      "step10": "Estimated time: 15 minutes"
+    }
+  },
+  {
+    "category": "Runtime Estimation",
+    "title": "Feasibility check and execution priority",
+    "description": "Total estimated runtime and priority ordering for the 8-hour budget on 1x A6000.",
+    "steps": {
+      "step1": "Setup + data: 30 min",
+      "step2": "Pilot experiment: 15 min",
+      "step3": "Calibration: 10 min",
+      "step4": "No-reduction baseline: 90 min",
+      "step5": "ToMe baseline: 70 min",
+      "step6": "EViT-style baseline: 35 min",
+      "step7": "SATA baseline: 45 min",
+      "step8": "Random drop baseline: 35 min",
+      "step9": "EGTM main (3 seeds): 90 min",
+      "step10": "Ablations: 40 min",
+      "step11": "Hyperparameter sensitivity: 25 min",
+      "step12": "Efficiency analysis: 20 min",
+      "step13": "Per-corruption analysis: 20 min (reuses data)",
+      "step14": "Visualization + evaluation: 45 min",
+      "step15": "TOTAL: ~570 min (~9.5 hours). OVER BUDGET by ~1.5 hours.",
+      "step16": "MITIGATION — reduce scope if running long: (a) Use 5K image subset of ImageNet val instead of 50K — saves ~80% eval time (~5x faster), bringing total to ~5 hours with margin, (b) Reduce ImageNet-C to severity 5 only for baselines (skip severity 3), (c) Skip SATA if implementation proves too complex — note as future work, (d) Reduce hyperparameter sweep to 3 values per param.",
+      "step17": "PRIORITY ORDER (if time runs out, cut from bottom): 1. Pilot (must-have), 2. Calibration (must-have), 3. No-reduction + ToMe baselines (must-have), 4. EGTM main (must-have), 5. Per-corruption analysis (high priority), 6. Ablations (high priority), 7. EViT + Random drop baselines (medium), 8. SATA baseline (medium), 9. Efficiency analysis (medium), 10. Sensitivity sweep (nice-to-have), 11. Visualization (do last with whatever data is available).",
+      "step18": "RECOMMENDED: Start with 5K subset for all evaluations, then expand to full 50K if time permits."
+    }
+  }
+]

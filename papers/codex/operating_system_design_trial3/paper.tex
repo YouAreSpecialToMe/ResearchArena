@@ -1,0 +1,356 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{array}
+
+\title{ShadowCache: A Simulator-Backed Trace Study of How Much Observable State Policy Ranking Needs}
+
+\author{
+  Anonymous Author(s)
+}
+
+\newcommand{\traceext}{\textsc{ExtendedHinted}}
+\newcommand{\tracecompact}{\textsc{CompactState}}
+\newcommand{\tracenodirty}{\textsc{NoDirty}}
+\newcommand{\traceaccess}{\textsc{AccessOnly}}
+\newcommand{\tracenoreclaim}{\textsc{NoReclaim}}
+\newcommand{\rebuilt}{\textsc{RebuiltNoHints}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Programmable Linux page-cache frameworks make it practical to compare multiple eviction policies, but credible evaluation still depends on either expensive kernel experiments or traces rich enough to preserve policy ordering. This paper asks a narrower question: for a fixed six-policy pool, how much Linux-observable state is needed to preserve ranking in replay? We execute three real workload families, capture logical accesses together with measured \texttt{mincore}-visible residency transitions where possible, coarse reclaim epochs from \texttt{/proc/vmstat}, and dirty or writeback hints, then replay six policies under progressively ablated trace modes. Across 18 workload-seed-budget replay cases, \tracecompact{} preserves the \traceext{} ranking much better than \traceaccess{}, reaching mean Kendall's $\tau=0.9556$ (95\% bootstrap CI $[0.9111, 0.9926]$) and mean top-2 recall $1.0$, while \traceaccess{} falls to $\tau=0.5259$ (CI $[0.2963, 0.7407]$) and top-2 recall $0.6944$ (CI $[0.4722, 0.8889]$). The failure mode is concentrated in the mixed fileserver workload, where \traceaccess{} drops to mean $\tau=-0.1111$ and top-2 recall $0.0833$ but \tracecompact{} remains perfect. However, a rebuilt richer reference without explicit insert and evict hints is itself unstable, with mean top-2 recall only $0.6944$ and a top-policy change fraction of $0.4444$. The result is intentionally narrow: this is a simulator-backed trace-ranking paper over measured event streams, not a live Linux policy-validation paper. Within that scope, coarse dirty and reclaim state is enough for this ranking task, but reference adequacy remains the main bottleneck for stronger claims.
+\end{abstract}
+
+\section{Introduction}
+Programmable page-cache mechanisms such as PageFlex and \texttt{cache\_ext} shift page-cache research from ``which heuristic should Linux hard-code?'' toward ``how should we compare policy families?'' \citep{yelam2025pageflex,cacheext}. That change creates a separate methodological problem. Before claiming that one policy is better than another, we need to know whether a cheaper trace or replay representation preserves the ordering among candidate policies at all. Approximate cache-evaluation work shows that reduced-state modeling can preserve useful structure in many settings \citep{waldspurger2017miniature,waldspurger2015shards,hu2016aet,shakiba2024kosmo}, but those papers do not isolate which Linux-observable signals matter for page-cache policy ranking.
+
+This paper studies that question under a deliberately narrowed scope. The workspace does not support live kernel policy swapping, \texttt{filebench}, \texttt{fio}, or a practical SQLite VFS shim, so the paper reports a simulator-backed trace study rather than a live Linux page-cache validation paper. Nothing here establishes which policy would win in an unmodified Linux kernel deployment. The study instead uses real executions of three workload families, measured cache-residency transitions from \texttt{mincore} where feasible, dirty and writeback hints derived from writes and \texttt{vmstat}, and coarse reclaim epochs sampled from \texttt{/proc/vmstat}. We then replay a fixed six-policy pool under progressively ablated trace modes and ask how much observable state is needed to preserve the ranking of that pool.
+
+The answer is mixed but useful. Over 18 replay cases, \tracecompact{} nearly preserves the richer \traceext{} reference, with mean top-2 recall $1.0$ and mean Kendall's $\tau=0.9556$. \traceaccess{} is materially worse overall and fails badly on the mixed fileserver-style workload, where mean $\tau$ falls to $-0.1111$ and mean top-2 recall to $0.0833$. At the same time, when we rebuild the richer reference without explicit insert and evict hints, reference adequacy itself becomes unstable: mean top-2 recall drops to $0.6944$, and the top policy changes in $44.44\%$ of cases.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate trace adequacy as a state-ablation ranking problem for a fixed six-policy page-cache pool rather than as a search for one best policy.
+  \item We present a simulator-backed methodology that combines measured logical accesses with sparse \texttt{mincore}-derived residency transitions, dirty or writeback hints, and coarse reclaim epochs.
+  \item We show that \tracecompact{} preserves the \traceext{} replay ranking much better than \traceaccess{}, with a paired mean advantage of $0.4296$ Kendall-$\tau$ points (95\% CI $[0.2222, 0.6669]$) and $0.3056$ top-2 recall points (CI $[0.1111, 0.5278]$).
+  \item We identify a negative result: the richer replay reference remains unstable without explicit insert and evict hints, which limits how strongly replay-only conclusions can be interpreted.
+\end{itemize}
+
+Section~\ref{sec:related} reviews programmable page-cache systems and approximate cache modeling. Section~\ref{sec:method} details the workload generator, trace hierarchy, simulator, ranking logic, and uncertainty procedure. Section~\ref{sec:experiments} presents the replay results, ablations, online anchors, and runtime costs. Section~\ref{sec:discussion} discusses scope and limitations. Appendix~\ref{app:repro} maps each table and figure to exact artifact files and distinguishes stage-summary numbers from downstream regroupings.
+
+\section{Related Work}
+\label{sec:related}
+Recent systems make Linux paging behavior increasingly programmable. PageFlex delegates paging policies to user space through eBPF, while \texttt{cache\_ext} exposes a programmable page-cache substrate inside the kernel \citep{yelam2025pageflex,cacheext}. P2Cache and FetchBPF likewise expose application- or eBPF-directed control over paging and prefetch behavior \citep{lee2023p2cache,cao2024fetchbpf}. These papers ask mechanism or policy-design questions: can a system expose new policy hooks, and can a proposed policy outperform a baseline? Our paper asks a different evaluation question: before trusting any replay-based comparison among policies, which observable state variables are actually needed to preserve the induced ranking?
+
+The papers closest to our evaluation setting are Linux page-cache studies that either model the page cache explicitly or measure specialized policies on data-intensive workloads. Do et al.\ build a Linux page-cache simulator for data-intensive applications, StreamCache studies buffered-I/O scan workloads on fast storage, and P2Cache evaluates an application-directed kernel page cache for database and analytics-style workloads \citep{do2021linuxpagecache,li2024streamcache,lee2023p2cache}. Those papers show that page-cache outcomes depend strongly on workload structure, but they assume either a detailed simulator or a particular page-cache design. Our question is narrower: given a fixed policy pool and a fixed replay engine, which Linux-visible signals are actually necessary to preserve the induced ranking?
+
+Another line of work studies accurate or efficient cache evaluation more broadly. Miniature Simulations, SHARDS, AET, and Kosmo reduce the cost of miss-ratio estimation or policy evaluation by approximating cache behavior while preserving useful ordering information \citep{waldspurger2017miniature,waldspurger2015shards,hu2016aet,shakiba2024kosmo}. Their main objective is MRC estimation or generic eviction-policy evaluation, not exact preservation of a fixed Linux page-cache policy ranking under progressively ablated observability. That distinction matters here because a method can estimate miss behavior well enough for an MRC yet still reorder the top few candidate policies.
+
+Methodologically, our paper is closer to trace-and-replay evaluation than to policy invention. The prior papers above mostly treat the trace or cache model as a tool in service of some downstream objective: deploying a programmable cache interface, estimating an MRC, or demonstrating a single policy's benefit. By contrast, we make provenance itself part of the contribution. The paper distinguishes measured traces, stage summaries stored in \texttt{exp/*/results.json}, and figure-only downstream regroupings, then asks which conclusions survive those distinctions.
+
+Unlike prior work, our study separates two questions that are often conflated: whether a compact trace preserves ranking relative to a richer replay reference, and whether that richer replay reference is itself adequate. In this workspace, the latter question is the limiting factor.
+
+\section{Method}
+\label{sec:method}
+\subsection{Study Scope}
+The paper reports a narrower claim than the original Stage~1 proposal. The environment is CPU-only, runs with two worker processes, and lacks live kernel policy swapping, \texttt{filebench}, \texttt{fio}, and a practical SQLite VFS hook. The resulting paper therefore concerns simulator-backed ranking preservation on measured workload event streams, not direct Linux-kernel policy validation.
+
+\subsection{Workloads and Measured Traces}
+We execute three workload families with seeds $\{11,17,23\}$ and memory budgets fixed at $0.40\times$ and $0.60\times$ each workload's estimated working set. Table~\ref{tab:workloads} summarizes the measured scale.
+
+\paragraph{Stream scan.}
+\texttt{stream\_scan} creates 64 directories, four files per directory, and file sizes sampled uniformly from 128--384~KiB. Each run scans the corpus sequentially and periodically rereads a hot subset. Averaged across seeds, the workload executes 16{,}892.67 accesses over 16{,}380.67 unique pages with an estimated working set of 1{,}870.33 pages (0.007133~GiB).
+
+\paragraph{SQLite Zipf.}
+\texttt{sqlite\_zipf} creates a 120{,}000-row SQLite database with 4~KiB pages and issues 80{,}000 operations per run. Ninety percent of operations target a hot 16{,}000-key region with a Pareto-skewed draw, and 5\% are updates. Logical page IDs are derived from fixed-width row packing rather than a custom VFS. Averaged across seeds, the workload uses 7{,}030 unique pages and an estimated working set of 264.33 pages (0.001006~GiB).
+
+\paragraph{Fileserver-like mixed workload.}
+\texttt{filebench\_fileserver} is a measured Python fileserver-style workload used because \texttt{filebench} is unavailable. It creates 16 directories with 32 files each, samples file sizes from 48--192~KiB, and runs 36{,}000 operations with mean read fraction 0.8187 plus writes, creations, and deletions. Averaged across seeds, it touches 18{,}630 unique pages and has an estimated working set of 1{,}839.67 pages (0.007017~GiB).
+
+For each access we log \texttt{logical\_seq}, \texttt{event\_time\_us}, \texttt{inode\_id}, \texttt{page\_index}, \texttt{op\_class}, and \texttt{phase\_id}. The richer trace also records:
+\begin{itemize}
+  \item \texttt{cache\_insert\_seen}: a measured transition from non-resident to resident for the referenced page when \texttt{mincore} sampling can observe it;
+  \item \texttt{cache\_evict\_seen}: a measured transition from resident to non-resident;
+  \item \texttt{dirty\_or\_writeback\_seen}: application-visible writes plus coarse dirty or writeback movement inferred from \texttt{vmstat};
+  \item \texttt{reclaim\_epoch}: a coarse epoch counter incremented when sampled reclaim counters move.
+\end{itemize}
+
+These are intentionally coarse signals. The point of the paper is not full Linux-page-cache reconstruction, but ranking preservation under realistic observability constraints.
+
+\subsection{Trace Hierarchy}
+From each measured execution we derive five trace modes:
+\begin{itemize}
+  \item \traceext{}: logical accesses plus dirty, reclaim, insert, and evict hints;
+  \item \tracecompact{}: \traceext{} without insert and evict hints;
+  \item \tracenodirty{}: \tracecompact{} without dirty or writeback hints;
+  \item \traceaccess{}: logical access stream only;
+  \item \tracenoreclaim{}: \tracecompact{} without reclaim epochs.
+\end{itemize}
+
+The primary replay reference is \traceext{}. For reference adequacy, we also construct \rebuilt{} by taking the \traceext{} trace and dropping explicit insert and evict hints before replay.
+
+\subsection{Policies and Replay Simulator}
+We replay six deterministic policies: \texttt{LinuxDefault}, \texttt{FIFO}, \texttt{CLOCK}, \texttt{LFU}, \texttt{S3FIFO}, and \texttt{Hyperbolic}. The simulator keeps a page store with per-page fields \{insert sequence, last-access sequence, hit count, dirty bit, reference bit, operation class, reclaim epoch, tier, insert-hinted flag\}. A page miss increments the miss counter; if the cache is full, the policy selects a victim, the simulator records eviction age as current sequence minus the victim's insert sequence, and dirty victims count as writebacks. A page hit updates per-policy state and may update dirty state or reclaim epoch.
+
+The policies are not intended as perfect Linux implementations. They are stable replay surrogates with fixed hyperparameters:
+\begin{itemize}
+  \item \texttt{FIFO} evicts the smallest insert sequence.
+  \item \texttt{CLOCK} ranks pages by reference bit, dirty state, reclaim gap, insert protection, and last-access sequence.
+  \item \texttt{LFU} ranks pages by hit count augmented by dirty and insert bonuses and penalized by reclaim-age decay.
+  \item \texttt{S3FIFO} splits pages into small and main tiers, promotes dirty or repeatedly hit pages, and retains a bounded ghost queue.
+  \item \texttt{Hyperbolic} uses a hit-plus-bonus score divided by age.
+  \item \texttt{LinuxDefault} approximates active/inactive-list behavior by combining access age with scan, dirty, reclaim, insert, and evict terms.
+\end{itemize}
+
+Trace modes change policy behavior only by disabling unavailable signals. For example, dirty bonuses are used only in \traceext{} and \tracecompact{}, reclaim terms are used only when \texttt{reclaim\_epoch} is present, and insert protection is used only in \traceext{}.
+
+\subsection{Ranking Logic and Tie-Breaking}
+Each replay case produces one row per policy with miss rate, hit rate, dirty-eviction count, clean-eviction count, writeback count, mean eviction age, replay runtime, and peak RSS. Policies are ranked lexicographically by:
+\begin{enumerate}
+  \item miss rate,
+  \item writeback count,
+  \item mean eviction age,
+  \item policy name.
+\end{enumerate}
+
+This deterministic ordering eliminates ties when two policies have identical miss rates. Given reference ranking $\pi_r$ and candidate ranking $\pi_c$, we compute Kendall's $\tau$, Spearman's $\rho$, top-1 agreement, top-2 set recall, and best-policy regret, where regret is the candidate best miss rate minus the reference best miss rate.
+
+\subsection{Online Anchors}
+Live kernel swaps are infeasible here, so the paper uses same-trace online anchors as bounded consistency checks. For seed 11 and budget ratio 0.40, we run online simulations for all six policies on each workload family. Every replay mode is then compared against the corresponding online ranking for that workload. These anchors are weaker than independent kernel validation because they reuse the same event streams and policy surrogates, but they can still reveal whether replay ordering diverges from an online version of the same simulator.
+
+\subsection{Bootstrap and Provenance}
+Replay uncertainty is computed over the 18 replay cases using percentile bootstrap with 1{,}000 resamples. Paired compact-versus-ablation differences use paired bootstrap over those same 18 matched cases. Live-anchor top-2 recall intervals are bootstrapped over the three workload-family anchors, so they are necessarily wide.
+
+Unless noted otherwise, the paper's headline means, confidence intervals, and audit counts come from the stage-summary JSON files \texttt{exp/main\_ranking\_study/results.json}, \texttt{exp/reference\_stability/results.json}, \texttt{exp/live\_anchors/results.json}, and \texttt{exp/audits/results.json}. A small number of presentation rows still require direct aggregation from case-level CSV artifacts; those exceptions are named explicitly in Appendix~\ref{app:repro}. Downstream CSV regroupings are otherwise used for figure assembly or row-level inspection.
+
+Figure~\ref{fig:frontier} plots per-workload means for Kendall's $\tau$ and top-2 recall across trace modes, including \tracenoreclaim{}. Figure~\ref{fig:heatmap} plots the absolute rank gap $|\mathrm{rank}_{\traceaccess{}}-\mathrm{rank}_{\tracecompact{}}|$ averaged over seeds for each workload family, budget ratio, and policy, where each per-case rank uses the lexicographic order from Section~\ref{sec:method}. Figure~\ref{fig:live} plots only \texttt{top2\_set\_recall\_live}; ordering metrics for the same anchors remain in Table~\ref{tab:live}. Figure~\ref{fig:reference} plots \texttt{reference\_tau\_6}, \texttt{reference\_top2\_recall}, and \texttt{top\_policy\_changed} by workload family.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+The full replay matrix contains $3 \times 3 \times 2 \times 4 \times 6 = 432$ replay runs. The supplementary reference-ablation stage adds 216 more runs for \rebuilt{} and \tracenoreclaim{}, and the online-anchor stage adds 18 online runs. Total end-to-end runtime is 1{,}895.7590~s, or 31.60 minutes, and this total is recorded in \texttt{exp/visualization/results.json}.
+
+The paper uses two provenance layers, and the distinction is explicit in the main text. Stage summaries in \texttt{exp/main\_ranking\_study/results.json}, \texttt{exp/reference\_stability/results.json}, \texttt{exp/live\_anchors/results.json}, and \texttt{exp/audits/results.json} store all reported workload means, replay-runtime means, headline agreement metrics, ablation deltas, policy-sensitivity summaries, and audit counts. Downstream CSV artifacts in \texttt{artifacts/tables/} are used only for figure assembly and row-level inspection. Appendix~\ref{app:repro} maps every table and figure to the exact layer it uses.
+
+\begin{table}[t]
+\caption{Workload statistics averaged over the three seeds. The datasets are intentionally sub-GiB because the study prioritizes complete replay coverage, measured state capture, and uncertainty estimates within a two-core CPU budget.}
+\label{tab:workloads}
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Workload & Accesses & Unique pages & Read frac. & WSS pages & Dataset GiB \\
+\midrule
+Stream scan & 16{,}892.67 & 16{,}380.67 & 1.0000 & 1{,}870.33 & 0.062487 \\
+SQLite Zipf & 80{,}000.00 & 7{,}030.00 & 0.9504 & 264.33 & 0.026817 \\
+Fileserver-like & 36{,}000.00 & 18{,}630.00 & 0.8187 & 1{,}839.67 & 0.071068 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Replay overhead remains modest relative to data generation. Averaged over seeds and budgets, replay on the mixed fileserver workload takes 6.2529~s for \traceaccess{}, 11.1722~s for \tracecompact{}, and 11.8729~s for \traceext{}. On SQLite Zipf the corresponding values are 0.4133~s, 0.6155~s, and 0.6586~s. These workload-level runtime means are stored directly in \texttt{exp/main\_ranking\_study/results.json}.
+
+\subsection{Main Replay Result}
+Table~\ref{tab:main} gives the central result. \tracecompact{} nearly preserves the \traceext{} ranking: mean Kendall's $\tau$ is 0.9556 with 95\% CI $[0.9111, 0.9926]$, top-1 agreement is 1.0, and top-2 recall is 1.0 in all 18 replay cases. By contrast, \traceaccess{} falls to mean $\tau=0.5259$ with CI $[0.2963, 0.7407]$, top-1 agreement 0.5556, and top-2 recall 0.6944 with CI $[0.4722, 0.8889]$. The paired compact-versus-access gap is 0.4296 Kendall-$\tau$ points (CI $[0.2222, 0.6669]$) and 0.3056 top-2 recall points (CI $[0.1111, 0.5278]$).
+
+Negative regret values in Table~\ref{tab:main} are possible by definition. Regret is computed as candidate-best miss rate minus \traceext{}-best miss rate within a replay case, so a negative value means the ablated trace selected a policy whose miss rate is slightly \emph{lower} than the policy chosen by the richer reference. Such cases do not imply that the ablated trace is more faithful than \traceext{}; they indicate that replay reordering can sometimes land on a policy that looks marginally better under the simulator's own miss-rate objective even while disagreeing with the reference ranking.
+
+\begin{table}[t]
+\caption{Replay ranking agreement against \traceext{}. Means are over 18 workload-seed-budget replay cases. Confidence intervals are 95\% percentile bootstrap intervals over those 18 cases. Higher is better for Kendall's $\tau$, Spearman's $\rho$, top-1 agreement, and top-2 recall; lower is better for regret.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Trace mode & Kendall's $\tau$ $\uparrow$ & Spearman's $\rho$ $\uparrow$ & Top-1 $\uparrow$ & Top-2 $\uparrow$ & Regret $\downarrow$ \\
+\midrule
+\traceext{} & \textbf{1.0000} & \textbf{1.0000} & \textbf{1.0000} & \textbf{1.0000} & \textbf{0.000000} \\
+\tracecompact{} & \textbf{0.9556} & \textbf{0.9746} & \textbf{1.0000} & \textbf{1.0000} & 0.000117 \\
+\tracenodirty{} & 0.7778 & 0.8857 & 0.8333 & 0.8611 & -0.000443 \\
+\traceaccess{} & 0.5259 & 0.6127 & 0.5556 & 0.6944 & -0.000513 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The degradation is highly workload-specific. Figure~\ref{fig:heatmap} shows the absolute rank gap between \tracecompact{} and \traceaccess{} for each workload, budget, and policy under the paper's lexicographic rank definition. The scan workload is largely insensitive, SQLite Zipf shows moderate changes, and the mixed fileserver workload dominates the gap. Averaged over the six fileserver replay cases, \traceaccess{} falls to Kendall's $\tau=-0.1111$, top-1 agreement 0.0, and top-2 recall 0.0833, whereas \tracecompact{} remains perfect on all three metrics.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/per_workload_rank_heatmap.pdf}
+\caption{Absolute rank gap $|\mathrm{rank}_{\traceaccess{}}-\mathrm{rank}_{\tracecompact{}}|$ averaged over seeds for each workload family, budget ratio, and policy. Each per-case rank uses the lexicographic order from Section~\ref{sec:method}. Larger values indicate that dropping dirty and reclaim state changes the policy ordering relative to \tracecompact{}. The largest gaps occur in the mixed fileserver workload.}
+\label{fig:heatmap}
+\end{figure}
+
+\subsection{Ablations}
+Table~\ref{tab:ablations} isolates which retained signals matter. Removing dirty and writeback hints lowers mean Kendall's $\tau$ by 0.1778 and mean top-2 recall by 0.1389 relative to \tracecompact{}. Removing reclaim epochs is much worse: \tracenoreclaim{} matches \traceaccess{} almost exactly, with mean $\Delta\tau=-0.4296$ and mean $\Delta$top-2 recall $=-0.3056$. Figure~\ref{fig:frontier} makes the same point visually, where the \tracenoreclaim{} curve nearly overlays \traceaccess{}. In this simulator, reclaim epochs carry most of the ranking signal beyond plain access order.
+
+\begin{table}[t]
+\caption{Mean deltas relative to \tracecompact{} over the 18 replay cases. Negative values indicate worse agreement than \tracecompact{}. The \tracenoreclaim{} row comes from the supplementary ablation stage in \texttt{artifacts/tables/ablation\_results.csv}.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Variant & $\Delta$ Kendall's $\tau$ & $\Delta$ top-2 recall & $\Delta$ regret \\
+\midrule
+\tracenodirty{} & -0.1778 & -0.1389 & -0.000561 \\
+\traceaccess{} & -0.4296 & -0.3056 & -0.000630 \\
+\tracenoreclaim{} & -0.4296 & -0.3056 & -0.000630 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The policy-level miss-rate deltas point to the same mechanism. The stage summary in \texttt{exp/main\_ranking\_study/results.json} records mean absolute miss-rate changes by policy. Across all replay cases, the largest mean absolute \traceaccess{}-versus-\traceext{} deltas occur for \texttt{LFU} (0.00733) and \texttt{Hyperbolic} (0.00701), while \texttt{FIFO} is unchanged and \texttt{S3FIFO} moves only 0.00050 on average. Policies that explicitly exploit reuse and retained state are therefore the most state-sensitive.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/compression_frontier.pdf}
+\caption{Per-workload replay means for Kendall's $\tau$ and top-2 recall across trace modes. Error bars show empirical 2.5th and 97.5th percentiles across the six replay cases per workload family. \tracecompact{} stays close to \traceext{}, while \traceaccess{} and \tracenoreclaim{} degrade mainly on the mixed fileserver workload. The \tracenoreclaim{} curve is reconstructed case-by-case from the stored ablation deltas and matching \tracecompact{} summaries.}
+\label{fig:frontier}
+\end{figure}
+
+\subsection{Reference Adequacy}
+The main threat to interpretation is the richer reference itself. Table~\ref{tab:reference} compares \rebuilt{} against \traceext{}. Overall mean top-2 recall is only 0.6944, mean Kendall's $\tau$ is 0.5259, and the top policy changes in 44.44\% of cases. The failures are again concentrated in the fileserver workload, where reference top-2 recall drops to 0.0833 and the top policy changes in every case.
+
+\begin{table}[t]
+\caption{Reference adequacy of the rebuilt no-hints trace relative to \traceext{}, averaged by workload family over the six cases per family. The fileserver workload shows that even the richer replay reference is unstable when explicit insert and eviction hints are removed.}
+\label{tab:reference}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Workload & Kendall's $\tau$ $\uparrow$ & Top-1 $\uparrow$ & Top-2 $\uparrow$ & Top-policy changed $\downarrow$ \\
+\midrule
+Stream scan & 0.8667 & 1.0000 & 1.0000 & 0.0000 \\
+SQLite Zipf & 0.8222 & 0.6667 & 1.0000 & 0.3333 \\
+Fileserver-like & -0.1111 & 0.0000 & 0.0833 & 1.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/reference_stability.pdf}
+\caption{Reference adequacy metrics from \texttt{artifacts/tables/reference\_stability.csv}. Bars show workload-level means for Kendall's $\tau$, top-2 recall, and top-policy change rate when \rebuilt{} is compared against \traceext{}.}
+\label{fig:reference}
+\end{figure}
+
+\subsection{Online Anchors}
+Table~\ref{tab:live} reports the same-trace online anchors. All three replay modes recover the live top-2 set in two of the three workload families, so mean top-2 recall is 0.8333 for every mode with a wide 95\% bootstrap CI of $[0.5, 1.0]$. Ordering metrics still favor richer state: \traceext{} has mean Kendall's $\tau=0.7778$, \tracecompact{} has 0.6889, and \traceaccess{} has 0.5111. The fileserver anchor again drives the disagreement: both richer traces recover only one of the live top-2 policies, and \traceaccess{} also loses top-1 agreement.
+
+\begin{table}[t]
+\caption{Agreement with same-trace online anchors, averaged over the three workload families. These anchors are online simulations over the same event streams, not independent kernel-policy swaps, so the table is best read as a bounded consistency check.}
+\label{tab:live}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Trace mode & Kendall's $\tau$ $\uparrow$ & Spearman's $\rho$ $\uparrow$ & Top-1 $\uparrow$ & Top-2 $\uparrow$ \\
+\midrule
+\traceext{} & \textbf{0.7778} & \textbf{0.8667} & \textbf{1.0000} & \textbf{0.8333} \\
+\tracecompact{} & 0.6889 & 0.7714 & \textbf{1.0000} & \textbf{0.8333} \\
+\traceaccess{} & 0.5111 & 0.5429 & 0.6667 & \textbf{0.8333} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/live_anchor_agreement.pdf}
+\caption{Top-2 set recall against same-trace online anchors for each workload family. This figure shows only \texttt{top2\_set\_recall\_live}; broader ordering metrics such as Kendall's $\tau$ and top-1 agreement are reported in Table~\ref{tab:live}.}
+\label{fig:live}
+\end{figure}
+
+\subsection{Pruning Use Case}
+One practical use of ranking preservation is policy pruning. Keeping only policies within 5\% of the \tracecompact{} best miss rate and retaining at most three survivors removes 51.85\% of the six-policy pool on average, never discards the \traceext{} winner, and yields mean survivor-set overlap 0.9259 with the richer reference top three. In this narrow setting, compact traces appear sufficient for early-stage pruning even if they are not sufficient for strong claims about live Linux behavior.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The paper's main positive result is narrow but consistent: in replay, coarse dirty and reclaim state is enough to preserve ranking almost perfectly for this six-policy pool. The main negative result is equally important: replay adequacy is bottlenecked less by \tracecompact{} than by the stability of the richer reference itself. That combination suggests a pragmatic workflow in which compact traces are used for exploratory ranking and policy pruning, while stronger claims depend on more credible online validation.
+
+The limitations are substantial. First, the datasets are real but small, with logical sizes only 0.0268--0.0711~GiB. Second, the online anchors are same-simulator consistency checks rather than kernel-level swaps. Third, insert and evict hints come from sparse \texttt{mincore}-visible transitions, and dirty and reclaim signals are coarse proxies rather than exact kernel state. Fourth, the policy pool is fixed to six deterministic heuristics, so the conclusion is about ranking preservation for this pool, not universal page-cache modeling. Finally, the near-identity between \tracenoreclaim{} and \traceaccess{} indicates that the current surrogate policies may lean heavily on reclaim epochs; future work should test richer policy families and stronger kernel instrumentation.
+
+\section{Conclusion}
+\label{sec:conclusion}
+This paper asked how much observable state a simulator-backed page-cache trace needs in order to preserve policy ranking. Across three measured workload families and 18 replay cases, \tracecompact{} preserved the richer \traceext{} ranking much better than \traceaccess{}, with mean Kendall's $\tau$ 0.9556 versus 0.5259 and mean top-2 recall 1.0 versus 0.6944. The benefit of retained state is concentrated in the mixed fileserver workload and in state-sensitive policies such as \texttt{LFU} and \texttt{Hyperbolic}.
+
+At the same time, a rebuilt richer reference without explicit insert and eviction hints changes the top policy in 44.44\% of cases. The broader implication is therefore methodological: compact state can support cheap ranking and candidate pruning in replay, but stronger systems conclusions still require more credible reference construction and genuine online validation.
+
+\appendix
+
+\section{Artifact and Reproducibility Appendix}
+\label{app:repro}
+\subsection{How To Reconstruct the Tables}
+The paper is auditable from two artifact layers. Stage-summary JSON files in \texttt{exp/*/results.json} provide most headline means, confidence intervals, deltas, and audit counts. Case-level CSV tables in \texttt{artifacts/tables/} provide figure inputs and the few table rows that are easiest to recover by direct regrouping. The appendix therefore names the exact layer for each item rather than treating the repository as one undifferentiated summary dump.
+
+\begin{table}[t]
+\caption{Exact artifact mapping for every reported table and figure. ``Primary layer'' distinguishes stage-summary JSON from downstream CSV aggregates. ``Aggregation'' states the computation used to obtain the reported number from the cited artifact.}
+\label{tab:artifactmap}
+\centering
+\scriptsize
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.15\linewidth}>{\raggedright\arraybackslash}p{0.14\linewidth}>{\raggedright\arraybackslash}p{0.27\linewidth}>{\raggedright\arraybackslash}p{0.34\linewidth}}
+\toprule
+Paper item & Primary layer & Source artifact(s) & Aggregation \\
+\midrule
+Table~\ref{tab:workloads} & Stage summary & \path{exp/main\_ranking\_study/results.json} & Read the workload-statistics summary for means over the three seeds in each workload family. \\
+Table~\ref{tab:main} & Mixed: summary + case rows & \path{exp/main\_ranking\_study/results.json}, \path{artifacts/tables/ranking\_metrics.csv} & Use JSON summary fields for \tracecompact{}, \tracenodirty{}, and \traceaccess{} means plus bootstrap intervals; recover the overall \traceext{} row directly from the case table by averaging its 18 replay rows. \\
+Table~\ref{tab:ablations} & Stage summary & \path{exp/reference\_stability/results.json} & Read the ablation-delta summary against \tracecompact{}. \\
+Table~\ref{tab:reference} & Stage summary & \path{exp/reference\_stability/results.json} & Read the workload-level rebuilt-reference summary. \\
+Table~\ref{tab:live} & Stage summary & \path{exp/live\_anchors/results.json} & Read the trace-mode means and live-anchor bootstrap intervals. \\
+Figure~\ref{fig:frontier} & Figure regrouping & \path{exp/visualization/results.json}, \path{artifacts/tables/ranking\_metrics.csv}, \path{artifacts/tables/ablation\_results.csv} & Assemble per-workload means across the six replay cases per family; \tracenoreclaim{} is reconstructed from stored deltas and matching \tracecompact{} rows. \\
+Figure~\ref{fig:heatmap} & Figure regrouping & \path{exp/visualization/results.json}, \path{artifacts/tables/replay\_case\_results.csv} & Compute lexicographic policy rank within each workload, seed, budget, and mode; then plot $|\mathrm{rank}_{\traceaccess{}}-\mathrm{rank}_{\tracecompact{}}|$ averaged over seeds. \\
+Figure~\ref{fig:reference} & Figure regrouping & \path{exp/visualization/results.json}, \path{artifacts/tables/reference\_stability.csv} & Plot workload-level means of \texttt{reference\_tau\_6}, \texttt{reference\_top2\_recall}, and \texttt{top\_policy\_changed}. \\
+Figure~\ref{fig:live} & Figure regrouping & \path{exp/visualization/results.json}, \path{artifacts/tables/live\_anchor\_metrics.csv} & Plot per-workload \texttt{top2\_set\_recall\_live} only. \\
+Runtime claim & Stage summary & \path{exp/visualization/results.json} & Read \texttt{runtime\_schedule.total\_minutes} and multiply by 60 for seconds if needed. \\
+Pruning claim & Stage summary & \path{exp/main\_ranking\_study/results.json} & Read \texttt{summary\_metrics.pruning}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Audit Summary}
+Table~\ref{tab:audits} reports the outputs of the explicit audit stage. The counts used in the appendix are fully stage-summary recoverable from \path{exp/audits/results.json}; the row-level CSVs remain useful only for inspecting which bibliography entries and consistency checks were audited.
+
+\begin{table}[t]
+\caption{Audit-stage outputs. Counts come from \texttt{exp/audits/results.json}; row-level details come from \texttt{artifacts/tables/reference\_audit.csv} and \texttt{artifacts/tables/spec\_consistency\_audit.csv}.}
+\label{tab:audits}
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+Audit output & Total rows & Passing rows \\
+\midrule
+Bibliography entries audited & 10 & 10 \\
+Bibliography rows requiring correction & 10 & 0 \\
+Spec-consistency checks & 7 & 7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stage-Level Provenance}
+The main replay summary is recorded in \path{exp/main_ranking_study/results.json}; the rebuilt-reference and ablation summary in \path{exp/reference\_stability/results.json}; the online-anchor summary in \path{exp/live\_anchors/results.json}; the audit summary in \path{exp/audits/results.json}; and the figure semantics in \path{exp/visualization/results.json}. Each file names the exact CSV artifacts used for the paper and the unit of aggregation. The JSON files support the paper's workload means, replay-runtime means, headline agreement metrics, ablation deltas, policy-sensitivity summaries, and audit counts. The CSV layer supports figure regroupings, row-level audits, and the few presentation rows such as the overall \traceext{} replay baseline that are most directly obtained from case tables.
+
+\subsection{Replay Mechanics}
+To reproduce a replay case, load the relevant trace parquet from \path{artifacts/traces/extended/} or \path{artifacts/traces/compact/}, select a policy and capacity, and iterate through rows in ascending \texttt{logical\_seq}. On each hit, update the page's policy state. On each miss, evict one victim if the cache is full, record eviction age as current sequence minus insert sequence, and count a writeback if the victim is dirty. Ranking metrics are then computed from the six-policy case table using the deterministic lexicographic order described in Section~\ref{sec:method}.
+
+\subsection{Figure-Generation Notes}
+The heatmap was regenerated to match the paper claim: it now visualizes the \tracecompact{} versus \traceaccess{} rank gap using the same lexicographic ranking rule stated in Section~\ref{sec:method}, rather than ranking by miss rate alone. The frontier figure now explicitly includes \tracenoreclaim{}; its semantics are recorded in \path{exp/visualization/results.json}. The live-anchor bar chart is intentionally narrower: it visualizes only top-2 recall because that is the metric plotted in the underlying artifact table. Ordering comparisons stay in Table~\ref{tab:live}.
+
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\end{document}

@@ -1,0 +1,216 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for LLM inference, retrieval, NLI scoring, and evaluation. Verify GPU availability.",
+    "steps": {
+      "step1": "Install core inference packages: pip install torch transformers accelerate vllm datasets",
+      "step2": "Install retrieval packages: pip install pyserini faiss-cpu rank_bm25",
+      "step3": "Install NLI and evaluation packages: pip install sentencepiece protobuf scikit-learn scipy numpy pandas matplotlib seaborn",
+      "step4": "Verify GPU: run 'nvidia-smi' to confirm 1x A6000 (48GB VRAM). Verify CUDA: python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\"",
+      "step5": "Create directory structure: exp/shared/ for utilities, exp/<experiment_name>/ for each experiment, figures/ for plots, results/ for JSON outputs",
+      "step6": "Pre-download models to avoid download time during experiments: (a) meta-llama/Meta-Llama-3-8B-Instruct (~16GB fp16), (b) mistralai/Mistral-7B-Instruct-v0.3 (~14GB fp16), (c) microsoft/deberta-v3-large-mnli (~1.5GB for NLI), (d) facebook/contriever-msmarco (~440MB for retriever). Note: 70B model (TheBloke/Llama-3-70B-Instruct-AWQ, ~35GB 4-bit) downloaded only if time permits in Exp 5d."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess QA datasets and retrieval corpus",
+    "description": "Obtain Natural Questions, TriviaQA, and PopQA. Subsample to 500 questions per dataset per seed for computational feasibility (4500 total across 3 seeds). Prepare Wikipedia retrieval index.",
+    "steps": {
+      "step1": "Download Natural Questions via HuggingFace: load_dataset('nq_open'). Use the validation split (~3610 questions). Subsample 500 questions per seed (seeds 42, 43, 44) using random.Random(seed).sample().",
+      "step2": "Download TriviaQA via HuggingFace: load_dataset('trivia_qa', 'unfiltered'). Use the validation split. Subsample 500 questions per seed.",
+      "step3": "Download PopQA from HuggingFace (akariasai/PopQA). Subsample 500 questions per seed. Preserve the s_pop (subject popularity) field for Exp 4 analysis.",
+      "step4": "For each dataset, store: question text, gold answer(s) as list of acceptable answers, dataset-specific metadata (entity popularity for PopQA).",
+      "step5": "Set up retrieval using pyserini's pre-built Wikipedia DPR passage index (wikipedia-dpr-100w). This provides 21M 100-word Wikipedia passages with both BM25 and dense retrieval support. If pre-built dense index is unavailable, fall back to BM25 only (which also serves as baseline retriever).",
+      "step6": "For each question in each subsample, retrieve top-10 passages using the primary retriever. Store retrieved passages alongside questions. Main experiments use k=5; keep top-10 for the k-ablation in Exp 5b.",
+      "step7": "Compute and report dataset statistics: number of questions, average answer length, answer type distribution. For PopQA, report popularity distribution (quartiles with boundaries).",
+      "step8": "Save preprocessed data as JSON: data/{dataset}_seed{seed}.json with fields [question, gold_answers, retrieved_passages, metadata]. Estimated time: ~30 min for downloads + retrieval."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build shared experiment utilities",
+    "description": "Create reusable code modules for LLM inference, answer evaluation, confidence extraction, PRA scoring, and metrics computation. Includes the Token Probability Delta (TPD) signal as proposed in the paper to bridge toward CBDR's hidden-state approach while remaining output-accessible.",
+    "steps": {
+      "step1": "Create exp/shared/inference.py: Functions for batched LLM inference using vLLM (offline batched mode for throughput). Key functions: (a) generate_answers(questions, model, sampling_params) -> list[dict] returning answer text + token log-probs, (b) load_model(model_name, quantization=None) -> LLM. Support both greedy (temperature=0) and sampling (temperature>0). Max output tokens: 64. Ensure per-token log-probabilities are captured by setting logprobs=1 in SamplingParams.",
+      "step2": "Create exp/shared/prompts.py: Prompt templates. PARAMETRIC: 'Answer the following question in a few words.\\nQuestion: {q}\\nAnswer:'. RAG: 'Answer the following question based on the provided context. Answer in a few words.\\nContext: {context}\\nQuestion: {q}\\nAnswer:'. VERBALIZED_CONF: 'Answer the following question and rate your confidence from 0 to 100.\\nQuestion: {q}\\nContext: {context}\\nAnswer the question, then on a new line write \"Confidence: X\" where X is 0-100.'. Context is formed by concatenating top-k passages with '\\n\\n' separator.",
+      "step3": "Create exp/shared/evaluation.py: Answer correctness functions. normalize_answer(s) -> str: lowercase, strip articles/punctuation/extra whitespace. exact_match(pred, gold_answers) -> bool: check normalized pred against all normalized gold answers. token_f1(pred, gold_answers) -> float: max F1 across gold answers using unigram overlap. Use standard NQ/TriviaQA evaluation logic.",
+      "step4": "Create exp/shared/confidence.py: Confidence signal extraction. (a) token_probability(logprobs_list) -> float: mean log-prob of generated answer tokens, (b) token_entropy(logprobs_list) -> float: mean entropy across token positions (negate for confidence), (c) verbalized_confidence(response_text) -> float: regex-parse confidence 0-100 from response, default to 50 on parse failure, (d) self_consistency(answers_list, reference_answer) -> float: fraction of sampled answers matching reference after normalization, (e) token_prob_delta(parametric_logprobs, rag_logprobs) -> float: mean_log_prob(rag) - mean_log_prob(parametric). This is the standalone TPD baseline that uses only the probability signal without output-level agreement -- it bridges toward CBDR's approach while remaining output-accessible.",
+      "step5": "Create exp/shared/pra_score.py: PRA-Score computation. (a) pra_em(a_param, a_rag) -> int: exact match after normalize_answer(), (b) pra_f1(a_param, a_rag) -> float: token F1 between normalized answers, (c) pra_nli(premises, hypotheses, nli_model, nli_tokenizer) -> list[float]: batch NLI inference, return P(entailment) for each pair. Load DeBERTa-v3-large-mnli once; batch with max_length=256, batch_size=64. (d) pra_tpd(parametric_logprobs, rag_logprobs, a_param, a_rag) -> float: combines token_prob_delta with pra_f1 to get a joint signal. Specifically: pra_tpd = alpha * pra_f1(a_param, a_rag) + (1-alpha) * sigmoid(token_prob_delta), with alpha=0.5 as default. This is distinct from the standalone TPD baseline (which uses probability delta alone without output-level agreement).",
+      "step6": "Create exp/shared/metrics.py: Evaluation metrics. (a) auroc(scores, labels) -> float: sklearn.metrics.roc_auc_score, (b) auprc(scores, labels) -> float: sklearn.metrics.average_precision_score, (c) ece(scores, labels, n_bins=10) -> float: expected calibration error with equal-width bins, (d) selective_accuracy(scores, labels, coverages=[0.5, 0.7, 0.9]) -> dict: accuracy when answering only the top-X% most confident predictions, (e) selective_accuracy_curve(scores, labels, n_points=100) -> (coverages, accuracies): full curve for plotting.",
+      "step7": "Create exp/shared/timing.py: Latency measurement utility. time_generation(model, questions, prompt_fn, sampling_params) -> dict with keys 'total_seconds', 'per_query_seconds', 'num_queries'. Used in Exp 6 for cost-benefit analysis."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Generate parametric and RAG answers for 7B/8B models",
+    "description": "For Llama-3-8B-Instruct and Mistral-7B-Instruct-v0.3, generate answers in both parametric and RAG modes across all datasets and seeds. This is the core data generation step (~4 hours). Token log-probabilities are captured for both passes to support the TPD signal.",
+    "steps": {
+      "step1": "Process one model at a time to avoid VRAM conflicts. For each model: load via vLLM with tensor_parallel_size=1, dtype=float16, gpu_memory_utilization=0.85.",
+      "step2": "For each dataset (NQ, TriviaQA, PopQA) x seed (42, 43, 44): Generate parametric answers with greedy decoding (temperature=0, max_tokens=64, logprobs=1). Record answer text and per-token log-probabilities. Batch size: all 500 questions at once via vLLM offline batching.",
+      "step3": "For each dataset x seed: Generate RAG answers using top-5 retrieved passages as context. Same greedy settings (temperature=0, max_tokens=64, logprobs=1). Record answer text and per-token log-probabilities.",
+      "step4": "For each dataset x seed: Generate verbalized confidence responses using the RAG prompt + confidence instruction. Parse numeric confidence from output.",
+      "step5": "For each dataset x seed: Generate 5 self-consistency samples for RAG setting with temperature=0.7, top_p=0.95, logprobs=1. Compute SC score as fraction matching greedy RAG answer after normalization.",
+      "step6": "Record wall-clock time for parametric generation, RAG generation, and self-consistency generation separately per batch. Store in results for Exp 6 cost-benefit analysis.",
+      "step7": "Evaluate all answers against gold labels: compute exact_match and token_f1 for both parametric and RAG answers.",
+      "step8": "Compute PRA-Score variants: PRA-EM, PRA-F1 between parametric and RAG answers. Compute PRA-TPD using token log-probs from both passes. Run batch NLI inference for PRA-NLI using DeBERTa (load on GPU after unloading LLM, or run on CPU if LLM still loaded).",
+      "step9": "Compute standalone TPD baseline: token_prob_delta = mean_log_prob(RAG) - mean_log_prob(parametric). This isolates the probability signal from the agreement signal, bridging toward CBDR while remaining output-accessible.",
+      "step10": "Save per-question results: results/generations_{model_short}_{dataset}_seed{seed}.json. Fields: question, gold_answers, parametric_answer, rag_answer, parametric_logprobs_mean, rag_logprobs_mean, parametric_correct_em, rag_correct_em, rag_correct_f1, token_prob_rag, entropy_rag, verbalized_conf, self_consistency, pra_em, pra_f1, pra_nli, pra_tpd, tpd_baseline.",
+      "step11": "Runtime estimate per model: 9 dataset x seed combos x 500 questions x (1 parametric + 1 RAG + 1 verbalized + 5 SC = 8 generations) = 36,000 generations. With vLLM batch throughput ~300 completions/min for 8B model: ~120 min = 2 hours per model. NLI scoring: ~10 min. Total for 2 models: ~4.5 hours."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Exp 1: RAG Calibration Diagnostic",
+    "description": "Compare calibration metrics for parametric-only vs. RAG generation to establish motivation: RAG improves accuracy but may degrade calibration. Connects to URAG's (Nguyen et al., 2026) finding that retrieval amplifies overconfident errors.",
+    "steps": {
+      "step1": "For each model/dataset/seed: Compute AUROC, AUPRC, ECE for parametric answers using token_probability as confidence, with parametric_correct_em as the label.",
+      "step2": "For each model/dataset/seed: Compute AUROC, AUPRC, ECE for RAG answers using token_probability as confidence, with rag_correct_em as the label.",
+      "step3": "Compare accuracy (EM) between parametric and RAG. Report: accuracy_parametric, accuracy_rag, delta_accuracy.",
+      "step4": "Compare calibration: report ECE_parametric, ECE_rag, AUROC_parametric, AUROC_rag. Test H1: RAG increases accuracy but degrades calibration (higher ECE and/or lower AUROC). Frame this in terms of URAG's finding that modular RAG can amplify overconfident errors.",
+      "step5": "For PopQA: stratify by entity popularity quartiles. Report accuracy and ECE by quartile for both modes.",
+      "step6": "Aggregate across 3 seeds: mean +/- std. Save to results/exp1_rag_calibration.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Exp 2: PRA-Score vs. Baselines (Individual Confidence Signals)",
+    "description": "Compare all individual confidence signals on selective prediction metrics for RAG answers. Tests H2: PRA-Score provides a strong calibration signal. Now includes 9 signals with TPD baseline and PRA-TPD.",
+    "steps": {
+      "step1": "Define 9 individual confidence signals: (1) P(answer) -- mean token log-prob of RAG answer, (2) Neg-Entropy -- negative mean token entropy of RAG answer, (3) Verbalized Confidence (VC) -- self-assessed 0-100 score, (4) Self-Consistency (SC-5) -- agreement rate across 5 RAG samples, (5) TPD Baseline -- token_prob_delta(RAG) - token_prob_delta(parametric) (probability signal only, no output agreement; bridges toward CBDR), (6) PRA-EM -- exact match between parametric and RAG, (7) PRA-F1 -- token F1 between parametric and RAG, (8) PRA-NLI -- NLI entailment probability, (9) PRA-TPD -- combined token probability delta + output agreement.",
+      "step2": "For each model (Llama-3-8B, Mistral-7B) x dataset (NQ, TriviaQA, PopQA) x seed (42, 43, 44): Compute AUROC for each signal predicting rag_correct_em.",
+      "step3": "Compute AUPRC for each signal x model x dataset x seed.",
+      "step4": "Compute ECE (10 bins) for each signal. For binary signals (PRA-EM), ECE is less meaningful -- note this.",
+      "step5": "Compute selective accuracy at coverage 50%, 70%, 90% for each signal.",
+      "step6": "Aggregate across 3 seeds: mean +/- std. Rank signals by mean AUROC per model/dataset.",
+      "step7": "Test strong confirmation criterion: Does PRA-NLI rank in top-2 AUROC on >= 2/3 datasets for at least one model?",
+      "step8": "Compare TPD Baseline vs. PRA-TPD to quantify the value of adding output-level agreement to the probability delta signal. This directly addresses the feedback about bridging toward CBDR.",
+      "step9": "Save to results/exp2_individual_signals.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Exp 3: Signal Combination via Logistic Regression Meta-Predictor",
+    "description": "Train lightweight logistic regression combining PRA with baseline signals. Tests H3: PRA captures complementary information. This is the only supervised step (~500 labeled examples for calibration, analogous to Platt scaling).",
+    "steps": {
+      "step1": "For each model/dataset/seed: Split 500 questions into calibration set (first 250) and test set (last 250). The calibration set trains the logistic regression; the test set evaluates.",
+      "step2": "Define feature combinations to test: (A) Best individual baseline signal only (identified from Exp 2), (B) PRA-NLI only, (C) Best baseline + PRA-NLI, (D) All baselines: P(answer) + Neg-Entropy + VC + SC + TPD-Baseline, (E) All baselines + PRA-NLI, (F) All baselines + all PRA variants (EM + F1 + NLI + TPD), (G) All 9 signals combined.",
+      "step3": "Train sklearn.linear_model.LogisticRegression(C=1.0, max_iter=1000) on the calibration set for each feature combination. Target: rag_correct_em. Standardize features (StandardScaler fit on calibration set, applied to test).",
+      "step4": "Evaluate each combination on the test set: AUROC, AUPRC, ECE (using predicted probabilities), selective accuracy at 50/70/90% coverage.",
+      "step5": "Key test: Does adding PRA-NLI to the best baseline (combination C) improve AUROC by >= 2 points over combination A? Report the delta.",
+      "step6": "Extract and report logistic regression coefficients as feature importance indicators. Note the relative weight of PRA signals vs. baselines.",
+      "step7": "Aggregate across 3 seeds: mean +/- std. Save to results/exp3_signal_combination.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 4: PRA-Score Analysis by Entity Popularity (PopQA)",
+    "description": "Analyze PRA-Score effectiveness stratified by entity popularity. Tests whether PRA is most informative for medium-popularity entities where parametric knowledge is partial.",
+    "steps": {
+      "step1": "Using PopQA's s_pop field, divide questions into 4 popularity bins by quartile: Q1 (rare, bottom 25%), Q2, Q3, Q4 (popular, top 25%). Report bin boundaries (log-scale) and question counts per bin.",
+      "step2": "For each popularity bin x model x seed: compute AUROC for each confidence signal (all 9 from Exp 2).",
+      "step3": "For each bin: compute parametric accuracy, RAG accuracy, PRA agreement rate (fraction where PRA-EM=1).",
+      "step4": "Test hypothesis: PRA-NLI AUROC is highest for Q2-Q3 bins (medium popularity where parametric knowledge is partial). Compute AUROC delta (PRA-NLI minus best baseline) per bin.",
+      "step5": "Aggregate across 2 models and 3 seeds: mean +/- std per popularity bin. Save to results/exp4_popularity_analysis.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 5a: Ablation -- Retriever Quality (BM25 vs. Dense)",
+    "description": "Test PRA-Score robustness to retriever choice. Run with alternative retriever on 1 model, 1 seed to save compute.",
+    "steps": {
+      "step1": "If primary retrieval used dense (Contriever): retrieve top-5 passages using BM25 via pyserini for all questions. If primary used BM25: retrieve using Contriever dense retrieval.",
+      "step2": "Generate RAG answers with alternative retriever's passages for Llama-3-8B-Instruct only, seed 42 only, all 3 datasets (1500 questions total).",
+      "step3": "Compute all confidence signals and PRA variants with the alternative retriever.",
+      "step4": "Compare AUROC for all signals across both retrievers. Report per-signal delta.",
+      "step5": "Key question: Does PRA-Score's relative ranking among signals remain stable across retrievers?",
+      "step6": "Save to results/exp5a_retriever_ablation.json. Estimated additional time: ~30 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 5b: Ablation -- Number of Retrieved Passages (k)",
+    "description": "Test PRA-Score sensitivity to the number of retrieved passages. Run on 1 model, 1 seed.",
+    "steps": {
+      "step1": "Using pre-retrieved top-10 passages, generate RAG answers with k=1, 3, 5, 10 for Llama-3-8B-Instruct, seed 42, all 3 datasets.",
+      "step2": "For each k: compute RAG accuracy, all confidence signals, and all PRA variants.",
+      "step3": "Report: RAG accuracy vs. k, PRA-Score AUROC vs. k, baseline AUROCs vs. k.",
+      "step4": "Test: Is PRA more useful when retrieval is noisier (very small or very large k)?",
+      "step5": "Save to results/exp5b_topk_ablation.json. Estimated additional time: ~40 min (4 k-values x 1500 questions, but parametric answers reused)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 5c: Ablation -- Agreement Measure Comparison",
+    "description": "Compare PRA-EM, PRA-F1, PRA-NLI, PRA-TPD in detail. Analyze which measure works best, whether they are redundant, and the value of output-level agreement vs. probability-only signals.",
+    "steps": {
+      "step1": "From Exp 2 results: extract per-dataset AUROC for PRA-EM, PRA-F1, PRA-NLI, PRA-TPD, and TPD-Baseline across all model/seed combinations.",
+      "step2": "Compute pairwise Pearson correlation between all PRA variants and TPD-Baseline across all questions.",
+      "step3": "Qualitative failure analysis: sample 20 questions where PRA-EM=0 but PRA-NLI>0.8 (semantic agreement missed by EM). Show examples.",
+      "step4": "Compare PRA-TPD vs. TPD-Baseline: quantify the value of adding output-level agreement (F1 component) to the raw probability delta. This addresses the feedback about bridging toward CBDR.",
+      "step5": "From Exp 3: compare meta-predictor AUROC using (a) only PRA-NLI vs. (b) all 4 PRA variants vs. (c) all 4 PRA + TPD-Baseline. If (b) > (a), the measures capture non-redundant information.",
+      "step6": "Save to results/exp5c_agreement_ablation.json. No additional generation needed -- uses existing data."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 5d: Scale Analysis -- 70B Model (if time permits)",
+    "description": "Test PRA-Score on Llama-3-70B-Instruct (4-bit AWQ, ~35GB VRAM) to assess whether PRA discriminative power degrades with stronger parametric knowledge. Run only on NQ, seed 42, 500 questions.",
+    "steps": {
+      "step1": "Download TheBloke/Llama-3-70B-Instruct-AWQ (4-bit quantized, ~35GB). Load via vLLM with quantization='awq'. Verify it fits in 48GB A6000.",
+      "step2": "Generate parametric and RAG answers for NQ seed 42 (500 questions). Greedy decoding with logprobs=1. Record log-probs for TPD computation.",
+      "step3": "Generate verbalized confidence and 3 SC samples (reduced from 5 to save time). SC uses temperature=0.7.",
+      "step4": "Compute all PRA variants (EM, F1, NLI, TPD) and baseline confidence signals including TPD-Baseline.",
+      "step5": "Compare with 8B results on same data (NQ seed 42): (a) parametric accuracy (expect higher for 70B), (b) RAG accuracy, (c) PRA agreement rate (expect higher), (d) PRA-NLI AUROC (may decrease if more agreement reduces signal variance), (e) distribution of agreement/disagreement cases.",
+      "step6": "Save to results/exp5d_scale_analysis.json. Estimated time: ~60-90 min for 70B inference. This experiment is optional -- run only if total time is under 6.5 hours at this point."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Exp 6: Cost-Benefit and Latency Analysis",
+    "description": "Measure and report per-query latency for each confidence method. Compute a cost-normalized metric (AUROC improvement per additional inference pass) to honestly assess when PRA-Score's extra parametric pass is worth the cost. Directly addresses reviewer feedback about inference cost doubling.",
+    "steps": {
+      "step1": "Using timing data collected in the generation step (step 6 of main experiment), compute per-query latency for: (a) RAG generation only (baseline cost), (b) Parametric generation (PRA's additional cost), (c) Self-consistency with 5 samples (SC's additional cost), (d) Verbalized confidence (minimal additional cost, uses modified prompt). Report in milliseconds per query for each model.",
+      "step2": "Compute the number of additional inference passes for each method: RAG-only = 0 (baseline), P(answer)/Neg-Entropy = 0 (from RAG pass), VC = 0 (modified prompt), SC-5 = 4 extra passes, PRA (all variants) = 1 extra pass, SelfCheckGPT-style = 4 extra passes.",
+      "step3": "Compute cost-normalized metric: AUROC_improvement_per_pass = (AUROC_method - AUROC_best_free_baseline) / num_extra_passes. 'Free baselines' are P(answer), Neg-Entropy, VC (which require 0 extra passes). This directly shows PRA's value proposition: 1 extra pass vs. SC's 4.",
+      "step4": "Create a Pareto frontier plot: x-axis = total inference passes (1 for free baselines, 2 for PRA, 5-6 for SC/SelfCheck), y-axis = AUROC. Show where each method sits on the cost-accuracy tradeoff.",
+      "step5": "Discuss scenarios where the extra pass IS worth it (high-stakes: medical QA, legal, financial; selective prediction pipelines; batch processing) vs. NOT worth it (latency-critical real-time with <500ms SLA; simple factoid QA; cost-sensitive high-throughput). This addresses feedback item 4.",
+      "step6": "Save to results/exp6_cost_benefit.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and test success criteria",
+    "description": "Compile all results, compute aggregate statistics, and formally evaluate the success criteria from the proposal.",
+    "steps": {
+      "step1": "Aggregate all experiment results across seeds: compute mean +/- std for every metric.",
+      "step2": "Test STRONG confirmation: (a) PRA-NLI achieves top-2 individual AUROC on >= 2/3 datasets for at least one model, AND (b) combination C (best baseline + PRA-NLI) improves AUROC by >= 2 points over combination A (best baseline alone). Both must hold.",
+      "step3": "Test MODERATE confirmation: Combination including PRA outperforms best individual baseline on > 50% of model x dataset settings. Count satisfied settings out of 6 (2 models x 3 datasets).",
+      "step4": "Test REFUTATION: Run paired t-test across seeds (n=3) for AUROC difference between best combination with PRA vs. without PRA. Report p-values. If p > 0.05 for all settings, the signal may not be reliable.",
+      "step5": "Compute 95% confidence intervals for key AUROC metrics using the 3 seeds (mean +/- 1.96 x std / sqrt(3)).",
+      "step6": "Write a structured summary with: (a) main finding, (b) which confirmation level achieved, (c) key numbers, (d) limitations (including the honest cost analysis from Exp 6), (e) comparison to related work (PAIRS, SUGAR, CBDR, URAG).",
+      "step7": "Save to results/final_summary.json with all aggregated metrics, success criteria verdicts, and p-values."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate publication-quality figures and tables",
+    "description": "Create all figures and tables needed for the paper. Use matplotlib + seaborn with consistent styling.",
+    "steps": {
+      "step1": "Set global plot style: seaborn 'whitegrid' theme, font size 12, figure DPI 300, colorblind-friendly palette (tab10 or seaborn 'colorblind'). All figures saved as both PDF and PNG.",
+      "step2": "Figure 1 -- RAG Calibration Diagnostic: Two-panel bar chart. Panel (a): accuracy (EM) for parametric vs. RAG, grouped by dataset. Panel (b): ECE for parametric vs. RAG. Shows RAG improves accuracy but may hurt calibration. Error bars from 3 seeds. Connect to URAG findings in caption.",
+      "step3": "Figure 2 -- Main Results (Individual Signal AUROC): Grouped bar chart with datasets on x-axis, AUROC on y-axis, one bar per signal (9 signals). Separate subplot per model. Highlight PRA-NLI and PRA-TPD with distinct color/pattern. Error bars from 3 seeds.",
+      "step4": "Figure 3 -- Signal Combination Improvement: Bar chart showing AUROC for combinations A through G (from Exp 3). Annotate the delta from adding PRA. One subplot per model, averaged across datasets.",
+      "step5": "Figure 4 -- Selective Accuracy Curves: One panel per dataset. Plot selective accuracy (y) vs. coverage (x, 0-100%) for PRA-NLI, best baseline, and best combination. Show that PRA enables higher accuracy at lower coverage.",
+      "step6": "Figure 5 -- Popularity Analysis: Line plot with popularity quartile (Q1-Q4) on x-axis, AUROC on y-axis, one line per signal (PRA-NLI, TPD-Baseline, best baseline, combination). Show PRA advantage varies by popularity.",
+      "step7": "Figure 6 -- Cost-Benefit Pareto Frontier: Scatter plot with total inference passes (x) vs. AUROC (y). Each method is a point. Draw Pareto frontier. Clearly shows PRA's 1-pass advantage over SC's 4-pass cost. Add annotations for when the extra pass is/isn't worth it.",
+      "step8": "Figure 7 -- Ablation Summary: 2-panel figure. Panel (a): AUROC vs. number of retrieved passages k. Panel (b): AUROC comparison across retrievers (Contriever vs. BM25). If Exp 5d completed, add Panel (c): 8B vs. 70B comparison.",
+      "step9": "Table 1 -- Main Results: LaTeX table with AUROC and AUPRC for all 9 signals x 3 datasets x 2 models. Mean +/- std across seeds. Bold best, underline second best per column.",
+      "step10": "Table 2 -- Signal Combination: LaTeX table with AUROC for combinations A-G x 3 datasets x 2 models. Highlight improvement from adding PRA.",
+      "step11": "Table 3 -- Cost-Benefit: LaTeX table with columns: Method, Extra Passes, Latency (ms/query), AUROC, AUROC/Pass. Shows PRA's efficiency advantage clearly.",
+      "step12": "Table 4 -- Ablation Summary: Compact LaTeX table covering retriever choice, top-k sensitivity, agreement measure comparison, and TPD-Baseline vs. PRA-TPD comparison.",
+      "step13": "If Exp 5d completed: Table 5 -- Scale Analysis comparing 8B vs. 70B on NQ.",
+      "step14": "Save all figures to figures/ as PDF+PNG. Save tables to figures/ as .tex and .csv files."
+    }
+  }
+]

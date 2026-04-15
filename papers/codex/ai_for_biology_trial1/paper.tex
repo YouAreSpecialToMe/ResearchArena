@@ -1,0 +1,329 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2025.sty}{
+  \usepackage[final]{neurips_2025}
+}{
+  \usepackage[margin=1in]{geometry}
+  \usepackage{setspace}
+  \setstretch{1.02}
+}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  citecolor=blue!50!black,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\title{Does Systema-Style Perturbed-Reference Residualization Help as a Training Target for Unseen Single-Cell Perturbation Prediction?\\A Pre-Registered Benchmark Note}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\xcent}[1]{x_{#1}}
+\newcommand{\xpert}{\xcent{p}}
+\newcommand{\mup}{\mu_{\mathrm{pert}}^{\mathrm{train}}}
+\newcommand{\rsys}{r_{\mathrm{sys}}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Recent single-cell perturbation benchmarks argue that strong claims require careful evaluation against simple baselines and against systematic variation shared across perturbations. We study one narrower question: if Systema-style perturbed-reference residualization is useful for evaluation, is the same reference also a better training target for unseen-perturbation prediction? We pre-register a lightweight benchmark on Adamson and Replogle K562 Essential, using three seeds, fixed STRING-derived perturbation descriptors, and a nine-model ladder spanning train-statistic baselines, linear residual models, and retrieval-augmented predictors. The main result is negative for the primary hypothesis. Residualized Ridge is indistinguishable from a matched non-residualized Ridge baseline on both datasets: the seed-averaged perturbed-reference Pearson difference is $-0.00010$ on Adamson and $-0.00005$ on Replogle, with confidence intervals tightly covering zero. Retrieval is dataset-dependent rather than general: on Replogle, ReSRP-MLP improves over the best residualized non-retrieval baseline from $0.272 \pm 0.013$ to $0.344 \pm 0.014$ perturbed-reference Pearson while lowering RMSE from $0.0840 \pm 0.0033$ to $0.0778 \pm 0.0021$; on Adamson, retrieval does not help and the simple train-perturbed median remains strongest on Pearson. Residual-target training nevertheless matters for optimization: compact MLPs trained on full targets collapse, whereas the same architecture trained on residual targets remains stable. Under this benchmark, perturbed-reference residualization appears more valuable as an evaluation lens than as a universally better supervised target.
+\end{abstract}
+
+\section{Introduction}
+
+Single-cell perturbation prediction asks a model to forecast the transcriptional response of a perturbation that was not observed during training. The problem is biologically relevant and methodologically fragile: recent benchmarks show that simple train-level summaries can remain competitive, and that evaluation can over-credit models that recover broad systematic shifts rather than perturbation-specific signal \citep{kernfeld2025expressionforecasting, vinastorne2025systema, wei2026benchmarking, csendes2025benchmarking}. Under that literature, another small architectural variation is not itself an interesting claim.
+
+This paper is therefore a benchmark note about a narrow training-target question. \citet{vinastorne2025systema} argue that comparing a prediction to a train-only perturbed reference better isolates perturbation-specific biology at evaluation time. We ask whether the same perturbed-reference view is also useful at training time. Concretely, we compare models trained to predict full perturbation centroids against matched models trained to predict residuals from the train-only mean perturbed centroid. Retrieval is treated only as a secondary add-on because retrieval-augmented perturbation prediction is already active \citep{difrancesco2026ptrag}.
+
+The answer is mixed but fairly sharp. For the primary comparison, residualized Ridge is essentially identical to a matched non-residualized Ridge baseline on both Adamson and Replogle K562 Essential. By contrast, residual-target training substantially stabilizes compact neural predictors relative to full-target training. Retrieval helps on Replogle but not on Adamson, and the strongest Adamson Pearson score comes from the trivial train-perturbed median baseline rather than from any learned model.
+
+Our contributions are:
+\begin{itemize}
+  \item We present a pre-registered benchmark that isolates the effect of Systema-style perturbed-reference residualization as a \emph{training target}, rather than as an evaluation-only device.
+  \item We show that residualized Ridge does not outperform a matched non-residualized Ridge baseline on either benchmark dataset, with seed-averaged bootstrap intervals tightly centered near zero.
+  \item We show that residual-target training can still be practically useful because it prevents catastrophic optimization failure in compact MLPs, even though it does not improve the primary linear-model comparison.
+  \item We document a dataset-dependent retrieval result: ReSRP-MLP is clearly helpful on Replogle but not on Adamson, while a feature-sufficiency contingency confirms that true STRING descriptors carry real signal on both datasets.
+\end{itemize}
+
+Section~\ref{sec:related} reviews prior perturbation-prediction benchmarks and retrieval work. Section~\ref{sec:method} defines the residual target and the fixed model ladder. Section~\ref{sec:experiments} presents the setup, main results, ablations, and descriptor contingency analysis. Section~\ref{sec:discussion} discusses interpretation and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Benchmark papers.}
+\citet{kernfeld2025expressionforecasting} show that train-mean, train-median, and other simple predictors can remain competitive, which raises the bar for claiming progress from small architectural modifications. \citet{wei2026benchmarking} contribute standardized perturbation-generalization assets and evaluation settings that support controlled cross-method comparisons. \citet{csendes2025benchmarking} extend that benchmark perspective to foundation-model baselines, finding that scale does not reliably beat trivial references. Relative to these papers, our contribution is not another method entry in the leaderboard. It is a tightly scoped benchmark question about whether a Systema-style residual target changes the conclusion when the model family and compute budget are held fixed.
+
+\paragraph{Evaluation frameworks.}
+\citet{vinastorne2025systema} argue that standard metrics can over-reward recovery of systematic variation shared across perturbations, and propose perturbed-reference evaluation to isolate perturbation-specific biology. That paper is our direct conceptual precursor. What is new here is the training-time counterpart: we test whether the same train-only perturbed reference should define the supervised target itself, rather than only the metric used to score predictions.
+
+\paragraph{Descriptor-based and transfer-based methods.}
+\citet{wenkel2025txpert} show that biochemical relationships can improve out-of-distribution perturbation prediction, while \citet{scholkemper2026c3tl} study efficient transfer mechanisms for unseen perturbations. GEARS \citep{roohani2023gears} similarly uses structured biological priors, albeit for a broader perturbation-setting family than we study here. Our benchmark borrows the descriptor-based intuition from this line of work but deliberately strips it down to a fixed 128-dimensional STRING embedding. The novelty is therefore not a new graph encoder, transfer objective, or architecture; it is the controlled comparison of full-target versus residual-target supervision under a lightweight, reproducible descriptor budget.
+
+\paragraph{Retrieval-based methods.}
+Retrieval-augmented perturbation prediction is already an explicit research direction \citep{difrancesco2026ptrag}. That substantially lowers novelty around retrieval itself. Accordingly, retrieval is secondary in our design: we ask only whether retrieval improves over the strongest residualized non-retrieval baseline after the target definition is fixed, and we report the answer as dataset-dependent rather than as a general method claim.
+
+\paragraph{Foundation-model baselines.}
+Recent work on perturbation prediction with large pretrained single-cell models, including the benchmark of \citet{csendes2025benchmarking} and efficient fine-tuning studies such as \citet{maleki2024efficient}, motivates caution about equating scale with robustness. Our paper differs by avoiding any scale claim. Instead, it asks whether a target-definition change survives comparison against strong simple baselines even before larger pretrained models enter the picture.
+
+Across all five groups, the paper's new element is the same: a pre-registered test of whether perturbed-reference residualization is helpful specifically as a supervised target for unseen-perturbation centroid prediction.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setup}
+
+For a dataset $d$ and seed-specific split $s$, let $\xcent{p} \in \mathbb{R}^G$ denote the gene-expression centroid of perturbation $p$ over the retained gene set of size $G$. For any training perturbation $q \in T_{\mathrm{train}}(d,s)$, we write its centroid as $\xcent{q}$. The train-only perturbed reference is
+\begin{equation}
+\mup(d,s)=\frac{1}{|T_{\mathrm{train}}(d,s)|}\sum_{q \in T_{\mathrm{train}}(d,s)} \xcent{q}.
+\end{equation}
+Our pre-registered residual target is
+\begin{equation}
+\rsys(p;d,s)=\xpert-\mup(d,s).
+\end{equation}
+Residualized models predict $\widehat{\rsys}(p;d,s)$ and reconstruct the full centroid as
+\begin{equation}
+\widehat{\xcent{p}}=\mup(d,s)+\widehat{\rsys}(p;d,s).
+\end{equation}
+
+The primary methodological comparison is therefore full-target training on $\xpert$ versus residual-target training on $\rsys$. Retrieval is evaluated only after this target definition is fixed.
+
+\subsection{Data Processing and Descriptors}
+
+We use the processed unseen-perturbation assets from \citet{wei2026benchmarking} for Adamson and Replogle K562 Essential. For each dataset and seed in $\{11,23,37\}$, we respect the released train/test perturbation identities and create an 80/20 train/validation split within training perturbations only. We retain single-gene perturbations with at least 20 cells per perturbation centroid and at least 100 training control cells.
+
+Preprocessing is fit from training data only: library-size normalization to $10^4$, log1p transform, selection of up to 2{,}000 highly variable genes with forced inclusion of perturbed target genes, and a final cap of 2{,}200 genes. We predict perturbation centroids rather than cell-level distributions. Adamson yields 56{,}998 cells, 76 kept perturbations, and 2{,}076 retained genes; Replogle yields 263{,}245 cells, 1{,}617 kept perturbations, and 2{,}200 retained genes.
+
+Each perturbation is represented by a fixed 128-dimensional STRING v12 descriptor built from human interactions with combined score at least 700. The graph is restricted to the retained gene universe, row-normalized, and embedded by truncated SVD. Held-out perturbations without graph signal receive a zero descriptor. Across seeds, the fraction of test perturbations with nonzero STRING descriptors averages 0.917 on Adamson and 0.960 on Replogle; the fraction with at least one connected training neighbor averages 0.563 and 0.934 respectively.
+
+\subsection{Output Spaces and Models}
+
+All learned residual predictors operate in a 64-dimensional PCA space fit on training residual targets only. For non-residualized full-target Ridge, we fit an analogous 64-dimensional truncated-SVD basis on training full centroids without centering, to avoid a vacuous comparator. Hyperparameters are selected on the validation perturbations only.
+
+The pre-registered model ladder contains exactly nine candidates:
+\begin{enumerate}
+  \item Train Perturbed Mean
+  \item Train Perturbed Median
+  \item Non-residualized Ridge
+  \item Residualized Ridge
+  \item Residualized PLS
+  \item Residualized Linear Embedding
+  \item Retrieval-only Residual kNN
+  \item ReSRP-Linear
+  \item ReSRP-MLP
+\end{enumerate}
+
+The residualized non-retrieval models regress the STRING descriptor onto residual PCA coordinates. Residualized Ridge uses an $\ell_2$-penalized linear map with $\alpha \in \{0.1,1,10,100\}$. Residualized PLS varies the latent dimensionality over $\{8,16,32\}$. Residualized Linear Embedding applies a learned 32-dimensional descriptor projection before residual regression.
+
+Retrieval-only Residual kNN predicts a similarity-weighted average of residual targets from the top-$k$ training neighbors using cosine similarity over STRING descriptors, with $k \in \{5,10,20\}$. ReSRP-Linear concatenates the query descriptor with summary statistics of retrieved neighbor residuals and fits a linear residual regressor. ReSRP-MLP uses the same retrieval features but replaces the linear head with a two-layer MLP of width 256, dropout 0.1, AdamW, learning rate $10^{-3}$, weight decay $10^{-4}$, batch size 64, maximum 100 epochs, and early stopping patience 10.
+
+\subsection{Evaluation}
+
+The primary endpoint is perturbed-reference Pearson correlation on held-out perturbations. The co-primary guardrail is reconstructed-centroid RMSE. We also report top-1 nearest-centroid accuracy, median rank of the true perturbation, perturbed-reference Pearson on the top 100 high-variance genes, runtime, and peak memory.
+
+Inference is performed at the dataset level. For each dataset, we bootstrap held-out perturbations within each seed for 1{,}000 draws, compute the metric difference per seed, and average the three seed-specific differences within each draw. We then report the 95\% interval of this seed-averaged difference. The primary residualization comparison is Residualized Ridge versus Non-residualized Ridge. The retrieval comparison uses the guardrailed best residualized non-retrieval baseline on each dataset.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+Adamson contains 54 training, 6 validation, and 16 test perturbations for each seed; Replogle contains 1{,}163 training, 130 validation, and 324 test perturbations. Adamson activates 54 residual PCA dimensions; Replogle uses the full 64. All experiments were run in a single environment with Python 3.12, PyTorch 2.10, scikit-learn 1.5, and one NVIDIA RTX A6000 GPU available for the MLP runs. Results are averaged across seeds $\{11,23,37\}$, and every number below is taken directly from the saved experiment artifacts in \texttt{exp/}.
+
+\subsection{Main Results}
+
+Table~\ref{tab:adamson-main} shows that Adamson is dominated by simple or lightly regularized baselines. The best perturbed-reference Pearson comes from Train Perturbed Median at $0.282 \pm 0.134$. Among residualized models, Residualized PLS reaches higher Pearson ($0.238 \pm 0.029$) but fails the RMSE guardrail with $0.2005 \pm 0.0417$, so the guardrailed residualized baseline is Residualized Linear Embedding at $0.141 \pm 0.027$ Pearson and $0.0835 \pm 0.0042$ RMSE. ReSRP-MLP does not improve on that baseline and slightly worsens RMSE.
+
+Table~\ref{tab:replogle-main} shows a different regime on Replogle. Retrieval models dominate Pearson and ranking metrics. ReSRP-MLP reaches the best perturbed-reference Pearson ($0.344 \pm 0.014$) and best RMSE ($0.0778 \pm 0.0021$) among the learned models, while Retrieval-only Residual kNN is strongest on top-1 accuracy and median rank. This indicates that Replogle contains enough descriptor and neighbor structure for retrieval to help, but the gain is still dataset-specific rather than universal.
+
+\begin{table*}[t]
+\caption{Main results on Adamson, reported as mean $\pm$ standard deviation across seeds $\{11,23,37\}$. Best values are in \textbf{bold}. Higher is better for perturbed-reference Pearson and Top-1; lower is better for RMSE and median rank. The residualized non-retrieval comparator used later in Figure~\ref{fig:bootstrap} is Residualized Linear Embedding, selected from \{Residualized Ridge, Residualized PLS, Residualized Linear Embedding\} by maximizing mean perturbed-reference Pearson subject to mean RMSE no worse than Train Perturbed Mean (threshold $0.0854$); Residualized PLS is excluded by that guardrail because its mean RMSE is $0.2005$.}
+\label{tab:adamson-main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Method & Pert.-ref. Pearson $\uparrow$ & RMSE $\downarrow$ & Top-1 $\uparrow$ & Median rank $\downarrow$ & Runtime (min) & Peak memory (MB) \\
+\midrule
+Train Perturbed Mean & 0.000 $\pm$ 0.000 & 0.0854 $\pm$ 0.0035 & 0.062 $\pm$ 0.000 & 8.5 $\pm$ 0.0 & 0.0001 & 704.9 \\
+Train Perturbed Median & \textbf{0.282 $\pm$ 0.134} & 0.0847 $\pm$ 0.0039 & 0.062 $\pm$ 0.000 & 8.5 $\pm$ 0.0 & 0.0002 & 705.0 \\
+Non-residualized Ridge & 0.140 $\pm$ 0.030 & 0.0835 $\pm$ 0.0042 & 0.083 $\pm$ 0.095 & 8.2 $\pm$ 0.3 & 0.0005 & 705.6 \\
+Residualized Ridge & 0.140 $\pm$ 0.030 & 0.0835 $\pm$ 0.0042 & 0.083 $\pm$ 0.095 & 8.2 $\pm$ 0.3 & 0.0012 & 705.7 \\
+Residualized PLS & 0.238 $\pm$ 0.029 & 0.2005 $\pm$ 0.0417 & \textbf{0.188 $\pm$ 0.062} & \textbf{6.3 $\pm$ 2.8} & 0.0018 & 706.2 \\
+Residualized Linear Embedding & 0.141 $\pm$ 0.027 & \textbf{0.0835 $\pm$ 0.0042} & 0.083 $\pm$ 0.095 & 8.2 $\pm$ 0.3 & 0.0023 & 706.6 \\
+Retrieval-only Residual kNN & 0.118 $\pm$ 0.042 & 0.0914 $\pm$ 0.0073 & 0.083 $\pm$ 0.036 & 7.7 $\pm$ 0.8 & 0.0004 & 706.6 \\
+ReSRP-Linear & 0.114 $\pm$ 0.015 & 0.1886 $\pm$ 0.0249 & \textbf{0.188 $\pm$ 0.062} & 7.3 $\pm$ 1.5 & 0.0031 & 1032.1 \\
+ReSRP-MLP & 0.117 $\pm$ 0.088 & 0.0894 $\pm$ 0.0042 & 0.042 $\pm$ 0.072 & 8.2 $\pm$ 0.3 & 0.0626 & 1195.7 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Main results on Replogle K562 Essential, reported as mean $\pm$ standard deviation across seeds $\{11,23,37\}$. Best values are in \textbf{bold}. The residualized non-retrieval comparator used later in Figure~\ref{fig:bootstrap} is Residualized Ridge, selected from \{Residualized Ridge, Residualized PLS, Residualized Linear Embedding\} by maximizing mean perturbed-reference Pearson subject to mean RMSE no worse than Train Perturbed Mean (threshold $0.0866$). Under the analogous retrieval guardrail against that comparator, ReSRP-MLP is the selected retrieval model because it has higher mean perturbed-reference Pearson than ReSRP-Linear while also improving RMSE over Residualized Ridge.}
+\label{tab:replogle-main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Method & Pert.-ref. Pearson $\uparrow$ & RMSE $\downarrow$ & Top-1 $\uparrow$ & Median rank $\downarrow$ & Runtime (min) & Peak memory (MB) \\
+\midrule
+Train Perturbed Mean & 0.000 $\pm$ 0.000 & 0.0866 $\pm$ 0.0029 & 0.003 $\pm$ 0.000 & 162.5 $\pm$ 0.0 & 0.0012 & 752.1 \\
+Train Perturbed Median & 0.127 $\pm$ 0.018 & 0.0870 $\pm$ 0.0030 & 0.003 $\pm$ 0.000 & 162.5 $\pm$ 0.0 & 0.0020 & 756.4 \\
+Non-residualized Ridge & 0.272 $\pm$ 0.013 & 0.0840 $\pm$ 0.0034 & 0.008 $\pm$ 0.002 & 134.3 $\pm$ 2.5 & 0.0043 & 756.9 \\
+Residualized Ridge & 0.272 $\pm$ 0.013 & 0.0840 $\pm$ 0.0033 & 0.008 $\pm$ 0.002 & 134.2 $\pm$ 2.4 & 0.0050 & 757.8 \\
+Residualized PLS & 0.259 $\pm$ 0.016 & 0.0888 $\pm$ 0.0067 & 0.009 $\pm$ 0.003 & 131.2 $\pm$ 3.3 & 0.0072 & 757.9 \\
+Residualized Linear Embedding & 0.166 $\pm$ 0.003 & 0.0852 $\pm$ 0.0028 & 0.004 $\pm$ 0.002 & 158.8 $\pm$ 1.2 & 0.0061 & 757.9 \\
+Retrieval-only Residual kNN & 0.329 $\pm$ 0.007 & 0.0794 $\pm$ 0.0021 & \textbf{0.032 $\pm$ 0.008} & \textbf{83.5 $\pm$ 4.0} & 0.0022 & 757.9 \\
+ReSRP-Linear & 0.303 $\pm$ 0.016 & 0.1551 $\pm$ 0.0256 & 0.025 $\pm$ 0.008 & 95.7 $\pm$ 5.6 & 0.0125 & 1260.1 \\
+ReSRP-MLP & \textbf{0.344 $\pm$ 0.014} & \textbf{0.0778 $\pm$ 0.0021} & 0.022 $\pm$ 0.000 & 100.3 $\pm$ 3.8 & 0.0663 & 1261.9 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Residualization Does Not Improve the Primary Linear Comparison}
+
+Figure~\ref{fig:bootstrap} summarizes the pre-registered bootstrap comparisons. Residualized Ridge minus Non-residualized Ridge gives a seed-averaged Pearson difference of $-0.00010$ on Adamson (95\% CI $[-0.00025, 0.00004]$) and $-0.00005$ on Replogle (95\% CI $[-0.00014, 0.00004]$). The corresponding RMSE differences are $7.9 \times 10^{-7}$ and $3.0 \times 10^{-6}$, again with intervals tightly overlapping zero. These intervals are so narrow that the primary hypothesis is not merely unsupported; under this experimental design, the linear residualization effect appears practically negligible.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/difference_intervals.pdf}
+\caption{Seed-averaged bootstrap differences with 95\% confidence intervals. The residualization comparison is always Residualized Ridge minus Non-residualized Ridge. The retrieval comparison is ReSRP-MLP minus the guardrailed best residualized non-retrieval baseline, where that baseline is chosen from \{Residualized Ridge, Residualized PLS, Residualized Linear Embedding\} by maximizing mean perturbed-reference Pearson subject to mean RMSE no worse than Train Perturbed Mean; this selects Residualized Linear Embedding on Adamson and Residualized Ridge on Replogle. Residualization is effectively neutral on both datasets, while retrieval is beneficial only on Replogle.}
+\label{fig:bootstrap}
+\end{figure}
+
+\subsection{Residual Targets Help Optimization Even When the Primary Claim Fails}
+
+Table~\ref{tab:ablations} isolates the effect of the target definition and retrieval in compact neural predictors. The full-target compact MLP collapses on both datasets, reaching negative perturbed-reference Pearson on average ($-0.080$ on Adamson and $-0.028$ on Replogle) with catastrophic RMSE on Adamson (1.030) and highly unstable RMSE on Replogle (0.459 mean with large spread). The same architecture trained on residual targets becomes stable, improving to $0.092$ Pearson and 0.0853 RMSE on Adamson, and $0.256$ Pearson and 0.0860 RMSE on Replogle. Thus, residualization matters for optimization geometry even though it does not improve the matched Ridge benchmark.
+
+Removing retrieval from ReSRP-MLP yields another dataset-dependent result. On Replogle, the no-retrieval ablation drops from $0.344$ to $0.254$ Pearson and worsens RMSE from 0.0778 to 0.0852, confirming that retrieval adds genuine signal. On Adamson, the no-retrieval ablation is slightly better than full ReSRP-MLP, consistent with the earlier observation that retrieval does not help there.
+
+\begin{table}[t]
+\caption{Ablations averaged across seeds $\{11,23,37\}$. ``Compact MLP, full target'' and ``Compact MLP, residual target'' use the same compact descriptor-to-latent architecture and differ only in whether they predict full centroids or train-only perturbed-reference residuals. ``ReSRP-MLP without retrieval'' keeps the ReSRP-MLP head and zeroes the retrieval summary channels. Residual-target training rescues optimization on both datasets, while retrieval helps only on Replogle.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Dataset & Ablation & Pert.-ref. Pearson $\uparrow$ & RMSE $\downarrow$ \\
+\midrule
+Adamson & Compact MLP, full target & -0.080 $\pm$ 0.042 & 1.030 $\pm$ 0.006 \\
+Adamson & Compact MLP, residual target & 0.092 $\pm$ 0.075 & 0.0853 $\pm$ 0.0035 \\
+Adamson & ReSRP-MLP without retrieval & 0.132 $\pm$ 0.030 & 0.0853 $\pm$ 0.0035 \\
+\midrule
+Replogle & Compact MLP, full target & -0.028 $\pm$ 0.034 & 0.459 $\pm$ 0.584 \\
+Replogle & Compact MLP, residual target & 0.256 $\pm$ 0.018 & 0.0860 $\pm$ 0.0047 \\
+Replogle & ReSRP-MLP without retrieval & 0.254 $\pm$ 0.008 & 0.0852 $\pm$ 0.0045 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Descriptor Contingency Confirms That STRING Features Matter}
+
+Because a null residualization result would be hard to interpret if the descriptors were uninformative, we pre-registered a feature-sufficiency contingency. Figures~\ref{fig:desc-adamson} and~\ref{fig:desc-replogle} show that true STRING descriptors outperform degraded alternatives on both datasets. On Adamson, Residualized Ridge with true STRING features reaches $0.140 \pm 0.030$ Pearson, compared with $0.041 \pm 0.072$ for permuted STRING and $-0.079 \pm 0.208$ for a degree-only scalar descriptor. On Replogle, the same ordering is stronger: $0.272 \pm 0.013$ for true STRING, $0.141 \pm 0.020$ for degree-only, and $0.017 \pm 0.028$ for permuted STRING. The residualization null result is therefore not attributable to a completely uninformative feature space.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.72\linewidth]{figures/descriptor_contingency_Adamson.pdf}
+\caption{Descriptor contingency on Adamson for Residualized Ridge, the linear residual model used in the primary residualization comparison. True STRING descriptors outperform the exact same Ridge regressor trained on permuted STRING descriptors or on a degree-only scalar descriptor, indicating that the benchmark is not feature-blind even though retrieval is not beneficial on this dataset.}
+\label{fig:desc-adamson}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.72\linewidth]{figures/descriptor_contingency_Replogle_K562essential.pdf}
+\caption{Descriptor contingency on Replogle K562 Essential for Residualized Ridge, the guardrailed best residualized non-retrieval comparator used in Figure~\ref{fig:bootstrap}. True STRING descriptors clearly dominate the same Ridge regressor trained on permuted STRING descriptors or on a degree-only scalar descriptor, and the stronger connectivity of this dataset aligns with the positive retrieval result.}
+\label{fig:desc-replogle}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The central conclusion is that perturbed-reference residualization is not a universally better supervised target under this benchmark. The primary Ridge comparison is effectively a tie on both datasets, despite very tight confidence intervals. This suggests that the main benefit of Systema-style residualization may remain interpretive and evaluative, rather than directly predictive, at least for lightweight descriptor-based regressors.
+
+At the same time, the ablations show that residual targets can improve optimization for neural models by making the target easier to learn. That distinction matters. ``Residualization helps training'' is too coarse a statement: it helps some architectures avoid collapse, but it does not automatically translate into a better benchmark score against a matched linear comparator.
+
+The retrieval result is also more conditional than a one-number summary would suggest. ReSRP-MLP is clearly useful on Replogle, where most held-out perturbations have connected training neighbors, but it fails to help on Adamson, where neighbor coverage is weaker and the train-perturbed median is already strong. A method paper built only around the Replogle result would overstate generality.
+
+This study has several limitations. First, we evaluate only two datasets from the benchmark assets of \citet{wei2026benchmarking}; generalization beyond Adamson and Replogle remains untested. Second, our perturbation descriptors are intentionally simple STRING-derived target embeddings rather than richer multimodal or foundation-model representations. Third, we predict perturbation centroids rather than full cell-state distributions, so the results do not address distributional fidelity. Fourth, the paper is deliberately compute-bounded and does not sweep a broader class of nonlinear architectures. Those choices are appropriate for a benchmark note about target definition, but they narrow the scope of the claims.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We studied whether Systema-style perturbed-reference residualization is useful not only for evaluation but also as a training target for unseen single-cell perturbation prediction. In a pre-registered benchmark on Adamson and Replogle K562 Essential, residualized Ridge was indistinguishable from a matched non-residualized Ridge baseline on both datasets, with seed-averaged perturbed-reference Pearson differences of only $-0.00010$ and $-0.00005$. The primary hypothesis is therefore not supported.
+
+Two secondary findings are still useful. First, residual-target training substantially stabilizes compact MLP optimization relative to full-target training. Second, retrieval is beneficial on Replogle, where ReSRP-MLP improves perturbed-reference Pearson from $0.272 \pm 0.013$ to $0.344 \pm 0.014$ and reduces RMSE from $0.0840 \pm 0.0033$ to $0.0778 \pm 0.0021$, but that gain does not transfer to Adamson. Taken together, these results suggest that perturbed-reference residualization is better viewed as a disciplined benchmark lens and as an architectural stabilizer in some settings, not as a universally superior supervised target. Future work should test the same question with richer perturbation descriptors, larger cross-dataset suites, and cell-level generative objectives.
+
+\appendix
+\section{Reproducibility Appendix}
+\label{sec:appendix-repro}
+
+Table~\ref{tab:repro-datasets} summarizes the exact datasets, seeds, and split counts used in the paper. All counts come from the saved dataset audits in \texttt{data/processed/*/seed\_*/audit/dataset\_audit.json}. The benchmark uses only seeds $\{11,23,37\}$.
+
+\begin{table}[t]
+\caption{Reproducibility summary for the exact benchmark assets used in this paper. Split counts are identical across seeds for a given dataset; the active residual PCA dimensionality differs because Adamson has lower rank than the fixed 64-dimensional cap.}
+\label{tab:repro-datasets}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+Dataset & Seeds & Cells & Genes avail. & Genes kept & Perturb. kept & Train/Val/Test & Control cells & Active residual PCA \\
+\midrule
+Adamson & 11, 23, 37 & 56{,}998 & 5{,}043 & 2{,}076 & 76 & 54 / 6 / 16 & 7{,}629 & 54 \\
+Replogle K562 Essential & 11, 23, 37 & 263{,}245 & 5{,}822 & 2{,}200 & 1{,}617 & 1{,}163 / 130 / 324 & 2{,}000 & 64 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The software environment recorded in both \path{exp/preprocess/results.json} and \path{exp/analysis/results.json} is Python 3.12.7 on Linux 6.8.0 with NumPy 1.26.4, SciPy 1.13.1, pandas 2.2.2, scikit-learn 1.5.2, anndata 0.12.10, Scanpy 1.12, PyArrow 16.1.0, matplotlib 3.9.2, seaborn 0.13.2, joblib 1.5.3, and PyTorch 2.10.0+cu128. CUDA was available on one NVIDIA RTX A6000 with 48.6 GB memory. Global seeds were fixed for Python, NumPy, and PyTorch; the saved environment metadata also notes residual nondeterminism from CUDA kernels and BLAS reductions.
+
+The main paper tables and figures are generated from these saved artifacts:
+\begin{itemize}
+  \item Raw data: \path{data/raw/Adamson.h5ad} and \path{data/raw/Replogle_K562essential.h5ad}.
+  \item Per-seed audits and prepared caches: \path{data/processed/Adamson/seed_11/}, \path{data/processed/Adamson/seed_23/}, \path{data/processed/Adamson/seed_37/}, and the corresponding \path{data/processed/Replogle_K562essential/seed_*/} directories.
+  \item Main-model metrics and predictions: \path{exp/baseline_ladder/metrics.csv}, \path{exp/baseline_ladder/predictions/}, \path{exp/retrieval_models/metrics.csv}, and \path{exp/retrieval_models/predictions/}.
+  \item Ablation metrics and descriptor contingency logs: \path{exp/ablations/metrics.csv} and \path{exp/ablations/logs/}.
+  \item Aggregated paper artifacts: \path{figures/main_results_table.csv}, \path{figures/ablation_table.csv}, \path{figures/bootstrap_comparisons.csv}, \path{figures/difference_intervals.pdf}, \path{figures/descriptor_contingency_Adamson.pdf}, and \path{figures/descriptor_contingency_Replogle_K562essential.pdf}.
+\end{itemize}
+
+The exact commands to regenerate the experimental artifacts and paper figures from the workspace root are:
+\begin{verbatim}
+python exp/preprocess/run.py
+python exp/baseline_ladder/run.py
+python exp/retrieval_models/run.py
+python exp/ablations/run.py
+python exp/analysis/run.py
+\end{verbatim}
+The exact commands to build the PDF are:
+\begin{verbatim}
+pdflatex paper.tex
+bibtex paper
+pdflatex paper.tex
+pdflatex paper.tex
+\end{verbatim}
+The bootstrap analysis uses 1{,}000 perturbation-level draws per dataset, averaged across seeds inside each draw, as implemented in \path{exp/analysis/run.py}. Hyperparameters for each saved run are recorded in the corresponding JSON files under \path{exp/baseline_ladder/hyperparams/}, \path{exp/retrieval_models/hyperparams/}, and \path{exp/ablations/hyperparams/}.
+
+\bibliographystyle{plainnat}
+\bibliography{paper_refs}
+
+\end{document}

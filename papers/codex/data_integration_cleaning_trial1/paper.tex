@@ -1,0 +1,373 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{amsmath,amssymb}
+\usepackage{multirow}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,citecolor=blue,linkcolor=blue,urlcolor=blue]{hyperref}
+
+\newcommand{\abca}{\textsc{ABCA}}
+\newcommand{\fonescore}{\ensuremath{\mathrm{F}_{1}}}
+
+\title{A Preliminary Artifact-Backed Cautionary Study of Benchmark-Conditional\\Admissibility for Robustness Evaluation in Schema and Entity Matching}
+\author{Anonymous Authors}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Perturbation-based robustness results in data integration are easy to over-interpret because many plausible edits also threaten the released benchmark label. We study a deliberately narrow, preliminary question: how much do robustness conclusions change when perturbations are filtered by explicit benchmark-conditional admissibility rules rather than only by format validity or unrestricted search budgets? We instantiate \abca{} (Audited Benchmark-Conditional Admissibility) on one schema-matching benchmark (T2D-SM-WH from the WDC Schema Matching Benchmark) and one entity-matching benchmark (a fixed WDC Products pairwise slice), then compare \abca{} against format-only and naive perturbation regimes under matched CPU-only budgets and lightweight baselines. The completed experiments show a large schema-matching sensitivity: for the stronger T2D-SM-WH baseline, targeted worst-case \fonescore{} drops by $0.3475$ under both format-only and naive perturbations but by $0.0000$ under \abca{}, and the apparent ranking reversal between the simple and strong matchers disappears. On WDC Products, the same targeted comparison is smaller: the stronger baseline drops by $0.0191$ under format-only perturbations, $0.0093$ under naive perturbations, and $0.0000$ under \abca{}. The planned dual-sided human audit was not completed: the workspace contains a frozen 240-example audit manifest, annotation packets, and final artifact tables, but no manual labels. The evidence therefore supports a preliminary artifact-backed cautionary study about sensitivity of robustness conclusions to benchmark-relative filtering, not a validated soundness methodology.
+\end{abstract}
+
+\section{Introduction}
+Robustness evaluation in data integration is unusually sensitive to benchmark semantics. In schema matching, a small edit can remove the exact header or value cue that justified a gold correspondence. In entity matching, a seemingly superficial title rewrite can delete the brand, model, or identifier evidence that supported the released pair label. A perturbation protocol that ignores these benchmark-relative constraints risks measuring relabeling rather than robustness.
+
+Prior work already established that entity-matching systems can fail under carefully designed label-preserving perturbations \citep{rastaghi2022probing}. The gap we target is narrower. We do not propose a new matcher or a new corruption family. Instead, we ask whether robustness conclusions change when perturbations are filtered by explicit benchmark-conditional admissibility rules tied to the released evidence structure of a fixed benchmark.
+
+We study this question through \abca{}, an audited benchmark-conditional admissibility protocol instantiated on T2D-SM-WH from the WDC Schema Matching Benchmark (\citealt{der2023wdcsmb}; \citealt{peeters2024schemaorgtables}) and on one official WDC Products slice for entity matching \citep{peeters2024wdcproducts}. \abca{} combines benchmark-specific protected evidence, deterministic reason-coded admissibility checks, and a planned dual-sided human audit. In the completed workspace, the deterministic checker, main robustness runs, pilot, ablations, bootstrap summaries, and final reproducibility artifacts were executed, but the audit package was frozen without annotations. That incompleteness determines the scope of the paper.
+
+Our contributions are:
+\begin{itemize}
+  \item We provide a preliminary, artifact-backed formulation of \abca{} as a benchmark-relative filtering protocol for perturbation studies, preserving released evidence rather than assuming that an operator family is label preserving by default.
+  \item We show that this filtering can materially change the observed robustness story on schema matching: under targeted search on T2D-SM-WH, the stronger baseline's mean worst-case \fonescore{} changes from $0.1744$ under both naive and format-only perturbations to $0.5220$ under \abca{}, eliminating a ranking reversal.
+  \item We make the evidentiary boundary explicit by surfacing the completed and blocked components of the study: the 8-run pilot, the search-strength and rule-weakening ablations, the frozen 240-example audit manifest, and the blocked accepted-only-audit analysis that prevents a validated soundness claim.
+\end{itemize}
+
+The paper is intentionally scoped as a preliminary artifact-backed cautionary study. The completed evidence supports a claim about \emph{evaluation sensitivity to admissibility filtering}. It does not validate the stronger soundness claim originally planned for \abca{} because the accepted precision, rejected violation rate, false-rejection rate, and agreement statistics are still unavailable.
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes \abca{}. Section~\ref{sec:experiments} presents the experimental setup, reproducibility details, and completed results. Section~\ref{sec:discussion} discusses limitations and what remains unresolved.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Perturbation robustness in entity matching.}
+\citet{rastaghi2022probing} are the closest prior work. They show that pre-trained entity-matching models can be brittle under perturbations intended to preserve labels. Our paper adopts the problem framing that perturbations should respect benchmark labels, but it differs in goal: we focus on how benchmark-specific admissibility filtering changes the conclusions drawn from a robustness study on fixed released benchmarks.
+
+\paragraph{Benchmark realism and evaluation validity.}
+\citet{wang2022bridging} argue that standard entity-matching benchmarks can encode unrealistic assumptions and propose benchmark reconstruction. We address a complementary question. Instead of rebuilding the benchmark, we hold the released benchmark fixed and ask what kinds of perturbation evidence can still support an interpretable robustness result. This connects to broader warnings about benchmark bias and gold-standard construction in matching tasks \citep{hertling2020oaei}.
+
+\paragraph{Schema matching and dataset-matching benchmarks.}
+Classical schema-matching work emphasizes that correspondence decisions depend on multiple fragile signals, including names, types, and structural or value evidence \citep{rahm2001survey,madhavan2001cupid}. That observation is methodological as well as algorithmic: if a benchmark label depends on a combination of cues, then perturbation evaluation should specify which cues are allowed to move and which must stay fixed. Evaluation frameworks such as Valentine and Alaska push in this direction by arguing for controlled, benchmark-aware comparisons, explicit fabrication or task design choices, and careful interpretation of benchmark conclusions in data integration \citep{koutras2021valentine,crescenzi2021alaska}. Our study extends that benchmark-aware perspective from clean accuracy to perturbation robustness.
+
+\paragraph{Schema-matching benchmark releases as evaluation objects.}
+The WDC Schema Matching Benchmark itself is relevant prior art, not just a data source. Its release page documents the fixed train/validation/test splits, benchmark-construction pipeline, and baseline difficulty profile for both SOTAB-SM and T2D-SM, including the T2D-SM-WH variant used here \citep{der2023wdcsmb}. The accompanying schema.org table-corpora paper explains the broader table extraction pipeline from which that benchmark ecosystem is derived \citep{peeters2024schemaorgtables}. We therefore position T2D-SM-WH as a released evaluation artifact with explicit design choices, not as an unstructured table collection.
+
+\paragraph{Why benchmark validity matters here.}
+Our framing is closest to the literature that treats benchmark construction and benchmark use as scientific objects in their own right. \citet{wang2022bridging} revisit entity-matching benchmarks because unrealistic assumptions distort measured system behavior. \citet{hertling2020oaei} show that track design and gold-standard choices can induce hidden bias even when systems are evaluated fairly against the released labels. Read together with Valentine and Alaska, these papers suggest that evaluation methodology in matching tasks should make benchmark assumptions explicit rather than implicit. We take the next narrower step: even if the benchmark is fixed, robustness conclusions can still be misleading when the perturbation generator is not aligned with the benchmark's released evidence.
+
+\paragraph{Benchmark documentation and corruption search.}
+The WDC benchmark release and benchmark papers motivate our choice of public, fixed evaluation sets for schema and entity matching \citep{der2023wdcsmb,peeters2024schemaorgtables,peeters2024wdcproducts}. \citet{zhu2025savage} show that targeted corruption search can be powerful in general ML pipelines. Our results suggest that, in data integration, the interpretability of such search depends on whether the candidate perturbations are first filtered through benchmark-relative admissibility logic.
+
+Relative to these strands, this paper contributes neither a new matcher nor a benchmark reconstruction. Its narrower position is that robustness conclusions can shift substantially once perturbations are constrained by benchmark-conditional admissibility, but that this claim should remain preliminary until the planned human audit is completed.
+
+\section{Method}
+\label{sec:method}
+\subsection{Benchmark-conditional admissibility}
+For a benchmark $B$, we write
+\[
+B = (D, G, N, E, R),
+\]
+where $D$ is the released data, $G$ is the released label set, $N$ is a benchmark-specific normalizer, $E$ is the protected evidence set, and $R$ is the admissibility rule set. A perturbation program $c$ is \abca-admissible when:
+\begin{enumerate}
+  \item $c(D)$ remains loadable and format valid;
+  \item family-level preconditions in $R$ hold;
+  \item the protected evidence in $E$ is preserved after normalization by $N$; and
+  \item $c$ does not create new benchmark-relevant ambiguity.
+\end{enumerate}
+
+The definition is intentionally conservative. \abca{} does not claim semantic invariance in the abstract. It only claims that the released benchmark label remains justified under explicit benchmark-relative sufficient conditions.
+
+\subsection{Schema matching instantiation}
+On T2D-SM-WH, the released label is a set of column correspondences. The protected evidence set therefore includes the columns participating in positive gold matches and nearby competitors that could alter the ambiguity structure around those matches. The checker protects normalized header evidence, normalized value multisets, and simple type profiles for protected matched columns and competitor columns. It rejects edits that change protected headers or values, change protected types, or create new competitors. Representative reason codes include \texttt{protected\_value\_changed}, \texttt{protected\_header\_changed}, \texttt{type\_changed}, and \texttt{unsupported\_alias}.
+
+Allowed schema perturbations are correspondingly narrow: verified header case or delimiter rewrites, row reordering, selected token shuffles, and other edits that leave protected evidence unchanged.
+
+\subsection{Entity matching instantiation}
+On WDC Products, the study fixes one official pairwise slice with medium difficulty, $80\%$ corner cases, and $0\%$ unseen products. The protected evidence set includes identifier-like fields when present, parsed quantities and units on numeric product attributes, brand and model tokens, and title spans containing protected tokens. The checker rejects edits that change protected identifiers, quantities, or brand-model evidence, or that touch protected title spans. Representative reason codes include \texttt{identifier\_changed}, \texttt{quantity\_changed}, \texttt{brand\_model\_changed}, and \texttt{insufficient\_protected\_evidence}.
+
+Allowed entity perturbations are again narrow: case and punctuation rewrites, numeric formatting rewrites, selected seller-boilerplate insertions, and token permutations outside protected spans when the evidence constraints still hold.
+
+\subsection{Comparison regimes}
+We compare three perturbation regimes.
+\begin{itemize}
+  \item \textbf{\abca{}} uses the benchmark-specific admissibility checker.
+  \item \textbf{Format} uses the same broad budget but only requires loadability and parseability.
+  \item \textbf{Naive} uses the same budget without benchmark-relative evidence checks.
+\end{itemize}
+
+Each run uses either random search or targeted search. Random search samples up to 40 perturbation programs. Targeted search uses beam width 8, maximum program length 3, and the same 40-evaluation budget.
+
+\subsection{Planned but incomplete audit}
+The original methodology claim depended on a dual-sided human audit over both accepted and rejected perturbations. The workspace contains the frozen audit manifest (240 items), a 72-example non-author subset, annotation templates, and packetized examples. It does not contain completed labels. This is the central reason the paper is written as a preliminary note rather than as a full methodology paper.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+We use exactly two public benchmarks.
+
+\textbf{T2D-SM-WH} is the schema-matching benchmark. We use the fixed train/validation/test split published as part of the WDC Schema Matching Benchmark release \citep{der2023wdcsmb}. Its train/validation/test splits contain 71/18/89 tables, 351/85/413 source columns, 340/98/443 target columns, and 177/59/209 positive correspondences. The corresponding candidate-pair counts are 1055/322/1265.
+
+\textbf{WDC Products (medium slice)} is the entity-matching benchmark. Its train/validation/test splits contain 25{,}567/3{,}835/4{,}400 record pairs with 5{,}502/828/1{,}200 positives. On the test split, identifier-like fields cover $0.8900$ of pairs, model-token evidence covers $0.9293$, brand coverage is $0.2268$, and price-field coverage is $0.0400$.
+
+We evaluate two CPU-only baselines per task family. For schema matching, the simple baseline is a lightweight header matcher and the stronger baseline is a COMA-style linear hybrid; their mean clean test \fonescore{} values are $0.3788$ and $0.5220$. For entity matching, the simple baseline is TF-IDF thresholding and the stronger baseline is logistic regression over handcrafted pair features; their mean clean test \fonescore{} values are $0.4132$ and $0.5381$.
+
+All reported means are over seeds 13, 29, and 47. The primary metric is worst-case test \fonescore{} under a 40-evaluation perturbation budget. Table~\ref{tab:benchmark-stats} summarizes the benchmark statistics.
+
+\begin{table*}[t]
+\caption{Benchmark statistics used in the completed study. T2D-SM-WH is a candidate-pair schema-matching benchmark; WDC Products is a pairwise entity-matching benchmark. Coverage values are split-specific fractions from the data-preparation artifacts.}
+\label{tab:benchmark-stats}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrl}
+\toprule
+Benchmark & Split & Examples & Positives & Tables / columns & Negatives & Coverage summary \\
+\midrule
+T2D-SM-WH & Train & 1055 candidate pairs & 177 & 71 tables, 351 / 340 cols. & -- & -- \\
+T2D-SM-WH & Valid & 322 candidate pairs & 59 & 18 tables, 85 / 98 cols. & -- & -- \\
+T2D-SM-WH & Test & 1265 candidate pairs & 209 & 89 tables, 413 / 443 cols. & -- & -- \\
+WDC Products & Train & 25{,}567 pairs & 5{,}502 & -- & 20{,}065 & id $0.8193$, model $0.8699$, brand $0.2043$, price $0.0241$ \\
+WDC Products & Valid & 3{,}835 pairs & 828 & -- & 3{,}007 & id $0.8266$, model $0.8738$, brand $0.2008$, price $0.0198$ \\
+WDC Products & Test & 4{,}400 pairs & 1{,}200 & -- & 3{,}200 & id $0.8900$, model $0.9293$, brand $0.2268$, price $0.0400$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Table~\ref{tab:admissibility-rationale} summarizes the benchmark-specific admissibility rationale that the deterministic checker instantiates. The thresholds and protected-evidence descriptions are copied directly from the frozen final artifacts and clarify why \abca{} is intentionally narrower than the format-only and naive regimes.
+
+\begin{table*}[t]
+\caption{Benchmark-specific admissibility rationale used by \abca{}. The protected evidence, competitor rule, admissible perturbation families, and forbidden edits are copied from the finalized artifact table.}
+\label{tab:admissibility-rationale}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{2.3cm}p{2.0cm}p{3.5cm}p{3.0cm}p{3.8cm}p{3.8cm}}
+\toprule
+Benchmark & Label type & Protected evidence & Competitor rule & Admissible families & Forbidden edits \\
+\midrule
+T2D-SM-WH & column correspondence & gold columns plus competitor columns & header $\geq 0.80$ or value cosine $\geq 0.90$ & header abbreviation or case, value formatting, row reorder, non-protected dropout & protected header or value changes, or new competitors \\
+WDC Products & binary match label & identifiers, brand, model, quantities, protected title spans & protected title spans immutable under \abca{} & case or punctuation, boilerplate, non-protected dropout, numeric format, token permutation & identifier, quantity, or brand/model changes \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Reproducibility and artifacts}
+The workspace records environment and artifact details explicitly. Runs were CPU-only on an Intel Xeon Silver 4214R host with 2 allocated CPU cores, 128\,GB allocated RAM, and no GPU. The realized software stack used Python 3.12.3, \texttt{numpy} 2.4.3, \texttt{pandas} 2.3.3, \texttt{scikit-learn} 1.8.0, \texttt{rapidfuzz} 3.14.3, and \texttt{matplotlib} 3.10.8. Thread counts were fixed to 1 for \texttt{OMP}, \texttt{OpenBLAS}, \texttt{MKL}, and \texttt{numexpr}.
+
+The pilot comprised 8 runs, representing $10\%$ of the originally planned main-run count, and consumed 22.41 wall-clock minutes in total. It already reproduced the final qualitative pattern: zero observed damage under \abca{} for all four pilot runs, a large T2D-SM-WH targeted drop of $0.3854$ for the strong baseline under naive perturbations, and smaller WDC Products drops of $0.0374$ and $0.0059$ for the simple and strong baselines. Based on that pilot, one planned simplification was activated: random-search runs were dropped for the simple baselines only, while all targeted runs for all four baselines and all random runs for the strong baselines were retained. No seeds were dropped. The strongest observed peak RAM in the completed robustness runs was 1.56\,GB. Mean run times ranged from 0.60 to 6.16 minutes depending on benchmark, method, regime, and search mode.
+
+The released artifacts in this workspace include raw run directories under \texttt{results/}, aggregated CSV and \LaTeX{} tables under \texttt{results/final\_artifacts/}, a runtime ledger, paired-bootstrap summaries with 72 comparison rows, a frozen audit manifest with 240 examples, packetized audit examples, and empty annotation templates for two authors and one non-author annotator. The artifact README labels the narrative status as \texttt{preliminary\_no\_validated\_soundness\_claim}. The exact status of the audit package is ``frozen but unannotated.''
+
+Because the audit was never annotated, Table~\ref{tab:audit-status} is placed before the main comparison table so that the paper states its evidentiary boundary before presenting robustness deltas.
+
+\begin{table}[t]
+\caption{Status of the planned dual-sided audit. The manifest and annotation packets exist, but no annotation labels were completed in this workspace.}
+\label{tab:audit-status}
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Item & Value \\
+\midrule
+Audit status & pending\_human\_annotations \\
+Frozen manifest size & 240 \\
+Planned non-author subset & 72 \\
+Validated soundness claim & 0 \\
+Accepted precision & N/A \\
+Rejected violation rate & N/A \\
+False-rejection rate & N/A \\
+Cohen's $\kappa$ & N/A \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main results}
+Table~\ref{tab:targeted-main} reports the main comparison because targeted-search results exist for all four baselines. Each cell is the mean over seeds 13, 29, and 47.
+
+Three patterns stand out. First, the schema-matching effect is large. On T2D-SM-WH, the strong baseline stays at its clean \fonescore{} under \abca{} ($0.5220$) but falls to $0.1744$ under both format-only and naive perturbations, a mean absolute drop of $0.3475$. Second, the entity-matching effect is smaller but still visible. On WDC Products, the strong baseline stays at $0.5381$ under \abca{}, falls to $0.5190$ under format-only perturbations, and to $0.5289$ under naive perturbations. Third, the qualitative ranking story changes only on schema matching. The clean ranking on T2D-SM-WH is \texttt{schema\_strong} $>$ \texttt{schema\_simple}; under targeted format-only or naive perturbations, that ordering flips, while under \abca{} it does not.
+
+\begin{table*}[t]
+\caption{Targeted-search robustness results. Clean and worst-case \fonescore{} values are means over seeds 13, 29, and 47, using a 40-evaluation search budget. ``Drop'' is the mean absolute difference between clean and worst-case \fonescore{}.}
+\label{tab:targeted-main}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrr}
+\toprule
+\multirow{2}{*}{Benchmark} & \multirow{2}{*}{Method} & \multirow{2}{*}{Clean} & \multicolumn{2}{c}{\abca{}} & \multicolumn{2}{c}{Format} & \multicolumn{2}{c}{Naive} & \multirow{2}{*}{Ranking shift?} \\
+\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+ &  &  & Worst & Drop & Worst & Drop & Worst & Drop &  \\
+\midrule
+T2D-SM-WH & schema\_simple & 0.3788 & 0.3788 & 0.0000 & 0.3788 & 0.0000 & 0.3788 & 0.0000 & only under format / naive \\
+T2D-SM-WH & schema\_strong & 0.5220 & 0.5220 & 0.0000 & 0.1744 & 0.3475 & 0.1744 & 0.3475 &  \\
+\midrule
+WDC Products & entity\_simple & 0.4132 & 0.4132 & 0.0000 & 0.3813 & 0.0319 & 0.3711 & 0.0421 & no \\
+WDC Products & entity\_strong & 0.5381 & 0.5381 & 0.0000 & 0.5190 & 0.0191 & 0.5289 & 0.0093 &  \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Figure~\ref{fig:curves} shows the same comparison as worst-case \fonescore{} trajectories over the perturbation budget for the stronger baselines. The separation between \abca{} and the weaker protocols is visually large on schema matching and modest on entity matching.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/figure1_worst_case_drop.pdf}
+\caption{Worst-case \fonescore{} trajectories for the stronger baselines. Each point is the mean worst-case \fonescore{} over seeds 13, 29, and 47 at the given perturbation budget. Panels are benchmark and search-mode specific.}
+\label{fig:curves}
+\end{figure*}
+
+Random-search results were retained only for the stronger baselines. The same qualitative pattern persists there. On T2D-SM-WH, mean worst-case \fonescore{} for the strong baseline is $0.5220$ under \abca{} and $0.1864$ under both format-only and naive perturbations, corresponding to a mean drop of $0.3356$. On WDC Products, the corresponding random-search drops for the strong baseline are $0.0000$ under \abca{}, $0.0100$ under format-only perturbations, and $0.0105$ under naive perturbations.
+
+The paired bootstrap analysis points in the same direction. For the strong schema matcher, the targeted \abca{} versus format-only mean deltas are $0.3883$ (seed 13), $0.2792$ (seed 29), and $0.3775$ (seed 47), and all three confidence intervals are strictly above zero. For the strong entity matcher, the targeted \abca{} versus naive differences are smaller, and some confidence intervals overlap zero.
+
+\begin{table*}[t]
+\caption{Selected paired bootstrap confidence intervals from the finalized artifacts. Each row compares targeted \abca{} predictions against targeted format-only or naive predictions for the stronger baseline at a single seed. Positive deltas favor \abca{} in worst-case \fonescore{}.}
+\label{tab:bootstrap-summary}
+\centering
+\small
+\begin{tabular}{lllrrr}
+\toprule
+Benchmark & Comparison & Seed & Mean delta & CI low & CI high \\
+\midrule
+T2D-SM-WH & \abca{} vs format & 13 & 0.3883 & 0.3143 & 0.4650 \\
+T2D-SM-WH & \abca{} vs format & 29 & 0.2792 & 0.2009 & 0.3535 \\
+T2D-SM-WH & \abca{} vs format & 47 & 0.3775 & 0.3074 & 0.4477 \\
+WDC Products & \abca{} vs naive & 13 & 0.0062 & -0.0104 & 0.0236 \\
+WDC Products & \abca{} vs naive & 29 & 0.0071 & -0.0093 & 0.0244 \\
+WDC Products & \abca{} vs naive & 47 & 0.0157 & -0.0010 & 0.0334 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Admissibility behavior}
+Because the audit is missing, the most defensible completed analysis of the checker is structural rather than human-validated. Figure~\ref{fig:operator-families} shows accepted and rejected \abca{} program families aggregated over the completed strong-baseline runs. The plot is faithful to the actual ABCA logs: it counts decisions by program family, not by manual audit outcome.
+
+On T2D-SM-WH, accepted families are dominated by header case or delimiter rewrites, row reordering, and token shuffles, while representative rejected families include value formatting and unsupported header abbreviations. On WDC Products, accepted families are dominated by case or punctuation rewrites and numeric rewrites, while attribute dropout, random deletion, and some boilerplate-containing programs are mostly rejected.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_accept_reject_counts.pdf}
+\caption{Accepted versus rejected \abca{} decisions by program family, aggregated over the completed strong-baseline runs across seeds and search modes. Only the highest-volume families per benchmark are shown. This figure summarizes deterministic checker outcomes only; it does not include human audit judgments because those labels are unavailable.}
+\label{fig:operator-families}
+\end{figure}
+
+\subsection{Ranking shifts}
+Figure~\ref{fig:rank-shift} shows the ranking-shift visualization requested by the self-review: the targeted clean ranking and the targeted worst-case ranking under each perturbation regime. The clean ranking is preserved under \abca{} on both benchmarks. A ranking reversal appears only for T2D-SM-WH under format-only and naive targeted evaluation, where the strong baseline falls below the simple baseline.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_rank_shift.pdf}
+\caption{Targeted ranking shifts from clean performance to worst-case performance under each perturbation regime. Ranks are computed from the mean \fonescore{} over seeds 13, 29, and 47, with rank 1 denoting the better method within each benchmark. Only T2D-SM-WH exhibits a regime-induced ranking reversal.}
+\label{fig:rank-shift}
+\end{figure}
+
+\subsection{Audit status and ablations}
+Table~\ref{tab:audit-status} states the exact audit status supported by the artifacts. The frozen manifest and packets exist, but none of the planned manual metrics can be reported.
+
+Table~\ref{tab:ablations} makes the ablation coverage explicit, including the completed search-strength rows and the blocked accepted-only-audit row from the final artifact table. The main positive ablation is the generic-rule replacement: on T2D-SM-WH, replacing benchmark-specific admissibility with a generic rule increases the targeted mean drop from $0.0000$ to $0.0710$; on WDC Products, the corresponding increase is from $0.0000$ to $0.0110$. By contrast, removing competitor protection on T2D-SM-WH had no observed effect in the completed runs, weakening the WDC evidence protection reproduces the generic-rule numbers, and the search-strength ablation shows no additional damage inside the admissible space under the fixed 40-evaluation budget.
+
+\begin{table*}[t]
+\caption{Ablation coverage for the stronger baselines. Numeric rows are means over seeds 13, 29, and 47. ``Drop'' is the mean absolute difference between clean and worst-case \fonescore{}. The final row is a blocked planned ablation reported exactly as a status from the frozen artifact table.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{llllrrr}
+\toprule
+Benchmark & Ablation & Search & Status & Worst \fonescore{} & Drop & Acceptance rate \\
+\midrule
+T2D-SM-WH & generic admissibility & random & completed & 0.4443 & 0.0777 & 0.7167 \\
+T2D-SM-WH & generic admissibility & targeted & completed & 0.4509 & 0.0710 & 0.8250 \\
+T2D-SM-WH & remove competitors & random & completed & 0.5220 & 0.0000 & 0.3000 \\
+T2D-SM-WH & remove competitors & targeted & completed & 0.5220 & 0.0000 & 0.5250 \\
+T2D-SM-WH & search strength & random & completed & 0.5220 & 0.0000 & 0.3000 \\
+T2D-SM-WH & search strength & targeted & completed & 0.5220 & 0.0000 & 0.5250 \\
+\midrule
+WDC Products & generic admissibility & random & completed & 0.5305 & 0.0076 & 1.0000 \\
+WDC Products & generic admissibility & targeted & completed & 0.5272 & 0.0110 & 1.0000 \\
+WDC Products & weaken entity evidence & random & completed & 0.5305 & 0.0076 & 1.0000 \\
+WDC Products & weaken entity evidence & targeted & completed & 0.5272 & 0.0110 & 1.0000 \\
+WDC Products & search strength & random & completed & 0.5381 & 0.0000 & 0.1667 \\
+WDC Products & search strength & targeted & completed & 0.5381 & 0.0000 & 0.3750 \\
+\midrule
+All & accepted-only audit & n/a & blocked & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The completed evidence supports a narrower claim than the original proposal. Benchmark-conditional admissibility clearly changes the robustness story on T2D-SM-WH. A naive or format-only targeted perturbation study would conclude that the stronger schema matcher is much more brittle than the simple baseline; under \abca{}, that conclusion disappears. On WDC Products, the differences are smaller but nonzero, suggesting that benchmark-conditional filtering matters there as well, just less dramatically.
+
+However, the central soundness argument is still missing. Without human labels on accepted and rejected perturbations, we do not know whether \abca{} accepted genuinely label-preserving edits at the intended precision threshold, whether rejected programs were mostly genuine label threats, or whether external annotators would agree with the rule design. The deterministic checker may be useful, but its correctness is not validated here.
+
+Several additional limitations matter.
+\begin{itemize}
+  \item The study covers only two benchmarks and four lightweight baselines.
+  \item The strongest observed schema-matching effect co-occurs with a narrow admissible space: the strong baseline's mean \abca{} acceptance rate is $0.3000$ under random search and $0.5250$ under targeted search on T2D-SM-WH, while the strong WDC Products baseline has mean \abca{} acceptance rates of $0.1667$ and $0.3750$. This narrowness improves the plausibility of soundness, but it also restricts the perturbation space enough that some of the observed robustness gap may be a consequence of severe admissibility pruning rather than a broadly deployable robustness protocol.
+  \item Relatedly, the completed evidence does not resolve the core tradeoff between soundness and admissible-space breadth. A broader admissibility rule would likely surface more damaging perturbations, as the generic ablations do, but it would also weaken the benchmark-relative argument that the released label is preserved.
+  \item The search-strength ablation did not find stronger \abca{} failures than random search for either strong baseline under the fixed 40-evaluation budget. This means the current artifact-backed evidence is about filtering sensitivity, not about the necessity of stronger search once the admissible space is enforced.
+  \item The accepted-only-audit ablation remained blocked because no human audit labels were collected, so we cannot quantify how misleading a one-sided validation procedure would have been in this workspace.
+  \item Random-search results are unavailable for the simple baselines because the pilot simplification removed them.
+  \item The realized environment differs from the plan: Python 3.12.3 and \texttt{scikit-learn} 1.8.0 were used instead of the originally planned Python 3.11 and \texttt{scikit-learn} 1.5 series.
+\end{itemize}
+
+The next step is straightforward and necessary: complete the dual-sided audit and report accepted precision, rejected violation rate, false-rejection rate, and agreement statistics. Until then, the strongest defensible interpretation is that admissibility filtering can materially affect robustness conclusions on these benchmarks, not that \abca{} has been validated as a sound methodology.
+
+\section{Conclusion}
+This paper revisited perturbation robustness in data integration through the narrower lens of benchmark-conditional admissibility. Using completed CPU-only experiments on one schema-matching benchmark and one entity-matching benchmark, we found that admissibility filtering can materially change the observed robustness story, especially on schema matching: for the stronger T2D-SM-WH baseline, the targeted mean worst-case \fonescore{} is $0.5220$ under \abca{} and $0.1744$ under both weaker perturbation regimes. On WDC Products, the differences are smaller but still measurable.
+
+At the same time, the original methodology claim remains incomplete because the human audit was not executed. The current paper should therefore be read as an artifact-backed empirical cautionary study. Its main lesson is that robustness numbers in schema and entity matching are not self-interpreting: the perturbation filter itself can change both effect sizes and qualitative rankings, and the most conservative filters may do so partly by sharply restricting the admissible space. Finishing the frozen audit package is the critical next step before any stronger soundness claim should be made.
+
+{\small
+\bibliographystyle{plainnat}
+\bibliography{paper}
+}
+
+\appendix
+
+\section{Artifact Mapping}
+For reproducibility, every quantitative table and figure in the paper maps directly to a frozen artifact under \texttt{results/final\_artifacts/}. Table~\ref{tab:artifact-mapping} records that mapping.
+
+\begin{table*}[t]
+\caption{Mapping from paper elements to frozen artifact files. All numeric values in the main paper are copied or filtered directly from these CSV files; the PDFs in \texttt{figures/} duplicate the corresponding files in \texttt{results/final\_artifacts/}.}
+\label{tab:artifact-mapping}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{3.0cm}p{5.3cm}p{6.6cm}}
+\toprule
+Paper element & Artifact file & Mapping notes \\
+\midrule
+Table~\ref{tab:benchmark-stats} & \texttt{table1\_benchmark\_statistics.csv} & Uses the train, valid, and test rows for \texttt{t2d\_sm\_wh} and \texttt{wdc\_products\_medium}; coverage values are copied from the corresponding split rows. \\
+Table~\ref{tab:admissibility-rationale} & \texttt{table2\_admissibility\_rationale.csv} & Copies the protected-evidence, competitor-rule, admissible-family, and forbidden-edit fields. \\
+Table~\ref{tab:audit-status} & \texttt{table3\_audit\_status.csv} & Reports the pending audit status exactly as frozen in the artifacts. \\
+Table~\ref{tab:targeted-main} & \texttt{table4\_clean\_corrupted\_performance.csv} & Filters to \texttt{search\_mode=targeted}; clean, worst-case, and drop values are copied from the mean columns. \\
+Table~\ref{tab:ablations} & \texttt{table5\_ablations.csv} & Filters to the stronger baselines and the ablations discussed in the text; the audit ablation remains blocked. \\
+Table~\ref{tab:bootstrap-summary} & \texttt{table6\_paired\_bootstrap\_cis.csv} & Selects the targeted strong-baseline rows referenced in the main text. \\
+Figure~\ref{fig:curves} & \texttt{figure1\_worst\_case\_drop.pdf} & Duplicated at \texttt{figures/figure1\_worst\_case\_drop.pdf}. \\
+Figure~\ref{fig:operator-families} & \texttt{figure2\_operator\_family\_counts.csv} and \texttt{figure2\_accept\_reject\_counts.pdf} & The CSV supplies the family counts; the PDF is the rendered plot. \\
+Figure~\ref{fig:rank-shift} & \texttt{figure3\_rank\_shift\_data.csv} and \texttt{figure3\_rank\_shift.pdf} & The CSV supplies clean and regime-specific ranks; the PDF is the rendered plot. \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\section{Additional Figure}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/appendix_ablation_summary.pdf}
+\caption{Appendix summary of the completed ablation runs from the artifact pipeline.}
+\end{figure*}
+
+\end{document}

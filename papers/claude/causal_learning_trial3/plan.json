@@ -1,0 +1,185 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and configure environment",
+    "description": "Set up the Python environment with all required causal discovery libraries and statistical testing packages. All computation is CPU-only on 2 cores with 128GB RAM.",
+    "steps": {
+      "step1": "Create a Python virtual environment with Python 3.10+: python -m venv venv && source venv/bin/activate",
+      "step2": "Install causal discovery libraries: pip install causal-learn (provides PC, FCI, GES, LiNGAM, DirectLiNGAM, NOTEARS via their respective modules). Install lingam package as standalone fallback. For CAM: implement a lightweight version using sklearn GAM-style additive regression since the R-based CAM package is hard to install; alternatively use causal-learn's ANM if CAM is unavailable.",
+      "step3": "Install statistical and scientific packages: pip install scipy numpy pandas scikit-learn statsmodels networkx",
+      "step4": "Install HSIC independence testing: pip install hyppo (provides permutation-based HSIC). If unavailable, implement a custom HSIC using RBF kernel with median bandwidth heuristic and permutation testing.",
+      "step5": "Install visualization: pip install matplotlib seaborn",
+      "step6": "Install data and benchmark packages: pip install pgmpy (for standard Bayesian network benchmarks: Asia, Alarm, Child). For Sachs dataset: download from bnlearn repository or bundle with the code.",
+      "step7": "Install parallelization utilities: pip install joblib tqdm",
+      "step8": "Run a smoke test: generate a 5-node random DAG, sample 200 data points (linear Gaussian), run each of the 7 algorithms (PC, FCI, GES, NOTEARS, LiNGAM, DirectLiNGAM, CAM), verify each returns an adjacency matrix without errors. Time each algorithm to establish baseline per-run cost.",
+      "step9": "Define global constants: SEEDS = [42, 123, 456], N_CORES = 2, MAX_ALGO_TIMEOUT = 120 (seconds per algorithm per dataset)"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic datasets with controlled assumption profiles",
+    "description": "Create synthetic structural equation model (SEM) datasets with known ground truth graphs and known per-edge assumption profiles. The experimental grid systematically varies which assumptions hold, enabling us to validate assumption profiling accuracy and measure performance under controlled conditions. We scope to 72 settings x 3 seeds = 216 datasets to fit the 8-hour budget.",
+    "steps": {
+      "step1": "Implement SEM data generator class in src/data_generator.py with parameters: (num_nodes, edge_density, functional_form, noise_type, faithfulness_mode, confounder_fraction, sample_size, random_seed). The generator returns: (data_matrix [n x p], ground_truth_adj [p x p], assumption_labels dict with per-edge linearity and per-node Gaussianity flags).",
+      "step2": "Graph generation: use networkx.generators.random_graphs.gnp_random_graph to create Erdos-Renyi DAGs. Ensure acyclicity by only keeping edges (i,j) where i < j in a random topological ordering. Parameters: num_nodes in {10, 20, 30}, edge_density in {1.5, 2.5} (as probability = density/num_nodes). Assign edge weights uniformly from [-1.0, -0.3] union [0.3, 1.0] to avoid near-zero effects.",
+      "step3": "Functional forms: (a) 'linear': Y_j = sum(w_ij * X_i for i in parents(j)) + noise, (b) 'nonlinear': Y_j = sum(f(w_ij * X_i)) + noise where f is randomly chosen per edge from {x^2 * sign(x), tanh(2*x), sin(pi*x)}, (c) 'mixed': each edge independently assigned linear (prob 0.5) or nonlinear (prob 0.5). Record per-edge linearity labels.",
+      "step4": "Noise distributions: (a) 'gaussian': eps ~ N(0, 1), (b) 'laplace': eps ~ Laplace(0, 1/sqrt(2)), (c) 'mixed_noise': each node independently Gaussian (prob 0.5) or Laplace (prob 0.5). Record per-node Gaussianity labels.",
+      "step5": "Faithfulness modes: (a) 'faithful': standard SEM, (b) 'near_unfaithful': for 20% of nodes with 2+ parents, adjust parent coefficients so that the sum of two parent effects nearly cancels (ratio between 0.9 and 1.1), creating near-zero partial correlations.",
+      "step6": "Confounder settings: (a) 'sufficient': all nodes observed, (b) 'confounded_20pct': randomly select 20% of non-root, non-leaf nodes as latent (remove from observed data but keep their causal effects active). Record which observed edges are affected by latent confounders.",
+      "step7": "Define the experiment grid (72 settings): nodes={10,20,30} x density={1.5,2.5} x func={linear,nonlinear,mixed} x noise={gaussian,laplace} x faith={faithful,near_unfaithful}. This gives 3*2*3*2*2 = 72 base settings, all with sufficient (no confounders). Sample size n=1000 for all.",
+      "step8": "Add confounder settings (12 extra): for nodes={10,20} x density={2.5} x func={linear,mixed} x noise={gaussian,laplace} x faith={faithful} with confounders=20%. This adds 2*1*2*2*1 = 8 settings. Total: 80 settings.",
+      "step9": "Generate 3 seeds per setting: 80 x 3 = 240 total datasets. Save to data/synthetic/ as: {setting_id}.npz containing keys 'data', 'true_adj', 'assumption_labels', 'params'. Also save a manifest CSV listing all settings and their parameters.",
+      "step10": "Generate additional sample-size variants for ablation: for a 12-setting subset (nodes=10, all func x noise combinations, faithful, sufficient), generate data with n in {200, 500, 2000, 5000} in addition to n=1000. This adds 12 x 4 x 3 = 144 extra datasets for the sample size ablation. Save to data/synthetic_samplesize/."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare real-world benchmark datasets",
+    "description": "Load and prepare 4 standard Bayesian network benchmarks with known ground-truth graphs. These provide realistic evaluation scenarios where true causal structure is established by domain experts.",
+    "steps": {
+      "step1": "Sachs protein signaling dataset (11 nodes, 17 edges): download from bnlearn data repository (https://www.bnlearn.com/bnrepository/). Use the observational continuous flow cytometry data (~853 samples). Save ground truth consensus DAG as adjacency matrix.",
+      "step2": "Asia network (8 nodes, 8 edges): load from pgmpy.models or bnlearn. Sample n=5000 continuous observations using forward sampling from the Bayesian network (convert discrete variables to continuous by adding Gaussian noise to ordinal encodings, or use the continuous version if available).",
+      "step3": "Child network (20 nodes, 25 edges): load from pgmpy/bnlearn. Sample n=5000 continuous observations with same conversion approach as Asia.",
+      "step4": "Alarm network (37 nodes, 46 edges): load from pgmpy/bnlearn. Sample n=5000 continuous observations. Note: this is the largest benchmark and some algorithms (CAM, NOTEARS) may be slow. Set a 300-second timeout per algorithm for this dataset.",
+      "step5": "Save all datasets to data/real/{name}/ with files: data.csv, true_adj.npy, metadata.json (containing node names, number of nodes/edges/samples, data source).",
+      "step6": "Compute and log summary statistics: marginal skewness/kurtosis per variable, pairwise correlation distribution, to characterize how 'easy' or 'hard' each dataset is for different algorithm families."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement ADECD framework core components",
+    "description": "Implement the three core components of the Assumption-Diagnostic Ensemble Causal Discovery framework: (1) algorithm portfolio runner, (2) per-edge assumption profiler, (3) diagnostic reconciler with adaptive calibration.",
+    "steps": {
+      "step1": "Create src/portfolio.py: implement run_portfolio(data, algorithms, timeout=120) that runs each algorithm and returns dict of adjacency matrices. Algorithm wrappers: PC(data, alpha=0.05) using causal-learn's PC with fisherz test; FCI(data, alpha=0.05) using causal-learn's FCI; GES(data) using causal-learn's GES with BIC; NOTEARS(data, lambda1=0.1, w_threshold=0.3) using causal-learn; LiNGAM(data) and DirectLiNGAM(data) using lingam package; CAM(data) using additive regression with sklearn (fit GAMs, test significance of each parent). Each wrapper handles errors/timeouts gracefully, returning an empty adjacency matrix on failure.",
+      "step2": "Create src/assumption_profiler.py: implement profile_edges(data, candidate_edges, algorithm_outputs) returning per-edge diagnostic scores. Candidate edges = union of all edges across algorithm outputs. For each edge (i,j): identify candidate_parents = union of parents of j across all algorithms.",
+      "step3": "Implement linearity diagnostic in assumption_profiler.py: fit OLS regression of X_j on X_i + candidate_parents. Compute residuals. Run HSIC permutation test (300 permutations) between residuals and X_i using RBF kernel with median bandwidth. linearity_score = HSIC p-value (high p-value = linear, i.e., residuals independent of predictor). Transform to [0,1] where 1 = linear.",
+      "step4": "Implement Gaussianity diagnostic: apply scipy.stats.anderson (Anderson-Darling test) to the residuals from step 3. gaussianity_score = 1 if AD statistic < critical_value_at_5pct, else min(1, critical_value / AD_statistic). Also compute abs(kurtosis - 3) as excess kurtosis measure.",
+      "step5": "Implement faithfulness diagnostic: for each edge (i,j), compute partial correlations r(X_i, X_j | S) for conditioning sets S drawn from the estimated Markov blanket of i and j (union of neighbors across algorithms). Use subsets up to size min(3, |MB|-1), sample at most 50 subsets if there are too many. faithfulness_score = 1 - (fraction of subsets where |partial_corr| < tau), with tau=0.05.",
+      "step6": "Implement sufficiency diagnostic: compare PC output with FCI output. For each edge (i,j): if FCI shows a bidirected edge (i <-> j) or no edge where PC shows directed edge, sufficiency_score = 0.3. If both agree, sufficiency_score = 1.0. If only FCI shows the edge, sufficiency_score = 0.7.",
+      "step7": "Create src/reconciler.py: implement reconcile(algorithm_outputs, assumption_profiles, beta_params) that computes per-edge confidence scores. For each candidate edge e and algorithm k: alpha_k(e) = beta_lin * s_lin(e) * M(k,'lin') + beta_gauss * s_gauss(e) * M(k,'gauss') + beta_faith * s_faith(e) * M(k,'faith') + beta_suff * s_suff(e) * M(k,'suff'), where M(k,a) encodes whether algorithm k benefits from assumption a being satisfied (+1), violated (-1), or is agnostic (0). Compute weights w_k(e) = softmax(alpha_k(e)) over algorithms. confidence(e) = sum_k w_k(e) * I(e in G_k).",
+      "step8": "Define the algorithm-assumption mapping matrix M in reconciler.py: PC: faith=+1, suff=+1, lin=0, gauss=0. FCI: faith=+1, suff=0, lin=0, gauss=0. GES: faith=+1, suff=+1, lin=0, gauss=0. NOTEARS: faith=0, suff=+1, lin=+1, gauss=0. LiNGAM: faith=0, suff=+1, lin=+1, gauss=-1. DirectLiNGAM: faith=0, suff=+1, lin=+1, gauss=-1. CAM: faith=0, suff=+1, lin=0, gauss=0.",
+      "step9": "Create src/calibration.py: implement calibrate_beta(training_datasets, true_adjs) that optimizes beta parameters. Stage 1 (pre-training): run portfolio + profiling on 50 diverse synthetic SEMs generated internally (10-20 nodes, all func/noise combos), optimize beta using scipy.optimize.minimize(method='L-BFGS-B') to minimize negative log-likelihood of edge predictions vs ground truth. Only 4 parameters so convergence is fast.",
+      "step10": "Implement bootstrap-adaptive calibration in calibration.py: adapt_beta(data, beta_init, B=30) generates B bootstrap resamples, runs portfolio + profiling on each, computes edge stability (fraction of resamples where edge appears in >50% of algorithms) as pseudo-labels, fine-tunes beta via L-BFGS-B. For 30-node graphs, reduce B to 20 for speed.",
+      "step11": "Create src/adecd.py: main class ADECD with methods fit(data, adapt=True), predict(threshold=0.5), get_diagnostics(). fit() runs portfolio, profiles edges, calibrates/adapts beta, reconciles. predict() thresholds confidence scores. get_diagnostics() returns per-edge assumption profiles and algorithm weights."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and run all baseline methods",
+    "description": "Implement all baseline methods for fair comparison: individual algorithms (7), naive ensembles (3), global-weight ensemble (Saldanha-style), bootstrap aggregation (2), and oracle ensemble (1). Run on all datasets.",
+    "steps": {
+      "step1": "Create src/baselines.py with functions: majority_vote(graphs) -- edge present if >50% of algorithms include it, orientation by weighted majority; union_graph(graphs) -- edge present if any algorithm includes it; intersection_graph(graphs) -- edge present if all algorithms include it.",
+      "step2": "Implement saldanha_ensemble(graphs, training_data, training_truth): learn 7 global algorithm weights (one per algorithm, shared across all edges) by optimizing edge prediction accuracy on synthetic training data. Apply these fixed weights to compute per-edge confidence = sum_k w_k * I(e in G_k) with threshold 0.5.",
+      "step3": "Implement bootstrap_agg(data, algorithm, B=30, threshold=0.5): generate B bootstrap resamples, run the specified algorithm on each, compute edge frequency, threshold. Instantiate for PC and GES.",
+      "step4": "Implement oracle_ensemble(graphs, true_adj, assumption_labels): given ground truth assumption status, assign weight=1 to algorithms whose assumptions are satisfied and weight=0 to violated, then weighted vote. This is the upper bound for assumption-aware ensembling.",
+      "step5": "Run all 7 individual algorithms on all 240 synthetic datasets (80 settings x 3 seeds). Use joblib.Parallel(n_jobs=2). Store results in results/individual/. Estimated time: ~90 minutes (7 algos x 240 datasets, most <10s each, but some 30-node runs may take 30-60s).",
+      "step6": "Compute naive ensemble baselines (majority, union, intersection) from individual algorithm outputs -- this is fast, just array operations. Store in results/naive_ensemble/.",
+      "step7": "Run Saldanha ensemble: use 50 settings for training (stratified sample), remaining 30 for testing. Compute global weights, then apply to all datasets. Store in results/saldanha/.",
+      "step8": "Run bootstrap-PC and bootstrap-GES on all 240 synthetic datasets with B=30. This is expensive: 240 x 30 x 2 = 14,400 algorithm runs. Use n_jobs=2. Estimated time: ~60 minutes (most runs are fast for 10-20 node graphs).",
+      "step9": "Run all baselines on 4 real-world datasets. Store in results/real/.",
+      "step10": "Compute metrics (SHD, F1, precision, recall, orientation accuracy) for all baselines on all datasets. Save summary to results/baseline_metrics.csv."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run ADECD on all datasets and collect results",
+    "description": "Execute the full ADECD pipeline on all synthetic and real-world datasets. This includes pre-training beta on synthetic data, running with transfer-only beta, and running with bootstrap-adaptive beta. Collect reconciled graphs, confidence scores, and diagnostics.",
+    "steps": {
+      "step1": "Pre-train beta parameters: generate 50 internal synthetic SEMs (10-20 nodes, spanning all func/noise/faith combos), run full pipeline, optimize beta via L-BFGS-B. Save to models/beta_pretrained.npy. Estimated time: ~20 minutes.",
+      "step2": "Run ADECD with pre-trained beta only (no bootstrap adaptation) on all 240 synthetic datasets. This is the 'transfer-only' variant needed for the calibration ablation. Since individual algorithm outputs are already computed, this only requires running assumption profiling + reconciliation. Estimated time: ~40 minutes (profiling is the bottleneck due to HSIC tests).",
+      "step3": "Run ADECD with bootstrap-adaptive calibration on all 240 synthetic datasets. B=30 bootstrap resamples for 10-20 node graphs, B=20 for 30-node graphs. Each bootstrap resample requires re-running 7 algorithms + profiling. Estimated time: ~2.5 hours (the most expensive step). Use n_jobs=2 for parallelism.",
+      "step4": "Run full ADECD (with bootstrap adaptation) on all 4 real-world datasets. Estimated time: ~20 minutes.",
+      "step5": "For each result, save: reconciled adjacency matrix, per-edge confidence scores, per-edge assumption profiles {linearity_score, gaussianity_score, faithfulness_score, sufficiency_score}, per-edge algorithm weights {algo: weight}, adapted beta parameters, total runtime. Store in results/adecd/.",
+      "step6": "Compute all metrics (SHD, F1, precision, recall, orientation accuracy) for ADECD on all datasets. Save to results/adecd_metrics.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Portfolio size",
+    "description": "Measure how ADECD performance changes with the number of algorithms in the portfolio, testing whether all 7 algorithms are needed.",
+    "steps": {
+      "step1": "Define 4 portfolio subsets: (a) 2-algo: PC + LiNGAM (constraint-based + functional), (b) 3-algo: PC + GES + LiNGAM (one from each major family), (c) 5-algo: PC + FCI + GES + NOTEARS + LiNGAM (all families, one representative each), (d) 7-algo: full portfolio (baseline).",
+      "step2": "For each subset, re-run ADECD (with bootstrap adaptation, B=20) on a representative 24-setting subset: nodes={10,20} x density={1.5,2.5} x func={linear,nonlinear,mixed} x noise={gaussian,laplace}, all faithful+sufficient. 24 settings x 3 seeds = 72 runs per portfolio size.",
+      "step3": "Compute SHD and F1 for each portfolio size. Store in results/ablation/portfolio_size.csv.",
+      "step4": "Estimated time: ~40 minutes total (smaller portfolios are faster; only 72 runs each)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Diagnostic feature leave-one-out",
+    "description": "Assess the contribution of each assumption diagnostic by removing one at a time. This identifies which diagnostics are most valuable for ADECD's performance.",
+    "steps": {
+      "step1": "Define 5 ablation variants: (a) no_linearity: set linearity_score=0.5 for all edges, (b) no_gaussianity: set gaussianity_score=0.5, (c) no_faithfulness: set faithfulness_score=0.5, (d) no_sufficiency: set sufficiency_score=0.5, (e) no_diagnostics: set all scores to 0.5 (equivalent to uniform-weight ensemble).",
+      "step2": "Run each variant on the same 24-setting subset (72 runs per variant). Re-optimize beta for each variant since the optimal weights may change. Total: 5 variants x 72 runs = 360 runs.",
+      "step3": "Compute SHD and F1 for each variant. Compute delta from full ADECD: delta_SHD = SHD_ablated - SHD_full (positive = ablated is worse). Store in results/ablation/diagnostics_loo.csv.",
+      "step4": "Estimated time: ~30 minutes (profiling is fast when skipping one diagnostic; reconciliation is instant)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Transfer vs. adaptive calibration",
+    "description": "Compare calibration strategies to quantify the value of bootstrap-adaptive fine-tuning. This directly tests whether the two-stage calibration from the proposal (synthetic pre-train + bootstrap adapt) outperforms simpler approaches.",
+    "steps": {
+      "step1": "Define 4 calibration variants: (a) uniform: beta_a = 1 for all a (no learning), (b) pretrained: synthetic-only beta (already computed), (c) adapted: full bootstrap-adaptive beta (already computed), (d) oracle: optimize beta per-dataset using actual ground truth adjacency as labels (upper bound).",
+      "step2": "Compute uniform and oracle variants on the 24-setting subset. Uniform requires no optimization. Oracle: for each dataset, optimize beta to maximize edge prediction F1 against true_adj using scipy.optimize.minimize. Reuse pretrained and adapted results from main experiment.",
+      "step3": "Compare all 4 variants on SHD and F1. Store in results/ablation/calibration.csv.",
+      "step4": "Estimated time: ~15 minutes (oracle optimization is fast with only 4 parameters)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Sample size sensitivity",
+    "description": "Test how ADECD and baselines degrade with decreasing sample size. Uses the extra sample-size datasets generated in data preparation.",
+    "steps": {
+      "step1": "Use the 12-setting subset (nodes=10, all func x noise combos, faithful, sufficient) with sample sizes n in {200, 500, 1000, 2000, 5000}. Each with 3 seeds = 12 x 5 x 3 = 180 datasets.",
+      "step2": "Run ADECD (with bootstrap adaptation B=20) and top baselines (majority vote, Saldanha ensemble, best individual algorithm per-setting, bootstrap-PC) on all 180 datasets.",
+      "step3": "Compute SHD and F1 at each sample size. Aggregate across settings. Store in results/ablation/sample_size.csv.",
+      "step4": "Estimated time: ~30 minutes (10-node graphs are very fast)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Assumption profile accuracy evaluation",
+    "description": "Evaluate how accurately ADECD's per-edge diagnostics detect which assumptions are satisfied or violated, using synthetic ground truth.",
+    "steps": {
+      "step1": "For all synthetic datasets, extract ground truth labels: per-edge linearity (1 if true functional form is linear, 0 if nonlinear), per-node Gaussianity (1 if noise is Gaussian, 0 otherwise), per-edge faithfulness (1 if no near-cancellation, 0 if near-unfaithful), per-edge sufficiency (1 if no latent confounder, 0 if confounded).",
+      "step2": "For each diagnostic, threshold the continuous score at 0.5 to produce binary predictions. Compute accuracy, precision, recall, F1, and AUC-ROC against ground truth labels. Aggregate across all edges in all synthetic datasets.",
+      "step3": "Break down accuracy by data-generating condition: e.g., linearity detection accuracy in purely linear vs purely nonlinear vs mixed settings.",
+      "step4": "Compute 'dominant violation identification' accuracy: for each dataset, identify the primary assumption violation (the one most severely violated based on generation parameters), check if ADECD's assumption profiles correctly flag it as the weakest assumption. Target: >65%.",
+      "step5": "Store all results in results/analysis/assumption_accuracy.csv."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute metrics and statistical significance tests",
+    "description": "Aggregate all results, compute evaluation metrics, perform statistical significance tests, and evaluate each success criterion from the proposal.",
+    "steps": {
+      "step1": "Implement src/metrics.py with functions: shd(pred, true) counting additions + deletions + reversals; edge_f1(pred, true) for undirected edge presence; orientation_accuracy(pred, true) for correctly oriented true positive edges; brier_score(confidences, true_labels) for calibration.",
+      "step2": "Compute all metrics for all methods on all datasets. Create a master results DataFrame with columns: method, setting_id, seed, SHD, F1, precision, recall, orientation_acc, runtime_sec. Save to results/all_metrics.csv.",
+      "step3": "Aggregate metrics: compute mean and std across seeds for each (method, setting_id), then across settings for overall summary. Also group by condition (func_form, noise_type, graph_size, etc.).",
+      "step4": "Statistical significance: for each pair (ADECD_adapted, baseline), run paired Wilcoxon signed-rank test on per-setting mean SHD (80 paired observations). Apply Bonferroni correction for 14 comparisons (7 individual + 3 naive + saldanha + 2 bootstrap + oracle). Report corrected p-values.",
+      "step5": "Calibration analysis: for ADECD's per-edge confidence scores, bin edges into 10 confidence deciles, compute actual accuracy in each bin. Compute Brier score and Expected Calibration Error (ECE). Generate data for reliability diagram.",
+      "step6": "Evaluate all 7 success criteria: (1) ADECD SHD < best individual in >=50% of settings. (2) ADECD never worse than median individual. (3) Confidence calibration within 15% per decile. (4) Assumption profile accuracy >65%. (5) Per-edge > global weighting in >=60% of settings. (6) Real-world: ADECD >= best individual. (7) Runtime < 5x slowest algorithm.",
+      "step7": "Save success criteria evaluation to results/success_criteria.json with fields: criterion, target, achieved_value, pass_or_fail, details."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables for the research paper. Use consistent styling: matplotlib with seaborn theme, PDF output at 300 DPI, colorblind-friendly palette.",
+    "steps": {
+      "step1": "Figure 1 (Framework overview): schematic diagram of ADECD showing the 3 components as connected boxes: (1) Algorithm Portfolio with icons for each algorithm family, (2) Per-Edge Assumption Profiler with the 4 diagnostic tests, (3) Diagnostic Reconciler showing weighted combination. Use matplotlib patches and annotations. Save as figures/fig1_framework.pdf.",
+      "step2": "Figure 2 (Main results - synthetic): grouped bar chart of mean SHD (lower is better) across all test synthetic settings. Groups: Individual Algorithms (PC, FCI, GES, NOTEARS, LiNGAM, DLiNGAM, CAM), Naive Ensembles (Majority, Union, Intersection), Informed Ensembles (Saldanha, Bootstrap-PC, Bootstrap-GES), ADECD. Error bars = std across settings. Use distinct colors per group. Save as figures/fig2_main_shd.pdf.",
+      "step3": "Figure 3 (Per-condition performance): heatmap with rows = methods (subset: best individual, majority vote, Saldanha, ADECD), columns = data-generating conditions (linear-Gauss, linear-Laplace, nonlinear-Gauss, nonlinear-Laplace, mixed-Gauss, mixed-Laplace). Cells = mean F1 score. Annotate cells with values. ADECD should be consistently high across columns. Save as figures/fig3_condition_heatmap.pdf.",
+      "step4": "Figure 4 (Ablations - 3 subplots): (a) Line plot of SHD vs portfolio size {2,3,5,7}. (b) Bar chart of delta-SHD for leave-one-out diagnostic ablation (positive = removing hurts). (c) Bar chart comparing calibration strategies (uniform, pretrained, adapted, oracle). Save as figures/fig4_ablations.pdf.",
+      "step5": "Figure 5 (Calibration reliability diagram): scatter+line plot of predicted confidence (x-axis, 10 bins) vs observed accuracy (y-axis). Include 45-degree perfect calibration line (dashed). Show Brier score and ECE in legend. Also overlay majority-vote frequency as a comparison. Save as figures/fig5_calibration.pdf.",
+      "step6": "Figure 6 (Sample size sensitivity): line plot of mean SHD vs sample size {200, 500, 1000, 2000, 5000} for ADECD, majority vote, Saldanha, and best individual algorithm. Shaded bands = +/- 1 std across settings. Save as figures/fig6_sample_size.pdf.",
+      "step7": "Figure 7 (Real-world case study - Sachs): (a) ground truth DAG drawn with networkx spring layout, (b) ADECD reconciled graph with edges colored by confidence (green=high, red=low), (c) annotation table showing 3-4 interesting edges with their assumption profiles and which algorithms agreed/disagreed. Save as figures/fig7_sachs_case.pdf.",
+      "step8": "Table 1 (Main results): rows = all methods (14 total), columns = SHD (mean +/- std), F1, Precision, Recall, Orient. Acc. Bold best, underline second best. Include p-value column for Wilcoxon test vs ADECD. Save as tables/table1_main.csv and tables/table1_main.tex.",
+      "step9": "Table 2 (Real-world benchmarks): rows = methods (top 7: best 3 individual, majority, Saldanha, bootstrap-PC, ADECD), columns = SHD on Sachs, Asia, Child, Alarm. Save as tables/table2_real.csv and tables/table2_real.tex.",
+      "step10": "Table 3 (Assumption profile accuracy): rows = diagnostic type (linearity, Gaussianity, faithfulness, sufficiency), columns = accuracy, precision, recall, F1, AUC-ROC. Save as tables/table3_assumption.csv and tables/table3_assumption.tex.",
+      "step11": "Table 4 (Runtime comparison): rows = methods, columns = mean runtime (seconds) for graph sizes 10, 20, 30 nodes. Include ADECD overhead ratio vs slowest individual algorithm. Save as tables/table4_runtime.csv and tables/table4_runtime.tex.",
+      "step12": "Create all output directories: figures/, tables/. Ensure all figures use consistent font sizes (axis labels 12pt, titles 14pt, legends 10pt) and a colorblind-friendly palette (seaborn 'colorblind')."
+    }
+  }
+]

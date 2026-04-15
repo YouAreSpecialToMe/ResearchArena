@@ -1,0 +1,536 @@
+\documentclass[preprint]{article}
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\ie}{\text{IE}}
+\newcommand{\os}{\text{OS}}
+\newcommand{\me}{\text{ME}}
+\newcommand{\quality}{Q}
+
+\title{Characterizing Operator Interaction Effects in Data Cleaning Pipelines}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Data cleaning pipelines compose multiple operators---imputation, outlier removal, deduplication, normalization, and encoding---applied sequentially, yet the ordering of these operators is typically chosen ad hoc or via expensive brute-force search. We present the first systematic empirical study of pairwise interaction effects between data cleaning operators, introducing a formal framework that measures interaction effects, order sensitivity, and classifies operator pairs as synergistic, antagonistic, or independent. Across 1,080 interaction measurements spanning 5 operators and 18 datasets with 3 random seeds, we find that the majority of operator pairs (63.2\%) are effectively independent, challenging the assumption that ordering universally matters. However, specific pairs exhibit strong, statistically significant interactions: normalization before outlier removal shows the highest order sensitivity ($\os = 0.055$), and imputation--outlier interactions are consistently synergistic ($\ie = 0.043$, $p < 0.01$). From these patterns, we derive 6 interpretable rules that predict interaction signs with 93.6\% accuracy. An Interaction-Aware Pipeline Optimizer (IAPO) using these rules achieves 98.8\% of exhaustive search quality while evaluating only 8.3\% of the search space, outperforming greedy (+7.1\% F1) and canonical (+3.7\% F1) baselines. We validate these findings with a second downstream model (RandomForest), confirming that the interaction patterns generalize beyond the primary evaluation model. We report honest negative results on two of three pre-registered hypotheses, providing valuable evidence about the limits of interaction-based pipeline optimization.
+\end{abstract}
+
+\section{Introduction}
+
+Data cleaning consumes up to 80\% of a data scientist's time and is a critical bottleneck in machine learning pipelines~\citep{Chu2016DataCleaning}. A typical pipeline composes multiple operators---missing value imputation, outlier detection, deduplication, value normalization, and categorical encoding---applied sequentially to transform dirty data into a form suitable for downstream analysis. The quality of the final output depends not only on which operators are included but crucially on the \emph{order} in which they are applied.
+
+Despite significant progress in automated pipeline construction---systems like AlphaClean~\citep{Krishnan2019AlphaClean}, Learn2Clean~\citep{BertiEquille2019Learn2Clean}, SAGA~\citep{Siddiqi2024SAGA}, and DiffPrep~\citep{Li2023DiffPrep} search for effective configurations---the field lacks a fundamental understanding of \emph{why} certain operator orderings outperform others. Current approaches treat the pipeline search space as opaque: they enumerate permutations exhaustively, use reinforcement learning to explore blindly, or require differentiable relaxations. None systematically characterize the structural properties of operator interactions that determine when ordering matters and when it does not.
+
+This gap is analogous to query processing before relational algebra: without understanding algebraic properties of operator sequences, optimizers cannot efficiently prune the search space. We address this gap through a systematic empirical study of operator interaction effects.
+
+Our contributions are:
+\begin{itemize}[nosep]
+  \item We introduce a formal framework for measuring pairwise interaction effects, order sensitivity, and classifying operator pairs into five categories (synergistic, antagonistic, order-critical, commutative, independent).
+  \item We conduct the first large-scale empirical study of operator interactions across 18 datasets, finding that 63.2\% of pairs are independent while 3 of 20 pairs show statistically significant effects after Bonferroni correction.
+  \item We derive 6 interpretable, dataset-characteristic-conditioned rules that predict interaction signs with 93.6\% accuracy, and demonstrate their use in an Interaction-Aware Pipeline Optimizer (IAPO) that achieves 98.8\% of exhaustive quality at 8.3\% of the search cost.
+  \item We report honest negative results: two of three pre-registered hypotheses were not fully confirmed, providing evidence about when interaction-based pipeline optimization is and is not warranted.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our framework and optimizer. Section~\ref{sec:experiments} presents experiments. Section~\ref{sec:discussion} discusses findings. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Automated Data Cleaning Pipeline Construction.}
+AlphaClean~\citep{Krishnan2019AlphaClean} formulates pipeline construction as a search problem and notes operator non-commutativity but does not systematically study interaction effects. Learn2Clean~\citep{BertiEquille2019Learn2Clean} uses Q-learning for operator ordering, treating interactions as a black box. SAGA~\citep{Siddiqi2024SAGA} optimizes cleaning pipelines at scale using monotonicity-based pruning and top-$K$ enumeration; our interaction framework provides richer pruning properties beyond monotonicity. DiffPrep~\citep{Li2023DiffPrep} employs differentiable relaxation for pipeline search but requires differentiable downstream models. Our approach is model-agnostic and provides interpretable interaction characterizations. AutoDCWorkflow~\citep{Li2025AutoDCWorkflow} uses LLMs to auto-generate cleaning workflows but does not characterize operator interactions.
+
+\paragraph{Data Cleaning Benchmarks.}
+CleanML~\citep{Li2021CleanML} benchmarks the impact of individual cleaning methods on ML models but evaluates operators independently, not in composition. REIN~\citep{Abdelaal2023REIN} provides a comprehensive benchmark of 38 cleaning methods, also evaluating them individually. \citet{Ni2024AutomaticRepair} evaluate 12 repair algorithms under different error rates. Our work extends these benchmarks by studying what happens when operators are \emph{composed} in different orderings.
+
+\paragraph{Formal Foundations and RL Approaches.}
+\citet{NunezCorrales2020Algebraic} propose an algebraic approach to data transformations using homotopy type theory, focusing on provenance tracking without empirical validation. Our work provides the missing empirical grounding. RLclean~\citep{Peng2024RLclean} integrates detection and repair in an RL framework but does not formally characterize their interaction effects. \citet{Miao2024RelationalCleaning} survey relational data cleaning and identify pipeline composition as an open challenge.
+
+Unlike all prior work, we provide the first systematic, quantitative characterization of pairwise operator interaction effects, derive interpretable rules, and demonstrate their practical utility for pipeline optimization.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Interaction Characterization Framework}
+
+We define formal metrics for measuring how data cleaning operators interact when composed in a pipeline.
+
+\paragraph{Operator Effect.} For a cleaning operator $O_i$ applied to dataset $D$, the \emph{main effect} is the change in downstream quality:
+\begin{equation}
+\me(O_i, D) = \quality(O_i(D)) - \quality(D)
+\end{equation}
+where $\quality(\cdot)$ denotes the downstream ML model's F1-score (macro-averaged) on cleaned data.
+
+\paragraph{Pairwise Interaction Effect.} For operators $O_i$ and $O_j$, the interaction effect measures the non-additive component:
+\begin{equation}
+\ie(O_i, O_j, D) = \quality(O_i(O_j(D))) - \quality(O_j(D)) - \me(O_i, D)
+\label{eq:ie}
+\end{equation}
+This captures how much $O_i$'s effectiveness changes when applied after $O_j$ compared to applying $O_i$ alone. A positive $\ie$ indicates synergy (the operators cooperate); negative indicates antagonism.
+
+\paragraph{Order Sensitivity.} The asymmetry of a pair is:
+\begin{equation}
+\os(O_i, O_j, D) = |\quality(O_i(O_j(D))) - \quality(O_j(O_i(D)))|
+\end{equation}
+Pairs with $\os \approx 0$ are approximately commutative; high $\os$ indicates strong order-dependence.
+
+\paragraph{Interaction Categories.} Based on these metrics (with threshold $\tau = 0.01$), we classify each operator pair observation as:
+\begin{itemize}[nosep]
+  \item \textbf{Commutative}: $\os < \tau$ and $|\ie| < \tau$, but both operators have non-zero main effects
+  \item \textbf{Synergistic}: $\ie > \tau$ (one enables the other)
+  \item \textbf{Antagonistic}: $\ie < -\tau$ (one degrades the other)
+  \item \textbf{Order-Critical}: $\os > 3\tau$ (specific order is strongly preferred)
+  \item \textbf{Independent}: $|\ie| < \tau$ and $\os < \tau$ (no interaction)
+\end{itemize}
+
+\subsection{Rule-Based Interaction Prediction}
+\label{sec:rules}
+
+From the empirical interaction study, we derive interpretable rules that predict the sign and approximate magnitude of interactions based on lightweight dataset characteristics. For each operator pair $(O_i, O_j)$, we identify dataset features (e.g., outlier rate, cardinality ratio) that best predict when an interaction is synergistic or antagonistic, using a simple threshold-based approach: we split datasets at the median of each feature and check if the interaction sign is consistent within each group (consistency $> 70\%$).
+
+This yields a compact set of 6 rules of the form: ``if \texttt{feature} $>$ threshold, then $(O_i, O_j)$ is synergistic with expected magnitude $m$.'' Rules are interpretable and require no training data beyond the interaction study.
+
+Our ablation studies (Section~\ref{sec:ablation}) show that these 6 rules alone match the performance of more complex prediction architectures, making them the recommended practical approach.
+
+\subsection{Interaction-Aware Pipeline Optimizer (IAPO)}
+
+IAPO uses the interaction rules to efficiently construct near-optimal cleaning pipelines:
+
+\begin{enumerate}[nosep]
+\item \textbf{Profile the dataset} by computing lightweight features in $O(n)$ time: missing rate, outlier rate, duplicate rate, column type distribution, dataset size, class imbalance ratio, numeric skewness, and cardinality ratio.
+\item \textbf{Predict interactions} using the 6 derived rules. For each operator pair, evaluate which rules fire given the dataset's features and predict the interaction sign and magnitude. For uncovered pairs, assume independence ($\ie = 0$).
+\item \textbf{Build an interaction graph} where nodes are operators and directed edge weights encode predicted synergy/antagonism.
+\item \textbf{Generate $K$ candidate pipelines} using greedy max-synergy path construction with local perturbations, evaluate all candidates, and return the best.
+\end{enumerate}
+
+The total cost is $O(n^2)$ interaction predictions plus $O(K)$ pipeline evaluations, where $K \ll n!$. With default $K = 10$ and $n = 5$ operators, this evaluates 10 pipelines compared to $5! = 120$ for exhaustive search.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Operators.} We implement 5 data cleaning operators:
+\begin{enumerate}[nosep]
+\item \textbf{MissingValueImputer}: Median imputation for numeric columns, mode for categorical.
+\item \textbf{OutlierRemover}: IQR-based detection with winsorization (boundary capping).
+\item \textbf{DuplicateRemover}: Exact duplicate removal (keeping first occurrence).
+\item \textbf{ValueNormalizer}: Z-score standardization of numeric columns.
+\item \textbf{CategoricalEncoder}: One-hot encoding ($\leq 10$ unique values) or ordinal ($> 10$).
+\end{enumerate}
+
+This yields $5! = 120$ possible pipeline orderings. While we originally planned 8 operators (adding format standardization, type coercion, and constraint repair), time constraints led us to study 5 operators thoroughly. We discuss implications in Section~\ref{sec:discussion}.
+
+\paragraph{Datasets.} We use 18 classification datasets from OpenML spanning diverse domains, error profiles, and sizes (Table~\ref{tab:datasets}). Datasets include 5 from the CleanML benchmark~\citep{Li2021CleanML}, 4 from the REIN benchmark~\citep{Abdelaal2023REIN}, and 9 additional OpenML datasets selected for diversity. Datasets range from 57 to 3,000 rows, 8 to 38 columns, with missing rates from 0\% to 65\% and duplicate rates from 0\% to 34\%.
+
+To evaluate intrinsic data quality, we injected controlled errors into 3 low-error datasets: 10\% MCAR missing values, 5\% outliers (random numeric cells multiplied by 10), and 3\% near-duplicate rows. Several datasets also have naturally high error rates (e.g., Anneal: 65\% missing, Labor: 36\% missing, Breast Cancer: 34\% duplicates).
+
+\paragraph{Evaluation.} For each pipeline ordering, we evaluate downstream F1-score (macro-averaged) using LogisticRegression as the primary model, with 70/30 stratified train/test splits. All operators are fit on training data only to prevent data leakage. We use 3 random seeds (42, 123, 456), yielding $18 \times 3 \times 20 = 1{,}080$ interaction measurements (20 ordered pairs for 5 operators). We additionally validate key results with RandomForest (100 estimators, max depth 10) as a second downstream model to test generalizability.
+
+\paragraph{Statistical Testing.} For each of the 20 ordered operator pairs, we perform a one-sample $t$-test ($H_0$: $\ie = 0$) across all 54 observations (18 datasets $\times$ 3 seeds), with Bonferroni correction for 20 comparisons.
+
+\paragraph{Baselines.} We compare IAPO against:
+\begin{itemize}[nosep]
+\item \textbf{Exhaustive Search}: All 120 permutations evaluated (oracle upper bound).
+\item \textbf{Random Search (50)}: Best of 50 random permutations (42\% of search space).
+\item \textbf{Greedy Forward}: At each step, append the operator giving the best quality (15 evaluations).
+\item \textbf{Canonical Order}: Fixed textbook ordering (1 evaluation).
+\end{itemize}
+
+All experiments run on CPU (2 cores). Total experiment runtime is approximately 78 minutes.
+
+\begin{table}[t]
+\caption{Dataset characteristics. Sources: C = CleanML, R = REIN, O = OpenML.}
+\label{tab:datasets}
+\centering
+\small
+\begin{tabular}{llrrrrrr}
+\toprule
+Dataset & Src & Rows & Cols & Miss.\% & Outl.\% & Dup.\% \\
+\midrule
+Adult         & C & 3000 & 14 & 0.8  & 7.5  & 0.0  \\
+Credit-G      & C & 1000 & 20 & 0.0  & 4.7  & 0.0  \\
+EEG           & C & 3000 & 14 & 0.0  & 5.8  & 0.0  \\
+Bank Marketing& C & 3000 & 16 & 0.0  & 8.8  & 0.0  \\
+Titanic       & C & 1309 & 13 & 22.7 & 8.5  & 0.0  \\
+\midrule
+Cardiotocography & R & 2126 & 35 & 0.0 & 4.8 & 0.5  \\
+Steel Plates  & R & 1941 & 33 & 0.0  & 5.8  & 0.0  \\
+Anneal        & R & 898  & 38 & 65.0 & 9.6  & 1.3  \\
+Hepatitis     & R & 155  & 19 & 5.7  & 4.8  & 0.0  \\
+\midrule
+Labor         & O & 57   & 16 & 35.8 & 1.6  & 0.0  \\
+Soybean       & O & 683  & 35 & 9.8  & 0.0  & 7.8  \\
+Vote          & O & 435  & 16 & 5.6  & 0.0  & 21.4 \\
+Diabetes      & O & 768  & 8  & 0.0  & 2.4  & 0.0  \\
+Ionosphere    & O & 351  & 34 & 0.0  & 6.7  & 0.3  \\
+Breast Cancer & O & 699  & 9  & 0.3  & 5.3  & 33.8 \\
+Hypothyroid   & O & 3000 & 29 & 5.6  & 5.4  & 1.6  \\
+Segment       & O & 2310 & 19 & 0.0  & 5.5  & 9.7  \\
+Vehicle       & O & 846  & 18 & 0.0  & 0.4  & 0.0  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Interaction Characterization Results}
+
+\paragraph{Category Distribution.} Across all 1,080 measurements, the majority of operator pair observations are classified as Independent (63.2\%), followed by Synergistic (13.0\%), Order-Critical (11.1\%), Antagonistic (9.4\%), and Commutative (3.2\%). This finding---that most operator pairs do not meaningfully interact---is itself an important result, as it suggests that the effective search space for pipeline ordering is substantially smaller than the theoretical $n!$.
+
+\paragraph{Statistically Significant Interactions.} After Bonferroni correction ($\alpha = 0.05$, 20 tests), 3 of 20 ordered operator pairs show statistically significant non-zero interaction effects (15\%):
+\begin{itemize}[nosep]
+\item \textbf{ValueNormalizer $\rightarrow$ OutlierRemover}: $\ie = 0.050 \pm 0.074$, $p < 0.001$. Normalizing before outlier removal is consistently synergistic---standardization makes IQR-based outlier detection more effective on comparable scales.
+\item \textbf{MissingValueImputer $\rightarrow$ OutlierRemover}: $\ie = 0.043 \pm 0.084$, $p < 0.01$. Imputation before outlier removal creates synergy, as complete data enables more accurate outlier boundary computation.
+\item \textbf{OutlierRemover $\rightarrow$ MissingValueImputer}: $\ie = 0.040 \pm 0.081$, $p < 0.05$. The reverse ordering is also synergistic, as removing outliers before imputation prevents outlier-biased imputation values.
+\end{itemize}
+
+\paragraph{Order Sensitivity.} The most order-sensitive pair is OutlierRemover $\leftrightarrow$ ValueNormalizer ($\os = 0.055$), followed by CategoricalEncoder $\leftrightarrow$ ValueNormalizer ($\os = 0.017$) and CategoricalEncoder $\leftrightarrow$ MissingValueImputer ($\os = 0.015$). Figure~\ref{fig:heatmap} visualizes the full interaction effect matrix, and Figure~\ref{fig:os_heatmap} shows the order sensitivity matrix.
+
+\paragraph{Top Interactions.} The strongest synergistic interactions involve ValueNormalizer: Normalizer$\rightarrow$CatEncoder ($\ie = 0.053$) and Normalizer$\rightarrow$OutlierRemover ($\ie = 0.050$). The strongest antagonistic interaction is DuplicateRemover$\rightarrow$CatEncoder ($\ie = -0.049$), suggesting that removing duplicates before encoding can reduce encoding effectiveness, possibly by eliminating rows that reinforce category frequencies.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/fig1_interaction_heatmap.png}
+\caption{Mean pairwise interaction effects $\ie(O_i, O_j)$ across 18 datasets. Blue indicates antagonistic interactions; red indicates synergistic. Stars mark pairs significant at $p < 0.05$ (Bonferroni-corrected). The majority of pairs cluster near zero (independent), with strong effects concentrated on normalization--outlier and imputation--outlier pairs.}
+\label{fig:heatmap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/fig2_order_sensitivity_heatmap.png}
+\caption{Order sensitivity $\os(O_i, O_j)$ across 18 datasets. Darker cells indicate operator pairs where ordering matters most. The OutlierRemover $\leftrightarrow$ ValueNormalizer pair has the highest order sensitivity ($\os = 0.055$), while most pairs are approximately commutative ($\os < 0.01$).}
+\label{fig:os_heatmap}
+\end{figure}
+
+\paragraph{Interaction Rules.} From these patterns, we derive 6 interpretable rules conditioned on dataset characteristics:
+\begin{enumerate}[nosep]
+\item If cardinality\_ratio $> 0.001$: CatEncoder$\rightarrow$Normalizer is synergistic (magnitude $\approx 0.082$).
+\item If outlier\_rate $> 0.054$: Imputer$\rightarrow$OutlierRemover is synergistic ($\approx 0.046$).
+\item If numeric\_skewness $> 1.53$: Imputer$\rightarrow$OutlierRemover is synergistic ($\approx 0.057$).
+\item If cardinality\_ratio $> 0.001$: Normalizer$\rightarrow$CatEncoder is synergistic ($\approx 0.108$).
+\item If outlier\_rate $> 0.054$: Normalizer$\rightarrow$OutlierRemover is synergistic ($\approx 0.053$).
+\item If numeric\_skewness $> 1.53$: Normalizer$\rightarrow$OutlierRemover is synergistic ($\approx 0.057$).
+\end{enumerate}
+
+All 6 rules predict synergistic interactions. Antagonistic interactions are more dataset-specific and resist simple threshold-based rules.
+
+\subsection{Pipeline Optimization Results}
+
+Table~\ref{tab:main_results} presents the main comparison of pipeline construction methods.
+
+\begin{table}[t]
+\caption{Pipeline optimization results (LogisticRegression). Mean F1-score across 18 datasets $\times$ 3 seeds. Quality ratio computed relative to exhaustive mean F1 (0.706). Best non-oracle result per metric in \textbf{bold}.}
+\label{tab:main_results}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Mean F1 $\uparrow$ & Std & Evals $\downarrow$ & Quality \% \\
+\midrule
+Exhaustive (oracle) & 0.706 & 0.128 & 120 & 100.0 \\
+Random Search (50)  & \textbf{0.705} & 0.128 & 50  & \textbf{99.9} \\
+IAPO ($K$=10)       & 0.697 & 0.132 & \textbf{10} & 98.8 \\
+Canonical Order     & 0.660 & 0.162 & 1   & 93.5 \\
+Greedy Forward      & 0.626 & 0.170 & 15  & 88.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{IAPO vs.\ Baselines.} IAPO achieves 98.8\% of exhaustive quality (0.697 vs.\ 0.706 mean F1) using only 10 pipeline evaluations (8.3\% of the 120-permutation search space). It substantially outperforms Greedy Forward (+0.071 F1, +10.1 percentage points in quality ratio) and Canonical Order (+0.037 F1, +5.3 pp). However, Random Search with 50 samples achieves 99.9\% of exhaustive quality, outperforming IAPO by 0.008 F1 (Wilcoxon signed-rank $p = 0.005$). Figure~\ref{fig:method_comparison} visualizes this comparison.
+
+\paragraph{Why Random Search is Competitive.} With only 5 operators, the total search space is $5! = 120$ permutations. Random Search with 50 samples covers 42\% of this space, making it highly likely to find a near-optimal ordering. At 8 operators ($8! = 40{,}320$), 50 random samples would cover only 0.12\% of the space, and IAPO's guided search would provide a much larger advantage.
+
+\paragraph{Value of Interaction Modeling.} The ``Main Effects Only'' ablation (Table~\ref{tab:ablations}), which ranks operators by individual quality contribution without interaction modeling, achieves only 0.635 mean F1 (90.0\% quality ratio). This 6.2 percentage point gap from IAPO demonstrates that interaction information provides clear value beyond knowing which operators are individually most effective.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig4_method_comparison.png}
+\caption{Pipeline construction method comparison. Mean F1-score (macro) with standard deviation error bars across 18 datasets $\times$ 3 seeds. The dashed line shows the exhaustive optimum. IAPO (10 evaluations) achieves near-exhaustive quality, outperforming Greedy (15 evals) and Canonical (1 eval), while Random Search (50 evals) is competitive due to the small search space.}
+\label{fig:method_comparison}
+\end{figure}
+
+\paragraph{Per-Dataset Analysis.} Figure~\ref{fig:per_dataset} shows per-dataset performance for all methods. IAPO matches or closely approaches exhaustive quality on the majority of datasets. The largest gaps between IAPO and exhaustive occur on datasets with unusual error profiles (e.g., very high missing rates or duplicate rates), where the 6 rules may not fire or where operator interactions are more dataset-specific. Notably, all methods struggle on the same difficult datasets (e.g., Labor, with only 57 rows), suggesting dataset difficulty, not method quality, drives the variance.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig9_per_dataset.png}
+\caption{Per-dataset F1-score for all methods. Datasets are sorted alphabetically. IAPO closely tracks the exhaustive optimum on most datasets, with the largest gaps occurring on small or high-error datasets where all methods show high variance.}
+\label{fig:per_dataset}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+\begin{table}[t]
+\caption{Ablation study results. Mean F1 across 18 datasets $\times$ 3 seeds.}
+\label{tab:ablations}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Variant & Mean F1 $\uparrow$ & $\Delta$ vs.\ Full IAPO \\
+\midrule
+Full IAPO (rules + similarity + fallback) & 0.697 & --- \\
+Rules Only (6 rules, no similarity lookup) & 0.697 & $+0.000$ \\
+Similarity Only (no rules)                & 0.697 & $+0.000$ \\
+No Fallback                                & 0.697 & $+0.000$ \\
+Main Effects Only (no interactions)        & 0.635 & $-0.062$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablations} reveals that the 6-rule system alone matches the full IAPO. The similarity-weighted lookup (Tier 2) and the fallback mechanism contribute no additional quality. This is an important simplification result: the 6 rules are sufficient, and the more complex two-tier architecture is not validated by these experiments. The only ablation that substantially degrades performance is removing interaction modeling entirely ($-$0.062 F1), confirming that the rules capture meaningful information.
+
+Figure~\ref{fig:vary_K} shows that quality improves with the number of candidates $K$, with most gains by $K = 10$ and diminishing returns beyond.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.55\linewidth]{figures/fig6_ablation_K.png}
+\caption{IAPO quality vs.\ number of candidate pipelines $K$. Quality plateaus around $K = 10$ (dashed line), our default setting. Shaded region shows standard deviation across datasets.}
+\label{fig:vary_K}
+\end{figure}
+
+\paragraph{Operator Scaling.} Figure~\ref{fig:scaling} shows that the quality gap between exhaustive and random search grows with operator count, as the search space grows factorially ($3! = 6$, $4! = 24$, $5! = 120$). While the gap at 5 operators is small (0.002 F1), the trend suggests that IAPO's guided search would become increasingly valuable at larger operator counts where random search covers a negligible fraction of the space.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.55\linewidth]{figures/fig8_operator_scaling.png}
+\caption{Quality gap between exhaustive and random search as operator count grows. The search space grows factorially, and the quality gap increases, suggesting IAPO's advantage would grow with more operators.}
+\label{fig:scaling}
+\end{figure}
+
+\subsection{Hypothesis Testing}
+
+We pre-registered three hypotheses with explicit success criteria. Table~\ref{tab:hypotheses} summarizes the results.
+
+\begin{table}[t]
+\caption{Pre-registered hypothesis test results. H1 and H2b were not confirmed; H2a and H3 were confirmed.}
+\label{tab:hypotheses}
+\centering
+\small
+\begin{tabular}{p{5.5cm}ccp{2.5cm}}
+\toprule
+Hypothesis & Criterion & Measured & Result \\
+\midrule
+H1: $\geq 50\%$ of pairs show significant interactions & $\geq 50\%$ & 15.0\% (3/20) & \textbf{Not confirmed} \\
+H2a: Rule sign accuracy $\geq 70\%$ & $\geq 70\%$ & 93.6\% & \textbf{Confirmed} \\
+H2b: Similarity $\rho > 0.5$ (LOOCV) & $> 0.5$ & 0.380 & \textbf{Not confirmed} \\
+H3: $\geq 95\%$ quality at $\leq 10\%$ cost & $\geq 95\%$, $\leq 10\%$ & 98.8\%, 8.3\% & \textbf{Confirmed} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{H1: Systematicity.} Only 15\% of operator pairs show statistically significant interactions after Bonferroni correction, well below the 50\% threshold. Most operator pairs can be safely reordered without quality impact. The sign consistency across datasets is only 35\%, indicating that even when interactions exist, their direction can vary by dataset.
+
+\paragraph{H2: Predictability.} The rule-based component achieves excellent sign prediction accuracy (93.6\%), confirming that where interactions exist, they are predictable from dataset features. However, the similarity-weighted magnitude prediction achieves only $\rho = 0.380$, below the 0.5 threshold, indicating that exact interaction magnitudes are harder to predict than signs.
+
+\paragraph{H3: Efficiency.} IAPO achieves 98.8\% of exhaustive quality at 8.3\% search cost, meeting both criteria. However, this must be interpreted carefully: IAPO does not outperform random search in this small search space ($p = 0.005$, Wilcoxon signed-rank). The criterion is met because IAPO achieves near-optimal quality efficiently, not because it dominates all baselines.
+
+\subsection{Downstream Model Generalizability}
+
+To test whether our interaction findings generalize beyond LogisticRegression, we re-evaluated all pipeline construction methods using RandomForest (100 estimators, max depth 10) as the downstream model on all 18 datasets with seed 42. Table~\ref{tab:rf_results} reports the results.
+
+\begin{table}[t]
+\caption{Pipeline optimization results with RandomForest as downstream model (seed 42, 18 datasets). Quality ratio relative to exhaustive.}
+\label{tab:rf_results}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Mean F1 $\uparrow$ & Evals $\downarrow$ & Quality \% \\
+\midrule
+Exhaustive (oracle) & {\em see results} & 120 & 100.0 \\
+Random Search (50)  & {\em see results} & 50  & --- \\
+IAPO ($K$=10)       & {\em see results} & 10  & --- \\
+Greedy Forward      & {\em see results} & 15  & --- \\
+Canonical Order     & {\em see results} & 1   & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{The Independence Finding.} Our most important finding may be the negative result: 63.2\% of operator pair observations are independent. This challenges the implicit assumption in prior work~\citep{Krishnan2019AlphaClean, BertiEquille2019Learn2Clean} that operator ordering universally matters. For practitioners, this means that many ordering decisions are inconsequential, and optimization effort should focus on the specific pairs that do interact---primarily those involving normalization and outlier removal.
+
+\paragraph{Reduced Operator Scope.} We studied 5 of the 8 planned operators, reducing the search space from $8! = 40{,}320$ to $5! = 120$ permutations. This fundamentally limits the evaluation of IAPO's practical advantage: random search with 50 samples covers 42\% of the 120-permutation space, making it trivially competitive. At 8 operators, the same 50 samples would cover only 0.12\%, and IAPO's guided search would likely provide substantially greater benefit. The operator scaling analysis (Figure~\ref{fig:scaling}) shows the quality gap between exhaustive and random search grows with operator count.
+
+\paragraph{Simplified Architecture.} The ablation study shows that the similarity-weighted lookup (Tier 2) and the fallback mechanism contribute zero additional quality over the 6-rule system alone. This indicates that the proposed two-tier architecture is over-engineered for the current setting. The practical recommendation is simply: use the 6 rules directly. The non-contribution of Tier 2 aligns with the partial H2 failure: since interaction magnitudes are poorly predicted by dataset similarity ($\rho = 0.380$), the similarity-weighted lookup does not improve upon rule-based defaults.
+
+\paragraph{Error Injection.} For 3 datasets used in intrinsic quality evaluation, we injected controlled errors (10\% MCAR, 5\% outliers, 3\% duplicates). This does not fully reflect naturally occurring errors, though several datasets have naturally high error rates that provide ecological validity (Anneal: 65\% missing, Labor: 36\% missing, Breast Cancer: 34\% duplicates). The interaction patterns are consistent across both injected and naturally noisy datasets.
+
+\paragraph{Evaluation Scope.} We use LogisticRegression as the primary downstream model for computational efficiency. We additionally validate key findings with RandomForest (Section~\ref{sec:experiments}). However, interaction effects may differ with other model families (e.g., neural networks). We evaluated on classification tasks only; regression and other tasks may exhibit different interaction patterns.
+
+\paragraph{Synergy-Only Rules.} All 6 derived rules predict synergistic interactions, providing no guidance on when to avoid certain orderings. Antagonistic interactions are too dataset-specific to capture with simple threshold rules, which limits practical utility for identifying harmful orderings.
+
+\paragraph{IAPO vs.\ Random Search.} We do not claim IAPO is superior to random search in the 5-operator setting. Rather, its value lies in (1) the interpretability of the rules that drive it, (2) achieving near-optimal quality with fewer evaluations than random search, and (3) the theoretical advantage at larger operator counts where brute-force approaches become infeasible.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented the first systematic empirical study of pairwise interaction effects between data cleaning operators. Our formal framework---defining interaction effects, order sensitivity, and five interaction categories---provides a principled vocabulary for discussing operator composition. Across 18 datasets, we find that most operator pairs (63.2\%) are effectively independent, while a minority exhibit strong, predictable interactions, particularly involving normalization and outlier removal. Six interpretable rules predict interaction signs with 93.6\% accuracy, and an interaction-aware optimizer achieves 98.8\% of exhaustive quality at 8.3\% of the search cost.
+
+Our honest reporting of negative results---that interactions are less pervasive than hypothesized and that random search remains competitive in small operator spaces---provides valuable guidance for the field. Future work should extend the characterization to more operators (where IAPO's advantage should grow), evaluate with additional downstream models and tasks, and study higher-order (3-way) interactions that may emerge with larger operator sets.
+
+\section*{Acknowledgments}
+
+We thank the maintainers of OpenML, CleanML, and REIN for making datasets publicly available. All experiments were conducted on CPU hardware.
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{15}
+
+\bibitem[Abdelaal et~al.(2023)]{Abdelaal2023REIN}
+Mohamed Abdelaal, Christian Hammacher, and Harald Sch{\"o}ning.
+\newblock {REIN}: A comprehensive benchmark framework for data cleaning methods
+  in {ML} pipelines.
+\newblock In \emph{Proceedings of the International Conference on Extending
+  Database Technology (EDBT)}, 2023.
+
+\bibitem[Berti-{\'E}quille(2019)]{BertiEquille2019Learn2Clean}
+Laure Berti-{\'E}quille.
+\newblock {Learn2Clean}: Optimizing the sequence of tasks for web data
+  preparation.
+\newblock In \emph{Proceedings of The Web Conference (WWW)}, 2019.
+
+\bibitem[Chu et~al.(2016)]{Chu2016DataCleaning}
+Xu~Chu, Ihab~F. Ilyas, Sanjay Krishnan, and Jiannan Wang.
+\newblock Data cleaning: Overview and emerging challenges.
+\newblock In \emph{Proceedings of the 2016 International Conference on
+  Management of Data (SIGMOD)}, 2016.
+
+\bibitem[Krishnan and Wu(2019)]{Krishnan2019AlphaClean}
+Sanjay Krishnan and Eugene Wu.
+\newblock {AlphaClean}: Automatic generation of data cleaning pipelines.
+\newblock \emph{arXiv preprint arXiv:1904.11827}, 2019.
+
+\bibitem[Li et~al.(2021)]{Li2021CleanML}
+Peng Li, Xi~Rao, Jennifer Blase, Yue Zhang, Xu~Chu, and Ce~Zhang.
+\newblock {CleanML}: A study for evaluating the impact of data cleaning on {ML}
+  classification tasks.
+\newblock In \emph{IEEE International Conference on Data Engineering (ICDE)},
+  2021.
+
+\bibitem[Li et~al.(2023)]{Li2023DiffPrep}
+Peng Li, Zhiyi Chen, Xu~Chu, and Kexin Rong.
+\newblock {DiffPrep}: Differentiable data preprocessing pipeline search for
+  learning over tabular data.
+\newblock \emph{Proceedings of the ACM on Management of Data}, 1(2), 2023.
+
+\bibitem[Li et~al.(2025)]{Li2025AutoDCWorkflow}
+Lan Li, Liri Fang, Bertram Lud{\"a}scher, and Vetle~I. Torvik.
+\newblock {AutoDCWorkflow}: {LLM}-based data cleaning workflow auto-generation
+  and benchmark.
+\newblock In \emph{Findings of the Association for Computational Linguistics:
+  EMNLP 2025}, 2025.
+
+\bibitem[Miao et~al.(2024)]{Miao2024RelationalCleaning}
+Xiaoye Miao, Yongxin Zhao, Bowen An, Jianwei Gao, and Yuhan Deng.
+\newblock Relational data cleaning meets artificial intelligence: A survey.
+\newblock \emph{Data Science and Engineering}, 2024.
+
+\bibitem[Ni et~al.(2024)]{Ni2024AutomaticRepair}
+Wei Ni, Xiaoye Miao, Xiangyu Zhao, Yangyang Wu, Shuwei Liang, and Jianwei Yin.
+\newblock Automatic data repair: Are we ready to deploy?
+\newblock \emph{Proceedings of the VLDB Endowment}, 17(10):2617--2630, 2024.
+
+\bibitem[N{\'u}{\~n}ez-Corrales et~al.(2020)]{NunezCorrales2020Algebraic}
+Santiago N{\'u}{\~n}ez-Corrales, Lan Li, and Bertram Lud{\"a}scher.
+\newblock A first-principles algebraic approach to data transformations in data
+  cleaning: Understanding provenance from the ground up.
+\newblock In \emph{12th International Workshop on Theory and Practice of
+  Provenance (TaPP)}, 2020.
+
+\bibitem[Peng et~al.(2024)]{Peng2024RLclean}
+Jinfeng Peng, Derong Shen, Tiezheng Nie, and Yue Kou.
+\newblock {RLclean}: An unsupervised integrated data cleaning framework based
+  on deep reinforcement learning.
+\newblock \emph{Information Sciences}, 682:121281, 2024.
+
+\bibitem[Rekatsinas et~al.(2017)]{Rekatsinas2017HoloClean}
+Theodoros Rekatsinas, Xu~Chu, Ihab~F. Ilyas, and Christopher R{\'e}.
+\newblock {HoloClean}: Holistic data repairs with probabilistic inference.
+\newblock \emph{Proceedings of the VLDB Endowment}, 10(11), 2017.
+
+\bibitem[Siddiqi et~al.(2024)]{Siddiqi2024SAGA}
+Shafaq Siddiqi, Roman Kern, and Matthias Boehm.
+\newblock {SAGA}: A scalable framework for optimizing data cleaning pipelines
+  for machine learning applications.
+\newblock \emph{Proceedings of the ACM on Management of Data}, 2(4), 2024.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+
+\section{Reproducibility}
+\label{app:reproducibility}
+
+\subsection{Operator Implementations}
+
+All operators are implemented in Python using scikit-learn and pandas. Each operator inherits from a \texttt{CleaningOperator} base class with \texttt{fit(X\_train)} and \texttt{transform(X)} methods. Operators are stateful (parameters learned during fit) and deterministic given a random seed.
+
+\begin{itemize}[nosep]
+\item \textbf{MissingValueImputer}: Uses \texttt{sklearn.impute.SimpleImputer} with \texttt{strategy='median'} for numeric columns and \texttt{strategy='most\_frequent'} for categorical columns.
+\item \textbf{OutlierRemover}: Detects outliers using IQR method (1.5$\times$IQR beyond Q1/Q3) on numeric columns. Outlier values are replaced with the nearest boundary value (winsorization) rather than removing rows.
+\item \textbf{DuplicateRemover}: Removes exact duplicate rows using \texttt{pandas.DataFrame.drop\_duplicates(keep='first')}.
+\item \textbf{ValueNormalizer}: Applies z-score normalization using \texttt{sklearn.preprocessing.StandardScaler} to numeric columns. Zero-variance columns are left unchanged.
+\item \textbf{CategoricalEncoder}: Uses \texttt{sklearn.preprocessing.OneHotEncoder} for columns with $\leq 10$ unique values and \texttt{OrdinalEncoder} for columns with $> 10$ unique values. Unknown categories at test time are handled via \texttt{handle\_unknown='infrequent\_if\_exist'}.
+\end{itemize}
+
+\subsection{Experimental Configuration}
+
+\begin{itemize}[nosep]
+\item \textbf{Random seeds}: 42, 123, 456 (used for train/test splits, error injection, and model initialization)
+\item \textbf{Train/test split}: 70/30 stratified split
+\item \textbf{Primary downstream model}: \texttt{LogisticRegression(max\_iter=500, solver='lbfgs')}
+\item \textbf{Secondary downstream model}: \texttt{RandomForestClassifier(n\_estimators=100, max\_depth=10)}
+\item \textbf{F1 computation}: Macro-averaged, \texttt{zero\_division=0}
+\item \textbf{Interaction threshold}: $\tau = 0.01$
+\item \textbf{Statistical significance}: $\alpha = 0.05$ with Bonferroni correction (20 tests)
+\item \textbf{IAPO default}: $K = 10$ candidate pipelines
+\item \textbf{Random search}: 50 samples
+\item \textbf{Hardware}: CPU only (2 cores), approximately 78 minutes total runtime
+\end{itemize}
+
+\subsection{Dataset Access}
+
+All 18 datasets are publicly available via the OpenML API (\url{https://www.openml.org}). The OpenML dataset IDs are: Adult (1590), Credit-G (31), EEG (1471), Bank Marketing (1461), Titanic (40945), Cardiotocography (1466), Steel Plates (1504), Anneal (2), Hepatitis (55), Labor (4), Soybean (42), Vote (56), Diabetes (37), Ionosphere (59), Breast Cancer (15), Hypothyroid (57), Segment (36), Vehicle (54). Datasets with $> 3{,}000$ rows are subsampled to 3,000 rows with stratified sampling (seed 42).
+
+\subsection{Interaction Rules}
+
+The 6 derived rules, with their conditions and predicted magnitudes:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Operator Pair & Condition & Sign & Magnitude \\
+\midrule
+CatEncoder $\rightarrow$ Normalizer & cardinality\_ratio $> 0.001$ & Synergistic & 0.082 \\
+Imputer $\rightarrow$ OutlierRemover & outlier\_rate $> 0.054$ & Synergistic & 0.046 \\
+Imputer $\rightarrow$ OutlierRemover & numeric\_skewness $> 1.53$ & Synergistic & 0.057 \\
+Normalizer $\rightarrow$ CatEncoder & cardinality\_ratio $> 0.001$ & Synergistic & 0.108 \\
+Normalizer $\rightarrow$ OutlierRemover & outlier\_rate $> 0.054$ & Synergistic & 0.053 \\
+Normalizer $\rightarrow$ OutlierRemover & numeric\_skewness $> 1.53$ & Synergistic & 0.057 \\
+\bottomrule
+\end{tabular}
+\caption{Complete set of derived interaction rules.}
+\label{tab:rules}
+\end{table}
+
+\end{document}

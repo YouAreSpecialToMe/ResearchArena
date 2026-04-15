@@ -1,0 +1,157 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set Up Reproducible Low-Compute Runs",
+    "description": "Prepare a deterministic experiment workspace for a benchmarked routing study that must finish within about 8 hours on 1x RTX A6000, 60 GB RAM, and 4 CPU cores.",
+    "steps": {
+      "step1": "Use Python 3.10 with `numpy`, `pandas`, `scipy`, `scikit-learn`, `anndata`, `scanpy`, `torch`, `xgboost`, `statsmodels`, `matplotlib`, and `seaborn`. Avoid large-model downloads and any package that requires long source builds.",
+      "step2": "Create `data/raw/`, `data/processed/`, `splits/`, `features/`, `exp/`, `figures/`, and `logs/`. Save `config.json`, `metrics.json`, `per_perturbation.csv`, `predictions.npz`, and `runtime.json` under `exp/<dataset>/<method>/seed_<seed>/` for every run.",
+      "step3": "Fix random seeds to `42`, `43`, and `44`. Use the same dataset split, preprocessing statistics, top-DE gene definitions, and acceptance-rate grids for every method within a dataset and seed.",
+      "step4": "Record hardware once using `nvidia-smi`, `free -h`, and `nproc`. Set deterministic PyTorch flags where supported, use at most `2` dataloader workers, and keep CPU-heavy preprocessing jobs to at most `2` concurrent processes on the 4-core machine.",
+      "step5": "Use one GPU job at a time on `CUDA_VISIBLE_DEVICES=0`. Parallelism comes from overlapping CPU-only preprocessing, metric aggregation, and plotting with non-GPU stages; there is no multi-GPU scheduling because only one GPU is available."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build Leakage-Free Pseudobulk Benchmarks",
+    "description": "Convert public perturbation datasets into perturbation-level pseudobulk benchmarks with explicit routing-development and conformal-calibration partitions.",
+    "steps": {
+      "step1": "Use the three datasets named in the proposal: Adamson Perturb-seq, Replogle K562 perturbations, and Norman combinatorial perturbations. Start from released processed matrices or AnnData objects, not raw sequencing pipelines.",
+      "step2": "Retain perturbations with stable cell counts: at least `40` cells for Adamson and Replogle perturbations and at least `30` cells for Norman double perturbations. Keep control cells as a separate pool because every predictor shares the same training-only control reference.",
+      "step3": "For each dataset and seed, split unique perturbation identities into `60% train`, `20% route-dev`, `10% calibration`, and `10% test`. Perform the split at perturbation level only, never at cell level. For Norman, keep single-gene perturbations in training whenever they are used to estimate additive effects for double perturbations.",
+      "step4": "Construct one pseudobulk vector per perturbation by averaging log-normalized expression over all cells assigned to that perturbation. Build one training-control pseudobulk from training control cells only and reuse it for every method on that dataset and seed.",
+      "step5": "Compute the retained gene space using training cells only: select the top `1500` highly variable genes from training data, then union them with all perturbed target genes observed in that dataset. Save the retained-gene list and never recompute it using route-dev, calibration, or test data.",
+      "step6": "For each dataset and seed, save the exact counts of perturbations in train, route-dev, calibration, and test. Surface the calibration count in a summary table before running conformal analyses. If a dataset has fewer than `20` calibration perturbations for a seed, mark conformal conclusions on that seed as underpowered and rely on sensitivity analysis rather than a strong claim.",
+      "step7": "For Norman route-dev, calibration, and test doubles, annotate each perturbation as `0-seen`, `1-seen`, or `2-seen` according to how many component genes have training single-effect estimates. For Adamson and Replogle, pre-compute novelty quartiles using training-only descriptor distances and freeze those quartile labels before model fitting."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create Descriptor Features And Responsive Panels",
+    "description": "Build the leakage-free features required by the frozen baseline, residual corrector, and routing policies.",
+    "steps": {
+      "step1": "Define a training-only responsive panel of at most `256` genes. For each training perturbation, compute differential expression against the training-control pseudobulk, take the top `80` genes by absolute effect size, keep genes appearing in at least `2` training perturbations, and cap the final panel at `256` genes by frequency.",
+      "step2": "Build perturbation descriptors using only information available before observing held-out responses: a `64`-dimensional hashed identity vector, GO biological-process indicators restricted to the top `128` training-observed terms, pathway indicators restricted to the top `64` training-observed pathways, and compact interaction-network features consisting of degree, mean one-hop degree, one-hop train-target count, and two-hop train-target count.",
+      "step3": "For single-gene perturbations, use the target descriptor directly. For Norman doubles, represent the pair by concatenating `gene_a`, `gene_b`, their elementwise mean, their absolute difference, and two indicators showing whether each component has a training single-effect estimate.",
+      "step4": "Standardize continuous descriptor features with training-only statistics and leave binary features as `0/1`. Save train, route-dev, calibration, and test feature matrices to `features/<dataset>/seed_<seed>/`.",
+      "step5": "Build train-only k-nearest-neighbor indices for the concatenated descriptor vector and for each descriptor view. Use cosine similarity and tune `k in {3, 5, 8}` on route-dev with the same choice later reused by all baselines and routers for that dataset and seed."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Fit And Freeze Two Meaningful Point-Prediction Baselines",
+    "description": "Train one simple and one stronger low-compute baseline, then freeze the better one before any routing experiment.",
+    "steps": {
+      "step1": "Simple baseline for Adamson and Replogle: predict `control + weighted mean(train perturbation effect)` where each training effect is `train pseudobulk - train control` and weights come from cosine similarity in the concatenated descriptor space. Tune `k in {3, 5, 8}` and temperature `tau in {0.5, 1.0, 2.0}` on route-dev using perturbation-level all-gene RMSE.",
+      "step2": "Simple baseline for Norman: predict `control + single_effect(gene_a) + single_effect(gene_b)` using single-gene effects estimated strictly from training singles. If a component effect is unavailable, substitute zero and preserve the perturbation hardness label for later analysis.",
+      "step3": "Strong baseline: fit a multi-output ridge regressor from the concatenated descriptor vector to the retained-gene pseudobulk target. Tune ridge penalty `alpha in {0.1, 1, 10, 100}` and optional target-space truncated SVD rank in `{64, 128}` on route-dev. If SVD is used, fit it on training targets only and invert predictions back to gene space.",
+      "step4": "Select the stronger baseline separately for each dataset and seed using perturbation-level all-gene RMSE on route-dev as the primary selector and top-DE RMSE as the tie-breaker. Freeze that baseline as `y0(x)` for all remaining experiments.",
+      "step5": "Evaluate both baselines once on test for reporting fairness, but do not re-select after seeing test results. The frozen stronger baseline becomes the default predictor for every router, including the always-baseline control."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train One Shared Lightweight Residual Corrector",
+    "description": "Train a single low-compute residual model shared by all routing policies so the comparison isolates the decision rule rather than changing the backbone.",
+    "steps": {
+      "step1": "Compute training residual targets on the `256`-gene responsive panel as `residual(x) = y(x) - y0(x)` using training perturbations only. Off-panel genes always keep the frozen baseline prediction and are never directly modeled by the residual corrector.",
+      "step2": "For every perturbation in train, route-dev, calibration, and test, retrieve `k` nearest training perturbations in each descriptor view and in the concatenated view. Exclude self-matches. For each view, compute a weighted prototype residual, maximum similarity, neighbor-weight entropy, and across-view prototype disagreement.",
+      "step3": "Assemble residual-model inputs from pre-response quantities only: frozen baseline panel values, training-control panel values, concatenated descriptor vector, pooled retrieval prototype vector, prototype norm, best-view similarity, across-view disagreement, and local descriptor density computed as the mean cosine distance to the nearest `5` training perturbations.",
+      "step4": "Train a `2`-layer MLP with hidden width `256`, GELU activations, layer normalization, dropout `0.1`, AdamW optimizer, learning rate `1e-3`, weight decay `1e-4`, batch size `64`, maximum `200` epochs, and early stopping patience `20` based on route-dev panel RMSE.",
+      "step5": "Form the corrected predictor `y1(x) = y0(x) + residual_hat(x)` on panel genes and `y1(x) = y0(x)` off-panel. Save baseline predictions, corrected predictions, MC-dropout replicates, routing features, and perturbation-level losses for route-dev, calibration, and test because all routing baselines consume the same artifacts."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Routing Baselines And The Conformal Gain Gate",
+    "description": "Benchmark routing policies under the same frozen baseline, corrected predictor, routing features, and matched acceptance rates.",
+    "steps": {
+      "step1": "Define the primary perturbation-level gain target on route-dev, calibration, and test as `g_rmse(x) = RMSE(y0(x), y(x)) - RMSE(y1(x), y(x))`, computed over all retained genes. Positive gain means the residual correction improved upon the frozen baseline.",
+      "step2": "Also pre-compute three secondary gain targets for sensitivity analysis only: top-DE RMSE gain, Pearson-delta gain, and pathway-score gain based on training-defined pathway activity scores. Do not use these secondary gains for the main router selection.",
+      "step3": "Build one shared routing feature vector from pre-response quantities only: descriptor novelty score, local descriptor density, best-view similarity, across-view disagreement, entropy of retrieval weights, baseline prediction norm on the panel, predicted residual norm, and predictive uncertainty estimated as mean panel standard deviation over `5` MC-dropout forward passes. For Norman, append the `0-seen` and `1-seen` indicators.",
+      "step4": "Always-baseline control: output `y0(x)` for all test perturbations. Always-correct control: output `y1(x)` for all test perturbations. These anchor whether routing is useful at all.",
+      "step5": "Classifier gate baseline: train gradient-boosted trees on route-dev to predict `1[g_rmse > 0]` with max depth `3`, `200` trees, learning rate `0.05`, subsample `0.8`, and early stopping. Rank test perturbations by predicted probability of positive gain and set thresholds to exactly match target acceptance rates `20%`, `40%`, and `60%`.",
+      "step6": "Uncertainty-threshold baseline: rank perturbations by negative predictive uncertainty so lower uncertainty is accepted first. Choose thresholds on route-dev to match the same acceptance rates `20%`, `40%`, and `60%`, then apply the matched thresholds to test.",
+      "step7": "Non-conformal gain regressor baseline: fit gradient-boosted regression trees on route-dev to predict `E[g_rmse | z]` with max depth `3`, `300` trees, learning rate `0.03`, subsample `0.8`, and early stopping. Rank perturbations by predicted gain and threshold them to the same target acceptance rates.",
+      "step8": "Conformal gain lower-bound gate: train a quantile gradient-boosting regressor for the conditional lower quantile of `g_rmse` on route-dev with target quantile `alpha = 0.2`. Calibrate it on the separate calibration split using split-conformal residual scores, then compute a calibrated lower bound for each test perturbation. Rank perturbations by that lower bound and threshold them to the same acceptance rates.",
+      "step9": "Evaluate six methods on test for every dataset and seed: always baseline, always correct, classifier gate, uncertainty-threshold gate, non-conformal gain regressor gate, and conformal gain lower-bound gate. The contribution is only supported if the conformal gate beats the uncertainty-threshold and non-conformal routers at matched acceptance rates."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run Pre-Specified Ablations",
+    "description": "Test every novel component and every concern raised in the feedback before looking at final conclusions.",
+    "steps": {
+      "step1": "Ablation A, no retrieval features: remove retrieval prototypes, best-view similarity, and retrieval-entropy features from the residual model and routing stack, then retrain on all three datasets for seed `42`.",
+      "step2": "Ablation B, no conformal calibration: compare the quantile regressor before versus after conformal calibration on all three datasets and all three seeds. This directly tests whether certification adds value beyond non-conformal gain ranking.",
+      "step3": "Ablation C, uncertainty-only router: train a router that uses only MC-dropout uncertainty and residual norm features, then compare it against the full non-conformal gain router on all three datasets for seed `42`. This checks whether the routing signal collapses to standard uncertainty filtering.",
+      "step4": "Ablation D, no descriptor novelty features: remove novelty score and density features from the routing feature vector and rerun classifier, non-conformal, and conformal routers on Adamson and Norman for seed `42`.",
+      "step5": "Ablation E, direct prediction instead of residualization: train the same MLP to predict panel expression directly rather than `y - y0`, then pair it with the same routing stack on Adamson and Norman for seed `42`. This tests whether routing gains depend on the residual formulation.",
+      "step6": "Interpretation rule: if Ablation B shows that conformal calibration does not outperform the non-conformal gain regressor or the uncertainty-threshold baseline at matched acceptance rates, the paper must be framed as a routing benchmark or negative result rather than a new method."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run Sensitivity Analyses Required By The Feedback",
+    "description": "Quantify whether conclusions are robust to calibration partitioning, quantile level, and gain definition.",
+    "steps": {
+      "step1": "Conformal split sensitivity: repeat the conformal gate with three route-dev versus calibration allocations, `20/10`, `15/15`, and `10/20` percent of perturbations, while keeping train and test fixed. Run this analysis on all datasets for seed `42` and compare primary gain at `40%` acceptance.",
+      "step2": "Cross-fit calibration sensitivity: on seed `42`, perform two-fold cross-fit conformal calibration by swapping route-dev and calibration halves, then average the resulting lower bounds before thresholding. Compare against the fixed split-conformal gate.",
+      "step3": "Quantile level sensitivity: rerun the conformal gate with `alpha in {0.1, 0.2, 0.3}` on all datasets and all three seeds, still using the primary RMSE-gain target.",
+      "step4": "Gain-definition sensitivity: rerun the non-conformal and conformal routers using top-DE RMSE gain, Pearson-delta gain, and pathway-score gain as alternate targets on all datasets for seed `42`. Compare whether accepted-set rankings materially change from the primary all-gene RMSE-gain target.",
+      "step5": "Calibration-size sensitivity: for any dataset with underpowered calibration size, subsample the calibration split to `50%`, `75%`, and `100%` of its available perturbations on seed `42` and measure how primary-gain performance degrades. This determines whether the method is too data-hungry for practical use."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate Accuracy, Biological Value, Calibration, And Cost",
+    "description": "Measure whether accepted-set gains are real, biologically interpretable, and worth the added routing complexity.",
+    "steps": {
+      "step1": "Primary endpoint: for each dataset, seed, and router, report mean perturbation-level all-gene RMSE gain on accepted test perturbations at `40%` acceptance. Also report the same metric at `20%` and `60%` acceptance as pre-specified sensitivities.",
+      "step2": "Standard predictive metrics: report all-gene RMSE, top-DE RMSE, all-gene Pearson delta, and top-DE Pearson delta for all six methods on the full test set and on the accepted subset. Use the same training-defined top-DE gene set for all methods within a dataset and seed.",
+      "step3": "Selective-routing summaries: compute selective-risk curves over acceptance rates `10%`, `20%`, ..., `100%` by ranking perturbations with each router score. Report area under the selective-risk curve, accepted-set mean gain, accepted-set median gain, and worst-quartile accepted-set gain with respect to descriptor novelty.",
+      "step4": "Biological interpretation metrics: for accepted perturbations, report recovery of the top `20` responsive genes by overlap with ground-truth top responsive genes, sign accuracy on the top `50` absolute differential-expression genes, and pathway-score correlation over training-defined pathways. If RMSE gains do not improve at least one of these metrics, state that biological significance is limited.",
+      "step5": "Calibration diagnostics: report empirical coverage and interval width for `90%` conformal intervals on all genes, panel genes, and off-panel genes. Separately, plot predicted gain score versus realized gain for the non-conformal and conformal routers to assess gain calibration.",
+      "step6": "Systems cost metrics: record wall-clock runtime, peak GPU memory, CPU time, and trainable parameter count for the frozen baseline, residual corrector, classifier gate, uncertainty-threshold gate, non-conformal gain regressor, and conformal gate. This is required because the study is explicitly framed as low-compute routing."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply Falsifiable Success Criteria",
+    "description": "Tie the final conclusion to explicit benchmark outcomes rather than post-hoc narrative.",
+    "steps": {
+      "step1": "Primary success criterion: at `40%` acceptance, the conformal gate must exceed both the uncertainty-threshold gate and the non-conformal gain regressor in mean perturbation-level all-gene RMSE gain on accepted perturbations in at least `2 of 3` datasets when averaged over seeds `42`, `43`, and `44`.",
+      "step2": "Hard-subset success criterion: the conformal gate must maintain non-negative accepted-set RMSE gain on the hardest pre-declared subset in at least `2 of 3` datasets, defined as the highest descriptor-novelty quartile for Adamson and Replogle and the `0-seen` Norman subset.",
+      "step3": "Biological-value success criterion: on accepted perturbations, the conformal gate must improve at least one biological interpretation metric over both always-baseline and uncertainty-threshold routing in at least `2 of 3` datasets.",
+      "step4": "Robustness success criterion: the sign of the conformal-versus-uncertainty advantage at `40%` acceptance must remain unchanged under at least two of the three required sensitivities: conformal split, quantile level, and gain definition.",
+      "step5": "Negative-result rule: if the uncertainty-threshold gate or the non-conformal gain regressor matches the conformal gate after acceptance-rate matching, or if biological metrics do not improve, present the result as a benchmarked negative finding that low-compute perturbation routing collapses to standard uncertainty filtering."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Benchmark-Focused Tables And Figures",
+    "description": "Produce paper-ready outputs that foreground matched-acceptance routing comparisons, hard subsets, calibration sizes, and negative-result interpretations.",
+    "steps": {
+      "step1": "Create `figures/main_table.csv` and `figures/main_table.md` with one row per dataset and method containing seed-mean plus seed-standard-deviation for primary accepted-set RMSE gain at `40%` acceptance, accepted-set gain at `20%` and `60%`, all-gene RMSE, top-DE RMSE, pathway-score correlation, runtime, and peak memory.",
+      "step2": "Create `figures/calibration_counts.csv` listing train, route-dev, calibration, and test perturbation counts for every dataset and seed. Include a flag for any calibration split with fewer than `20` perturbations.",
+      "step3": "Create `figures/selective_risk.png` with one panel per dataset showing selective-risk curves for always baseline, always correct, classifier gate, uncertainty-threshold gate, non-conformal gain router, and conformal gain lower-bound router.",
+      "step4": "Create `figures/matched_acceptance_bars.png` showing primary RMSE gain at `20%`, `40%`, and `60%` acceptance for the uncertainty-threshold, non-conformal, and conformal routers. This is the main figure testing the central claim.",
+      "step5": "Create `figures/hard_subset_results.png` showing results by novelty quartile for Adamson and Replogle and by `0-seen`, `1-seen`, and `2-seen` for Norman, including biological interpretation metrics as secondary annotations.",
+      "step6": "Create `figures/router_diagnostics.png` with realized gain versus router score, acceptance rate by novelty quartile, and overlap between conformal accepted sets and uncertainty-threshold accepted sets. If the accepted sets largely coincide, note that the method may collapse to ordinary uncertainty filtering.",
+      "step7": "Create `figures/sensitivity.png` summarizing conformal split, quantile-level, and gain-definition sensitivities. Highlight negative or unstable outcomes rather than hiding them."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Verify Runtime Feasibility Under The 8 Hour Budget",
+    "description": "Estimate wall-clock cost in advance and define a strict execution order so the core benchmark is completed before optional analyses.",
+    "steps": {
+      "step1": "Budget preprocessing, pseudobulk construction, split generation, responsive-panel selection, feature assembly, and nearest-neighbor index creation at `70` to `80` minutes total across all three datasets using at most two concurrent CPU jobs.",
+      "step2": "Budget simple-baseline fitting, ridge fitting, and baseline selection at `40` to `50` minutes total across all datasets and seeds because these models are small and mostly CPU-bound.",
+      "step3": "Budget residual-model training for `3 datasets x 3 seeds = 9` runs at `5` to `7` minutes each, for `45` to `63` minutes total GPU time. Generate the `5` MC-dropout passes inside the same evaluation loop rather than in a separate run.",
+      "step4": "Budget routing-feature export, classifier training, uncertainty thresholding, non-conformal gain regression, conformal calibration, and test evaluation at `50` to `60` minutes total because they operate on perturbation-level features rather than cell-level matrices.",
+      "step5": "Budget all-seed required sensitivities at `90` to `105` minutes total for quantile-level sensitivity and the key no-conformal ablation. Budget seed-42-only ablations and split-sensitivity analyses at `80` to `95` minutes total. Budget final metric aggregation and plotting at `45` to `60` minutes total.",
+      "step6": "The full plan totals about `6.3` to `7.6` hours. If execution approaches `7.5` hours, preserve work in this priority order: core baselines, shared residual corrector, matched-acceptance router comparison on all seeds, no-conformal ablation on all seeds, quantile sensitivity on all seeds, then seed-42-only ablations, then seed-42 split sensitivities. Do not drop the uncertainty-threshold baseline, non-conformal gain baseline, or three-seed primary comparison because they are essential to the claim."
+    }
+  }
+]

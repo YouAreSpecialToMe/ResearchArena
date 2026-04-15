@@ -1,0 +1,193 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for flow matching, consistency distillation, spectral analysis, and evaluation. Verify CUDA and GPU availability.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 (if not already installed)",
+      "step2": "Install flow matching and evaluation packages: pip install torchdiffeq scipy matplotlib seaborn tqdm einops accelerate clean-fid pytorch-fid",
+      "step3": "Install additional utilities: pip install torch_dct or implement DCT via torch.fft. Also install lpips for perceptual metrics.",
+      "step4": "Verify GPU: run 'python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem)\"'",
+      "step5": "Create experiment directory structure: exp/shared/ (shared code), exp/teacher/ (teacher training), exp/cd_baseline/ (standard CD), exp/cd_pseudohuber/ (Pseudo-Huber CD), exp/rectflow_baseline/ (rectified flow few-step), exp/scd_main/ (our method), exp/ablation_*/ (ablation variants)"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess CIFAR-10",
+    "description": "Download CIFAR-10 dataset and prepare it for flow matching training. Compute dataset statistics needed for FID evaluation. CIFAR-10 (32x32, 50k train / 10k test) is our primary dataset — feasible on a single A6000 within the time budget.",
+    "steps": {
+      "step1": "Download CIFAR-10 via torchvision.datasets.CIFAR10(root='./data', train=True, download=True). Do the same for test split.",
+      "step2": "Normalize images to [-1, 1] range (standard for flow matching): transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))])",
+      "step3": "Create DataLoaders with batch_size=128, num_workers=4, pin_memory=True for training. Separate loader for evaluation.",
+      "step4": "Compute and cache the FID reference statistics on the CIFAR-10 train set (50k images) using clean-fid or pytorch-fid. Save to data/cifar10_fid_stats.npz for reuse across all experiments.",
+      "step5": "Verify data pipeline: load a batch, check shapes (B,3,32,32), value range [-1,1], visualize a few samples to confirm correctness."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Implement shared utilities",
+    "description": "Create shared code modules used across all experiments: model architecture, DCT operations, flow matching ODE solver, evaluation metrics, and distillation utilities.",
+    "steps": {
+      "step1": "Implement U-Net architecture in exp/shared/models.py — use a DDPM++ style U-Net with: channels=[128,256,256,256], num_res_blocks=2, attention at 16x16 and 8x8, time embedding via sinusoidal + MLP. Condition on class label via AdaGN (for class-conditional experiments). Total ~35M params — fits comfortably on A6000.",
+      "step2": "Implement flow matching utilities in exp/shared/flow_matching.py: (a) OT-CFM interpolation: x_t = (1-t)*x_0 + t*x_1 with x_1 ~ N(0,I); (b) velocity field target: u_t = x_1 - x_0; (c) ODE solver (Euler and midpoint) for sampling; (d) noise schedule: uniform t ~ U(0,1).",
+      "step3": "Implement DCT utilities in exp/shared/spectral.py: (a) 2D block DCT using torch.fft or scipy.fftpack (8x8 blocks, matching JPEG convention); (b) frequency band masks M_k for K bands — partition DCT coefficients by frequency magnitude (L1 distance from DC); (c) function to compute per-band MSE between two images; (d) inverse DCT for reconstruction verification. For 32x32 images with 8x8 blocks, this gives 4x4=16 spatial blocks, each with 64 DCT coefficients.",
+      "step4": "Implement evaluation metrics in exp/shared/metrics.py: (a) FID computation using clean-fid (generate 50k samples, compare to cached stats); (b) per-frequency-band MSE: for each generated image and corresponding real image, compute MSE per DCT band; (c) LPIPS score using lpips package; (d) Precision and Recall using k-nearest-neighbors in Inception feature space.",
+      "step5": "Implement consistency distillation utilities in exp/shared/distillation.py: (a) standard CD loss (MSE between student prediction and teacher ODE trajectory endpoint); (b) Pseudo-Huber variant of CD loss; (c) SCD loss with DCT decomposition; (d) EMA for student model target network (decay=0.999).",
+      "step6": "Implement training loop template in exp/shared/trainer.py: handles logging, checkpointing (every 5k steps), EMA update, learning rate scheduling (cosine with warmup), gradient clipping (max_norm=1.0), mixed precision (fp16) for memory efficiency."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train flow matching teacher model on CIFAR-10",
+    "description": "Train a high-quality flow matching model that serves as the teacher for all distillation experiments. This is the most critical prerequisite — all subsequent experiments depend on it. Target: FID < 10 with 100 Euler steps (decent quality for a research teacher).",
+    "steps": {
+      "step1": "Train unconditional flow matching model on CIFAR-10 using OT-CFM objective. Architecture: U-Net as specified in shared/models.py. Hyperparameters: lr=2e-4, Adam optimizer (beta1=0.9, beta2=0.999), batch_size=128, training for 200k steps (~60 min on A6000 with fp16). Use EMA with decay=0.9999.",
+      "step2": "Every 20k steps, generate 1024 samples with 100 Euler steps and log FID to monitor convergence. Save checkpoint at best FID.",
+      "step3": "After training, evaluate final teacher model: generate 50k samples with 100 Euler steps, compute FID against CIFAR-10 train set. Also compute FID at 10, 20, 50 steps to establish teacher quality at different step budgets.",
+      "step4": "Save teacher checkpoint to exp/teacher/checkpoint_best.pt. Also save 50k generated samples for qualitative inspection.",
+      "step5": "Record: final FID (100 steps), FID at 10/20/50 steps, total training time, GPU memory usage. Save to exp/teacher/results.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Standard consistency distillation baseline (3 seeds)",
+    "description": "Train a standard consistency distillation student using vanilla MSE loss. This is the primary baseline against which SCD is compared. Run with 3 seeds for statistical significance.",
+    "steps": {
+      "step1": "Initialize student model with same architecture as teacher. Load teacher checkpoint (frozen). Use EMA target network with decay=0.999.",
+      "step2": "Consistency distillation training: at each step, sample x_0 from data, sample t ~ U(0,1), compute x_t. Run teacher ODE from t to 0 (using N=20 Euler steps) to get target x_hat_0. Train student to predict x_hat_0 from (x_t, t) using MSE loss. Hyperparameters: lr=1e-4, batch_size=128, 100k training steps (~25 min per run).",
+      "step3": "Run for seeds=[42, 43, 44]. Each run saves checkpoint and generated samples.",
+      "step4": "For each seed, evaluate: generate 50k samples at 1-step, 2-step, and 4-step inference. Compute FID, per-frequency MSE (across K=4 bands), and LPIPS for each step budget.",
+      "step5": "Save per-seed results to exp/cd_baseline/results_seed{N}.json. Compute mean and std across seeds."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Consistency distillation with Pseudo-Huber loss (3 seeds)",
+    "description": "A stronger baseline using the Pseudo-Huber loss from Improved Consistency Training (Song & Dhariwal, 2023) instead of MSE. This tests whether a better loss function alone can address the high-frequency degradation problem.",
+    "steps": {
+      "step1": "Same setup as standard CD, but replace MSE loss with Pseudo-Huber loss: L_PH(x, y) = sqrt(||x - y||^2 + c^2) - c, where c=0.00054*sqrt(d) and d is the dimensionality (3*32*32=3072). This loss is less sensitive to outliers than MSE.",
+      "step2": "Also use the lognormal noise schedule from Improved CT: t ~ LogNormal(P_mean=-1.1, P_std=2.0), clamped to [0.002, 80]. This concentrates training on critical timesteps.",
+      "step3": "Run for seeds=[42, 43, 44] with same hyperparameters: lr=1e-4, batch_size=128, 100k steps.",
+      "step4": "Evaluate identically to standard CD: 50k samples at 1/2/4 steps, compute FID, per-frequency MSE, LPIPS.",
+      "step5": "Save results to exp/cd_pseudohuber/results_seed{N}.json."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Rectified flow few-step Euler baseline (3 seeds)",
+    "description": "Evaluate the teacher model directly with few Euler steps (1, 2, 4) as a no-training baseline. This shows how well the flow model performs without any distillation. Different seeds control the initial noise z ~ N(0,I).",
+    "steps": {
+      "step1": "Load the trained teacher model checkpoint.",
+      "step2": "For each step budget (1, 2, 4): generate 50k samples using Euler ODE solver with that many steps. For 1 step: x_0 = z + v(z, 1.0). For 2 steps: midpoint at t=0.5. For 4 steps: t=[1.0, 0.75, 0.5, 0.25].",
+      "step3": "Run with seeds=[42, 43, 44] (different random noise z). Compute FID, per-frequency MSE, LPIPS for each.",
+      "step4": "Save results to exp/rectflow_baseline/results_seed{N}.json.",
+      "step5": "This baseline requires no training — only inference. Estimated time: ~15 min total for all seeds and step budgets."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Spectral Consistency Distillation (SCD) — main method (3 seeds)",
+    "description": "Train our proposed SCD method with all three components: spectral loss decomposition, frequency-adaptive teacher supervision, and progressive spectral refinement. This is the core experiment.",
+    "steps": {
+      "step1": "Configure SCD hyperparameters: K=4 frequency bands (low, mid-low, mid-high, high based on DCT frequency magnitude). Teacher steps per band: N_low=10, N_mid_low=20, N_mid_high=50, N_high=100. Initial frequency weights: w=[1.0, 1.0, 1.0, 1.0] (uniform start).",
+      "step2": "Implement progressive spectral refinement schedule over 100k training steps: Phase 1 (0-30k steps): uniform weights w=[1,1,1,1], standard CD-like training to build basic generation capability. Phase 2 (30k-70k steps): linearly ramp up high-frequency weights to w=[1.0, 1.5, 2.5, 4.0]. Phase 3 (70k-100k steps): fix weights based on running per-band error, use error-driven weighting w_k ∝ Error_k^0.5.",
+      "step3": "SCD loss computation per training step: (a) sample x_0, t, compute x_t; (b) get student prediction f_theta(x_t, t); (c) for each band k, run teacher with N_k steps to get target; (d) compute DCT of (prediction - target), mask to band k, compute weighted MSE; (e) sum across bands. To amortize teacher cost: cache teacher outputs at different step counts, recompute every 10 steps.",
+      "step4": "Training: lr=1e-4, Adam, batch_size=128, 100k steps, EMA decay=0.999, fp16, gradient clipping max_norm=1.0. Run for seeds=[42, 43, 44]. Estimated time per run: ~30 min (slightly longer than CD due to multi-step teacher, but amortized by caching).",
+      "step5": "For each seed, evaluate: generate 50k samples at 1/2/4 steps. Compute FID, per-frequency MSE (4 bands), LPIPS, Precision, Recall.",
+      "step6": "Save per-seed results to exp/scd_main/results_seed{N}.json. Also save frequency weight trajectories over training for analysis."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: SCD without frequency-adaptive teacher supervision",
+    "description": "Remove component 2 (frequency-adaptive teacher) — use uniform teacher steps (N=20) for all frequency bands. This tests whether the multi-resolution teacher supervision matters, or if the spectral loss decomposition alone is sufficient.",
+    "steps": {
+      "step1": "Same as SCD main, but use N_k=20 teacher steps for ALL frequency bands (same as standard CD teacher budget). Keep spectral loss decomposition and progressive refinement.",
+      "step2": "Train for 100k steps with seed=42. Same hyperparameters as SCD main.",
+      "step3": "Evaluate: 50k samples at 1/2/4 steps, compute FID, per-frequency MSE.",
+      "step4": "Save results to exp/ablation_no_adaptive_teacher/results.json.",
+      "step5": "Expected outcome: some improvement over standard CD (from spectral loss), but less than full SCD (missing high-quality HF targets)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: SCD without progressive spectral refinement",
+    "description": "Remove component 3 (progressive curriculum) — use fixed high-frequency-emphasizing weights from the start. This tests whether the curriculum is necessary, or if the model can learn with aggressive frequency weighting from step 0.",
+    "steps": {
+      "step1": "Same as SCD main, but use FIXED weights w=[1.0, 1.5, 2.5, 4.0] throughout all 100k training steps. No warmup phase, no progressive ramping.",
+      "step2": "Train for 100k steps with seed=42. Same hyperparameters.",
+      "step3": "Evaluate: 50k samples at 1/2/4 steps, compute FID, per-frequency MSE.",
+      "step4": "Save results to exp/ablation_no_progressive/results.json.",
+      "step5": "Expected outcome: may cause training instability early on (high-frequency focus before low-frequency structure is established), leading to worse FID than full SCD."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Number of frequency bands K",
+    "description": "Test sensitivity to the number of frequency bands K. Compare K=2 (coarse: low vs high), K=4 (our default), and K=8 (fine-grained). This determines the optimal granularity of spectral decomposition.",
+    "steps": {
+      "step1": "K=2: bands split at median frequency. Weights: w=[1.0, 3.0]. Teacher steps: N=[10, 50].",
+      "step2": "K=4: our default configuration (already run in main experiment).",
+      "step3": "K=8: 8 bands from lowest to highest frequency. Weights: w=[1.0, 1.0, 1.5, 1.5, 2.0, 2.5, 3.0, 4.0]. Teacher steps: N=[10, 10, 20, 20, 50, 50, 100, 100].",
+      "step4": "Train K=2 and K=8 variants for 100k steps each with seed=42. K=4 results taken from main experiment seed=42.",
+      "step5": "Evaluate all three: 50k samples at 1/2/4 steps, compute FID, per-frequency MSE.",
+      "step6": "Save results to exp/ablation_K2/results.json and exp/ablation_K8/results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Weighting strategy comparison",
+    "description": "Compare three weighting strategies: (a) analytic (inverse PSD), (b) error-driven (w_k proportional to running error), (c) uniform (equal weights, spectral loss only). This determines the best way to set per-band weights.",
+    "steps": {
+      "step1": "Analytic weighting: compute power spectral density of CIFAR-10 training images per DCT band. Set w_k = 1 / PSD_k (normalized so mean weight = 1). This upweights under-represented high frequencies.",
+      "step2": "Error-driven weighting: start with uniform weights, every 1000 steps update w_k = (Error_k / mean(Error))^0.5. This equalizes per-band errors over time.",
+      "step3": "Uniform spectral: w_k = 1.0 for all k. This isolates the benefit of spectral decomposition from the weighting scheme.",
+      "step4": "Train all three variants for 100k steps with seed=42, using frequency-adaptive teacher and progressive refinement (Phase 1 uses uniform, Phase 2-3 use the specified weighting).",
+      "step5": "Evaluate: 50k samples at 1/2/4 steps, FID, per-frequency MSE.",
+      "step6": "Save results to exp/ablation_weight_analytic/results.json, exp/ablation_weight_errordriven/results.json, exp/ablation_weight_uniform/results.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and statistical analysis",
+    "description": "Compile all results, compute statistics, and assess whether the success criteria from the hypothesis are met.",
+    "steps": {
+      "step1": "Load all results.json files from every experiment directory.",
+      "step2": "Compute mean ± std FID across 3 seeds for: standard CD, Pseudo-Huber CD, rectified flow, and SCD. Report for 1-step, 2-step, and 4-step inference.",
+      "step3": "Test success criterion 1: Does SCD have lower mean FID than standard CD at all step budgets? Compute relative improvement: (FID_CD - FID_SCD) / FID_CD * 100%. Target: 10-25% improvement.",
+      "step4": "Test success criterion 2: Compute per-frequency-band MSE for SCD vs CD. Focus on top 2 bands (high frequency). Compute relative reduction: (MSE_CD_HF - MSE_SCD_HF) / MSE_CD_HF * 100%. Target: >15% reduction.",
+      "step5": "Test success criterion 3: Compare training times. Compute overhead ratio: time_SCD / time_CD. Target: <1.5x overhead.",
+      "step6": "Compile ablation results into a table showing the contribution of each component.",
+      "step7": "Save aggregated results to results.json in the workspace root. Format: {\"main_results\": {method: {steps: {fid_mean, fid_std, ...}}}, \"ablation_results\": {...}, \"success_criteria\": {criterion: pass/fail}}."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables for the paper. All figures saved as both PDF and PNG.",
+    "steps": {
+      "step1": "Table 1 (Main Results): LaTeX table comparing all methods across step budgets. Columns: Method, 1-step FID, 2-step FID, 4-step FID (mean±std). Bold best results. Save to figures/table1_main_results.tex and figures/table1_main_results.csv.",
+      "step2": "Figure 1 (Spectral Error Analysis): Bar chart or line plot showing per-frequency-band MSE for each method at 1-step and 4-step generation. X-axis: frequency band (low to high). Y-axis: MSE. One line/bar group per method. This is the key figure demonstrating SCD's advantage in high frequencies. Save to figures/figure1_spectral_error.pdf and .png.",
+      "step3": "Figure 2 (Qualitative Comparison): Grid of generated images from each method at 1-step. Include zoomed-in crops of texture-rich regions. Layout: rows=methods (teacher 100-step, rect-flow 1-step, CD 1-step, Pseudo-Huber CD 1-step, SCD 1-step), columns=different samples. Save to figures/figure2_qualitative.pdf and .png.",
+      "step4": "Table 2 (Ablation Study): LaTeX table showing FID at 1-step for all ablation variants. Columns: Variant, FID, HF-MSE reduction (%). Save to figures/table2_ablation.tex and .csv.",
+      "step5": "Figure 3 (Training Dynamics): Plot of per-band distillation error over training steps for SCD, showing how the progressive curriculum shifts focus to high frequencies. X-axis: training step. Y-axis: per-band MSE. One line per frequency band. Save to figures/figure3_training_dynamics.pdf and .png.",
+      "step6": "Figure 4 (FID vs Steps): Line plot comparing FID at 1, 2, 4 steps for all methods. X-axis: number of inference steps. Y-axis: FID. One line per method with error bars (±1 std). Save to figures/figure4_fid_vs_steps.pdf and .png.",
+      "step7": "Use matplotlib with publication style: fontsize=12, figsize appropriate for single/double column, seaborn color palette. All plots have labeled axes, legends, and gridlines."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime estimation and feasibility check",
+    "description": "Verify the experiment plan fits within the 8-hour budget on 1x A6000.",
+    "steps": {
+      "step1": "Teacher training: 200k steps, batch_size=128, CIFAR-10 32x32, fp16. Estimated: ~60 min.",
+      "step2": "Distillation runs (sequential on 1 GPU): Standard CD (3 seeds × 25 min) = 75 min. Pseudo-Huber CD (3 seeds × 25 min) = 75 min. Rectified flow eval (3 seeds × 5 min) = 15 min. SCD main (3 seeds × 30 min) = 90 min. Total baselines+main: ~255 min = 4.25 hours.",
+      "step3": "Ablation runs (1 seed each): no-adaptive-teacher (30 min) + no-progressive (30 min) + K=2 (25 min) + K=8 (25 min) + weight-analytic (25 min) + weight-errordriven (25 min) + weight-uniform (25 min) = 185 min = ~3.1 hours.",
+      "step4": "Evaluation overhead (FID computation, 50k samples): ~5 min per evaluation × ~30 evaluations (methods × steps × seeds) = 150 min. But sample generation is the bottleneck, not FID computation — already included in distillation times above. Extra eval-only time: ~30 min.",
+      "step5": "Visualization: ~15 min.",
+      "step6": "Total estimated sequential time: 60 + 255 + 185 + 30 + 15 = 545 min ≈ 9.1 hours. This exceeds the 8-hour budget by ~1 hour.",
+      "step7": "MITIGATION: (a) Reduce ablation weighting variants from 3 to 2 (drop uniform-spectral since it overlaps with no-progressive ablation concept), saving 25 min. (b) Reduce teacher training to 150k steps (still sufficient for CIFAR-10), saving 15 min. (c) Use 10k samples for intermediate evaluations and 50k only for final evaluation, saving ~20 min. Revised total: ~485 min ≈ 8.1 hours — within budget with small margin.",
+      "step8": "SEEDS: All main experiments use seeds [42, 43, 44]. Ablations use seed 42 only (single seed, compared against main experiment seed 42 for fair ablation comparison)."
+    }
+  }
+]

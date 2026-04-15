@@ -1,0 +1,169 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python environment and dependencies",
+    "description": "Install all required packages for benchmark generation, model inference, and analysis. We use vLLM for efficient batched local model inference and standard scientific Python for analysis.",
+    "steps": {
+      "step1": "Create a conda/venv environment with Python 3.10+",
+      "step2": "Install core dependencies: pip install vllm>=0.4.0 transformers>=4.40 torch>=2.1 accelerate bitsandbytes",
+      "step3": "Install analysis dependencies: pip install numpy scipy pandas matplotlib seaborn scikit-learn tqdm jsonlines",
+      "step4": "Verify GPU availability: run 'python -c \"import torch; print(torch.cuda.get_device_name(0))\"' to confirm A6000 is accessible",
+      "step5": "Create directory structure: exp/generators/, exp/evaluation/, exp/analysis/, exp/results/, exp/figures/"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Implement procedural benchmark generator",
+    "description": "Build the template-based procedural generation framework for all 8 atomic skills and their pairwise/triple compositions. Each generator produces instances with deterministic ground-truth answers. This is the core contribution of the paper.",
+    "steps": {
+      "step1": "Implement 8 atomic skill generators in exp/generators/skills.py, each with 5-8 template variants: (1) Arithmetic (AR): multi-step integer arithmetic with +, -, ×, ÷ operations on 2-4 digit numbers; (2) Comparison (CO): comparing fractions, multi-step computed quantities, dates; (3) Counting (CN): counting items matching predicates in lists of 8-15 items; (4) Logical Deduction (LD): 2-3 step syllogisms with fictional entity names to prevent memorization; (5) Spatial Reasoning (SP): 3-4 entity relative position chains (north/south/east/west); (6) String Manipulation (ST): character indexing, reversal, substring operations on 6-10 char words; (7) Temporal Reasoning (TE): overlap detection, duration computation with hours/minutes; (8) Set Operations (SE): union/intersection/difference/cardinality on sets of 4-8 integer elements",
+      "step2": "Implement composition engine in exp/generators/composer.py that combines skill templates: for each pair (i,j), create 3-5 composition templates where skill_i feeds into skill_j or both operate on shared context. For triples (i,j,k), create 2-3 templates with chained or parallel dependencies. Each template includes a deterministic solver function that computes the ground truth from randomized parameters.",
+      "step3": "Implement difficulty calibration in exp/generators/calibrator.py: for each skill, define parameter ranges (e.g., number magnitudes for AR, list lengths for CN) that yield comparable difficulty. Use pilot testing on 1 small model to verify single-skill accuracies are in the 70-90% range, adjusting parameter ranges if needed.",
+      "step4": "Implement the main generation script exp/generators/generate.py that: (a) takes a random seed as input, (b) generates 50 instances per category (8 single + 28 pairwise + 56 triple = 92 categories × 50 = 4600 instances), (c) runs each instance through the deterministic solver to get ground truth, (d) validates that all instances have unambiguous answers, (e) saves output as JSONL with fields: {id, skill_combo, level, question, answer, answer_type, template_id, seed}",
+      "step5": "Generate 3 independent benchmark sets using seeds 42, 123, 456. These serve dual purposes: (a) seeds 42 and 123 are used for main evaluation with test-retest reliability analysis, (b) seed 456 is reserved for ablation studies",
+      "step6": "Compute and log benchmark statistics: number of instances per category, answer type distribution, average question length, parameter range distributions. Save as exp/results/benchmark_stats.json"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Validate benchmark quality",
+    "description": "Ensure generated instances are well-formed, solvable, and have correct ground-truth answers through automated validation and manual spot-checking.",
+    "steps": {
+      "step1": "Run automated validation on all 3 generated sets: (a) verify all instances parse correctly, (b) re-run solver on each instance and confirm answer matches, (c) check no duplicate questions exist within a set, (d) verify answer type matches expected type for each skill combo",
+      "step2": "Compute cross-set statistics: verify that parameter distributions are similar across seeds (KS test p > 0.05 for numerical parameters), confirming procedural generation produces comparable difficulty",
+      "step3": "Manually inspect 5 randomly sampled instances from each of the 8 single-skill categories and 10 randomly sampled pairwise categories (total: 40 + 50 = 90 instances) to verify: questions are grammatically correct, unambiguous, and genuinely require the intended skills",
+      "step4": "Log any filtered/regenerated instances and reasons. Save validation report as exp/results/validation_report.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Establish random and independence baselines",
+    "description": "Compute theoretical baselines that establish the floor and the 'no composition penalty' ceiling. These are not model baselines but statistical reference lines essential for interpreting results.",
+    "steps": {
+      "step1": "Compute random baseline accuracy for each category based on answer types: for numerical answers, random accuracy ≈ 0; for yes/no answers, random = 50%; for multiple-choice-like (comparison with named entities), random = 50%. Save per-category random baselines.",
+      "step2": "Define the 'independence baseline' for each composed category: Independence_Accuracy(S_i, S_j) = PSA(S_i) × PSA(S_j), assuming skills are independent. This serves as a reference — if actual composed accuracy significantly exceeds this, skills interact positively; if below, there is composition interference.",
+      "step3": "Define the 'min baseline': Min_Accuracy(S_i, S_j) = min(PSA(S_i), PSA(S_j)). This is the optimistic upper bound — performance should not exceed the weakest component skill. The composition gap CG = Min_Accuracy - Actual_Accuracy.",
+      "step4": "Save all baseline computations as exp/results/baselines.json (will be populated with actual values after single-skill evaluation)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate simple and strong model baselines",
+    "description": "Evaluate a simple small model and a strong larger model to establish the range of model performance on SkillStack. These serve as the required 'simple baseline' and 'strong baseline' for fair benchmarking.",
+    "steps": {
+      "step1": "Simple baseline — Qwen2.5-1.5B-Instruct: Load with vLLM (fits easily in memory). Evaluate on full benchmark set (seed 42) with zero-shot direct prompting. Use batch size 64, max_new_tokens=256, temperature=0. Parse answers using regex patterns per answer_type. Save raw outputs and parsed results to exp/results/qwen1.5b_direct_seed42.jsonl. Estimated time: ~20 minutes.",
+      "step2": "Strong baseline — Qwen2.5-32B-Instruct-AWQ (4-bit quantized): Load with vLLM using quantization='awq'. Evaluate on full benchmark set (seed 42) with zero-shot direct prompting. Same evaluation protocol. Save to exp/results/qwen32b_direct_seed42.jsonl. Estimated time: ~45 minutes.",
+      "step3": "Compute per-category accuracy for both models. Compute composition gap CG and composition efficiency CE for all pairwise and triple categories. Save summary statistics to exp/results/baseline_summary.json.",
+      "step4": "Quick sanity check: verify single-skill accuracies are in expected ranges (Qwen-1.5B: 30-60%, Qwen-32B: 70-95%). If outside range, revisit difficulty calibration before proceeding."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Full model evaluation suite",
+    "description": "Evaluate 6 models spanning different families, sizes, and training paradigms on the full benchmark with both direct and chain-of-thought prompting. This is the core experiment producing the Skill Interaction Matrices and composition gap analysis.",
+    "steps": {
+      "step1": "Define model suite (6 models, chosen for diversity along size/family/training axes): (1) Qwen2.5-1.5B-Instruct [small, simple baseline], (2) Llama-3.1-8B-Instruct [medium, Meta family], (3) Qwen2.5-7B-Instruct [medium, Qwen family], (4) DeepSeek-R1-Distill-Qwen-7B [medium, reasoning-tuned], (5) Qwen2.5-14B-Instruct [large-medium], (6) Qwen2.5-32B-Instruct-AWQ [large, strong baseline]. All loaded via vLLM with appropriate quantization.",
+      "step2": "For each model, evaluate on benchmark seed 42 with zero-shot DIRECT prompting: prompt format is 'Q: {question}\\nA:' with instruction 'Answer with just the final answer, no explanation.' Use temperature=0, max_new_tokens=256. Parse answers per answer_type. Save raw model outputs and parsed results. Run models sequentially (1 GPU). Estimated per-model time: 20-45 min depending on size. Total: ~3 hours.",
+      "step3": "For each model, evaluate on benchmark seed 42 with zero-shot CHAIN-OF-THOUGHT prompting: prompt format is 'Q: {question}\\nLet me think step by step:' with no answer-format constraint. Use temperature=0, max_new_tokens=512. Extract final answer from CoT output using regex. Save raw outputs. Estimated per-model time: 30-60 min. Total: ~4 hours.",
+      "step4": "IMPORTANT TIME MANAGEMENT: Direct prompting for all 6 models (~3h) + CoT for all 6 models (~4h) = ~7h. To fit in budget, run direct prompting for all 6, but CoT only for 4 models (skip Qwen-1.5B and one 7B). Alternatively, if direct runs faster than estimated, run CoT for all 6.",
+      "step5": "Compute per-model results: (a) Per-Skill Accuracy (PSA) for 8 single skills, (b) Composed Accuracy (CA) for 28 pairwise + 56 triple, (c) Composition Gap CG(S_i, S_j) = min(PSA(S_i), PSA(S_j)) - CA(S_i, S_j), (d) Composition Efficiency CE = CA / min(PSA), (e) Composition Scaling Exponent α by fitting CA = PSA^α across levels. Save all results to exp/results/main_results.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Test-retest reliability evaluation",
+    "description": "Evaluate models on a second independently generated benchmark set (seed 123) to verify that composition gap measurements are stable across different instances. This validates the benchmark's measurement reliability.",
+    "steps": {
+      "step1": "Select 3 representative models for reliability testing: Qwen2.5-1.5B-Instruct (small), Qwen2.5-7B-Instruct (medium), Qwen2.5-32B-Instruct-AWQ (large). These span the size range.",
+      "step2": "Evaluate these 3 models on benchmark seed 123 with direct prompting only (same protocol as main experiment). Estimated time: ~1.5 hours total.",
+      "step3": "Compute Pearson and Spearman correlation between composition gap measurements on seed 42 vs seed 123 for each model. Report per-model and aggregate reliability. Target: r > 0.90.",
+      "step4": "Save reliability analysis to exp/results/reliability.json including per-category CG values for both seeds and correlation statistics."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: composition level scaling",
+    "description": "Analyze how performance degrades from Level 1 (single) to Level 2 (pairwise) to Level 3 (triple) compositions. Tests the hypothesis that degradation is super-linear in the number of composed skills.",
+    "steps": {
+      "step1": "For each model and prompting strategy, extract accuracy at each composition level: Level 1 (average across 8 skills), Level 2 (average across 28 pairs), Level 3 (average across 56 triples).",
+      "step2": "Fit the scaling model: Accuracy(K) = A × PSA_mean^(α×K) where K is the composition level (1,2,3). Estimate α for each model. If α > 1, degradation is super-linear (supporting hypothesis). If α ≤ 1, degradation is linear or sub-linear.",
+      "step3": "Test statistical significance of super-linearity: bootstrap 95% CI on α across categories. Report per-model α with CIs.",
+      "step4": "Save scaling analysis to exp/results/scaling_analysis.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: sequential vs parallel compositions",
+    "description": "Test hypothesis that sequentially-dependent skill pairs show larger composition gaps than parallel pairs. Classify each pairwise composition as sequential or parallel based on template dependency structure.",
+    "steps": {
+      "step1": "Classify each of the 28 pairwise combinations as 'sequential' (output of skill A is input to skill B) or 'parallel' (both skills operate on independent parts of the problem) based on the composition templates. Some pairs may have both types — classify based on dominant template pattern. Save classification to exp/results/dependency_classification.json.",
+      "step2": "Compare mean composition gap for sequential vs parallel pairs using a two-sample t-test (or Mann-Whitney U if normality is violated). Compute effect size (Cohen's d).",
+      "step3": "For chain-of-thought vs direct prompting: compute the 'CoT benefit' = CG_direct - CG_CoT for sequential and parallel pairs separately. Test whether CoT helps more for sequential compositions (hypothesis).",
+      "step4": "Save analysis to exp/results/sequential_vs_parallel.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: template diversity",
+    "description": "Test whether the composition gap is robust across different template formulations or is an artifact of specific phrasings. This validates that we are measuring genuine compositional difficulty, not template-specific difficulty.",
+    "steps": {
+      "step1": "For 10 selected pairwise categories (chosen to span easy/medium/hard compositions based on initial results), generate instances using only template variant 1, then only template variant 2, etc.",
+      "step2": "Evaluate on 1 model (Qwen2.5-7B-Instruct) with direct prompting. Compare per-template accuracy within each category.",
+      "step3": "Compute intra-category variance across templates. If template variance is small relative to inter-category variance (ICC > 0.7), the composition gap is robust to template choice.",
+      "step4": "Save to exp/results/template_ablation.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: difficulty calibration effect",
+    "description": "Test whether difficulty calibration (matching single-skill difficulty across compositions) affects the measured composition gap. Compare calibrated vs uncalibrated parameter ranges.",
+    "steps": {
+      "step1": "Generate a 'hard' variant of the benchmark (seed 456) where parameter ranges are NOT calibrated — use the full range for each skill regardless of composition context (e.g., larger numbers in arithmetic when composed, longer lists in counting when composed).",
+      "step2": "Evaluate on 2 models (Qwen2.5-7B-Instruct, Qwen2.5-32B-Instruct-AWQ) with direct prompting.",
+      "step3": "Compare composition gaps between calibrated (seed 42) and uncalibrated (seed 456) versions. If gaps are much larger without calibration, it validates that calibration is necessary for fair measurement. If gaps are similar, the composition penalty is robust to difficulty.",
+      "step4": "Save to exp/results/calibration_ablation.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria verification",
+    "description": "Apply rigorous statistical tests to verify the primary, secondary, and tertiary success criteria defined in the proposal.",
+    "steps": {
+      "step1": "Primary criterion — Statistically significant composition gap: For each model and each of the 28 pairwise categories, test H0: CG ≤ 0 using a one-sided binomial test (comparing observed composed accuracy to the min-baseline). Apply Bonferroni correction for multiple comparisons. Count the fraction of (model, pair) combinations with p < 0.01. Target: ≥80% of pairs for ≥5 models.",
+      "step2": "Secondary criterion — Distinct composition patterns: Apply hierarchical clustering on the 28-dimensional CG vector (one per pair) across all models. Use Ward's linkage with cosine distance. Identify natural cluster count using silhouette score. Target: ≥3 distinct clusters corresponding to easy/medium/hard compositions.",
+      "step3": "Tertiary criterion — Meaningful variation: Compute the range of composition gap across model families (Qwen vs Llama vs DeepSeek), sizes (1.5B vs 7B vs 14B vs 32B), and prompting strategies (direct vs CoT). Target: >10pp difference on at least one comparison axis.",
+      "step4": "Validation criterion — Test-retest reliability: already computed in reliability experiment. Verify r > 0.90.",
+      "step5": "Save comprehensive statistical results to exp/results/statistical_tests.json including all p-values, effect sizes, confidence intervals, and pass/fail status for each criterion."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for the paper. All figures use matplotlib with consistent styling (font size 12, serif fonts, colorblind-friendly palettes).",
+    "steps": {
+      "step1": "Figure 1 — Skill Interaction Heatmap: 8×8 heatmap showing composition gap CG(S_i, S_j) for pairwise compositions. Create one panel per model size (1.5B, 7B, 14B, 32B) in a 2×2 grid. Use diverging colormap (blue=low gap, red=high gap). Annotate cells with CG values. Save as figures/figure1_skill_interaction_matrix.pdf",
+      "step2": "Figure 2 — Composition Scaling Plot: Line plot with composition level (1, 2, 3) on x-axis, accuracy on y-axis. One line per model, with error bars (95% CI across categories). Include dashed reference line showing linear scaling prediction. Save as figures/figure2_composition_scaling.pdf",
+      "step3": "Figure 3 — CoT vs Direct Comparison: Grouped bar chart showing composition gap for sequential vs parallel pairs, split by prompting strategy (direct, CoT). One group per model. Save as figures/figure3_cot_effect.pdf",
+      "step4": "Figure 4 — Skill Difficulty Clustering: Dendrogram or t-SNE/UMAP plot of the 28 pairwise categories based on their CG profiles across models, with cluster labels. Annotate with skill pair names. Save as figures/figure4_composition_clusters.pdf",
+      "step5": "Figure 5 — Reliability Plot: Scatter plot of CG(seed 42) vs CG(seed 123) for all 28 pairwise categories, one panel per model. Include regression line and r-value annotation. Save as figures/figure5_reliability.pdf",
+      "step6": "Table 1 — Main Results Table: LaTeX table with rows = models, columns = {Per-Skill Acc (avg), Pairwise Acc (avg), Triple Acc (avg), Composition Gap (avg), Composition Efficiency}. Include both direct and CoT results. Save as figures/table1_main_results.tex",
+      "step7": "Table 2 — Per-Skill Accuracy Breakdown: LaTeX table with rows = models, columns = 8 skills. Include both direct and CoT. Save as figures/table2_per_skill.tex",
+      "step8": "Table 3 — Top-5 Hardest and Top-5 Easiest Compositions: Ranked list with skill pair, average CG across models, and CG range. Save as figures/table3_hard_easy.tex"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Runtime budget and execution order",
+    "description": "Detailed time budget ensuring all experiments fit within 8 hours on 1× A6000 GPU.",
+    "steps": {
+      "step1": "Phase 1 — Setup & Generation (30 min): Environment setup (10 min), benchmark generation for 3 seeds (15 min), validation (5 min).",
+      "step2": "Phase 2 — Baseline evaluation (1 hour): Qwen2.5-1.5B direct on seed 42 (20 min), Qwen2.5-32B-AWQ direct on seed 42 (40 min). Quick sanity check on results.",
+      "step3": "Phase 3 — Main direct evaluation (2.5 hours): Remaining 4 models (Llama-3.1-8B, Qwen2.5-7B, DeepSeek-R1-7B, Qwen2.5-14B) with direct prompting on seed 42. ~35 min each.",
+      "step4": "Phase 4 — CoT evaluation (2.5 hours): 4 models (Llama-3.1-8B, Qwen2.5-7B, DeepSeek-R1-7B, Qwen2.5-32B-AWQ) with CoT on seed 42. ~40 min each.",
+      "step5": "Phase 5 — Reliability + ablations (1 hour): Reliability evaluation on seed 123 for 3 models with direct prompting (45 min). Template ablation runs concurrently on CPU for already-generated data (15 min). Calibration ablation uses results from Phase 2-3 + 1 additional uncalibrated run.",
+      "step6": "Phase 6 — Analysis & visualization (30 min): All statistical tests and figure generation. This is CPU-only and fast.",
+      "step7": "Total estimated: 0.5 + 1.0 + 2.5 + 2.5 + 1.0 + 0.5 = 8.0 hours. Buffer strategy: if models run faster, add CoT for Qwen-1.5B and Qwen-14B. If slower, drop CoT for one 7B model.",
+      "step8": "All experiments use fixed random seeds: generation seeds {42, 123, 456}, model inference temperature=0 (deterministic). Results are fully reproducible."
+    }
+  }
+]

@@ -1,0 +1,88 @@
+{
+  "title": "ShareArb: Evictor-Side Responsibility for Shared Linux Page-Cache Arbitration",
+  "description": "ShareArb studies multi-tenant Linux page-cache arbitration when tenants overlap on file-backed pages. It starts from a pCache-style shared/private occupancy baseline and adds one new signal: evictor-side responsibility debt that charges the tenant that displaced a shared page for the predicted downstream harm imposed on the other tenants that were likely to reuse it.",
+  "motivation": "The broad adjacent space is already occupied: pCache covers shared/private page-cache accounting, Per-VM Page Cache Partitioning covers utility-driven share control with tenant-aware policy choice, and recent systems such as FetchBPF, PageFlex, and cache_ext cover programmable paging mechanisms. The remaining gap is narrower but still important: occupancy accounting says who uses cache space, yet it does not attribute who caused cross-tenant harm when a shared page is evicted under overlap-heavy file-backed workloads.",
+  "proposed_approach": "ShareArb keeps a conservative pCache-style proportional charging baseline, maintains a Shared Responsibility Vector over the current consumers of each shared page, and charges a decayed debt to the evictor equal to the predicted miss cost imposed on the other tenants. A small controller then uses occupancy plus debt to choose among a few existing replacement profiles and a simplex-style coarse share grid that works for both 2-tenant and 3-tenant cases; when overlap is weak, the debt term is disabled and the method reduces to occupancy-only arbitration.",
+  "related_work": [
+    {
+      "title": "Precise control of page cache for containers",
+      "authors": [
+        "Kun Wang",
+        "Song Wu",
+        "Shengbang Li",
+        "Zhuo Huang",
+        "Hao Fan",
+        "Chen Yu",
+        "Hai Jin"
+      ],
+      "how_it_differs": "pCache already contributes shared/private page-cache accounting and proportional charging of shared pages. ShareArb assumes that baseline and asks whether arbitration still needs an additional evictor-side responsibility signal."
+    },
+    {
+      "title": "Per-VM Page Cache Partitioning for Cloud Computing Platforms",
+      "authors": [
+        "Prateek Sharma",
+        "Purushottam Kulkarni",
+        "Prashant J. Shenoy"
+      ],
+      "how_it_differs": "Per-VM Page Cache Partitioning already studies utility-based share allocation plus tenant-level replacement control. ShareArb uses only a small controller and claims novelty solely in the added responsibility heuristic."
+    },
+    {
+      "title": "Shared-Page Management for Improving the Temporal Isolation of Memory Reservations in Resource Kernels",
+      "authors": [
+        "Hyoseung Kim",
+        "Ragunathan Rajkumar"
+      ],
+      "how_it_differs": "This paper identifies cross-domain interference from shared-page eviction and proposes protection mechanisms such as Shared-Page Eviction Lock, but it targets real-time memory reservations rather than best-effort Linux page-cache arbitration and does not perform online evictor-side harm attribution."
+    },
+    {
+      "title": "ROBUS: Fair cache allocation for data-parallel workloads",
+      "authors": [
+        "Mayuresh Kunjir",
+        "Brandon Fain",
+        "Kamesh Munagala",
+        "Shivnath Babu"
+      ],
+      "how_it_differs": "ROBUS studies fairness for shareable cached objects and is conceptually close because one cached object can benefit multiple tenants at once. However, it focuses on batch object allocation in data-parallel systems, not online page eviction in Linux, and it does not charge the evictor for downstream harm after a shared item is displaced."
+    },
+    {
+      "title": "Towards Application-level I/O Proportionality with a Weight-aware Page Cache Management",
+      "authors": [
+        "Jonggyu Park",
+        "Kwonje Oh",
+        "Young Ik Eom"
+      ],
+      "how_it_differs": "Justitia shows that page-cache occupancy must sometimes reflect fairness weights, but it does not address overlap-heavy shared-page externalities or evictor-side responsibility."
+    },
+    {
+      "title": "cache_ext: Customizing the Page Cache with eBPF",
+      "authors": [
+        "Tal Zussman",
+        "Ioannis Zarkadas",
+        "Jeremy Carin",
+        "Andrew Cheng",
+        "Hubertus Franke",
+        "Jonas Pfefferle",
+        "Asaf Cidon"
+      ],
+      "how_it_differs": "cache_ext provides mechanism for custom Linux page-cache policies while preserving sharing, but it does not define a multi-tenant arbitration signal for harmful shared-page eviction."
+    }
+  ],
+  "hypothesis": "On overlap-heavy file-backed workloads, adding evictor-side responsibility debt on top of pCache-style shared/private occupancy charging will reduce shared-page regret and improve worst-tenant slowdown relative to occupancy-only baselines, while preserving aggregate throughput and reducing to baseline behavior on disjoint workloads.",
+  "success_criteria": {
+    "confirm": [
+      "Across the overlap-heavy synthetic and SQLite trace-derived families, ShareArb improves worst-tenant slowdown by roughly 8 to 12 percent on average over pCache-Account.",
+      "Aggregate throughput proxy remains within 3 percent of pCache-Account in the worst case and usually improves.",
+      "Shared-page regret decreases materially relative to both pCache-Account and ShareArb-NoDebt.",
+      "Charged debt correlates positively with realized downstream harm on both synthetic and trace-derived workloads.",
+      "On the disjoint negative-control family, ShareArb stays within 3 percent of pCache-Account, confirming correct reduction behavior.",
+      "Replay-to-live sanity checks preserve the ranking between pCache-Account and ShareArb in at least 3 of 4 tested conditions."
+    ],
+    "refute": [
+      "pCache-style shared/private charging alone matches ShareArb on overlap-heavy workloads.",
+      "The debt term helps only under one fragile decay or miss-cost setting.",
+      "The observed gains disappear on the SQLite trace-derived workloads even if they appear on synthetic traces.",
+      "Fairness improvements occur only with severe throughput collapse or unstable share/profile oscillation.",
+      "Limited live checks fail to preserve even the direction of replay-predicted improvements."
+    ]
+  }
+}

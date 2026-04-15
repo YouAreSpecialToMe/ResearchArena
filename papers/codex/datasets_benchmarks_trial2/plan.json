@@ -1,0 +1,146 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set Up A Reproducible Benchmark-Build And Inference Environment",
+    "description": "Create a pinned environment for abstract mining, annotation bookkeeping, non-LLM baselines, and quantized LLM inference that fits 1x RTX A6000 48GB, 60GB RAM, 4 CPU cores, and an 8-hour total compute budget.",
+    "steps": {
+      "step1": "Create a Python 3.11 environment and install pinned packages: torch==2.5.*, transformers==4.46.*, accelerate==1.1.*, bitsandbytes==0.44.*, sentence-transformers==3.*, spacy==3.8.*, scikit-learn==1.5.*, pandas==2.2.*, numpy==2.1.*, scipy==1.14.*, datasets==3.*, evaluate==0.4.*, rapidfuzz==3.*, rank-bm25==0.2.*, matplotlib==3.9.*, seaborn==0.13.*, statsmodels==0.14.*, and jsonlines==4.*.",
+      "step2": "Download `en_core_web_sm`; fix seeds 17, 23, and 42 for Python, NumPy, and PyTorch for every stochastic stage; and save package versions, checkpoint revisions, GPU model, CUDA version, CPU model, and RAM size to `results/run_metadata.json`.",
+      "step3": "Create directories `data/raw`, `data/intermediate`, `data/pilot`, `data/annotated`, `data/final`, `results/baselines`, `results/analysis`, `results/ablations`, and `figures`. Save all model predictions as JSONL with fields `example_id`, `task`, `model`, `seed`, `input_variant`, `gold_label`, `predicted_label`, `score`, `runtime_seconds`, and `peak_vram_mb`.",
+      "step4": "Use the 4 CPU cores for metadata fetch, sentence alignment, filtering, bootstrap statistics, and plotting. Use the single GPU sequentially for sentence embeddings, NLI inference, and 4-bit LLM inference; do not overlap GPU workloads because there is only one available GPU."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Collect And Normalize Multi-Version Abstracts",
+    "description": "Assemble a narrow but credible source pool for a compact benchmark of abstract-local scientific claim updates rather than a broad revision corpus.",
+    "steps": {
+      "step1": "Use arXiv as the primary source and restrict to papers from `cs.AI`, `cs.CL`, `cs.CV`, and `cs.LG` dated 2022-01-01 through 2025-12-31 with at least two abstract versions. Target 1200 to 1800 papers so mining is broad enough to populate all revision categories without creating unmanageable annotation volume.",
+      "step2": "For each paper, store arXiv ID, title, primary category, all category tags, version numbers, version timestamps, and every abstract version in `data/raw/arxiv_revision_records.jsonl`.",
+      "step3": "Reject records with missing versioned abstracts, non-English abstracts detected by lightweight language ID, or malformed revision chains. Retain papers with many versions only if at least one adjacent version pair changes an abstract sentence by more than a normalized edit distance of 0.08.",
+      "step4": "Before candidate mining, compute source statistics: papers per subject area, versions per paper, abstract sentence count distribution, proportion of papers with any abstract edit, and proportion with edits that include changed numbers, comparisons, or hedge terms."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Mine Candidate Claim Updates With Conservative Triggers And A Semantic Audit Pass",
+    "description": "Build a candidate pool that favors substantive claim updates while explicitly measuring whether the benchmark is collapsing to local lexical edits.",
+    "steps": {
+      "step1": "Sentence-segment every abstract version with spaCy and align sentences across adjacent versions using a lexical first pass based on token-set ratio, normalized Levenshtein similarity, and content-word overlap. Keep one-to-one best matches and mark insertions and deletions separately.",
+      "step2": "For every aligned pair, compute `all-mpnet-base-v2` cosine similarity. Flag a pair for semantic audit if lexical confidence is low but semantic similarity is high, specifically token-set ratio below 0.55 and cosine at or above 0.78. Do not include these automatically; track them as a separate pool.",
+      "step3": "Retain a triggered candidate if it matches at least one preregistered factual-status cue: changed numbers or percentages, changed comparative language such as `better than` or `state-of-the-art`, changed certainty language such as `shows` to `suggests`, changed dataset or evaluation setting names, or changed scope qualifiers such as `all`, `most`, `in-domain`, or `under weak supervision`.",
+      "step4": "Remove non-substantive edits with deterministic rules: punctuation-only changes, citation-only changes, whitespace-only changes, sentence pairs with cosine above 0.97 and no changed number or comparison phrase, or pairs containing multiple unrelated propositions after spot-checking.",
+      "step5": "Assign each surviving item a provisional type from `numeric_update`, `comparative_update`, `softening_or_retraction`, `dataset_or_setting_change`, or `scope_qualification_change`. Also assign a coarse bucket of `local_updates` for numeric and comparative edits and `semantic_updates` for the three remaining categories.",
+      "step6": "Export three files: `data/intermediate/mined_triggered_candidates.jsonl`, `data/intermediate/paraphrase_audit_candidates.jsonl`, and `data/intermediate/rejected_candidates.jsonl`. Include an explicit `rejection_reason` field so selection bias can be reported in the paper."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Run A Pilot With Go Or No-Go Gates",
+    "description": "Use a pilot to test whether abstract-local obsolete-vs-current examples are abundant and reliable enough to justify the full benchmark build.",
+    "steps": {
+      "step1": "Sample 120 pilot candidates stratified by subject area and provisional revision type: 90 from the triggered pool and 30 from the semantic-audit pool. Use seeds 17, 23, and 42 to generate three stratified candidate orderings, but annotate only the seed-17 sample and keep the other two as backup draws if categories are under-filled.",
+      "step2": "Two annotators independently label each pilot item in two stages. Stage A is `substantive_change`, `non_substantive_edit`, or `ambiguous`. Stage B is earlier-claim status against the latest abstract: `obsolete`, `supported_current`, or `insufficient_evidence`. Annotators also assign the final revision type and cite the exact latest-abstract span supporting their decision.",
+      "step3": "Compute raw agreement and Cohen's kappa for Stage A and Stage B, plus Wilson 95% confidence intervals for substantive-change rate, obsolete rate among substantive items, insufficient-evidence rate, and semantic-audit acceptance rate.",
+      "step4": "Proceed to the full build only if the pilot projection supports at least 150 final Current-Claim Selection items from a total annotation budget of 700 to 900 candidates. Retain the secondary verification task only if Stage B reaches at least 0.60 Cohen's kappa and at least 80% raw agreement on substantive items.",
+      "step5": "If retained semantic updates are projected below 30 items, keep the paper claim narrow and preregister semantic results as descriptive only. If the semantic-audit pool contributes under 10% of retained pilot items, report that deeper semantic coverage is limited and do not claim strong semantic mining performance."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Execute The Annotation Operations Plan And Freeze Splits",
+    "description": "Convert the pilot into a full, operationally budgeted benchmark build with explicit quotas, adjudication rules, and contingency paths for rare semantic revisions.",
+    "steps": {
+      "step1": "Annotate 700 to 900 candidates total, inclusive of the pilot. Budget the effort explicitly: 2.0 minutes per candidate per annotator for first-pass labeling, 20% to 30% adjudication at 2.5 minutes each, and 6 to 8 hours for calibration and spot audits, for a total expected labor of 58 to 79 annotator-hours.",
+      "step2": "Use dynamic sampling rather than fixed one-shot sampling after the pilot. Continue drawing candidates until one of two stopping conditions is met: either the benchmark reaches 150 to 180 retained Current-Claim Selection items or the annotation budget of 900 total candidates is exhausted.",
+      "step3": "Preregister category thresholds for analysis: target at least 30 retained `numeric_update` items, at least 30 retained `comparative_update` items, and at least 30 retained items in aggregate across `softening_or_retraction`, `dataset_or_setting_change`, and `scope_qualification_change`. Report any fine-grained category with fewer than 15 retained items descriptively only.",
+      "step4": "Adjudicate every disagreement with a third reviewer. Resolve borderline `obsolete` versus `insufficient_evidence` cases in favor of exclusion from Task 1. Freeze annotation guidelines immediately after the pilot and do not revise category definitions during the main round.",
+      "step5": "Keep a primary-task example only if adjudication confirms `substantive_change`, the earlier claim is `obsolete` against the latest abstract, and the later claim is the current counterpart for the same proposition. Keep Task 2 verification examples only if the pilot agreement gate is met.",
+      "step6": "Split the final benchmark by paper, not by example, into 20% development and 80% test with zero paper overlap. If the final primary benchmark has 150 items, use 30 dev and 120 test; if it has 180 items, use 36 dev and 144 test. Store the split manifest in `data/final/split_manifest.json`."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Simple And Strong Symmetric Baselines",
+    "description": "Establish a credible difficulty profile with one simple heuristic floor and multiple stronger baselines that score both claims against the same latest abstract rather than privileging the later claim by construction.",
+    "steps": {
+      "step1": "Simple baseline: `LaterClaimWins`. For Current-Claim Selection, always select the later claim. Use this only as a floor and explicitly compare stronger models against it to test whether the benchmark is trivial.",
+      "step2": "Strong retrieval baseline: compute BM25 and `all-mpnet-base-v2` cosine similarity between each claim and each latest-abstract sentence. Score each claim as `0.5 * max_BM25_norm + 0.5 * max_cosine` and select the higher-scoring claim. Tune only the BM25-cosine mixture weight and any tie threshold on the dev split.",
+      "step3": "Strong nontrivial baseline: symmetric pairwise NLI verifier with `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` or an equivalent DeBERTa-v3 MNLI checkpoint. For each claim, score all latest-abstract sentences, keep the best evidence sentence, and convert entailment minus contradiction probability into a support score. Select the claim with the larger support score margin. This baseline is the main non-LLM comparator because it treats old and new claims symmetrically.",
+      "step4": "Calibration protocol: fit all thresholded decisions on the fixed dev split only. For stochastic calibration or tie-breaking, run seeds 17, 23, and 42 and report mean and standard deviation across seeds. Deterministic inference outputs remain constant across seeds and should be reported once.",
+      "step5": "Report Current-Claim Selection accuracy, macro-F1 over the binary labels, obsolete-claim attraction rate, runtime per example, and peak GPU memory for each baseline. If Task 2 survives the pilot, also report verification macro-F1 and per-class F1."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate Feasible Open LLM Baselines Under A Fixed Zero-Shot Protocol",
+    "description": "Measure benchmark difficulty on strong open instruction-tuned models without introducing prompt-selection variance from tiny dev-shot pools.",
+    "steps": {
+      "step1": "Evaluate exactly two local 4-bit models: `Qwen2.5-7B-Instruct` and `Llama-3.1-8B-Instruct`. Load one model at a time on the A6000 and keep generation deterministic with temperature 0.0, top_p 1.0, and greedy decoding.",
+      "step2": "Primary selection prompt: provide `Earlier claim`, `Later claim`, and `Latest abstract`, instruct the model to choose the claim that is current in the latest version, and require exact output `A` or `B`. Do not use in-context demonstrations in the headline experiment.",
+      "step3": "If Task 2 is retained, use a second zero-shot prompt with one claim plus the latest abstract and require one of `obsolete`, `supported_current`, or `insufficient_evidence`. Use `max_new_tokens=16` for selection and `max_new_tokens=24` for verification.",
+      "step4": "Use batch size 8 initially and increase only if peak VRAM remains below 44 GB. Cache tokenized inputs and write invalid-format outputs to a separate audit file. Because inference is deterministic, run each main LLM condition once; use seeds 17, 23, and 42 only for any auxiliary robustness checks, not for resampled few-shot prompt selection.",
+      "step5": "Treat the stronger of the two open LLMs as the benchmark's principal neural baseline for future comparisons, but frame results benchmark-centrically: failure analysis matters more than absolute score."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Measure The Value Of Revision-Aware Framing And Latest-Abstract Evidence",
+    "description": "Test the core hypothesis that models still make stale-claim errors on adjudicated abstract-local scientific updates, and that explicit revision-aware framing plus local evidence reduces but does not eliminate those errors.",
+    "steps": {
+      "step1": "For each LLM, run two primary input conditions on the same test items: `claim_pair_only` with earlier and later claims but no abstract, and `claim_pair_plus_latest_abstract` with both claims plus the latest abstract. Keep every other factor fixed.",
+      "step2": "Within the `claim_pair_plus_latest_abstract` condition, compare a plain instruction prompt against a revision-aware prompt that explicitly states the earlier claim may be obsolete and the goal is to identify the claim still valid in the latest version. This tests whether version-aware framing reduces stale-claim attraction beyond merely adding evidence.",
+      "step3": "Define the main benchmark claim as supported if at least one strong LLM baseline remains materially below annotation agreement on Current-Claim Selection and if adding the latest abstract improves accuracy over `claim_pair_only` with a paired bootstrap 95% confidence interval excluding zero.",
+      "step4": "Define the revision-aware prompting claim as supported only if the revision-aware prompt lowers obsolete-claim attraction versus the plain prompt on both backbones or yields a statistically significant gain on at least one backbone without harming the other.",
+      "step5": "If Task 2 is retained, run the same plain versus revision-aware prompt comparison for verification, but treat it as secondary analysis rather than a headline result."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate Every Novel Benchmark-Building Choice",
+    "description": "Test whether the benchmark's composition and difficulty come from the proposed design decisions rather than accidental artifacts.",
+    "steps": {
+      "step1": "Mining ablation: annotate a matched 60 to 80 item sample of edited sentence pairs drawn uniformly without triggers and compare substantive-change yield, obsolete yield, and semantic-update rate against the trigger-based pipeline. This measures whether triggers improve efficiency at the cost of excessive narrowness.",
+      "step2": "Semantic-audit ablation: report how many retained examples came exclusively from the paraphrase-audit pool and whether they contain a larger fraction of semantic updates than the lexical-trigger pool. If the count is under 10 retained items, present the result as a negative finding.",
+      "step3": "Evidence-restriction ablation: on a 40-item diagnostic subset, ask annotators to relabel first with abstract-only evidence and then with optional full-paper access. Measure label-flip rate from `insufficient_evidence` to another label to quantify what reproducibility gains cost in coverage.",
+      "step4": "Prompting ablation: on the best open LLM, compare the plain zero-shot prompt with the revision-aware zero-shot prompt under seeds 17, 23, and 42 using three fixed prompt surface forms that preserve semantics. Report whether gains are robust to wording, not to resampled demonstrations.",
+      "step5": "Taxonomy ablation: report separate results for `local_updates` and `semantic_updates`, then for each fine-grained category that reaches the preregistered minimum count. This tests whether the benchmark is challenging only for easy numeric edits or also for genuinely semantic revisions."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate Dataset Validity, Model Difficulty, And Statistical Reliability",
+    "description": "Measure whether the benchmark is valid, nontrivial, and informative under the compact framing adopted in the proposal.",
+    "steps": {
+      "step1": "Dataset-validity metrics: candidate counts by pool, rejection reasons, substantive-change rate, obsolete rate among substantive items, insufficient-evidence rate, semantic-audit contribution, annotator raw agreement, Cohen's kappa, adjudication rate, revision-type counts, and subject-area counts.",
+      "step2": "Primary-task metrics: accuracy, binary macro-F1, obsolete-claim attraction rate, and per-category accuracy for `numeric_update`, `comparative_update`, and aggregated `semantic_updates`. Report human agreement as an upper-reference line rather than as a directly comparable model score.",
+      "step3": "Secondary-task metrics if retained: macro-F1, balanced accuracy, and per-class precision, recall, and F1 for `obsolete`, `supported_current`, and `insufficient_evidence`. If the pilot gate fails, state explicitly that Task 2 was dropped for reliability reasons.",
+      "step4": "Use paper-level paired bootstrap with 1000 resamples for model and condition comparisons so multiple examples from one paper do not artificially narrow confidence intervals. Use McNemar tests for headline pairwise comparisons on the selection task.",
+      "step5": "Success criteria: the study succeeds if the final primary benchmark contains 150 to 180 adjudicated items or at least 150 with transparent category counts, the strong symmetric NLI baseline does not saturate performance, at least one open LLM remains below annotation agreement, and either at least 30 semantic-update items support coarse-grained analysis or the paper explicitly narrows its claim to mostly local updates."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Prepare Paper Tables, Figures, And A Runtime Ledger",
+    "description": "Produce outputs that foreground benchmark scope, annotation credibility, and failure modes instead of overstating novelty.",
+    "steps": {
+      "step1": "Create Table 1 with source and annotation statistics: papers collected, subject-area distribution, versions per paper, triggered candidates, semantic-audit candidates, pilot size, pilot agreement, total annotated candidates, adjudication rate, final benchmark size, and revision-type distribution.",
+      "step2": "Create Table 2 with model results for `LaterClaimWins`, retrieval scoring, symmetric NLI, `Qwen2.5-7B-Instruct`, and `Llama-3.1-8B-Instruct` under plain and revision-aware prompts. Include accuracy, macro-F1, obsolete-claim attraction, runtime per example, and peak VRAM.",
+      "step3": "Create Figure 1 as a dataset-construction flow chart from raw papers to aligned edits to triggered candidates to pilot-retained items to final benchmark items, with retention percentages and rejection reasons at each stage.",
+      "step4": "Create Figure 2 as bar charts of model accuracy by coarse bucket (`local_updates` versus `semantic_updates`) and by fine-grained category where counts permit. Create Figure 3 as a stacked error chart showing stale-number, stale-comparison, scope-confusion, and unsupported-claim errors.",
+      "step5": "Create an appendix table with 8 to 10 representative benchmark items and a runtime ledger summarizing wall-clock time for preprocessing, embedding extraction, NLI inference, LLM inference, and plotting."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Enforce A Concrete 8-Hour Compute Schedule",
+    "description": "Pre-commit to a feasible run order and a simplification policy so the plan stays within the available resources before execution starts.",
+    "steps": {
+      "step1": "CPU preprocessing budget: 1.5 to 2.0 hours wall-clock on 4 cores for metadata fetch, sentence alignment, trigger filtering, export of candidate pools, and descriptive statistics.",
+      "step2": "GPU feature budget: 0.5 to 0.75 hours for `all-mpnet-base-v2` embeddings and 0.5 to 0.75 hours for symmetric NLI scoring over the candidate and final benchmark pools, with all features cached to disk.",
+      "step3": "GPU LLM budget: 2.0 to 2.5 hours total for 2 models x 2 main input conditions x 1 deterministic run, plus up to 1.0 hour for revision-aware prompt comparison and wording-robustness ablation on the best backbone. If Task 2 is retained, reserve at most 1.0 additional hour for verification runs.",
+      "step4": "CPU analysis and plotting budget: 0.5 to 0.75 hours for bootstrap resampling, McNemar tests, table generation, and figure rendering after predictions are cached.",
+      "step5": "If total measured runtime approaches 8 hours, simplify in this order: drop Task 2 if its pilot gate was marginal, skip extra semantic-audit annotation beyond the pilot, keep both non-LLM baselines and both LLMs but run wording-robustness ablations only on the best LLM, and only as a last resort remove one LLM backbone while preserving one simple baseline, one strong symmetric baseline, and one open LLM baseline."
+    }
+  }
+]

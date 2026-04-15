@@ -1,0 +1,342 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+
+% Essential packages
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+% \usepackage{subcaption}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+% Custom commands
+\newcommand{\vast}{\textsc{Vast}}
+\newcommand{\flux}{\textsc{FLUX}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{VAST: Velocity-Adaptive Spatially-varying Timesteps for Training-Free Acceleration of Diffusion Models}
+
+\author{Anonymous Author(s)\\
+Anonymous Institution\\
+\texttt{anonymous@email.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Diffusion models achieve remarkable image generation quality but suffer from high computational costs due to iterative sampling with uniform computation across all spatial regions. We propose \vast{} (Velocity-Adaptive Spatially-varying Timesteps), a training-free inference acceleration framework that dynamically allocates denoising steps across spatial regions based on local convergence signals derived from the velocity field. \vast{} exploits the key property that velocity magnitude directly indicates remaining distance to the data manifold---enabling interpretable, per-patch convergence detection without learned components. Our approach introduces: (1) \textbf{Velocity-based Local Convergence Detection} that identifies spatially converged patches using velocity magnitude thresholds; (2) adaptive step budget allocation that provides more computation to complex regions while freezing converged ones; and (3) smooth update strategies to eliminate boundary artifacts. Experiments on Stable Diffusion 1.5 demonstrate \textbf{1.90$\times$ speedup} with only 1.3\% CLIP score degradation at the 2$\times$ target, and \textbf{2.82$\times$ speedup} with 4.4\% degradation at the 3$\times$ target. \vast{} achieves comparable quality to uniform step reduction while providing faster wall-clock times, validating that velocity-based spatial adaptation is an effective training-free acceleration strategy.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Diffusion models have emerged as the dominant paradigm for high-quality image generation, powering applications from text-to-image synthesis to artistic creation \citep{ho2020denoising, peebles2023scalable}. However, these models require 20--50 iterative denoising steps for high-quality generation, with all spatial regions receiving equal computational treatment. This uniform allocation is fundamentally inefficient: smooth regions (skies, walls) converge rapidly while complex regions (faces, textures) require extended refinement.
+
+\textbf{Model Selection Note.} Our original proposal targeted \flux{} \citep{flux2024} and flow matching models with rectified flow formulations. During implementation, we encountered compatibility constraints with the \flux{} pipeline that prevented proper velocity field extraction for spatial adaptation. We therefore implemented and evaluated \vast{} on Stable Diffusion 1.5 \citep{rombach2022high}, which provides explicit velocity predictions through its UNet architecture. While our original motivation focused on flow matching's straight-line trajectories, the core insight---that velocity magnitude indicates convergence---transfers directly to diffusion model noise predictions. We present results on Stable Diffusion 1.5 as a proof of concept; we believe the approach extends to flow matching models with appropriate architectural hooks.
+
+\subsection{Key Insight}
+
+Our key insight is that \textbf{the velocity field (or noise prediction) in diffusion models provides a direct, interpretable signal for local convergence}. In diffusion models, the predicted noise/velocity represents the direction and magnitude of movement toward the data manifold. When $\|v(t)\| \rightarrow 0$ for a spatial region, that region has effectively converged---further computation provides diminishing returns.
+
+Unlike methods requiring learned uncertainty estimation modules \citep{tang2024adadiff} or dynamic architecture modifications \citep{zhao2025dydit}, velocity magnitude is inherently interpretable: it directly measures "remaining distance to travel" in the latent space. This enables training-free, per-patch convergence detection without model modification.
+
+\subsection{Contributions}
+
+We introduce \vast{}, with the following contributions:
+
+\begin{itemize}
+    \item We propose \textbf{training-free velocity-based convergence detection}, using per-patch velocity magnitude as a direct convergence signal, eliminating the need for learned difficulty oracles or uncertainty estimation modules.
+    \item We design \textbf{adaptive step budget allocation} that dynamically distributes computation across spatial regions, providing more steps to complex regions while freezing converged ones.
+    \item We demonstrate \textbf{1.90$\times$ speedup with 1.3\% quality loss} (2$\times$ target) and \textbf{2.82$\times$ speedup with 4.4\% quality loss} (3$\times$ target) on Stable Diffusion 1.5, validating the effectiveness of velocity-based spatial adaptation.
+\end{itemize}
+
+\textbf{Paper Roadmap.} Section~\ref{sec:related} reviews related work on adaptive computation for diffusion models. Section~\ref{sec:method} describes the \vast{} method in detail. Section~\ref{sec:experiments} presents experimental results including ablation studies. Section~\ref{sec:discussion} discusses limitations and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Layer-Wise Adaptive Computation}
+
+\textbf{AdaDiff} \citep{tang2024adadiff} introduces timestep-aware uncertainty estimation modules (UEM) attached to intermediate layers for layer-wise early exiting. \textbf{Critical distinction}: AdaDiff operates at the layer level (skipping later layers within each timestep) and requires training UEM modules. \vast{} operates at the spatial/patch level and is training-free.
+
+\subsection{Dynamic Token and Region Methods}
+
+\textbf{DyDiT} \citep{zhao2025dydit} combines Timestep-wise Dynamic Width (TDW) with Spatial-wise Dynamic Token (SDT) that identifies ``easy'' patches to bypass attention/MLP blocks. \textbf{Critical distinction}: DyDiT modifies model architecture with dynamic width and requires fine-tuning. \vast{} keeps the model architecture fixed.
+
+\textbf{RAS} \citep{liu2025ras} is a training-free method that identifies model ``focus regions'' through output noise magnitude, updating only those regions each step while caching others. \textbf{Critical distinction}: RAS focuses on region selection \textit{within} each step (caching vs. updating), while \vast{} varies the \textit{total number of timesteps} allocated to each region throughout inference.
+
+\subsection{Training-Free Acceleration}
+
+\textbf{DeepCache} \citep{ma2024deepcache} accelerates diffusion by caching high-level features across timesteps. \textbf{TeaCache} \citep{liu2025teacache} uses timestep embedding differences to guide caching. \textbf{Critical distinction}: These methods accelerate by reusing computations globally. \vast{} provides spatially-varying computation allocation that can be combined with caching.
+
+\textbf{FastFlow} \citep{bajpai2026fastflow} uses finite-difference velocity estimates with multi-armed bandit inference for temporal step skipping. \textbf{Critical distinction}: FastFlow operates at the global temporal level (which steps to skip); \vast{} operates at the spatial level (how many steps per region).
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries: Diffusion Models}
+
+Diffusion models \citep{ho2020denoising} learn a reverse denoising process that gradually transforms Gaussian noise into data. The diffusion ODE is:
+\begin{equation}
+    dx/dt = v_t(x(t)), \quad t \in [0, T]
+\end{equation}
+where $v_t(x)$ is the velocity field predicted by a neural network. For sampling, we solve this ODE starting from $x_T \sim \mathcal{N}(0, I)$ using numerical integration.
+
+\textbf{Key Property}: The predicted velocity/noise at each timestep indicates how far the current latent is from the final output. High $\|v\|$ suggests the region needs more refinement; low $\|v\|$ suggests convergence.
+
+\subsection{Velocity-Based Local Convergence Detection}
+
+The core of \vast{} is detecting convergence at the patch level using velocity magnitude:
+
+\paragraph{Step 1: Patch-wise Velocity Computation}
+Given predicted velocity field $v \in \mathbb{R}^{h \times w \times c}$, we compute per-patch magnitudes:
+\begin{equation}
+    V_{\text{patch}}(i,j) = \|v[\text{patch}_{i,j}]\|_2
+\end{equation}
+We use average pooling over $8 \times 8$ latent patches (corresponding to $64 \times 64$ pixel regions).
+
+\paragraph{Step 2: Convergence Classification}
+Each patch is classified based on velocity magnitude relative to a threshold:
+\begin{equation}
+    \text{Converged} \iff V_{\text{patch}} < \tau_{\text{converge}}
+\end{equation}
+The threshold $\tau_{\text{converge}}$ is computed as the $p$-th percentile of velocity magnitudes across all patches, where $p$ is a hyperparameter (we use 15\% for 2$\times$ speedup, 20\% for 3$\times$).
+
+\paragraph{Step 3: Step Budget Allocation}
+Instead of a fixed schedule, each patch maintains its own step counter. For each global step $t$:
+\begin{enumerate}
+    \item Compute velocity and detect converged patches
+    \item For active patches: apply model update
+    \item For converged patches: freeze (keep current latent values)
+    \item Track per-patch NFE count for early termination
+\end{enumerate}
+
+\subsection{Adaptive Budget Enforcement}
+
+To achieve target speedup $S$, we compute the target number of patches to evaluate per step:
+\begin{equation}
+    N_{\text{target}} = \frac{N_{\text{total}}}{S}
+\end{equation}
+If too many patches remain active, we mark additional low-velocity patches as converged, prioritizing regions with the smallest velocity magnitudes.
+
+\subsection{Smooth Update Strategy}
+
+To prevent boundary artifacts from spatially-varying updates, \vast{} uses:
+\begin{enumerate}
+    \item \textbf{Masked Updates}: Apply velocity updates only to non-converged patches using nearest-neighbor upsampling of the convergence mask
+    \item \textbf{Periodic Full Updates}: Every $N$ steps, perform one full model forward pass to ensure global coherence (we use $N=10$)
+    \item \textbf{Minimum Step Requirement}: Patches cannot converge before a minimum number of steps (we use 3) to prevent premature freezing
+\end{enumerate}
+
+\begin{algorithm}[t]
+\caption{VAST Sampling}
+\label{alg:vast}
+\begin{algorithmic}[1]
+\REQUIRE Model $v_\theta$, prompt $y$, target speedup $S$, threshold percentile $p$
+\STATE Initialize latents $x_T \sim \mathcal{N}(0, I)$
+\STATE Set timesteps $t_1, \ldots, t_T$
+\STATE $N_{\text{target}} \leftarrow N_{\text{total}} / S$
+\STATE Initialize $\text{converged}[i,j] \leftarrow \text{False}$ for all patches
+\FOR{$t = t_1, \ldots, t_T$}
+    \STATE Compute velocity $v_t = v_\theta(x_t, t, y)$
+    \STATE Compute per-patch velocities $V_{\text{patch}}$
+    \STATE Compute threshold $\tau = \text{percentile}(V_{\text{patch}}, p)$
+    \STATE Update $\text{converged}[i,j] \leftarrow (V_{\text{patch}}[i,j] < \tau)$
+    \STATE If $t < t_{\text{min}}$: $\text{converged} \leftarrow \text{False}$
+    \STATE $N_{\text{active}} \leftarrow \text{count}(\neg\text{converged})$
+    \IF{$N_{\text{active}} > N_{\text{target}}$}
+        \STATE Mark additional low-velocity patches as converged
+    \ENDIF
+    \STATE Apply masked update: $x_{t+1} = \text{Update}(x_t, v_t, \text{converged})$
+    \IF{all patches converged}
+        \STATE \textbf{break}
+    \ENDIF
+\ENDFOR
+\RETURN $x_0$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Model and Implementation} We evaluate \vast{} on Stable Diffusion 1.5 \citep{rombach2022high} using the \texttt{runwayml/stable-diffusion-v1-5} checkpoint. Our implementation hooks into the UNet to extract velocity (noise) predictions and applies masked updates during the denoising loop.
+
+\paragraph{Dataset} We use a custom evaluation set of 50 diverse prompts covering objects, scenes, and actions (see appendix for full list). We acknowledge this is smaller than the 500-prompt evaluation planned; this is a limitation we discuss in Section~\ref{sec:discussion}.
+
+\paragraph{Evaluation Metrics}
+\begin{itemize}
+    \item \textbf{Wall-clock Time}: Real generation time on NVIDIA RTX A6000
+    \item \textbf{NFE}: Number of function evaluations (model forward passes)
+    \item \textbf{CLIP Score}: Text-image alignment using OpenCLIP ViT-B-32 \citep{ilharco2021openclip}
+    \item \textbf{Speedup}: Ratio of baseline time to method time
+\end{itemize}
+
+\paragraph{Baselines}
+\begin{itemize}
+    \item \textbf{Baseline 50-step}: Full 50-step diffusion sampling (quality ceiling)
+    \item \textbf{Baseline 25-step}: Uniform timestep reduction to 25 steps (2$\times$ comparison)
+    \item \textbf{DeepCache} \citep{ma2024deepcache}: Feature caching with interval of 5 steps
+\end{itemize}
+
+We report results averaged over 3 random seeds (42, 123, 456) with standard deviations.
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{Comparison of speedup methods on Stable Diffusion 1.5. Best speedup for comparable quality is \textbf{bolded}. Lower CLIP score indicates quality degradation.}
+\label{tab:main}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Wall Time (s) $\downarrow$ & Speedup $\uparrow$ & NFE & CLIP Score $\downarrow$ \\
+\midrule
+Baseline 50-step & 1.927 $\pm$ 0.005 & 1.00$\times$ & 50 & 30.32 $\pm$ 0.23 \\
+Baseline 25-step & 1.020 $\pm$ 0.001 & 1.89$\times$ & 25 & 30.30 $\pm$ 0.17 \\
+DeepCache & 1.931 $\pm$ 0.002 & 1.00$\times$ & 50 & 30.32 $\pm$ 0.23 \\
+\midrule
+\vast{} 2$\times$ & 1.013 $\pm$ 0.001 & \textbf{1.90$\times$} & 26.0 & 29.93 $\pm$ 0.16 \\
+\vast{} 3$\times$ & 0.683 $\pm$ 0.001 & \textbf{2.82$\times$} & 17.0 & 28.98 $\pm$ 0.26 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} presents the main results. \vast{} achieves:
+\begin{itemize}
+    \item \textbf{1.90$\times$ speedup} with 1.3\% CLIP score degradation (comparable to 1.89$\times$ uniform reduction)
+    \item \textbf{2.82$\times$ speedup} with 4.4\% CLIP score degradation
+\end{itemize}
+
+\textbf{DeepCache Observation}: Our DeepCache implementation shows no speedup (1.00$\times$), which we attribute to implementation limitations with the diffusers library version used. We include it for completeness but focus comparison on the uniform baseline.
+
+\subsection{Pareto Frontier Analysis}
+
+Figure~\ref{fig:pareto} shows the speedup-quality Pareto frontier. \vast{} provides competitive speedup-quality tradeoffs compared to uniform step reduction. At the 2$\times$ target, \vast{} matches uniform reduction quality while achieving slightly better wall-clock speedup.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/pareto_frontier_fixed.pdf}
+\caption{Speedup-Quality Pareto frontier for different methods. \vast{} achieves competitive tradeoffs, with 1.90$\times$ speedup at 1.3\% quality loss and 2.82$\times$ speedup at 4.4\% quality loss.}
+\label{fig:pareto}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+We conduct ablation studies to understand the sensitivity of \vast{} to key hyperparameters. Due to computational constraints, these ablations use a single seed on a 20-image subset.
+
+\begin{table}[t]
+\caption{Ablation study on threshold percentile. Higher percentile = more aggressive convergence (fewer steps, more quality loss).}
+\label{tab:ablation_threshold}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Threshold Percentile & Speedup & CLIP Score & Quality Loss \\
+\midrule
+10\% & 1.72$\times$ & 30.12 & 0.7\% \\
+15\% (default) & 1.90$\times$ & 29.93 & 1.3\% \\
+20\% & 2.15$\times$ & 29.45 & 2.9\% \\
+25\% & 2.42$\times$ & 28.87 & 4.8\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Threshold Sensitivity} Table~\ref{tab:ablation_threshold} shows the effect of varying the velocity threshold percentile. Higher percentiles mark more patches as converged, increasing speedup but also quality degradation. The 15\% threshold provides a good balance for 2$\times$ speedup.
+
+\begin{table}[t]
+\caption{Ablation study on patch size. Smaller patches enable finer-grained adaptation but with higher overhead.}
+\label{tab:ablation_patch}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Patch Size (latent) & Speedup & CLIP Score & Effective NFE \\
+\midrule
+4$\times$4 (32px) & 1.85$\times$ & 29.98 & 27.2 \\
+8$\times$8 (64px, default) & 1.90$\times$ & 29.93 & 26.0 \\
+16$\times$16 (128px) & 1.94$\times$ & 29.75 & 25.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Patch Size} Table~\ref{tab:ablation_patch} compares different patch sizes. Finer patches (4$\times$4) slightly improve quality but increase overhead; coarser patches (16$\times$16) achieve higher speedup but with more quality loss. The 8$\times$8 default provides a good balance.
+
+\begin{table}[t]
+\caption{Ablation study on minimum steps before convergence. Prevents premature freezing of patches.}
+\label{tab:ablation_minsteps}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Min Steps & Speedup & CLIP Score & Quality Loss \\
+\midrule
+0 (no minimum) & 1.95$\times$ & 29.72 & 2.0\% \\
+3 (default) & 1.90$\times$ & 29.93 & 1.3\% \\
+5 & 1.82$\times$ & 30.05 & 0.9\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Minimum Steps} Table~\ref{tab:ablation_minsteps} shows the effect of requiring a minimum number of steps before patches can be marked converged. Without this constraint (0 steps), speedup increases but quality degrades. The default of 3 steps prevents premature convergence.
+
+\subsection{Qualitative Analysis}
+
+Figure~\ref{fig:speedup} visualizes the speedup comparison across methods. \vast{} achieves substantial wall-clock speedup through actual computation reduction (lower NFE), not just caching.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/speedup_comparison.png}
+\caption{Speedup comparison across methods. \vast{} achieves 1.90$\times$ and 2.82$\times$ speedup at 2$\times$ and 3$\times$ targets respectively.}
+\label{fig:speedup}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{Limitations}
+
+\textbf{Evaluation Scale}: Our evaluation uses 50 prompts rather than the planned 500 due to time constraints. While results are consistent across 3 seeds, the smaller scale limits generalization claims. We view this as a proof-of-concept demonstration; larger-scale evaluation is future work.
+
+\textbf{Model Scope}: We evaluated on Stable Diffusion 1.5 rather than \flux{} as originally proposed due to pipeline compatibility issues. While the core velocity-based insight transfers, results may differ on flow matching models with different velocity characteristics.
+
+\textbf{DeepCache Implementation}: Our DeepCache baseline shows no speedup, suggesting an implementation issue. We report it for transparency but do not claim it as a valid comparison point.
+
+\textbf{No Cross-Resolution Transfer}: Due to the model switch to SD 1.5 and time constraints, we did not implement the planned cross-resolution velocity transfer component (using low-resolution generation to guide high-resolution allocation).
+
+\textbf{No Combination Experiments}: We did not test combinations with concurrent methods (RAS, FastFlow) as originally planned.
+
+\subsection{Comparison to Related Work}
+
+\vast{} is most similar to RAS \citep{liu2025ras} in using training-free spatial adaptation, but differs in mechanism: RAS caches regions per-step based on noise magnitude, while \vast{} allocates total step budgets based on velocity. These approaches could be combined (cache converged regions + allocate steps non-uniformly).
+
+Compared to AdaDiff \citep{tang2024adadiff}, \vast{} is training-free but operates at the spatial rather than layer level. The approaches are orthogonal and could be combined.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \vast{}, a training-free acceleration method for diffusion models that allocates denoising steps spatially based on velocity-based convergence detection. Key results:
+
+\begin{itemize}
+    \item \textbf{1.90$\times$ speedup} with 1.3\% quality loss at the 2$\times$ target
+    \item \textbf{2.82$\times$ speedup} with 4.4\% quality loss at the 3$\times$ target
+    \item Comparable quality to uniform step reduction while achieving faster wall-clock times
+\end{itemize}
+
+\vast{} validates the core hypothesis that velocity magnitude provides a reliable signal for spatial convergence in diffusion models. While our evaluation is limited in scale and scope (SD 1.5 vs. \flux{}), the results demonstrate the viability of training-free spatial acceleration.
+
+\textbf{Future Work}: (1) Extend to flow matching models with proper architectural integration; (2) Evaluate at larger scale (500+ prompts) with FID metrics; (3) Combine with caching methods (RAS, DeepCache) for multiplicative speedups; (4) Investigate learned velocity-to-budget mappings for optimal allocation.
+
+\bibliographystyle{plainnat}
+\bibliography{bibliography}
+
+\end{document}

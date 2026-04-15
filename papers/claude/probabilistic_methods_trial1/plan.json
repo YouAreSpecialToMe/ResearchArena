@@ -1,0 +1,158 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python environment and dependencies",
+    "description": "Install all required packages and verify the computing environment is ready for CPU-based MCMC experiments.",
+    "steps": {
+      "step1": "Create a virtual environment or use the system Python. Install: numpy, scipy, matplotlib, seaborn, pandas, tqdm, joblib (for parallel execution across 2 CPU cores).",
+      "step2": "Create the project directory structure: src/ (core library code), experiments/ (experiment scripts), results/ (output data), figures/ (plots for paper).",
+      "step3": "Verify environment: run a quick test with a 1D Metropolis-Hastings chain of 10,000 iterations targeting N(0,1) to confirm MCMC sampling works and measure baseline iteration speed."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare target distributions and UCI datasets",
+    "description": "Define all target distributions for synthetic experiments and download/preprocess UCI datasets for the Bayesian logistic regression experiment.",
+    "steps": {
+      "step1": "Implement target distribution classes with log_density methods: (a) Multivariate Gaussian N(0, Sigma) with configurable dimension d and correlation structure (Sigma = I, AR(1) with rho=0.5, equicorrelated with rho=0.3); (b) Mixture of Gaussians: 0.5*N(-mu, I) + 0.5*N(mu, I) with configurable separation mu; (c) Bayesian logistic regression posterior: p(beta | X, y) proportional to p(y | X, beta) * N(beta; 0, 10*I).",
+      "step2": "Download 3 UCI datasets via scipy/sklearn or direct URL: German Credit (n=1000, p=24), Ionosphere (n=351, p=34), Pima Indians Diabetes (n=768, p=8). Standardize features to zero mean and unit variance. Store preprocessed data as .npy files in data/ directory.",
+      "step3": "For each UCI dataset, compute the posterior mode via L-BFGS optimization to use as MCMC initialization point. Record the mode and Hessian at the mode for proposal tuning.",
+      "step4": "Define ground truth values: for Gaussian targets, mu=0 is the known mean. For logistic regression, run a very long reference chain (1M iterations) with 3 seeds and average to get a high-accuracy reference estimate for each regression coefficient."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement MCMC samplers and baseline confidence intervals",
+    "description": "Implement the MCMC samplers and the two baseline methods: CLT-based confidence intervals and fixed-width stopping rules (FWSR). These baselines represent current practice.",
+    "steps": {
+      "step1": "Implement Random Walk Metropolis-Hastings (RWMH) sampler: proposal X' ~ N(X_t, h^2 * I), with tunable step size h. Include adaptive tuning during burn-in to target ~23.4% acceptance rate (optimal for d>=5) or ~44% for d=1. Record full chain trace.",
+      "step2": "Implement batch means variance estimator: given chain {X_1,...,X_n} and batch size b, compute batch means Y_j = (1/b)*sum_{i=(j-1)b+1}^{jb} X_i for j=1,...,floor(n/b). Estimate asymptotic variance as sigma^2_BM = b * Var(Y_1,...,Y_{n/b}). Use default batch size b = floor(sqrt(n)) following Flegal & Jones (2010).",
+      "step3": "Implement CLT-based confidence interval (Baseline 1): CI_n = [X_bar_n - z_{alpha/2} * sqrt(sigma^2_BM / n), X_bar_n + z_{alpha/2} * sqrt(sigma^2_BM / n)] where z_{alpha/2} = 1.96 for alpha=0.05. This is only valid at a pre-specified n, not sequentially.",
+      "step4": "Implement fixed-width stopping rule (Baseline 2, Vats et al. 2019): stop at the first n such that the CLT half-width < epsilon. Use epsilon values: 0.1, 0.05, 0.02. This is current best practice but has no sequential validity guarantee.",
+      "step5": "Implement the lugsail lag window variance estimator (Vats & Flegal 2022) as a stronger baseline: use a flat-top lag window with lugsail modification to reduce negative bias. Bandwidth selected via the adaptive procedure of Vats & Flegal."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement confidence sequence methods (BMCS, CBCS, MDCS)",
+    "description": "Implement the three proposed confidence sequence methods for MCMC. Each method converts dependent MCMC samples into a form suitable for confidence sequence construction.",
+    "steps": {
+      "step1": "Implement Batch Means Confidence Sequences (BMCS): (a) Use adaptive batch size b_k = max(50, ceil(c * log(k+1))) where c is calibrated from an initial mixing time estimate. (b) After k batches, compute running mean Y_bar_k and running variance estimate. (c) Apply the empirical Bernstein confidence sequence from Howard et al. (2021): half-width w_k = sqrt(2 * V_k * log(log(2*k)/alpha) / k) + 3*B*log(log(2*k)/alpha) / k, where V_k is the empirical variance of batch means, B is a bound on |Y_j - mu|, and alpha is the significance level. (d) Add correction term for residual batch dependence: delta_k = C * rho^{b_k} where rho is estimated from the autocorrelation function.",
+      "step2": "Implement Coupling-Based Confidence Sequences (CBCS): (a) Implement maximal coupling of two RWMH kernels: propose X'~q(.|X_t) and Y'~q(.|Y_t) using the maximal coupling of the two proposal distributions N(X_t, h^2*I) and N(Y_t, h^2*I). Accept/reject each chain independently. (b) Run coupled chains until meeting time tau (X_tau = Y_tau). (c) Construct unbiased estimator H_k = h(X_k) + sum_{t=k+1}^{tau-1}[h(X_t) - h(Y_{t-1})] following Jacob et al. (2020), with burn-in k=max(1, floor(tau/2)). (d) Generate m independent unbiased estimators by repeating coupled chain pairs. (e) Apply the sub-Gaussian confidence sequence to the i.i.d. estimators: CS_m = [H_bar_m - sqrt(2*sigma^2_hat*log(log(2m)/alpha)/m), H_bar_m + sqrt(2*sigma^2_hat*log(log(2m)/alpha)/m)].",
+      "step3": "Implement Martingale Decomposition Confidence Sequences (MDCS): (a) Estimate the Poisson equation solution g via online regression: maintain running estimate of g(x) = sum_{t=0}^{T} (f(X_t) - mu_hat) where the sum follows the chain from state x. Use a simple kernel-based estimator or polynomial approximation for g. (b) Compute martingale increments M_t - M_{t-1} = f(X_t) - mu_hat - g(X_t) + g(X_{t-1}). (c) Apply the method of mixtures confidence sequence for martingales: use the conjugate mixture with a Gaussian prior on the mean, yielding CS_n that tracks the martingale partial sums. (d) Add boundary term for the remainder |R_n| = |g(X_n) - g(X_0)| bounded by 2*||g||_inf.",
+      "step4": "Implement helper utilities: (a) Effective sample size (ESS) computation via initial positive sequence estimator. (b) Integrated autocorrelation time (IAT) estimation. (c) R-hat convergence diagnostic (split-chain version). (d) Confidence sequence width tracker that records width at each time step."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 1: Coverage verification on Gaussian targets",
+    "description": "Verify that confidence sequences maintain nominal coverage at ALL stopping times, while CLT intervals fail under sequential monitoring. This is the core validation experiment with known ground truth (mu=0).",
+    "steps": {
+      "step1": "Configuration: target = N(0, I_d) for d in {1, 10, 50}. Chain length n = 50,000. Number of independent replicates R = 500. Alpha = 0.05 (target 95% coverage). Random seeds: 42, 123, 456. Proposal step size h tuned to ~23.4% acceptance for each d.",
+      "step2": "For each (d, seed, replicate): run RWMH chain of length n. At monitoring times t in {100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000}, compute: (a) CLT CI and check if mu=0 is covered; (b) BMCS and check if mu=0 is covered; (c) CBCS with m=t/E[tau] coupled estimators and check coverage; (d) MDCS and check coverage. Record per-method coverage indicator at each t.",
+      "step3": "Compute empirical coverage at each time t across all R replicates: cov(t) = (1/R) * sum I(mu in CS_t^r). For confidence sequences, compute TIME-UNIFORM coverage: min_t cov(t). For CLT, compute both fixed-time coverage at n and sequential coverage (min_t cov(t)).",
+      "step4": "Expected results: CLT sequential coverage should be 85-92% (below nominal 95%) due to optional stopping. BMCS, CBCS, MDCS should all achieve >= 95% time-uniform coverage. Record exact coverage numbers for all methods and all d values.",
+      "step5": "Runtime estimate: 500 replicates x 50K iterations x 3 dimensions x 4 methods. RWMH at ~100K iter/sec in numpy. Per-replicate: ~0.5 sec for chain + ~0.5 sec for all CS computations. Total: 500 * 1 * 3 = ~25 min. With CBCS coupling overhead (3x): ~45 min total. Parallelize across 2 cores => ~25 min wall time."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Bayesian logistic regression on UCI datasets",
+    "description": "Demonstrate practical utility on real Bayesian inference problems. Compare all methods on posterior mean estimation for logistic regression coefficients.",
+    "steps": {
+      "step1": "Configuration: 3 UCI datasets (German Credit, Ionosphere, Pima). Chain length n = 100,000. Seeds: 42, 123, 456. Alpha = 0.05. Target function f(beta) = beta_j for each coordinate j. Report results aggregated over coordinates.",
+      "step2": "For each (dataset, seed): (a) Initialize at posterior mode. (b) Run RWMH with step size tuned during 5000-step burn-in. (c) Compute CLT CI, BMCS, CBCS, and FWSR at monitoring intervals. (d) Record: coverage of reference value, width at each t, time to reach width < 0.05.",
+      "step3": "For CBCS on logistic regression: run 200 independent coupled chain pairs per dataset. Record meeting time distribution. Compute unbiased estimators and confidence sequences. Report median and 95th percentile meeting times.",
+      "step4": "Compare methods on: (a) time to reach target width epsilon=0.05, (b) actual coverage of reference value at stopping time, (c) total CPU time. Present as table: dataset x method x (stopping_time, coverage, cpu_seconds).",
+      "step5": "Runtime estimate: 3 datasets x 3 seeds x 100K iterations = ~900K total iterations for base chains. Logistic regression likelihood is O(n*p) per evaluation, so ~1ms per iteration for largest dataset. Base chains: 3*3*100 sec = ~15 min. CBCS adds 200 coupled pairs x 3 datasets x 3 seeds ≈ 1800 pairs, each ~2*E[tau] iterations. If E[tau]~500, that's ~1.8M iterations total = ~30 min. Total: ~45 min, parallelized to ~25 min."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Robustness under poor mixing (multimodal targets)",
+    "description": "Test how confidence sequences behave when the MCMC chain mixes poorly between modes. This stress-tests our methods and shows where they honestly fail.",
+    "steps": {
+      "step1": "Configuration: target = 0.5*N(-mu_sep, I_d) + 0.5*N(mu_sep, I_d) with d=5 and separation mu_sep in {1.0, 2.0, 3.0, 4.0}. True mean = 0. Chain length n = 100,000. Replicates R = 300. Seeds: 42, 123, 456.",
+      "step2": "For each (mu_sep, seed, replicate): run RWMH and compute all methods' confidence sequences. Record: (a) time-uniform coverage, (b) width trajectory, (c) number of mode switches in the chain, (d) estimated IAT.",
+      "step3": "Analyze the relationship between mixing quality and coverage: plot coverage vs. mu_sep for each method. Identify the separation threshold beyond which each method's coverage degrades. BMCS should degrade gracefully as batch size adapts; CLT should degrade most rapidly.",
+      "step4": "Record CBCS meeting times for each separation level. For large separations (mu_sep >= 3), meeting times may be very large, making CBCS impractical. Document this honestly as a limitation.",
+      "step5": "Runtime estimate: 300 replicates x 100K iterations x 4 separations = ~120M iterations. At ~100K iter/sec: ~20 min for base chains. With methods overhead: ~40 min. Parallelized: ~20 min."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 4: Sequential stopping efficiency",
+    "description": "Quantify computational savings from valid early stopping with confidence sequences vs. conservative fixed-sample approaches.",
+    "steps": {
+      "step1": "Configuration: use Gaussian targets d in {1, 10, 50} and logistic regression (Pima dataset). Target widths epsilon in {0.1, 0.05, 0.02}. Max chain length 200,000. R = 300 replicates for Gaussian, 100 for logistic regression. Seeds: 42, 123, 456.",
+      "step2": "For each replicate, run the chain to max length and compute stopping times for each method: (a) Oracle: n* such that sqrt(sigma^2_true / n*) = epsilon (uses known asymptotic variance); (b) FWSR: first n such that CLT half-width < epsilon; (c) CS-Stop (BMCS): first n such that BMCS half-width < epsilon; (d) CS-Stop (CBCS): first m such that CBCS half-width < epsilon.",
+      "step3": "Compute efficiency metrics: (a) Ratio n_method / n_oracle for each method (lower is better, 1.0 is optimal). (b) Coverage at stopping time (should be >= 0.95). (c) Percentage of replicates that stopped before max chain length.",
+      "step4": "Report: (a) Table of mean stopping time ratios across methods and targets. (b) Scatter plot of stopping time vs. coverage at stopping. (c) Compute savings: (n_FWSR - n_CS-Stop) / n_FWSR * 100%. Hypothesis: CS-Stop saves 20-40% vs. FWSR while maintaining valid coverage.",
+      "step5": "Runtime estimate: 300 reps x 200K iterations x 3 dims = ~180M iterations. ~30 min for base chains. With methods: ~50 min. Parallelized: ~25 min."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies for BMCS components",
+    "description": "Ablation study for the novel components of BMCS: adaptive batch size, dependence correction term, and empirical Bernstein vs. simpler bounds.",
+    "steps": {
+      "step1": "Ablation A1 - Batch size strategy: Compare (a) fixed batch size b=floor(sqrt(n)) (standard), (b) fixed batch size b=floor(n^{1/3}), (c) our adaptive b_k = max(50, ceil(c*log(k+1))). Evaluate on Gaussian d=10 with R=500 replicates. Measure: coverage and width at each t.",
+      "step2": "Ablation A2 - Dependence correction: Compare BMCS (a) with the dependence correction delta_k, (b) without the correction (delta_k = 0). Evaluate on Gaussian d=10, d=50 and multimodal target with mu_sep=2.0. Measure: coverage (should be lower without correction) and width (should be narrower without correction).",
+      "step3": "Ablation A3 - Confidence sequence type: Compare (a) empirical Bernstein CS (our default), (b) Hoeffding-style CS (no variance adaptation), (c) sub-Gaussian CS with estimated variance. Evaluate on Gaussian d=10. Measure: width convergence rate and coverage.",
+      "step4": "Ablation A4 - Burn-in handling: Compare (a) discarding first 10% of samples as burn-in before starting CS, (b) no burn-in discard (start CS from iteration 1), (c) adaptive burn-in based on R-hat < 1.01. Evaluate on logistic regression (German Credit). Measure: coverage and early-time behavior.",
+      "step5": "Present ablation results as a table: Ablation x Variant x (Coverage, Mean Width at n=50K, Width Ratio vs. Default). Seeds: 42, 123, 456. Runtime: ~30 min total (reuses chains from Experiment 1 where possible)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies for CBCS components",
+    "description": "Ablation study for CBCS: coupling strategy, burn-in parameter k, and confidence sequence applied to unbiased estimators.",
+    "steps": {
+      "step1": "Ablation B1 - Coupling mechanism: Compare (a) maximal coupling of proposals (our default), (b) common random numbers coupling (simpler but less efficient). Evaluate on Gaussian d=10 and logistic regression (Pima). Measure: meeting time distribution and resulting CS width.",
+      "step2": "Ablation B2 - Burn-in parameter k for unbiased estimators: Compare k in {1, floor(tau/4), floor(tau/2), floor(3*tau/4)} where tau is the meeting time. Evaluate on Gaussian d=10 with R=300. Measure: variance of H_k estimators and resulting CS width.",
+      "step3": "Ablation B3 - Number of coupled pairs vs. single long chain: For equivalent total computation budget (measured in likelihood evaluations), compare (a) CBCS with m coupled pairs, (b) BMCS with one chain of length m*2*E[tau]. This tests whether coupling overhead is worth the exactness. Measure: CS width at equivalent compute.",
+      "step4": "Present results as table and plots. Seeds: 42, 123, 456. Runtime: ~20 min total."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 5: Scalability analysis",
+    "description": "Assess how computational cost and confidence sequence width scale with problem dimension.",
+    "steps": {
+      "step1": "Configuration: Gaussian N(0, I_d) targets with d in {2, 5, 10, 20, 50, 100, 200}. Fixed chain length n = 50,000. R = 100 replicates. Seeds: 42, 123, 456.",
+      "step2": "For each (d, seed, replicate): run RWMH and compute all confidence sequences. Record: (a) per-iteration wall-clock time, (b) total method overhead time (time to compute CS minus time to run chain), (c) final CS width at n=50K, (d) peak memory usage.",
+      "step3": "Plot: (a) per-iteration cost vs. d for each method, (b) CS width at n=50K vs. d, (c) overhead ratio (CS computation time / chain running time) vs. d. For CBCS, also plot median meeting time vs. d.",
+      "step4": "Fit scaling laws: per-iteration cost should be O(d) for RWMH and BMCS, O(d) for CBCS (dominated by proposal coupling), O(d^2) or O(d) for MDCS depending on Poisson equation estimator. Report fitted exponents.",
+      "step5": "Runtime estimate: 100 reps x 50K iterations x 7 dimensions = ~35M iterations. Even with d=200, per-iteration cost is ~0.01ms. Total: ~15 min. With CBCS coupling: ~25 min. Parallelized: ~15 min."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical evaluation and success criteria assessment",
+    "description": "Aggregate results across all experiments and formally evaluate against the stated success criteria.",
+    "steps": {
+      "step1": "Primary criterion 1 (Coverage): From Experiment 1, compute time-uniform coverage for BMCS, CBCS, MDCS across all dimensions and seeds. Report mean and 95% CI of the coverage. Success: coverage >= 0.95 for all methods in all settings where chains are well-mixing.",
+      "step2": "Primary criterion 2 (Practicality): From Experiment 5, compute overhead ratio = (time with CS) / (time without CS) for BMCS and CBCS. Success: at least one method has overhead < 2.0.",
+      "step3": "Primary criterion 3 (Savings): From Experiment 4, compute percentage savings of CS-Stop vs. FWSR. Report mean and std across replicates and settings. Success: mean savings >= 15%.",
+      "step4": "Secondary criteria: (a) From Experiment 1, fit the width convergence rate and check if it matches O(sqrt(log log n / n)). (b) From Experiments 1-3, check consistency across target distributions. (c) Compare CS width to CLT CI width at the fixed terminal sample size — the ratio measures the 'cost of anytime validity'.",
+      "step5": "Failure condition checks: (a) If BMCS width at n=50K is more than 3x the CLT CI width, flag as potentially impractical. (b) If median CBCS meeting time exceeds 5000, flag coupling as impractical. (c) If CLT sequential coverage is > 0.93, the coverage distortion from sequential monitoring is mild, weakening motivation."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate all figures and tables for the paper",
+    "description": "Create publication-quality figures summarizing all experimental results. Use matplotlib with consistent styling.",
+    "steps": {
+      "step1": "Figure 1 (Coverage trajectories): For Gaussian d=10, plot coverage(t) vs. t for all methods (CLT, BMCS, CBCS, MDCS) on one panel. Horizontal dashed line at 0.95. CLT curve should dip below 0.95 under sequential monitoring; CS methods should stay above. Include 3 panels for d=1, 10, 50.",
+      "step2": "Figure 2 (Width trajectories): For Gaussian d=10, plot mean CS width vs. t for all methods. Show that BMCS and CBCS widths shrink at rate ~sqrt(log log t / t). Include reference line for optimal i.i.d. rate sqrt(1/t). Show CLT CI width for comparison.",
+      "step3": "Figure 3 (Bayesian logistic regression): For each UCI dataset, plot width vs. iteration for all methods on one panel (3 panels total). Mark stopping times for FWSR and CS-Stop with vertical lines. Show that CS-Stop can stop earlier while maintaining validity.",
+      "step4": "Figure 4 (Multimodal robustness): Plot time-uniform coverage vs. mode separation (mu_sep) for all methods. Show graceful degradation of BMCS and catastrophic failure of CLT under poor mixing.",
+      "step5": "Figure 5 (Stopping efficiency): Bar chart comparing mean stopping time ratios (n_method / n_oracle) across methods and target distributions. Include error bars (std across replicates).",
+      "step6": "Figure 6 (Scalability): Two-panel plot: (a) per-iteration overhead vs. dimension d, (b) CS width at n=50K vs. dimension d. Both on log-log scale with fitted scaling lines.",
+      "step7": "Figure 7 (Ablation summary): Grouped bar chart showing coverage for each ablation variant. Highlight which components are essential (large coverage drop when removed) vs. optional.",
+      "step8": "Table 1 (Main results): Comprehensive table with columns: Method, Target, d, Time-Uniform Coverage, Width at n=50K, Overhead Ratio. Include all methods across Gaussian d={1,10,50} and all 3 UCI datasets.",
+      "step9": "Table 2 (Stopping efficiency): Columns: Method, Target, Epsilon, Mean Stopping Time, Coverage at Stop, Savings vs. FWSR (%).",
+      "step10": "Style: use matplotlib with font size 12, figure size (6,4) for single panels, (12,4) for triple panels. Colors: CLT=gray, BMCS=blue, CBCS=orange, MDCS=green, FWSR=red. Save as both PDF and PNG at 300 DPI."
+    }
+  }
+]

@@ -1,0 +1,140 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze Software and Runtime Budget",
+    "description": "Set a reproducible frozen-CLIP evaluation environment that fits one RTX A6000, 60 GB RAM, 4 CPU cores, and an 8-hour total wall-clock budget.",
+    "steps": {
+      "step1": "Use Python 3.10, PyTorch 2.2+, torchvision 0.17+, open_clip_torch, numpy, scipy, scikit-learn, pandas, matplotlib, seaborn, and tqdm. Install faiss-cpu only if the optional AutoCLIP reproduction requires it.",
+      "step2": "Use one backbone for every required experiment: OpenCLIP ViT-B-32 with pretrained weights laion2b_s34b_b79k. Keep input resolution at 224x224, enable fp16 image encoding, and L2-normalize all image and text features before scoring.",
+      "step3": "Fix random seeds to [7, 17, 27]. Use the same three seeds for synthetic pilot corruption generation, proxy split sampling, residual-bank sensitivity checks, and all stochastic method runs. Treat plain zero-shot CLIP and fixed prompt baselines as deterministic once the dataset split is fixed.",
+      "step4": "Set dataloader batch size to 512 for CIFAR-style evaluation, num_workers to 4, pin_memory to true, and persistent_workers to true. Because only one GPU is available, schedule GPU work serially and use CPU parallelism only for corruption synthesis, metadata generation, scoring, and plotting.",
+      "step5": "Create an experiment ledger JSON or CSV per run with fields method, seed, dataset, corruption_family, severity, split, wall_clock_seconds, gpu_memory_gb, clean_accuracy, corruption_accuracy, and output_path so all runs are auditable and resumable."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare Required Datasets and Proxy Splits",
+    "description": "Restrict the study to the smallest benchmark set that still tests the claim about family-specific corruption language beyond generic prompt strengthening.",
+    "steps": {
+      "step1": "Download CIFAR-10 test, CIFAR-100 test, CIFAR-10-C, and CIFAR-100-C. Restrict corruption evaluation to four families only: gaussian_noise, motion_blur, fog, and jpeg_compression. Use all severities 1 through 5 for each selected family on both CIFAR-C datasets.",
+      "step2": "Build a small unlabeled proxy set from CIFAR-10 training images only. For each seed, sample 2000 clean images, then reserve 500 for a pilot holdout and 1500 for proxy tuning. Do not use CIFAR-10-C or CIFAR-100-C test corruption labels for model selection.",
+      "step3": "Generate synthetic pilot corruptions on the sampled clean CIFAR-10 images using the same four families at severity 3 so the pilot has known family labels. Store image_id, seed, source_index, corruption_family, severity, and split in a metadata CSV.",
+      "step4": "Precompute and cache image features for clean CIFAR-10, clean CIFAR-100, CIFAR-10-C four-family slice, CIFAR-100-C four-family slice, and the synthetic pilot split. Save cached tensors in fp16 or fp32 as .pt files to avoid repeated GPU passes during ablations.",
+      "step5": "Do not start any optional benchmark beyond the required CIFAR suite unless all required runs, ablations, and figures are complete with at least 90 minutes remaining. The default plan assumes no optional third benchmark."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Required Baselines and Controls",
+    "description": "Establish a simple baseline, a strong prompt baseline, and the two required family-specificity controls before evaluating the proposed residual recipe.",
+    "steps": {
+      "step1": "Simple baseline: zero-shot CLIP with the single template 'a photo of a {class}'. Evaluate clean CIFAR-10, clean CIFAR-100, CIFAR-10-C, and CIFAR-100-C with the same cached image features and preprocessing as every other method.",
+      "step2": "Strong baseline: clean prompt ensemble with five templates averaged in normalized text space: 'a photo of a {class}', 'an image of a {class}', 'a close-up photo of a {class}', 'a centered photo of a {class}', and 'a blurry photo of a {class}'. This is the primary non-adaptive comparator.",
+      "step3": "Naive corruption-prompt baseline: build one text prototype per class and family using 'a photo of a {class} with {family}'. Combine family-specific scores with the same inferred family posterior q(z|x) used by the main method so the comparison isolates residual construction rather than posterior quality.",
+      "step4": "Generic degradation control: construct one shared residual r_generic = mean_y[e('a low-quality photo of a {class_y}') - e('a clear photo of a {class_y}')], then apply the same additive calibration rule and the same hyperparameter grid as the main method. This tests whether gains come from generic quality language instead of family structure.",
+      "step5": "Random family reassignment control: use the same family posterior q(z|x), the same residual bank, and the same calibration weights as the main method, but randomly permute the mapping between residuals and named families once per seed. This is a required control and must appear in the main analysis, not only the appendix."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Pilot Gate for Family-Specific Signal",
+    "description": "Decide early whether corruption-family residuals show any usable family-specific structure beyond generic degradation cues before spending the full benchmark budget.",
+    "steps": {
+      "step1": "Build class-conditioned family residuals r_z = mean_y[e('a photo of a {class_y} with {z}') - e('a clear photo of a {class_y}')], for z in {gaussian_noise, motion_blur, fog, jpeg_compression}. Also build the generic residual r_generic from low-quality or degraded wording.",
+      "step2": "Estimate family posteriors with frozen prompts only: a_z(x) = sim(v(x), e('an image with {z} corruption')), q(z|x) = softmax(beta * a_z(x)), with beta searched over {2, 5, 10}. Measure family-prediction accuracy on the synthetic pilot holdout, where chance is 25 percent for four families.",
+      "step3": "Measure family alignment by comparing paired visual corruption shifts delta_z^v = mean_x[v(x_corrupt_z) - v(x_clean)] against text residuals. Report matched-versus-mismatched cosine margins for the family residual bank, the generic residual control, and the random reassignment control.",
+      "step4": "Run a downstream pilot on the synthetic corrupted holdout using zero-shot CLIP, clean prompt ensemble, naive corruption prompts, generic residual control, random reassignment, and the proposed family residual method. Search alpha in {0.05, 0.10, 0.20} and lambda in {0.25, 0.50, 1.00} on the proxy split only.",
+      "step5": "Pilot success rule: proceed to full CIFAR-C evaluation only if, in at least 2 of 3 seeds, the family residual method beats both the generic residual control and the random reassignment control by at least 0.5 absolute top-1 points on the pilot corrupted split or by at least 0.03 matched-minus-mismatched cosine margin, while not reducing clean pilot accuracy by more than 0.5 points. If this gate fails, stop method claims and continue only as a negative-result baseline analysis."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Freeze the Residual Calibration Recipe",
+    "description": "Select one global hyperparameter setting from the proxy split, then freeze it for all required final evaluations to avoid test-set tuning.",
+    "steps": {
+      "step1": "Use only the 1500-image proxy subset for tuning. Search alpha in {0.05, 0.10, 0.20}, lambda in {0.25, 0.50, 1.00}, beta in {2, 5, 10}, and prompt wording variant in {base family phrases, stronger family phrase bank}. The stronger phrase bank should contain 3 prompts per family and average them: one artifact-focused, one acquisition-focused, and one plain-language description.",
+      "step2": "Optimize a proxy objective that favors corruption robustness without harming clean behavior: mean corrupted confidence recovery plus clean-prediction consistency minus a penalty if clean top-1 on the held-out clean proxy subset drops relative to the single-template zero-shot baseline.",
+      "step3": "Freeze one global configuration by averaging the proxy objective across seeds [7, 17, 27]. Do not tune separately by dataset, corruption family, or severity. Use the same frozen q(z|x), residual construction, and calibration parameters for CIFAR-10-C and CIFAR-100-C.",
+      "step4": "Keep projection out of the main recipe by default. If a projection diagnostic is later run, report it only as an ablation or appendix analysis, not as a core claimed component."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate on CIFAR-10-C and CIFAR-100-C",
+    "description": "Run the final controlled benchmark suite on the two required corruption datasets with three seeds for every stochastic component.",
+    "steps": {
+      "step1": "Evaluate clean CIFAR-10 and clean CIFAR-100 for single-template zero-shot CLIP, clean prompt ensemble, naive corruption prompts, generic residual control, random family reassignment control, and the proposed family residual method. Report clean top-1 accuracy and clean delta relative to single-template CLIP.",
+      "step2": "Evaluate CIFAR-10-C and CIFAR-100-C on the four selected corruption families and severities 1 through 5. Report mean top-1 accuracy over all 20 corruption conditions per dataset, plus per-family and per-severity breakdowns.",
+      "step3": "Run the full proposed method for seeds [7, 17, 27]. Recompute only the seed-dependent components such as proxy split, pilot-derived prompt choice if needed, and random family reassignment permutation. Reuse cached image features and deterministic text features wherever possible so seeded runs are cheap.",
+      "step4": "Do not include oracle family selection in headline comparisons. If an oracle-family diagnostic is run for the naive corruption-prompt baseline, place it in an appendix-only analysis table and label it as non-deployable."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate Each Retained Component",
+    "description": "Test whether any observed gain comes from explicit family-specific residuals rather than generic prompt strengthening or posterior smoothing.",
+    "steps": {
+      "step1": "Ablation 1, remove family residuals: replace the paired residual bank with direct naive corruption prompts only, keeping q(z|x), alpha, lambda, and all other settings fixed. Run on both CIFAR-C datasets for all 3 seeds.",
+      "step2": "Ablation 2, remove image-specific family weighting: replace q(z|x) with a uniform average over the four families while keeping the family residual bank fixed. Run on both CIFAR-C datasets for all 3 seeds to test whether the posterior adds usable information.",
+      "step3": "Ablation 3, generic versus family-specific residuals: compare the final method directly against the generic degraded-image residual under matched hyperparameters and seeds on both CIFAR-C datasets. This is required because the proposal's central soundness risk is collapse to a generic quality vector.",
+      "step4": "Ablation 4, family identity sanity check: compare the final method directly against random family reassignment under matched hyperparameters and seeds on both CIFAR-C datasets. Gains that disappear under reassignment do not support the family-specificity claim.",
+      "step5": "Optional ablation 5, stronger prompt bank sensitivity: if the stronger family phrase bank was needed to pass the pilot, compare base family phrases versus the stronger bank on CIFAR-10-C only for 3 seeds. Skip this ablation if the base phrases already passed the pilot cleanly."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Optional Stronger Comparator After Positive Pilot",
+    "description": "Run one stronger recent method only if the controlled baseline study is already positive and enough time remains; otherwise preserve budget for required analyses.",
+    "steps": {
+      "step1": "Treat AutoCLIP as optional and single-seed only. Start it only if the pilot gate succeeds clearly, the final family residual method beats both required controls on both CIFAR-C datasets at least once, and at least 90 minutes remain after required ablations.",
+      "step2": "If run, use the same backbone, the same unlabeled proxy pool, the same cached image features when compatible, and the same CIFAR-10-C and CIFAR-100-C four-family evaluation slice. Do not expand the unlabeled data budget or add extra tuning datasets.",
+      "step3": "Report AutoCLIP strictly as context for strength-of-baseline comparison, not as a gating condition for the core claim. If it is skipped due to budget or weak pilot evidence, state that explicitly in the final write-up."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Score Claims, Failure Modes, and Cost",
+    "description": "Evaluate the proposal under explicit confirm and refute conditions so the study remains informative even if the method underperforms.",
+    "steps": {
+      "step1": "Primary metrics: top-1 accuracy on clean CIFAR-10 and CIFAR-100, mean corruption top-1 over the 20 conditions of each CIFAR-C dataset, per-family top-1, and per-severity top-1. Report mean and standard deviation across the three seeds for any seed-dependent method.",
+      "step2": "Secondary metrics: family posterior accuracy on the synthetic pilot, matched-minus-mismatched cosine margin between visual shifts and text residuals, expected calibration error with 15 equal-width bins, and end-to-end runtime per 10000 images including text-side setup.",
+      "step3": "Success criteria for the controlled baseline claim: the proposed family residual method must beat both the generic residual control and the random reassignment control on both CIFAR-C datasets in mean corruption accuracy, improve over single-template zero-shot CLIP on both datasets, and keep clean accuracy drops within 0.5 absolute points.",
+      "step4": "Stronger success criterion for a positive empirical story: the proposed method also matches or exceeds the clean prompt ensemble on at least one of CIFAR-10-C or CIFAR-100-C without being worse than the ensemble by more than 0.5 points on the other.",
+      "step5": "Refutation criteria: if gains are statistically tiny, vanish against the generic residual control, vanish under family reassignment, or come with more than 0.5 clean-accuracy loss, frame the result as evidence that prompt-side corruption language mostly encodes generic degradation rather than usable family-specific signal."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Paper-Ready Tables and Plots",
+    "description": "Generate a compact figure set that emphasizes the controlled-analysis framing and makes negative results visible rather than hiding them.",
+    "steps": {
+      "step1": "Create a main results table in CSV and LaTeX-ready text with rows for single-template CLIP, clean prompt ensemble, naive corruption prompts, generic residual control, random family reassignment, proposed family residuals, and optional AutoCLIP if run. Columns should include clean CIFAR-10, clean CIFAR-100, CIFAR-10-C mean, CIFAR-100-C mean, and runtime.",
+      "step2": "Create a pilot alignment heatmap showing cosine(delta_z^v, r_k) for matched and mismatched family pairs, averaged across seeds, for the family residual bank and the generic residual control.",
+      "step3": "Create per-family grouped bar plots for CIFAR-10-C and CIFAR-100-C comparing single-template CLIP, clean prompt ensemble, generic residual control, random family reassignment, and the proposed method, with seed error bars where applicable.",
+      "step4": "Create severity curves from severity 1 through 5 for the same methods on each dataset. Use one plot per dataset and save both PNG and PDF versions, along with tidy CSV files of the plotted values.",
+      "step5": "If optional diagnostics are run, put oracle-family naive prompts, projection checks, and AutoCLIP in appendix-only plots or tables so the headline visuals stay deployable and aligned with the core claim."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Execute Within the 8-Hour Budget",
+    "description": "Assign a concrete wall-clock schedule so the study remains feasible on a single GPU and four CPU cores.",
+    "steps": {
+      "step1": "Hour 0.0 to 0.5: install or verify dependencies, download model weights, validate datasets, and write metadata manifests. Use CPU parallelism for indexing and corruption generation while the GPU remains mostly idle.",
+      "step2": "Hour 0.5 to 1.5: precompute all required image features for clean CIFAR-10, clean CIFAR-100, CIFAR-10-C four-family slice, CIFAR-100-C four-family slice, and the synthetic pilot split. This is the main GPU-heavy stage and should happen once.",
+      "step3": "Hour 1.5 to 2.5: run the three-seed pilot gate, search beta, alpha, and lambda on the proxy split, and decide whether the study proceeds as a positive or negative-result analysis. Stop optional work immediately if the pilot gate fails.",
+      "step4": "Hour 2.5 to 5.0: run all required final evaluations and required ablations using cached features. Because scoring is mostly matrix multiplication over cached embeddings, most of this stage can execute on CPU with modest GPU usage and should comfortably cover three seeds.",
+      "step5": "Hour 5.0 to 6.5: finish remaining required analysis, aggregate metrics, and generate plots and tables. Hour 6.5 to 8.0 is reserved first for reruns of failed jobs or missing figures, then for optional single-seed AutoCLIP only if the required study is already complete and clearly positive. No GPU-parallel execution is assumed because only one GPU is available."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Artifact and Bibliography Hygiene",
+    "description": "Keep the final output credible by saving structured artifacts and cleaning obvious scholarship inconsistencies before submission.",
+    "steps": {
+      "step1": "Save every final metric table as both JSON and CSV, with per-seed entries for seed-dependent methods and explicit tags for required controls versus optional diagnostics.",
+      "step2": "Store the final selected prompts, residual vectors, hyperparameters, and seed mappings in a small machine-readable config file so the exact recipe used in the paper can be reconstructed.",
+      "step3": "Before submission, clean the bibliography to remove duplicate or inconsistent entries, especially any repeated or conflicting AutoCLIP citation variants, and make venue and year formatting consistent across all references."
+    }
+  }
+]

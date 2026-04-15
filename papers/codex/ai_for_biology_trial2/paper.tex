@@ -1,0 +1,418 @@
+\documentclass{article}
+
+\usepackage[final]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{multirow}
+
+\title{Masked-Child Surrogate Calibration for Safe EC Prefix Decisions:\\A Leakage-Controlled Benchmark for Future-Child Emergence}
+
+\author{Anonymous Authors}
+
+\newcommand{\method}{MCC-EC\xspace}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Hierarchical enzyme-function predictors can abstain at an internal EC prefix when a sequence does not support a confident EC-4 leaf, but a deployment-relevant failure mode remains under-studied: the EC-3 parent is familiar while the correct EC-4 child is absent from the deployed label set. We study this as a decision-layer problem rather than a new backbone-model problem. \method adds two post hoc gates on top of frozen ESM-2 embeddings and parent-local logistic scorers: a represented-child conformal gate and a masked-child surrogate gate obtained by removing one supported child per parent, rebuilding all parent-local retrieval features, and thresholding the resulting scores. We evaluate on 12 Swiss-Prot EC-3 parents selected from Swiss-Prot 2018\_02, with temporal evaluation on Swiss-Prot 2023\_01, three seeds, and 36 leakage-audited masked-child events. The main conclusion is about evaluation transparency rather than a new best method. At the nominal target coverage 0.80 on temporal future-child proteins, realized coverage varies widely across methods: \texttt{one\_nn\_threshold} realizes 0.0477 leaf coverage with catastrophic overspecialization 0.0477, while \texttt{hsc\_style} and \method realize 0.2299 and 0.2586 coverage with catastrophic overspecialization 0.2299 and 0.2586, respectively. On the exact-matched mixed temporal set, where every method is forced to the same realized coverage 0.8000 by post hoc ranking of its stored selection scores, \texttt{one\_nn\_threshold} attains the best hierarchical loss (0.2046) and selective EC-4 F1 (0.9942). These results support a narrow claim: leakage-controlled masked-child calibration is a useful benchmark protocol, but in this study it does not justify a stronger stopping rule than the simpler baselines already run.
+\end{abstract}
+
+\section{Introduction}
+
+Modern enzyme-function predictors increasingly exploit hierarchy-aware architectures, protein language model embeddings, and calibrated selective prediction \citep{Huang_2024,Yim_2024,Dumontet_2026,Boger_2025}. Yet deployment remains fragile when a sequence belongs under a known EC-3 parent but its correct EC-4 child is absent from the training vocabulary. In that regime, forcing an EC-4 leaf can overspecialize into the wrong known child, while stopping at a prefix such as \texttt{2.7.1.-} is often the safer action.
+
+This paper studies a deliberately narrow question: can a leakage-controlled masked-child surrogate help decide when a fixed hierarchical scorer should stop at an internal EC prefix? The idea is operationally appealing because it targets a specific label-space shift rather than generic out-of-distribution detection. It is also methodologically risky. If parent-local prototypes, nearest-neighbor caches, or density features are not rebuilt after masking, the surrogate can leak the removed child and overstate its value.
+
+We therefore frame the contribution around transparent evaluation. We implement \method, a two-gate post hoc decision layer on top of frozen ESM-2 embeddings and parent-local logistic regressors, and compare it against every selective baseline actually run in the workspace. The resulting picture is more nuanced than the previous draft suggested. No single baseline dominates every slice. On the nominal temporal future-child slice, \texttt{one\_nn\_threshold} is by far the safest method but only because it almost never descends. Among methods with realized coverage closer to \method, \texttt{hsc\_style} is slightly better. On the exact-matched mixed temporal evaluation, \texttt{one\_nn\_threshold} is strongest on hierarchical loss and selective EC-4 F1. Parent-OpenMax is not ignored, but it must be disclosed as a revised post hoc feasible implementation recorded in the run metadata rather than a pristine preregistered baseline.
+
+Our contributions are:
+\begin{itemize}
+\item We implement \method, a two-gate decision layer for safe EC prefix prediction on top of frozen \texttt{facebook/esm2\_t30\_150M\_UR50D} embeddings and parent-local logistic scorers.
+\item We provide a leakage-controlled masked-child benchmark that rebuilds prototype, neighbor-vote, margin, and density feature families after child removal and audits all 36 valid masked-child events.
+\item We revise the empirical reporting around realized coverage, exact-matched comparisons, and complete baseline coverage. In particular, the main table includes every baseline actually run on each slice, including \texttt{one\_nn\_threshold}, and reports realized coverage alongside the nominal target.
+\item We show that masked-child calibration is informative as a benchmark but not clearly superior as a deployment rule: at the nominal temporal future-child target 0.80, \method reaches catastrophic overspecialization 0.2586 at realized coverage 0.2586, while \texttt{hsc\_style} reaches 0.2299 at realized coverage 0.2299; at exact-matched mixed coverage 0.8000, \texttt{one\_nn\_threshold} attains hierarchical loss 0.2046 and selective EC-4 F1 0.9942.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the pipeline and leakage controls, Section~\ref{sec:experiments} presents transparently coverage-matched and non-matched results, Section~\ref{sec:discussion} discusses what the negative result means, and the appendix summarizes reproducibility artifacts.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Benchmarking realistic enzyme annotation.}
+Realistic evaluation is now a central issue in enzyme-function prediction. ProFAB argues for open and biologically meaningful benchmark construction rather than optimistic closed-set splits \citep{Ozdilek_2023}, and EC-Bench formalizes modern evaluation tasks and metrics for EC prediction \citep{Davoudi_2026}. Comparative studies of protein language models likewise show that dataset construction strongly changes conclusions about which models are competitive \citep{Capela_2025}. Our work follows that evaluation-first perspective, but narrows the task to safe stopping under retained EC-3 parents and future EC-4 child emergence.
+
+\paragraph{Hierarchy-aware EC prediction.}
+Earlier sequence-only EC classifiers such as DEEPre and ECPred framed the problem as closed-set EC assignment from protein sequence and established strong leaf-prediction baselines before the current hierarchy-aware wave \citep{Li_2018_DEEPre,Dalkiran_2018_ECPred}. More recent hierarchy-aware models such as GloEC and HIT-EC show that explicitly modeling the EC tree improves closed-set prediction quality \citep{Huang_2024,Dumontet_2026}. Representation-learning approaches such as hierarchy-aware contrastive learning and structural contrastive learning further improve enzyme embeddings and coarse placement \citep{Yim_2024,Yang_2024}. ProtIR instead emphasizes iterative retrieval-prediction refinement for protein function annotation \citep{zhang2024protir}. The closest task-level comparator to our paper is the recent unseen-function placement study of Ma et al., which introduces EnzPlacer for predicting unseen EC-4 functions at coarser EC levels via contrastive learning \citep{Ma_2026_how_not_to_be_seen}. That paper shares the motivation of avoiding wrong leaf commitments for unseen functions, but differs materially in contribution: EnzPlacer is a new predictive model trained for coarse placement, whereas \method is a post hoc stopping rule applied to a fixed scorer and evaluated through leakage-controlled surrogate transfer. Our work therefore should not be read as the first attempt to return higher-level EC prefixes for unseen functions; the narrower claim is about calibration and auditable evaluation under the known-parent, missing-child regime.
+
+\paragraph{Selective prediction and conformal calibration.}
+Generic selective prediction provides the broader language for our stopping problem. Classical selective classification for deep networks studies risk--coverage trade-offs under abstention \citep{Geifman_2017}, and SelectiveNet integrates the reject option into end-to-end training \citep{Geifman_2019}. Hierarchical Selective Classification is the most direct structured analogue for returning internal nodes under a coverage budget \citep{goren2024hierarchical}. Open-set recognition work, including OpenMax, addresses a related but distinct failure mode in which a classifier should detect classes outside its support \citep{Bendale_2016_CVPR}. Conformal methods have also become increasingly relevant in protein decision pipelines, including high-confidence functional mining settings \citep{Boger_2025}. \method adopts standard represented-child conformal calibration but adds a second masked-child gate targeted at the narrower regime ``known parent, missing child.'' The current results show that this extra complexity is not automatically worthwhile.
+
+\paragraph{Limitations of current EC systems.}
+Recent audits of enzyme predictors document persistent failures on under-characterized proteins and realistic split designs \citep{deCrecyLagard_2025,Capela_2025}. Our results align with that broader caution. A synthetic missing-child surrogate can be carefully implemented and still fail to translate into a better deployment rule than simpler alternatives.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem setup}
+
+Let $x$ be a protein sequence with true EC-4 label $y \in \mathcal{Y}$. The deployed vocabulary contains only the EC-4 children observed in an older Swiss-Prot snapshot. For a sequence whose EC-3 parent is known but whose EC-4 child is missing from that vocabulary, the desired behavior is to stop at the correct EC-3 prefix rather than commit to an incorrect EC-4 leaf.
+
+We study this as a decision-layer problem on top of a fixed parent-local scorer. Each sequence is embedded once with frozen ESM-2, producing $z(x) \in \mathbb{R}^{640}$. For each retained parent $v$, we fit a lightweight child classifier over its supported EC-4 children.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/figure1_mcc_ec_schematic.pdf}
+\caption{Overview of \method on the Swiss-Prot 2018\_02 $\rightarrow$ 2023\_01 benchmark. A frozen ESM-2 embedding feeds parent-local prototype, vote, margin, and density features and then a multinomial logistic scorer. A sequence descends from an EC-3 parent to an EC-4 child only if both gates pass: the represented-child conformal gate calibrated on \texttt{cal\_known} and the masked-child surrogate gate calibrated from leakage-controlled child removals. Otherwise the model returns the current EC prefix.}
+\label{fig:method}
+\end{figure}
+
+\subsection{Parent-local scorer}
+
+For parent $v$ with child set $\mathcal{C}(v)$, let $p_c$ be the mean embedding of child $c$. Given a query embedding $z$, we build
+\begin{equation}
+\phi_v(z) = [\mathrm{cos}(z,p_c)_{c \in \mathcal{C}(v)},\ \mathrm{vote}(z),\ \mathrm{margin}(z),\ \mathrm{density}(z)].
+\end{equation}
+The implemented components are:
+\begin{itemize}
+\item prototype cosine similarity to every child mean,
+\item child-wise vote share from a parent-restricted cosine $k$-NN index with $k \le 10$,
+\item margin between the two largest prototype similarities,
+\item local density defined by the mean of $(1-d)$ over the closest $k \le 5$ neighbors.
+\end{itemize}
+
+A multinomial logistic regressor with class-balanced weights is fitted independently at each EC-3 parent. For a query $x$, this yields child probabilities $s_v(x,c)$, the top child $\hat{c}_v(x)$, its probability $p_{\max}(x)$, the runner-up probability, and the scores needed by the baseline stopping rules.
+
+\subsection{Represented-child conformal gate}
+
+For calibration examples whose true EC-4 child is represented in training, we compute parent-local true-child probabilities and fit a split-conformal threshold per parent at target error $\alpha=0.10$. Descent is allowed only when the top child probability exceeds the parent-specific conformal threshold:
+\begin{equation}
+G_v^{\mathrm{known}}(x)=\mathbb{1}\{p_{\max}(x) \ge q_v\}.
+\end{equation}
+
+\subsection{Masked-child surrogate gate}
+
+The second gate targets the narrower regime ``known parent, missing child.'' For each seed and parent, we rotate over eligible children, remove one child from the parent-local training set, rebuild the scorer from scratch, and score held-out sequences from the removed child against the retained siblings. This yields a surrogate distribution over top-child probabilities for missing-child events.
+
+The masked-child gate is
+\begin{equation}
+G_v^{\mathrm{mask}}(x)=\mathbb{1}\{p_{\max}(x) > t_v\},
+\end{equation}
+where $t_v$ is the empirical $0.90$ quantile of masked-child top probabilities for parent $v$. \method descends only when both gates pass:
+\begin{equation}
+G_v(x)=G_v^{\mathrm{known}}(x)\cdot G_v^{\mathrm{mask}}(x).
+\end{equation}
+Otherwise the system emits the current EC-3 prefix and sets \texttt{open\_child\_under\_parent}=1.
+
+\subsection{Leakage controls}
+
+The surrogate is only credible if masked children are fully removed from parent-local state. For every masked event, we rebuild:
+\begin{itemize}
+\item child prototypes,
+\item parent-restricted $k$-NN indices,
+\item vote-share features,
+\item density features.
+\end{itemize}
+
+An event passes audit only if the removed child is absent from prototypes, absent from training labels, and absent from retrieved neighbors of masked examples. Across all seeds, 36 masked-child events pass these audits from 144 audited rows (Figure~\ref{fig:leakage}).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Data.}
+The pipeline starts from Swiss-Prot releases \texttt{2018\_02} and \texttt{2023\_01}. After filtering to single-label proteins with complete EC-4 annotations and sequence lengths between 30 and 1024 amino acids, the raw pool contains 173{,}396 proteins from 2018 and 180{,}146 proteins from 2023. Parent selection uses only the 2018 snapshot: each retained EC-3 parent must have at least four supported EC-4 children and at least 25 training sequences per retained child. This yields 12 retained EC-3 parents, 64{,}175 selected 2018 proteins, and 68{,}246 selected 2023 proteins under the same parent set.
+
+\paragraph{Splits and implementation.}
+For each seed in $\{13,29,47\}$, the selected 2018 data are split parent-stratified into 44{,}785 \texttt{train\_core}, 9{,}479 \texttt{cal\_known}, and 9{,}911 \texttt{val\_select} proteins. All selected proteins are embedded once with frozen \texttt{facebook/esm2\_t30\_150M\_UR50D}. The recorded environment uses Python 3.10.20, NumPy 1.26.4, pandas 2.2.2, scikit-learn 1.4.2, SciPy 1.11.4, Torch 2.2.2+cpu, and an NVIDIA RTX A6000.
+
+\paragraph{Evaluation slices.}
+We report three evaluation slices:
+\begin{itemize}
+\item \textbf{Temporal future-child}: 2023 proteins whose EC-3 parent was retained from 2018 but whose EC-4 child was absent from the retained 2018 label set.
+\item \textbf{Temporal known-child}: 2023 proteins whose EC-4 child was already present in 2018.
+\item \textbf{Masked-child surrogate}: held-out examples from synthetically removed children under the same retained parents.
+\end{itemize}
+
+\paragraph{Baselines.}
+All baselines use the same frozen embeddings. The parent-local baselines share the same logistic scorer and differ only in the scalar selection score used to decide leaf descent on \texttt{val\_select}: \texttt{max\_probability} thresholds the top child probability, \texttt{hsc\_style} thresholds $p_{\max}/(p_{\max}+p_{2})$, and \texttt{energy\_threshold} thresholds the negative log-sum-exp energy of the parent-local logits. \texttt{parent\_openmax} fits one Weibull distribution per parent to calibration distances $1-p_{\mathrm{true}}$ on \texttt{cal\_known} examples, converts a query top probability into an open score by the fitted Weibull CDF, and then thresholds that open score. \texttt{one\_nn\_threshold} is a retrieval-only baseline built from a global cosine 1-NN index over \texttt{train\_core}; it predicts the nearest neighbor EC-4 label and uses $1-d_{\cos}$ as both confidence and selection score. The flat baseline is a separate multinomial logistic classifier over all EC-4 leaves; when its top probability falls below the validation threshold, it returns the deepest common prefix of its top three classes. Forced hierarchical prediction always returns the top EC-4 leaf. Parent-OpenMax must still be interpreted carefully: the run metadata record it as a revised post hoc feasible implementation because the originally intended per-child fit was degenerate under the 70/15/15 split.
+
+\paragraph{Metrics and reporting rule.}
+The primary metrics are catastrophic overspecialization rate, correct-safe-prefix rate, hierarchical loss, selective EC-4 micro-F1, realized leaf coverage, mean returned depth, and open-child AUROC when defined. We report two complementary views:
+\begin{itemize}
+\item nominal target-coverage results on each slice, always with realized coverage shown explicitly,
+\item exact-matched post hoc results on the mixed temporal set when making matched-coverage claims.
+\end{itemize}
+All table values are rounded to four decimals for readability; the raw unrounded means used to generate the paper are stored in \texttt{exp/summary/*.csv} and mirrored in \texttt{figures/source\_data/*.csv}. We avoid mixing nominal-target slice results with exact-matched claims.
+
+\subsection{Transparent main results}
+
+Table~\ref{tab:main_nominal} reports the nominal 0.80 operating point with realized coverage exposed for each slice. The key point is not just ranking but comparability. Realized coverage differs substantially across methods on temporal future-child proteins, so the nominal target alone is not interpretable. For example, at the nominal target 0.80, \texttt{one\_nn\_threshold} realizes only 0.0477 future-child coverage and correspondingly attains the lowest catastrophic overspecialization (0.0477). \texttt{hsc\_style}, Parent-OpenMax, and \method realize 0.2299, 0.2378, and 0.2586 coverage, respectively, yielding much closer like-for-like comparisons among those three methods.
+
+The table also shows that the masked-child slice does not establish a clear \method advantage. At the same nominal target, \texttt{hsc\_style} slightly outperforms \method on catastrophic overspecialization (0.3487 versus 0.3689) and correct-safe-prefix rate (0.6513 versus 0.6311), while Parent-OpenMax dominates open-child AUROC (0.9864) despite weaker stopping behavior.
+
+Uncertainty is modest for some comparisons and decisive for others. On the nominal temporal future-child slice at target 0.80, the three-seed confidence intervals for catastrophic overspecialization do not overlap between \texttt{one\_nn\_threshold} (0.0475--0.0480) and either \texttt{hsc\_style} (0.2171--0.2428) or \method (0.2541--0.2632), so the conservativeness of \texttt{one\_nn\_threshold} is not a rounding artifact. By contrast, the comparison among parent-local thresholding rules is narrower and should be interpreted cautiously; the paper reports seed means and confidence intervals from the stored summary files, but the preregistered paired bootstrap and paired permutation analyses were not completed in the final pipeline.
+
+\begin{table*}[t]
+\caption{Nominal operating-point results at target leaf coverage 0.80. The left block is the temporal future-child split from Swiss-Prot 2023\_01, where each example belongs under a retained EC-3 parent from Swiss-Prot 2018\_02 but has an EC-4 child absent from the retained 2018 vocabulary. The right block is the masked-child surrogate split built from leakage-controlled child removals. ``Catastrophic'' is the rate of wrong EC-4 overspecialization, ``Safe prefix'' is the rate of stopping at the correct prefix, and ``Realized cov.'' is the actual fraction of examples returned as EC-4 leaves after thresholding on \texttt{val\_select}. All values are rounded from \texttt{figures/source\_data/table1\_temporal\_results.csv} and \texttt{figures/source\_data/table2\_masked\_child\_ablations.csv}. Dashes indicate that a method was not run on that slice.}
+\label{tab:main_nominal}
+\centering
+\scriptsize
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c}{Temporal future-child} & \multicolumn{4}{c}{Masked-child surrogate} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-8}
+& Realized cov. & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & Realized cov. & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & Open-child AUROC $\uparrow$ \\
+\midrule
+Forced hierarchical & 1.0000 & 1.0000 & 0.0000 & --- & --- & --- & --- \\
+Flat logistic & 0.0498 & 0.0498 & 0.6859 & --- & --- & --- & --- \\
+Energy threshold & 0.4387 & 0.4387 & 0.5613 & 0.3141 & 0.3141 & 0.6859 & 0.0000 \\
+Max probability & 0.2377 & 0.2377 & 0.7623 & 0.3643 & 0.3643 & 0.6357 & 0.8597 \\
+\texttt{hsc\_style} & 0.2299 & 0.2299 & 0.7701 & 0.3487 & 0.3487 & \textbf{0.6513} & 0.8386 \\
+Parent-OpenMax & 0.2378 & 0.2378 & 0.7622 & 0.3565 & 0.3565 & 0.6435 & \textbf{0.9864} \\
+\texttt{one\_nn\_threshold} & \textbf{0.0477} & \textbf{0.0477} & \textbf{0.9523} & --- & --- & --- & --- \\
+\method & 0.2586 & 0.2586 & 0.7414 & 0.3689 & 0.3689 & 0.6311 & 0.8198 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Figure~\ref{fig:riskcov} shows the broader temporal future-child risk--coverage trade-off, and Figure~\ref{fig:leakage} summarizes the leakage audit. The figures reinforce the same point as Table~\ref{tab:main_nominal}: nominal target coverage is a weak summary for this slice because many methods fail to realize the intended operating point.
+
+Table~\ref{tab:known80} reports the previously omitted temporal known-child slice at the same nominal target. This slice behaves very differently from the future-child slice: all methods are strong, the dominant variation is how conservative they are, and \texttt{one\_nn\_threshold} is the clear winner among the evaluated methods at target 0.80, reaching realized coverage 0.9355, hierarchical loss 0.0649, and selective EC-4 F1 0.9996 after rounding. Reporting this slice separately matters because it shows that conservative future-child behavior does not automatically imply a collapse on represented children.
+
+\begin{table}[t]
+\caption{Temporal known-child results at nominal target leaf coverage 0.80 on Swiss-Prot 2023\_01 proteins whose EC-4 child was already present in the retained Swiss-Prot 2018\_02 vocabulary. ``Catastrophic'' is wrong EC-4 overspecialization, hierarchical loss is the depth-normalized error used by the benchmark code, and selective EC-4 F1 is computed only on the subset returned as EC-4 leaves. All values are rounded from \texttt{figures/source\_data/table1\_temporal\_results.csv}.}
+\label{tab:known80}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Realized cov. & Catastrophic $\downarrow$ & Hierarchical loss $\downarrow$ & Selective EC-4 F1 $\uparrow$ \\
+\midrule
+Forced hierarchical & 1.0000 & 0.0113 & \textbf{0.0113} & 0.9887 \\
+Flat logistic & 0.8080 & \textbf{0.0000} & 0.4079 & \textbf{0.9999} \\
+Energy threshold & 0.8465 & 0.0037 & 0.1572 & 0.9956 \\
+Max probability & 0.8316 & 0.0006 & 0.1691 & 0.9992 \\
+\texttt{hsc\_style} & 0.8339 & 0.0006 & 0.1667 & 0.9993 \\
+Parent-OpenMax & 0.8255 & 0.0007 & 0.1752 & 0.9992 \\
+\texttt{one\_nn\_threshold} & \textbf{0.9355} & 0.0004 & 0.0649 & 0.9996 \\
+\method & 0.8340 & 0.0007 & 0.1667 & 0.9992 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure2_temporal_risk_coverage.pdf}
+\caption{Temporal future-child risk--coverage curves on Swiss-Prot 2023\_01 proteins whose EC-4 child is missing from the retained 2018 vocabulary. The x-axis is realized leaf coverage and the y-axis is catastrophic overspecialization, meaning the fraction of examples forced to an incorrect EC-4 leaf. Forced hierarchical prediction overspecializes on every example. Simpler thresholds and retrieval rules span a wide range of realized coverages, making explicit coverage reporting necessary for interpretation.}
+\label{fig:riskcov}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure3_leakage_audit.pdf}
+\caption{Leakage audit for the masked-child surrogate protocol. Each valid event removes one supported EC-4 child under a retained EC-3 parent, rebuilds prototype, neighbor-vote, margin, and density feature families without that child, and checks that the removed child does not re-enter through parent-local support state. Of 144 audited rows, 36 masked-child events pass all checks and enter the benchmark.}
+\label{fig:leakage}
+\end{figure}
+
+\subsection{Exact-matched temporal comparison}
+
+When we compare methods at truly matched coverage, we use the exact-matched post hoc results consistently. These exact-matched metrics are summary-level artifacts derived by \texttt{exp/summary/run.py} from stored per-example predictions and \texttt{selection\_score}; unlike the nominal tables, they are not backed by the per-method \texttt{exp/<method>/results.json} files. For each method and seed, we pool temporal known-child and future-child examples, sort by the method's own \texttt{selection\_score}, accept the top $k=\mathrm{round}(c n)$ examples for target coverage $c$, and force all remaining examples to their method-specific rejection prefix. At target 0.80 this yields the same raw realized coverage, 0.8000029305746857, for every method; Table~\ref{tab:exact80} shows the rounded value 0.8000. Under this matched comparison, \texttt{one\_nn\_threshold} is the strongest method in the run suite on hierarchical loss (0.2046), selective EC-4 F1 (0.9942), and catastrophic overspecialization (0.0046). \texttt{hsc\_style} and \method are close to one another, with \texttt{hsc\_style} slightly better on hierarchical loss (0.2316 versus 0.2338) and selective EC-4 F1 (0.9605 versus 0.9578). Parent-OpenMax remains clearly weaker.
+
+This table changes the narrative from the earlier draft. The workspace results do not support the claim that \texttt{hsc\_style} is the strongest non-\method comparator overall. Instead, the fairest statement is that no single baseline dominates every reporting view: \texttt{one\_nn\_threshold} is strongest in the exact-matched mixed evaluation, whereas \texttt{hsc\_style} is the closest comparator to \method among the parent-local thresholds with similar realized future-child coverage.
+
+The exact-matched ranking is also statistically more stable than the small gap between \texttt{hsc\_style} and \method. At target 0.80, \texttt{one\_nn\_threshold} has non-overlapping three-seed confidence intervals against both methods on hierarchical loss (0.2045--0.2048 versus 0.2306--0.2327 for \texttt{hsc\_style} and 0.2329--0.2347 for \method) and on selective EC-4 F1 (0.9941--0.9944 versus 0.9592--0.9618 and 0.9566--0.9589). By contrast, the intervals for \texttt{hsc\_style} and \method overlap on catastrophic overspecialization, so that pairwise difference should be treated as suggestive rather than definitive.
+
+\begin{table}[t]
+\caption{Exact-matched mixed temporal evaluation. For each method and seed, the benchmark pools temporal known-child and future-child examples, ranks them by the stored \texttt{selection\_score}, accepts the top $\mathrm{round}(0.8n)$ examples as EC-4 leaves, and forces the remainder to their rejection prefix. The raw realized coverage is 0.8000029305746857 for every method in \texttt{figures/source\_data/table1b\_posthoc\_exact\_matched.csv}. Hierarchical loss is the benchmark's depth-aware error, selective EC-4 F1 is computed on accepted leaves, and catastrophic is wrong EC-4 overspecialization on the pooled temporal set.}
+\label{tab:exact80}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Hierarchical loss $\downarrow$ & Selective EC-4 F1 $\uparrow$ & Catastrophic $\downarrow$ \\
+\midrule
+Forced hierarchical & 0.2322 & 0.9597 & 0.0322 \\
+Flat logistic & 0.5391 & 0.9868 & 0.0106 \\
+Energy threshold & 0.2559 & 0.9301 & 0.0559 \\
+Max probability & 0.2322 & 0.9597 & 0.0322 \\
+\texttt{hsc\_style} & 0.2316 & 0.9605 & 0.0316 \\
+Parent-OpenMax & 0.3154 & 0.8558 & 0.1154 \\
+\texttt{one\_nn\_threshold} & \textbf{0.2046} & \textbf{0.9942} & \textbf{0.0046} \\
+\method & 0.2338 & 0.9578 & 0.0338 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure2b_temporal_mixed_exact_matched.pdf}
+\caption{Exact-matched post hoc evaluation on the mixed temporal set. Every method is evaluated at the same realized leaf coverage 0.8000 by ranking the pooled temporal examples with its stored \texttt{selection\_score}. At that shared operating point, \texttt{one\_nn\_threshold} achieves hierarchical loss 0.2046 and selective EC-4 F1 0.9942, while \texttt{hsc\_style} and \method remain close at 0.2316/0.9605 and 0.2338/0.9578, respectively.}
+\label{fig:mixed}
+\end{figure}
+
+\subsection{Ablations and transfer}
+
+Table~\ref{tab:ablation} shows the \method-family ablations at the nominal future-child target 0.80 and the exact-matched mixed temporal coverage 0.8000. The strongest \method-family variant on the nominal future-child slice is the no-retrieval surrogate ablation, which reaches catastrophic overspecialization 0.2217 at realized coverage 0.2217. On the exact-matched mixed set, however, the full method remains close to the simpler ablations. Taken together, the ablations suggest that the retrieval-heavy masked-child signal is the most brittle component rather than the source of the method's strength.
+
+\begin{table}[t]
+\caption{Ablations of \method. The left block uses the temporal future-child split at nominal target leaf coverage 0.80, so realized coverage is shown explicitly. The right block uses the exact-matched mixed temporal evaluation at shared realized coverage 0.8000. ``No masked gate'' removes the masked-child surrogate threshold, ``No conformal gate'' removes the represented-child conformal threshold, ``Global masked threshold'' replaces parent-specific masked thresholds with one global threshold, and ``No retrieval surrogate'' removes the retrieval-derived surrogate features.}
+\label{tab:ablation}
+\centering
+\scriptsize
+\begin{tabular}{lccccc}
+\toprule
+\multirow{2}{*}{Variant} & \multicolumn{3}{c}{Temporal future-child} & \multicolumn{2}{c}{Temporal mixed exact-matched} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-6}
+& Realized cov. & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & Hierarchical loss $\downarrow$ & Selective EC-4 F1 $\uparrow$ \\
+\midrule
+\method & 0.2586 & 0.2586 & 0.7414 & 0.2338 & 0.9578 \\
+No masked gate & 0.2613 & 0.2613 & 0.7387 & 0.2339 & 0.9576 \\
+No conformal gate & 0.2702 & 0.2702 & 0.7298 & 0.2350 & 0.9562 \\
+Global masked threshold & 0.2377 & 0.2377 & 0.7623 & 0.2322 & 0.9597 \\
+No retrieval surrogate & \textbf{0.2217} & \textbf{0.2217} & \textbf{0.7783} & 0.2342 & 0.9572 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The parent-level transfer analysis asks whether gains on masked-child events predict gains on real future-child events. Figure~\ref{fig:transfer} shows that \method has positive but modest transfer relative to \texttt{hsc\_style} across the 12 eligible parents (Pearson $r=0.3892$, Spearman $\rho=0.6760$). In contrast, the \texttt{hsc\_style} versus Parent-OpenMax comparison shows a stronger relationship (Pearson $r=0.8258$, Spearman $\rho=0.7483$). The masked-child surrogate therefore captures some real structure, but not enough to become the strongest stopping rule in aggregate.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure4_transfer_scatter.pdf}
+\caption{Parent-level transfer from masked-child gain to temporal future-child gain across the 12 retained EC-3 parents. Each point is a parent, the x-axis is catastrophic-overspecialization reduction on masked-child events, and the y-axis is the same reduction on temporal future-child proteins. \method shows positive but weaker transfer than the \texttt{hsc\_style} versus Parent-OpenMax comparison.}
+\label{fig:transfer}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main empirical result is negative but useful. Leakage-controlled masked-child calibration is feasible and auditable, but the full \method rule does not emerge as the strongest practical stopping policy in this experiment suite. The reason is not a single failure mode.
+
+First, coverage mismatch matters. On the temporal future-child slice, thresholds calibrated on represented children produce realized coverages far below their nominal targets. This is precisely why the earlier presentation was misleading: a nominal ``0.80'' operating point can correspond to realized future-child coverage between 0.0477 and 0.4387 depending on the method. Transparent reporting therefore changes the scientific conclusion.
+
+Second, no single baseline wins everywhere. \texttt{one\_nn\_threshold} is exceptionally safe on temporal future-child proteins and strongest on the exact-matched mixed set, but it does so by behaving very conservatively on the future-child slice. \texttt{hsc\_style} is the closest comparator to \method among the parent-local thresholding rules with similar realized future-child coverage. Parent-OpenMax has the best masked-child AUROC, but weaker stopping behavior and an important implementation caveat.
+
+Third, the benchmark remains narrow. We study 12 EC-3 parents, one frozen backbone, one parent-local scorer family, one masked child per parent per seed, and a single temporal gap. The recorded environment also differs from the originally planned stack; the appendix reports the actual rerun environment used for the final summaries. These are acceptable limitations for a benchmark paper, but they prevent a broader deployment claim.
+
+The execution also fell short of the full preregistered analysis set in \texttt{plan.json}. Completed items include the temporal benchmark, the masked-child leakage audit, the main baseline sweep, the four ablations, and the parent-level transfer correlation plot. Dropped items include the preregistered transferability stratification analysis, the ridge-regression diagnostic on parent statistics, and the paired bootstrap/permutation significance tests for the headline 0.80 comparison. The manuscript therefore limits itself to the completed analyses and treats the remaining plan items as future work rather than implicitly claiming they were finished.
+
+\section{Conclusion}
+
+We studied masked-child surrogate calibration as a decision-layer heuristic for safe EC prefix prediction under future EC-4 child emergence. The resulting benchmark is methodologically useful: it rebuilds parent-local state after masking, audits leakage explicitly, and exposes transfer from synthetic masked-child events to temporal future-child proteins. The stronger contribution of this paper, however, is transparent evaluation reporting. Once every baseline is shown, realized coverage is reported, and matched-coverage claims are restricted to exact-matched results, the workspace outputs support a restrained conclusion. \method is a credible benchmarked heuristic, but not the strongest stopping rule in this study.
+
+\appendix
+
+\section{Reproducibility Summary}
+
+\paragraph{Dataset construction.}
+Raw Swiss-Prot counts are 173{,}396 proteins from \texttt{2018\_02} and 180{,}146 from \texttt{2023\_01}. After filtering to single-label proteins with complete EC-4 annotations and selecting 12 retained EC-3 parents, the benchmark uses 64{,}175 proteins from 2018 and 68{,}246 proteins from 2023. The retained parents are \texttt{6.1.1.-}, \texttt{2.1.1.-}, \texttt{2.7.7.-}, \texttt{4.2.1.-}, \texttt{2.7.1.-}, \texttt{2.5.1.-}, \texttt{1.1.1.-}, \texttt{2.3.1.-}, \texttt{4.1.1.-}, \texttt{1.6.5.-}, \texttt{2.4.2.-}, and \texttt{5.3.1.-}.
+
+\paragraph{Seeds and splits.}
+All aggregate numbers average over seeds 13, 29, and 47. Per seed, the selected 2018 data are split into 44{,}785 \texttt{train\_core}, 9{,}479 \texttt{cal\_known}, and 9{,}911 \texttt{val\_select} proteins.
+
+\paragraph{Environment.}
+The final summaries were generated in the recorded workspace environment: Python 3.10.20, NumPy 1.26.4, pandas 2.2.2, scikit-learn 1.4.2, SciPy 1.11.4, Torch 2.2.2+cpu, Linux 6.8, and an NVIDIA RTX A6000. The metadata also note that the originally planned pinned environment was unavailable and that the experiments were rerun in the actual installed stack.
+
+\paragraph{Leakage audits and baseline caveats.}
+The surrogate benchmark contains 144 audit rows, of which 36 masked-child events pass all leakage checks and are used in the reported surrogate results. The metadata further record that Parent-OpenMax was revised to a feasible per-parent Weibull fit on \texttt{cal\_known} examples because the original per-child minimum was degenerate under the final split protocol.
+
+\paragraph{Baseline and exact-match reconstruction.}
+The reporting pipeline can be reconstructed directly from \texttt{exp/shared/pipeline.py}. All scalar-threshold baselines choose thresholds on \texttt{val\_select} by quantiles of their method-specific selection score. \texttt{one\_nn\_threshold} uses a global cosine 1-NN index over \texttt{train\_core}; \texttt{max\_probability}, \texttt{hsc\_style}, and \texttt{energy\_threshold} share the parent-local logistic scorer; Parent-OpenMax fits one Weibull per parent on $1-p_{\mathrm{true}}$ from \texttt{cal\_known}. Exact-matched results are produced post hoc by sorting each method's mixed temporal pool by \texttt{selection\_score}, accepting the top $\mathrm{round}(c n)$ examples for coverage target $c$, and forcing the rest to their stored rejection prefix and depth.
+
+\paragraph{Canonical sources for paper claims.}
+The paper uses two explicit canonical sources. All nominal operating-point claims are auditable from the per-method files \texttt{exp/<method>/results.json}; Tables~\ref{tab:main_nominal}, \ref{tab:known80}, and \ref{tab:ablation} mirror those values through \texttt{figures/source\_data/table1\_temporal\_results.csv} and \texttt{figures/source\_data/table2\_masked\_child\_ablations.csv}. All exact-matched mixed temporal claims are auditable from the exported source-data file \texttt{figures/source\_data/table1b\_posthoc\_exact\_matched.csv}, which is produced by \texttt{exp/summary/run.py} from the stored per-example prediction files and method-specific \texttt{selection\_score}. In other words, nominal metrics are per-experiment JSON-backed, whereas \texttt{temporal\_mixed\_posthoc} metrics are post hoc summary-level outputs backed by the summary export. We therefore avoid claiming that Table~\ref{tab:exact80} is reconstructed from nominal per-method JSONs alone.
+
+\section{Complete Operating-Point Tables}
+
+Tables~\ref{tab:future_allcov}--\ref{tab:masked_allcov} expose the already-generated 0.60 and 0.95 operating points that were omitted from the earlier draft. These appendix tables use the same rounded aggregates as the main paper and make the full operating-point sweep auditable from the workspace artifacts.
+
+\begin{table*}[t]
+\caption{Temporal future-child operating points at nominal target coverages 0.60 and 0.95 on Swiss-Prot 2023\_01 proteins whose EC-4 child is missing from the retained Swiss-Prot 2018\_02 vocabulary. ``Realized cov.'' is the actual EC-4 leaf coverage after thresholding, ``Catastrophic'' is wrong EC-4 overspecialization, and ``Safe prefix'' is stopping at the correct prefix. All values are rounded from \texttt{figures/source\_data/table1\_temporal\_results.csv}.}
+\label{tab:future_allcov}
+\centering
+\scriptsize
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c}{Nominal target 0.60} & \multicolumn{3}{c}{Nominal target 0.95} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+& Realized cov. & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & Realized cov. & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ \\
+\midrule
+Forced hierarchical & 1.0000 & 1.0000 & 0.0000 & 1.0000 & 1.0000 & 0.0000 \\
+Flat logistic & 0.0208 & 0.0208 & 0.7120 & 0.1669 & 0.1669 & 0.5837 \\
+Energy threshold & 0.3418 & 0.3418 & 0.6582 & 0.8505 & 0.8505 & 0.1495 \\
+Max probability & 0.1878 & 0.1878 & 0.8122 & 0.4687 & 0.4687 & 0.5313 \\
+\texttt{hsc\_style} & 0.1667 & 0.1667 & 0.8333 & 0.4833 & 0.4833 & 0.5167 \\
+Parent-OpenMax & 0.1925 & 0.1925 & 0.8075 & 0.4500 & 0.4500 & 0.5500 \\
+\texttt{one\_nn\_threshold} & \textbf{0.0326} & \textbf{0.0326} & \textbf{0.9674} & \textbf{0.1922} & \textbf{0.1922} & \textbf{0.8078} \\
+\method & 0.2068 & 0.2068 & 0.7932 & 0.4749 & 0.4749 & 0.5251 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Exact-matched mixed temporal operating points at shared realized coverages 0.6000 and 0.9500. For each method and seed, the benchmark pools temporal known-child and future-child examples, sorts by the stored \texttt{selection\_score}, accepts the top $\mathrm{round}(cn)$ examples for coverage target $c$, and forces the remainder to the stored rejection prefix. All values are rounded from \texttt{figures/source\_data/table1b\_posthoc\_exact\_matched.csv}.}
+\label{tab:exact_allcov}
+\centering
+\scriptsize
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c}{Exact-matched target 0.60} & \multicolumn{3}{c}{Exact-matched target 0.95} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+& Hierarchical loss $\downarrow$ & Selective EC-4 F1 $\uparrow$ & Catastrophic $\downarrow$ & Hierarchical loss $\downarrow$ & Selective EC-4 F1 $\uparrow$ & Catastrophic $\downarrow$ \\
+\midrule
+Forced hierarchical & 0.4234 & 0.9610 & 0.0234 & 0.1383 & 0.9070 & 0.0883 \\
+Flat logistic & 0.9528 & 0.9943 & 0.0034 & 0.2976 & 0.9222 & 0.0739 \\
+Energy threshold & 0.4431 & 0.9281 & 0.0431 & 0.1442 & 0.9009 & 0.0942 \\
+Max probability & 0.4234 & 0.9610 & 0.0234 & 0.1383 & 0.9070 & 0.0883 \\
+\texttt{hsc\_style} & 0.4209 & 0.9652 & 0.0209 & 0.1393 & 0.9060 & 0.0893 \\
+Parent-OpenMax & 0.5096 & 0.8172 & 0.1097 & 0.1718 & 0.8718 & 0.1218 \\
+\texttt{one\_nn\_threshold} & \textbf{0.4028} & \textbf{0.9954} & \textbf{0.0028} & 0.2293 & \textbf{0.9185} & \textbf{0.0775} \\
+\method & 0.4256 & 0.9573 & 0.0256 & \textbf{0.1384} & 0.9069 & 0.0884 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Masked-child surrogate operating points across all generated coverages. The masked-child split contains 36 valid leakage-audited events. On this split, every accepted EC-4 leaf is necessarily an overspecialization because the true child was removed, so catastrophic overspecialization equals realized leaf coverage; we still report both safe-prefix rate and open-child AUROC for completeness. All values are rounded from \texttt{figures/source\_data/table2\_masked\_child\_ablations.csv}.}
+\label{tab:masked_allcov}
+\centering
+\scriptsize
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c}{Target 0.60} & \multicolumn{3}{c}{Target 0.80} & \multicolumn{3}{c}{Target 0.95} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+& Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & AUROC $\uparrow$ & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & AUROC $\uparrow$ & Catastrophic $\downarrow$ & Safe prefix $\uparrow$ & AUROC $\uparrow$ \\
+\midrule
+Energy threshold & 0.2494 & 0.7506 & 0.0000 & 0.3141 & 0.6859 & 0.0000 & 0.6175 & 0.3825 & 0.0000 \\
+Max probability & 0.2990 & 0.7010 & 0.8597 & 0.3643 & 0.6357 & 0.8597 & 0.5750 & 0.4250 & 0.8597 \\
+\texttt{hsc\_style} & \textbf{0.2305} & \textbf{0.7695} & 0.8386 & \textbf{0.3487} & \textbf{0.6513} & 0.8386 & 0.5759 & 0.4241 & 0.8386 \\
+Parent-OpenMax & 0.3003 & 0.6997 & \textbf{0.9864} & 0.3565 & 0.6435 & \textbf{0.9864} & \textbf{0.5555} & \textbf{0.4445} & \textbf{0.9864} \\
+\method & 0.2310 & 0.7690 & 0.8198 & 0.3689 & 0.6311 & 0.8198 & 0.5738 & 0.4262 & 0.8198 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

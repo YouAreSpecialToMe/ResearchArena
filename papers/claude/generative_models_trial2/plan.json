@@ -1,0 +1,227 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for diffusion model inference, metric computation, and visualization. Verify CUDA availability and A6000 GPU.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision diffusers transformers accelerate safetensors",
+      "step2": "Install metric packages: pip install clean-fid torch-fidelity clip-score open_clip_torch lpips scipy",
+      "step3": "Install image-reward: pip install image-reward",
+      "step4": "Install visualization: pip install matplotlib seaborn pandas",
+      "step5": "Verify GPU: run a short script that prints torch.cuda.is_available(), torch.cuda.get_device_name(0), and torch.cuda.get_device_properties(0).total_mem",
+      "step6": "Verify diffusers can load SD1.5: load runwayml/stable-diffusion-v1-5 pipeline in float16, generate one test image with 20 DDIM steps, save to exp/test_setup.png",
+      "step7": "Verify SD3 Medium can load: load stabilityai/stable-diffusion-3-medium-diffusers in float16, generate one test image with 20 steps, save to exp/test_setup_sd3.png"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare evaluation prompt sets",
+    "description": "Download and prepare three prompt sets for evaluation: a 500-prompt COCO subset, PartiPrompts (200 prompts subset), and DrawBench (200 prompts). Using smaller subsets than the full benchmarks to fit within the 8-hour compute budget while maintaining statistical significance.",
+    "steps": {
+      "step1": "Download MS-COCO 2017 validation captions: use pycocotools or direct download of captions_val2017.json. Extract 500 random captions using seed=42. Save to exp/data/coco_500_prompts.json as a list of {id, prompt} objects.",
+      "step2": "Download PartiPrompts: use the HuggingFace dataset nateraw/parti-prompts or download from the official source. Randomly sample 200 prompts with seed=42. Save to exp/data/parti_200_prompts.json.",
+      "step3": "Prepare DrawBench prompts: download or hardcode the 200 DrawBench prompts from the official Imagen paper supplementary. Save to exp/data/drawbench_prompts.json.",
+      "step4": "For FID computation: download 500 random real images from COCO 2017 validation set matching the selected captions. Resize to 512×512. Save to exp/data/coco_real_images/.",
+      "step5": "Create exp/data/summary.json with prompt counts and dataset statistics."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement CoPS core: Prediction Coherence Score and particle resampling",
+    "description": "Implement the Coherent Particle Sampling (CoPS) method. This is the core contribution: a particle-based sampling framework that uses temporal coherence of denoised predictions (PCS) as an intrinsic quality signal for particle resampling, replacing external reward models.",
+    "steps": {
+      "step1": "Create exp/shared/cops.py with the following components:\n  (a) PCSTracker class: tracks denoised predictions x_hat_0 at each timestep for each particle. Computes instantaneous coherence c_i = -d(x_hat_0(t_i), x_hat_0(t_{i-1})) using configurable distance metric (L2, LPIPS, cosine). Accumulates weighted PCS = sum(w_j * c_j).\n  (b) ParticleResampler class: given K particles and their PCS scores, resamples proportional to exp(alpha * PCS) using multinomial resampling. Applies optional Gaussian noise jittering (sigma_jitter) to maintain diversity.\n  (c) CoPS pipeline wrapper: wraps a diffusers StableDiffusionPipeline. Takes parameters: K (num particles), R (resampling interval in steps), alpha (temperature), distance_metric ('l2', 'lpips', 'cosine'), num_inference_steps, and timestep_weights ('uniform', 'mid_emphasis', 'early_emphasis', 'late_emphasis').",
+      "step2": "Implement the CoPS sampling loop in detail:\n  - Initialize K particles from the SAME initial noise z_0 (shared start for fair comparison)\n  - At each denoising step t_i, call the UNet to get noise/velocity prediction for each particle\n  - Compute denoised prediction x_hat_0 for each particle using the standard formula\n  - Update PCS for each particle\n  - Every R steps, resample particles proportional to softmax(alpha * PCS)\n  - After resampling, add small Gaussian noise (sigma_jitter=0.01) in latent space to resampled duplicates to maintain diversity\n  - At the final step, select the particle with highest PCS as output\n  - Return both the selected image and all PCS trajectories for analysis",
+      "step3": "Implement flow matching variant for SD3: adapt PCS computation for velocity-parameterized models where x_hat_0 = x_t - t * v_theta(x_t, t). Use the same coherence tracking.",
+      "step4": "Unit test: run CoPS on 5 prompts with K=4, R=10, 50 DDIM steps on SD1.5. Verify PCS is computed correctly (should be negative, with more coherent particles having less negative PCS). Save test outputs to exp/test_cops/.",
+      "step5": "Implement Adaptive Step Allocation (ASA):\n  - Run a pilot trajectory with 10 uniform steps\n  - Compute per-step prediction change magnitudes\n  - Redistribute the full NFE budget (e.g., 50 steps) proportionally: more steps where prediction changes are large\n  - Create a custom timestep schedule and run the refined trajectory\n  - Save to exp/shared/asa.py"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Standard sampling baselines",
+    "description": "Generate images using standard sampling methods as baselines. These represent what is achievable without any particle-based approach. All baselines use the same prompts, seeds, and evaluation pipeline for fair comparison.",
+    "steps": {
+      "step1": "Create exp/baselines/run_baselines.py that generates images for each prompt set using the following configurations on SD1.5:\n  (a) DDIM 50 steps, CFG scale 7.5 (standard baseline)\n  (b) DPM-Solver++ 20 steps, CFG scale 7.5 (efficient baseline)\n  (c) Euler 50 steps, CFG scale 7.5 (alternative sampler)\n  Use 3 random seeds: [42, 123, 456]. Save images to exp/baselines/{method}_{seed}/{dataset}/",
+      "step2": "For each method-seed-dataset combination, generate all images and save them as PNG files named by prompt index. Track generation time per image.",
+      "step3": "Compute and save per-image metadata: generation time, seed, prompt, method. Save to exp/baselines/metadata.json.",
+      "step4": "Total estimated time: 500 COCO prompts × 3 seeds × 3 methods × ~1.5s/image ≈ 1.1 hours. Plus PartiPrompts (200 × 3 × 3 × 1.5s ≈ 27 min) and DrawBench (200 × 3 × 3 × 1.5s ≈ 27 min). Total ≈ 1.6 hours."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Particle-based baselines: Random-K and Reward-guided",
+    "description": "Implement particle baselines to isolate the effect of the selection criterion. Random-K generates K particles and picks one randomly (controls for generating multiple samples). Reward-guided baselines use external CLIP score and ImageReward as the selection criterion, representing the current SOTA approach.",
+    "steps": {
+      "step1": "Implement exp/baselines/particle_baselines.py:\n  (a) Random-K: Generate K=4 particles per prompt (each from different noise but same seed for particle initialization). Select one uniformly at random. Total NFE = K × steps_per_particle.\n  (b) Best-of-K CLIP: Generate K=4 particles, compute CLIP score for each final image vs. the text prompt, select the one with highest CLIP score.\n  (c) Best-of-K ImageReward: Generate K=4 particles, compute ImageReward for each, select the highest.",
+      "step2": "Run all three particle baselines on COCO-500, PartiPrompts-200, DrawBench with 3 seeds [42, 123, 456]. Use DDIM sampler with 50 steps per particle, CFG 7.5. Save images to exp/baselines/{method}_{seed}/{dataset}/.",
+      "step3": "Important: for fair comparison with CoPS, all particle methods use the SAME set of initial noise vectors per seed. Store the initial noise tensors in exp/shared/noise_cache/ so they can be reused across methods.",
+      "step4": "Track per-prompt: all K particle images, their CLIP scores, ImageReward scores, and which particle was selected. Save to exp/baselines/particle_metadata.json.",
+      "step5": "Estimated time: 500 × 3 seeds × 3 methods × K=4 × 1.5s/image ≈ 4.5 hours for COCO alone. THIS IS TOO EXPENSIVE. Optimization: (a) Generate K=4 particles ONCE per seed, then apply all three selection criteria (random, CLIP, ImageReward) to the same set. This reduces generation to 500 × 3 × 4 × 1.5s ≈ 1.5 hours for COCO. (b) Compute CLIP and ImageReward scores as a batch post-hoc. Add ~15 min for scoring.",
+      "step6": "Apply same optimization to PartiPrompts and DrawBench. Total estimated time for all particle baselines: ~2.3 hours generation + ~0.5 hours scoring = ~2.8 hours."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CoPS evaluation on all benchmarks",
+    "description": "Run CoPS with the default configuration on all three benchmarks. This is the primary experiment testing whether PCS-guided particle selection matches reward-guided methods.",
+    "steps": {
+      "step1": "Default CoPS configuration for SD1.5:\n  - K=4 particles\n  - R=10 (resample every 10 steps)\n  - alpha=1.0 (resampling temperature)\n  - Distance metric: L2 in latent space (fastest; ablate later)\n  - 50 DDIM steps per particle\n  - CFG scale 7.5\n  - sigma_jitter=0.01\n  - Timestep weights: uniform",
+      "step2": "Create exp/main/run_cops.py: Run CoPS on COCO-500, PartiPrompts-200, DrawBench with 3 seeds [42, 123, 456]. Use the SAME initial noise vectors as the particle baselines (from noise_cache). Save selected images to exp/main/cops_default_{seed}/{dataset}/.",
+      "step3": "For each prompt, also save:\n  - All K particle images (for analysis)\n  - PCS trajectory for each particle (PCS value at each resampling step)\n  - Which particle was selected\n  - Final PCS value for each particle\n  Save to exp/main/cops_metadata.json.",
+      "step4": "Estimated time: CoPS has negligible overhead over standard K-particle generation (PCS computation is a few matrix operations). Time ≈ same as particle baselines generation: ~2.3 hours.",
+      "step5": "IMPORTANT: Because particle baselines and CoPS share the same K=4 particle generation, we can combine them. Generate K=4 particles ONCE per prompt per seed, compute PCS during generation, then apply all selection criteria post-hoc. This reduces total generation time to ~2.3 hours for ALL particle-based methods (Random-K, CLIP-guided, ImageReward-guided, CoPS)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "PCS correlation analysis",
+    "description": "Analyze whether PCS actually correlates with external quality metrics. This directly tests the core hypothesis: that temporal coherence of predictions is predictive of final sample quality.",
+    "steps": {
+      "step1": "For each prompt in COCO-500 (using seed=42), we have K=4 particles with:\n  - PCS score for each particle\n  - CLIP score for each particle's final image\n  - ImageReward score for each particle's final image\n  - Aesthetic score for each particle's final image",
+      "step2": "Compute rank correlation (Spearman's rho) between PCS and each external metric WITHIN each prompt (i.e., do particles with higher PCS also have higher CLIP/ImageReward?). Report mean and std of rho across prompts.",
+      "step3": "Compute agreement rate: what fraction of the time does PCS select the same particle as CLIP-guided / ImageReward-guided selection?",
+      "step4": "Visualize: scatter plot of PCS vs CLIP score, PCS vs ImageReward, across all particles from all prompts. Color by prompt to show within-prompt correlation.",
+      "step5": "Save analysis to exp/analysis/pcs_correlation.json and figures to figures/."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Scaling behavior experiment",
+    "description": "Test whether generation quality scales with the number of particles K under PCS guidance, which is a key requirement for inference-time scaling. Vary K while keeping total NFE approximately constant.",
+    "steps": {
+      "step1": "Configurations (constant total NFE ≈ 200):\n  - K=1, 200 steps (standard, no particles)\n  - K=2, 100 steps\n  - K=4, 50 steps\n  - K=8, 25 steps\n  - K=16, 12 steps (edge case: very few steps per particle)\n  For each K, apply: random selection, PCS selection (CoPS), CLIP selection.",
+      "step2": "Run on COCO-500 with seed=42 only (scaling experiment is expensive). Use DDIM sampler, CFG 7.5.",
+      "step3": "Plot quality metrics (FID, CLIP score, ImageReward) vs K for each selection method. The hypothesis is that PCS selection shows positive scaling (quality improves with K), similar to CLIP selection, while random selection plateaus or degrades.",
+      "step4": "Estimated time: 5 K-values × 500 prompts × max(K) particles × ~1.5s ≈ 3 hours. BUT with K=16, each prompt needs 16 × 12-step trajectories = 192 NFE ≈ same as 1 × 192-step trajectory. So the time per prompt is roughly constant across K values (~3s). Total ≈ 5 × 500 × 3s ≈ 2 hours.",
+      "step5": "Save results to exp/main/scaling_results.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Flow matching evaluation with SD3 Medium",
+    "description": "Evaluate CoPS on Stable Diffusion 3 Medium to demonstrate that prediction coherence is equally informative for flow matching (velocity-based) models as for noise-prediction diffusion models.",
+    "steps": {
+      "step1": "Load stabilityai/stable-diffusion-3-medium-diffusers in float16. Adapt CoPS for flow matching: use x_hat_0 = x_t - t * v_theta(x_t, t) for denoised prediction.",
+      "step2": "Run on PartiPrompts-200 only (SD3 is slower, ~3s/image at 28 steps). Configurations:\n  - Standard: 1 trajectory, 28 Euler steps\n  - Random-K: K=4, 28 steps, random selection\n  - CoPS: K=4, 28 steps, R=7 resampling interval, L2 distance\n  - CLIP-guided: K=4, 28 steps, CLIP selection\n  Use 3 seeds [42, 123, 456].",
+      "step3": "Estimated time: 200 prompts × 3 seeds × 4 particles × 3s ≈ 1.2 hours.",
+      "step4": "Save images to exp/main/sd3_{method}_{seed}/parti/ and metadata to exp/main/sd3_metadata.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation A1: Distance metric for PCS",
+    "description": "Compare different distance metrics for computing prediction coherence to determine which most reliably predicts final quality.",
+    "steps": {
+      "step1": "Distance metrics to compare:\n  (a) L2 in latent space (default, cheapest)\n  (b) LPIPS in pixel space (requires decoding latents at each resampling step — more expensive)\n  (c) Cosine distance in CLIP feature space (requires CLIP encoding at each resampling step)\n  (d) MSE in pixel space (decode + MSE, moderate cost)",
+      "step2": "Run CoPS with each distance metric on COCO-500, seed=42, K=4, 50 DDIM steps, R=10, alpha=1.0.",
+      "step3": "IMPORTANT optimization: We can reuse the same K=4 particle trajectories from the main experiment. We just need to track x_hat_0 at each step and recompute PCS with different metrics post-hoc for L2 and MSE. For LPIPS and cosine, we need to decode/encode at each step, so these must be computed during generation. To save time, compute LPIPS and cosine PCS on a 100-prompt subset.",
+      "step4": "Compare: (a) Spearman correlation of each PCS variant with external quality metrics (b) Final image quality when selecting by each PCS variant. Save to exp/ablations/distance_metric_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation A2: Resampling frequency",
+    "description": "Test how often particles should be resampled. Too frequent resampling may reduce diversity (mode collapse); too infrequent may miss quality signals.",
+    "steps": {
+      "step1": "Resampling intervals to test (all with 50 DDIM steps, K=4):\n  (a) R=1 (every step — most aggressive)\n  (b) R=5 (every 5 steps)\n  (c) R=10 (default)\n  (d) R=25 (only twice during sampling)\n  (e) R=50 (no resampling, just final selection by PCS)\n  Note: R=50 is equivalent to Best-of-K with PCS as the selection criterion.",
+      "step2": "Run on COCO-500, seed=42. Reuse noise vectors from main experiment.",
+      "step3": "For R=50 (no resampling), we can reuse the main particle baselines and just apply PCS selection. For other R values, we need separate generation runs since resampling changes the trajectories.",
+      "step4": "Measure: FID, CLIP score, ImageReward, plus diversity metrics (average pairwise LPIPS distance among the K particles at the final step, to detect mode collapse).",
+      "step5": "Estimated time: 4 new R values × 500 prompts × 4 particles × 1.5s ≈ 2 hours. THIS IS TOO MUCH. Reduce to 200-prompt COCO subset for R={1,5,25} and reuse main experiment for R=10,50. Total ≈ 0.6 hours.",
+      "step6": "Save to exp/ablations/resampling_freq_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation A3: Timestep weighting for PCS",
+    "description": "Test whether emphasizing prediction coherence at certain timestep ranges improves the quality signal. The hypothesis from the proposal is that mid-range timesteps carry the most predictive signal.",
+    "steps": {
+      "step1": "Weighting schemes (50 DDIM steps, normalized to sum to 1):\n  (a) Uniform: w_j = 1/50\n  (b) Mid-emphasis: w_j = Gaussian centered at step 25, sigma=10\n  (c) Early-emphasis: w_j = exp(-j/10) (emphasize early steps t≈1→0.5)\n  (d) Late-emphasis: w_j = exp(-(50-j)/10) (emphasize late steps t≈0.1→0)\n  (e) Learned: use the Spearman correlation of per-step coherence with final CLIP score from a small calibration set (50 prompts) to set weights",
+      "step2": "Since weighting only affects how PCS is aggregated, NOT the particle trajectories, we can reuse all trajectories from the main experiment and recompute PCS with different weights. No additional generation needed.",
+      "step3": "Compute PCS under each weighting scheme, select particles, evaluate final quality metrics on COCO-500, seed=42.",
+      "step4": "Also analyze: which timestep range has the highest per-step correlation with final quality? Plot correlation(c_j, final_quality) vs timestep j.",
+      "step5": "Save to exp/ablations/timestep_weights_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation A4: Adaptive Step Allocation (ASA)",
+    "description": "Test whether using PCS to adaptively allocate step sizes within a fixed NFE budget improves quality compared to uniform step schedules.",
+    "steps": {
+      "step1": "Configurations (all single trajectory, no particles):\n  (a) Uniform 50 steps (baseline)\n  (b) ASA 50 steps: run 10-step pilot, redistribute 50 steps based on per-step prediction change\n  (c) Uniform 20 steps (efficient baseline)\n  (d) ASA 20 steps: run 5-step pilot, redistribute 20 steps\n  All use DDIM sampler, SD1.5, CFG 7.5.",
+      "step2": "Run on COCO-500 with 3 seeds [42, 123, 456].",
+      "step3": "Also test ASA combined with CoPS: K=4 particles, each using ASA-50 schedule. Compare against CoPS with uniform-50 schedule.",
+      "step4": "Estimated time: 4 configs × 500 × 3 seeds × 1.5s ≈ 1.5 hours. Plus combined CoPS+ASA: 500 × 3 × 4 × 1.5s ≈ 1.5 hours. Total ≈ 3 hours. Reduce COCO to 200 prompts for ASA ablation. Total ≈ 1.2 hours.",
+      "step5": "Save to exp/ablations/asa_results.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation A5: Combination with guidance methods",
+    "description": "Test whether CoPS is complementary to existing guidance methods (CFG variations). Since PAG and SAG require model modifications and additional dependencies, we focus on CFG scale variations as the most practical and widely-used guidance.",
+    "steps": {
+      "step1": "Configurations:\n  (a) CFG=3.0 (low guidance) — standard vs CoPS\n  (b) CFG=7.5 (default) — standard vs CoPS (already have from main experiment)\n  (c) CFG=12.0 (high guidance) — standard vs CoPS\n  (d) CFG=20.0 (extreme guidance) — standard vs CoPS\n  All with K=4, 50 DDIM steps, R=10 for CoPS.",
+      "step2": "Run on COCO-200 subset, seed=42.",
+      "step3": "Measure quality metrics at each CFG scale, with and without CoPS. If CoPS provides additive improvement at all CFG scales, it is complementary.",
+      "step4": "Estimated time: 3 new CFG values × 200 × 4 × 1.5s ≈ 0.6 hours.",
+      "step5": "Save to exp/ablations/cfg_combination_results.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute all evaluation metrics",
+    "description": "Compute FID, CLIP score, ImageReward, and Aesthetic score for all generated image sets. This is the centralized evaluation step.",
+    "steps": {
+      "step1": "Create exp/eval/compute_metrics.py that takes an image directory and prompt list as input and computes:\n  (a) FID: using clean-fid against the COCO real images (only for COCO-500 evaluations)\n  (b) CLIP Score: using open_clip ViT-B/32, average cosine similarity between text and image embeddings\n  (c) ImageReward: using the ImageReward model, average score per prompt\n  (d) Aesthetic Score: using the LAION aesthetic predictor v2\n  Save all metrics to a standardized JSON format.",
+      "step2": "Run evaluation on ALL generated image sets from baselines, main experiments, and ablations. Organize results by: method → dataset → seed → {fid, clip_score, image_reward, aesthetic_score}.",
+      "step3": "Compute mean and standard deviation across 3 seeds for each method-dataset combination.",
+      "step4": "Compute statistical significance: paired t-test or Wilcoxon signed-rank test between CoPS and each baseline, per prompt. Report p-values.",
+      "step5": "Create a comprehensive results table: exp/eval/all_results.json with all methods, datasets, seeds, and metrics.",
+      "step6": "Estimated time: scoring ~5000 images with CLIP + ImageReward + Aesthetic ≈ 30 minutes. FID computation ≈ 10 minutes per dataset. Total ≈ 1 hour."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success criteria evaluation",
+    "description": "Explicitly check each success criterion from the proposal against the experimental results.",
+    "steps": {
+      "step1": "Criterion 1: CoPS achieves FID within 5% of CLIP-guided particle sampling on COCO-500. Compute: |FID_CoPS - FID_CLIP_guided| / FID_CLIP_guided < 0.05.",
+      "step2": "Criterion 2: CoPS achieves CLIP/ImageReward scores within 3% of reward-guided methods. Compute relative differences.",
+      "step3": "Criterion 3: CoPS significantly outperforms random particle selection (>10% FID improvement). Compute: (FID_random - FID_CoPS) / FID_random > 0.10.",
+      "step4": "Criterion 4: PCS shows Spearman rho > 0.5 with external quality metrics across particles within each prompt. Use results from PCS correlation analysis.",
+      "step5": "Criterion 5: Quality scales positively with K under constant NFE. Check if metrics improve monotonically with K for CoPS (from scaling experiment).",
+      "step6": "Criterion 6: ASA provides measurable improvement over fixed schedules. Check if ASA variants outperform uniform variants at same NFE.",
+      "step7": "Criterion 7: CoPS is complementary to CFG. Check if CoPS+CFG_x > CFG_x for all tested CFG scales.",
+      "step8": "Compile a pass/fail table for all criteria. Save to exp/eval/success_criteria.json and exp/eval/success_criteria_summary.md."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables for the research paper. All figures use matplotlib with consistent styling.",
+    "steps": {
+      "step1": "Figure 1 (Method Overview / Teaser): Qualitative comparison showing the same prompt generated by (a) standard DDIM, (b) random particle selection, (c) CLIP-guided selection, (d) CoPS. Show 4 example prompts. Include PCS trajectory visualization below each CoPS example. Save as figures/figure1_qualitative.pdf.",
+      "step2": "Figure 2 (PCS Correlation): (a) Scatter plot of PCS vs CLIP score across all particles. (b) Scatter plot of PCS vs ImageReward. (c) Bar chart of Spearman rho for PCS vs each external metric. Save as figures/figure2_pcs_correlation.pdf.",
+      "step3": "Figure 3 (Main Results Table): Create a LaTeX table with rows = methods (DDIM-50, DPM-Solver-20, Random-K, CLIP-guided, ImageReward-guided, CoPS), columns = metrics (FID↓, CLIP↑, ImageReward↑, Aesthetic↑) × datasets (COCO-500, PartiPrompts-200, DrawBench). Bold the best, underline second best. Include ± std across seeds. Save as figures/table1_main_results.tex.",
+      "step4": "Figure 4 (Scaling Behavior): Line plot of quality metrics vs K (number of particles) for random, CLIP-guided, and CoPS selection methods. X-axis: K ∈ {1,2,4,8,16}, Y-axis: FID (one subplot), CLIP score (another), ImageReward (third). Save as figures/figure4_scaling.pdf.",
+      "step5": "Figure 5 (Ablation Studies): 2×2 grid of ablation results:\n  (a) Distance metric comparison (bar chart)\n  (b) Resampling frequency vs quality (line plot)\n  (c) Timestep weighting comparison (bar chart)\n  (d) ASA vs uniform schedule (bar chart with error bars)\n  Save as figures/figure5_ablations.pdf.",
+      "step6": "Figure 6 (Flow Matching): Bar chart comparing methods on SD3 Medium / PartiPrompts. Demonstrates generality to flow matching models. Save as figures/figure6_sd3.pdf.",
+      "step7": "Figure 7 (CFG Combination): Line plot of quality vs CFG scale, with and without CoPS. Shows CoPS provides additive improvement. Save as figures/figure7_cfg_combination.pdf.",
+      "step8": "Figure 8 (PCS Trajectory Visualization): For a few selected prompts, plot PCS value vs denoising step for each of the K particles. Show that selected (high-PCS) particles converge smoothly while rejected ones are erratic. Save as figures/figure8_pcs_trajectories.pdf.",
+      "step9": "Create a summary of all results as exp/results_summary.json with the complete results for easy reference during paper writing."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Computational cost analysis",
+    "description": "Analyze and visualize the computational cost of CoPS compared to reward-guided methods, demonstrating the practical advantage of not requiring external reward models.",
+    "steps": {
+      "step1": "Measure wall-clock time per image for each method:\n  (a) Standard DDIM-50\n  (b) Random-K (K=4, 50 steps)\n  (c) CoPS (K=4, 50 steps, L2 PCS)\n  (d) CoPS (K=4, 50 steps, LPIPS PCS)\n  (e) CLIP-guided (K=4, 50 steps + CLIP inference per resample)\n  (f) ImageReward-guided (K=4, 50 steps + IR inference per resample)\n  Time 100 prompts for each, report mean and std.",
+      "step2": "Measure peak GPU memory for each method.",
+      "step3": "Compute NFE (number of function evaluations) for each method to verify fair comparison.",
+      "step4": "Create table and bar chart comparing methods on: wall time, GPU memory, NFE, quality. Show that CoPS achieves quality comparable to reward-guided at lower cost. Save as figures/figure_cost_analysis.pdf and figures/table_cost.tex.",
+      "step5": "Save to exp/eval/cost_analysis.json."
+    }
+  }
+]

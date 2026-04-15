@@ -1,0 +1,308 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages and verify CUDA availability on the A6000 GPU.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision numpy scipy scikit-learn matplotlib seaborn pandas tqdm",
+      "step2": "Verify GPU availability: run python -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))\" and confirm A6000 is detected",
+      "step3": "Create project directory structure: exp/ (experiment runners), exp/shared/ (shared modules), figures/, results/",
+      "step4": "Verify all imports work correctly with a quick smoke test"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare all datasets",
+    "description": "Download CIFAR-10, CIFAR-100 (with superclass labels), and prepare data loaders with standard augmentation. CIFAR-100-C and Tiny-ImageNet are Tier 2 and prepared only if time allows.",
+    "steps": {
+      "step1": "Download CIFAR-10 and CIFAR-100 via torchvision.datasets (automatic download to ./data/). CIFAR-100 has 100 fine classes in 20 superclasses (coarse labels available via coarse=True).",
+      "step2": "Define standard training augmentation for 32x32 images: RandomResizedCrop(32, scale=(0.2, 1.0)), RandomHorizontalFlip(), ColorJitter(0.4, 0.4, 0.4, 0.1) with prob 0.8, RandomGrayscale(p=0.2), Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)) for CIFAR-100.",
+      "step3": "Define test transform: Normalize only (no augmentation) with same mean/std.",
+      "step4": "Create a shared data_loader.py module that returns train/test DataLoaders for CIFAR-10 and CIFAR-100 with batch_size=512, num_workers=4, pin_memory=True. For contrastive learning, each sample returns two augmented views (TwoCropTransform wrapper).",
+      "step5": "Build CIFAR-100 superclass mapping: map each of 100 fine classes to its superclass (0-19). Store as a dictionary for evaluation.",
+      "step6": "Verify data loading: print dataset sizes (CIFAR-100: 50000 train, 10000 test), number of classes, sample shapes.",
+      "step7": "[Tier 2] Download Tiny-ImageNet (200 classes, 64x64) and create data loaders with RandomResizedCrop(64). Download CIFAR-100-C for corruption robustness evaluation."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build shared training and evaluation utilities",
+    "description": "Create reusable modules for models, losses, training loops, and evaluation that all experiments will share.",
+    "steps": {
+      "step1": "Create exp/shared/models.py: ResNet-18 encoder with a 2-layer MLP projection head (2048->2048->128) following SupCon protocol. Output is L2-normalized 128-dim embeddings. Also support ResNet-50 for Tier 2. Use torchvision.models.resnet18/resnet50 modified for 32x32 input (replace first 7x7 conv with 3x3 conv, remove first maxpool).",
+      "step2": "Create exp/shared/losses.py with: (a) SupConLoss: standard supervised contrastive loss with fixed temperature tau=0.07, (b) CGALoss: the Confusion-Geometric Alignment loss operating on class prototypes with target similarity s*(i,j) = -1/(C-1) - alpha*(c_norm(i,j) - 1/(C-1)), weighted by c_norm(i,j), (c) SupConAdaptiveTempLoss: SupCon with class-pair-specific temperatures tau(i,j) = tau_base / (1 + gamma * c_norm(i,j)), (d) HardNegLoss: hard negative mining loss following Robinson et al. (2021) with concentration parameter beta=1.0, (e) CrossEntropyLoss: standard CE baseline.",
+      "step3": "Create exp/shared/utils.py with: (a) ConfusionTracker: maintains EMA confusion matrix (mu=0.99), computes symmetrized normalized confusion c_norm(i,j), (b) PrototypeTracker: maintains EMA of L2-normalized class prototypes (nu=0.99), (c) LinearEvaluator: trains a linear classifier on frozen embeddings (SGD, lr=0.1, cosine schedule, 100 epochs, batch 256), (d) seed_everything(seed): sets all random seeds for reproducibility, (e) compute_metrics(): computes top-1, top-5 accuracy, within-superclass accuracy, between-superclass accuracy, ETF deviation (variance of pairwise cosine similarities of class means), hierarchy correlation (Spearman rho between pairwise distances and superclass co-membership).",
+      "step4": "Create exp/shared/trainer.py: generic training loop that accepts a loss function, optional ConfusionTracker and PrototypeTracker, trains for specified epochs with SGD (lr=0.5, cosine schedule, momentum=0.9, weight_decay=1e-4), batch_size=512, warmup for first 5 epochs with lambda=0 for CGA methods. Saves checkpoints and logs loss/accuracy per epoch. For CG-SupCon: ramp lambda from 0 to lambda_max over epochs 5-10.",
+      "step5": "Implement a results saving utility: each experiment saves results.json with {method, dataset, seed, top1_acc, top5_acc, superclass_metrics, training_time, hyperparameters}."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Cross-Entropy baseline on CIFAR-100",
+    "description": "Train standard cross-entropy classifier as the simplest baseline. ResNet-18, 200 epochs, 5 seeds.",
+    "steps": {
+      "step1": "Create exp/ce_baseline/run.py: Train ResNet-18 with cross-entropy loss on CIFAR-100 for 200 epochs. SGD optimizer, lr=0.5 with cosine annealing, momentum=0.9, weight_decay=1e-4, batch_size=512. Standard augmentation.",
+      "step2": "Run with seeds [42, 43, 44, 45, 46]. Each run ~6 min (total ~30 min for 5 seeds sequential on 1 GPU).",
+      "step3": "Evaluate: top-1 accuracy, top-5 accuracy, within-superclass accuracy, between-superclass accuracy. Extract class embeddings (penultimate layer) for geometry analysis.",
+      "step4": "Save results to exp/ce_baseline/results_seed{N}.json. Expected: ~76-78% top-1 accuracy.",
+      "step5": "Estimated time: ~30 minutes total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "SupCon baseline on CIFAR-100",
+    "description": "Train standard SupCon (Khosla et al., 2020) as the primary comparison baseline. This is the CGA-free version. ResNet-18, 200 epochs contrastive + 100 epochs linear eval, 5 seeds.",
+    "steps": {
+      "step1": "Create exp/supcon_baseline/run.py: Train ResNet-18 encoder with SupCon loss (tau=0.07) on CIFAR-100 for 200 epochs. SGD, lr=0.5, cosine schedule, momentum=0.9, weight_decay=1e-4, batch_size=512. Two-crop augmentation.",
+      "step2": "After contrastive training, freeze encoder and train linear classifier for 100 epochs (SGD, lr=0.1, cosine schedule).",
+      "step3": "Run with seeds [42, 43, 44, 45, 46]. Each run ~7 min contrastive + ~3 min linear = ~10 min (total ~50 min for 5 seeds).",
+      "step4": "Evaluate: top-1, top-5, within-superclass, between-superclass accuracy. Compute ETF deviation and hierarchy correlation from class mean embeddings.",
+      "step5": "Save results to exp/supcon_baseline/results_seed{N}.json. Expected: ~72-74% top-1 accuracy (ResNet-18, 200 epochs).",
+      "step6": "Estimated time: ~50 minutes total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "HardNeg-CL baseline on CIFAR-100",
+    "description": "Train SupCon with hard negative mining (Robinson et al., 2021) as instance-level baseline. Tests class-level vs instance-level approaches.",
+    "steps": {
+      "step1": "Create exp/hardneg_baseline/run.py: Implement HardNeg-CL following Robinson et al. (2021). Use concentration parameter beta=1.0 (their recommended default). The loss upweights negatives that are closer to the anchor in embedding space.",
+      "step2": "Same training protocol as SupCon: ResNet-18, 200 epochs, SGD lr=0.5, cosine, batch_size=512, tau=0.07. Then 100 epochs linear eval.",
+      "step3": "Run with seeds [42, 43, 44, 45, 46]. ~10 min per seed, ~50 min total.",
+      "step4": "Evaluate same metrics as SupCon baseline.",
+      "step5": "Save results to exp/hardneg_baseline/results_seed{N}.json. Expected: ~73-75% top-1 (slight improvement over SupCon).",
+      "step6": "Estimated time: ~50 minutes total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "TCL baseline on CIFAR-100",
+    "description": "Train Tuned Contrastive Learning (Animesh & Chandraker, 2025) as a second instance-level baseline. 3 seeds.",
+    "steps": {
+      "step1": "Create exp/tcl_baseline/run.py: Implement TCL with learnable gradient response parameters for hard positives (rho_pos) and negatives (rho_neg). Initialize rho_pos=rho_neg=1.0, learn via SGD with lr=0.01.",
+      "step2": "Same backbone training protocol: ResNet-18, 200 epochs, SGD lr=0.5, cosine, batch_size=512. Then 100 epochs linear eval.",
+      "step3": "Run with seeds [42, 43, 44]. ~10 min per seed, ~30 min total.",
+      "step4": "Evaluate same metrics.",
+      "step5": "Save results to exp/tcl_baseline/results_seed{N}.json. Expected: ~73-75% top-1.",
+      "step6": "Estimated time: ~30 minutes total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "SupCon + Pairwise Reweighting (MACL-style) baseline on CIFAR-100",
+    "description": "Adapt MACL's pairwise reweighting approach using confusion frequency. Tests whether simple reweighting suffices vs geometric alignment.",
+    "steps": {
+      "step1": "Create exp/reweight_baseline/run.py: Standard SupCon but weight each negative pair (i,j) by w(i,j) = 1 + beta_rw * c_norm(i,j) where c_norm is from the same EMA confusion tracker used by CG-SupCon. beta_rw=2.0. This upweights confused pairs in the contrastive loss without prescribing target geometry.",
+      "step2": "Same training protocol: ResNet-18, 200 epochs, SGD lr=0.5, cosine, batch_size=512. Uses ConfusionTracker from shared utils. 5 epoch warmup before enabling reweighting.",
+      "step3": "Run with seeds [42, 43, 44]. ~10 min per seed, ~30 min total.",
+      "step4": "Evaluate same metrics.",
+      "step5": "Save results to exp/reweight_baseline/results_seed{N}.json.",
+      "step6": "Estimated time: ~30 minutes total."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "VarCon-T baseline on CIFAR-100",
+    "description": "Implement VarCon's confidence-adaptive temperature mechanism (without full ELBO). Tests per-sample temperature adaptation.",
+    "steps": {
+      "step1": "Create exp/varcon_t_baseline/run.py: SupCon with per-sample adaptive temperature: for anchor x, tau(x) = tau_base / (1 + gamma_v * (1 - max_c p(c|x))) where p(c|x) is the model's softmax prediction. Low-confidence samples get lower temperature (sharper). gamma_v=2.0.",
+      "step2": "Requires a classification head during contrastive training to compute p(c|x). Add a linear classification head trained jointly (with stop-gradient on encoder for this head, or detached). Alternatively, use nearest-prototype classification for p(c|x).",
+      "step3": "Same backbone protocol: ResNet-18, 200 epochs, batch_size=512. Then 100 epochs linear eval.",
+      "step4": "Run with seeds [42, 43, 44]. ~12 min per seed (slightly more compute for adaptive temp), ~36 min total.",
+      "step5": "Save results to exp/varcon_t_baseline/results_seed{N}.json.",
+      "step6": "Estimated time: ~36 minutes total."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CG-SupCon hyperparameter grid search on CIFAR-100",
+    "description": "Run alpha/lambda grid search on CIFAR-100 with 1 seed to select best hyperparameters before the full 5-seed evaluation.",
+    "steps": {
+      "step1": "Create exp/cgsc_grid/run.py: CG-SupCon with grid over alpha in {0.3, 0.5, 0.7} and lambda in {0.1, 0.5, 1.0}. Fixed gamma=0 (no adaptive temp) to isolate CGA effect. Total: 9 configurations.",
+      "step2": "Training: ResNet-18, 200 epochs, SGD lr=0.5, cosine, batch_size=512. 5-epoch warmup (lambda=0), then lambda ramp-up over epochs 5-10. ConfusionTracker (mu=0.99) and PrototypeTracker (nu=0.99).",
+      "step3": "Run all 9 configs with seed=42. Each ~10 min, total ~90 min sequential.",
+      "step4": "Select best (alpha, lambda) by top-1 accuracy on test set. Record all results for sensitivity analysis figure.",
+      "step5": "Save results to exp/cgsc_grid/results_alpha{A}_lambda{L}.json.",
+      "step6": "Estimated time: ~90 minutes total."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CG-SupCon full evaluation on CIFAR-100",
+    "description": "Run CG-SupCon with best hyperparameters from grid search, 5 seeds, full metric evaluation.",
+    "steps": {
+      "step1": "Create exp/cgsc_main/run.py: CG-SupCon with best (alpha, lambda) from grid search. gamma=0 for CGA-only variant; also run with gamma=5 for full CG-SupCon.",
+      "step2": "Run CGA-only variant (gamma=0) with seeds [42, 43, 44, 45, 46]. ~10 min per seed, ~50 min total.",
+      "step3": "Run full CG-SupCon (gamma=5) with seeds [42, 43, 44, 45, 46]. ~12 min per seed, ~60 min total.",
+      "step4": "Full evaluation for each seed: top-1, top-5, within-superclass accuracy, between-superclass accuracy, ETF deviation, hierarchy correlation (Spearman rho), top-20 confused pair reduction, training time per epoch.",
+      "step5": "Save results to exp/cgsc_main/results_cga_seed{N}.json and exp/cgsc_main/results_full_seed{N}.json.",
+      "step6": "Estimated time: ~110 minutes total."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "CGA component ablation study",
+    "description": "Ablate each component of CG-SupCon to validate that CGA is the primary contributor. 4 variants, 3 seeds each.",
+    "steps": {
+      "step1": "Create exp/ablation_components/run.py with 4 variants: (A) SupCon only (lambda=0, gamma=0) -- reuses SupCon baseline results, (B) SupCon + CGA only (best lambda, gamma=0) -- reuses CGA-only from main experiment, (C) SupCon + adaptive temp only (lambda=0, gamma=5), (D) CG-SupCon full (best lambda, gamma=5) -- reuses full CG-SupCon from main experiment.",
+      "step2": "Only need to run variant C (adaptive temp only) freshly with seeds [42, 43, 44]. ~12 min each, 3 runs = ~36 min.",
+      "step3": "Key test: variant B (CGA only) should provide the majority of gain over A (SupCon). Variant D should be >= B. Variant C (adaptive temp only) should provide smaller gain than B.",
+      "step4": "Report delta accuracy for each component: CGA contribution = B - A, temp contribution = D - B, interaction = D - (B + C - A).",
+      "step5": "Save results to exp/ablation_components/results_variant{X}_seed{N}.json.",
+      "step6": "Estimated time: ~36 minutes (only variant C needs fresh runs)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Alpha and lambda sensitivity analysis",
+    "description": "Analyze sensitivity of CG-SupCon to CGA strength (alpha) and regularizer weight (lambda). Extends grid search with boundary values.",
+    "steps": {
+      "step1": "Use results from the alpha/lambda grid search (9 configurations, 1 seed each). Additionally run alpha in {0.1, 1.0} with best lambda, and lambda in {0.01, 5.0} with best alpha, each with seed=42. Total: 4 additional runs.",
+      "step2": "Create exp/sensitivity/run.py for the additional boundary configurations.",
+      "step3": "Plot heatmap: alpha (x-axis) vs lambda (y-axis), color = top-1 accuracy. Show that performance is robust across a range.",
+      "step4": "Plot 1D sensitivity curves: accuracy vs alpha (fixing best lambda), accuracy vs lambda (fixing best alpha).",
+      "step5": "Save results to exp/sensitivity/results_alpha{A}_lambda{L}.json.",
+      "step6": "Estimated time: ~40 minutes total (4 additional runs)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Wall-clock overhead measurement",
+    "description": "Measure training time per epoch for each method to demonstrate CGA has negligible overhead.",
+    "steps": {
+      "step1": "For each method (CE, SupCon, HardNeg-CL, CG-SupCon), time 10 training epochs on CIFAR-100 with ResNet-18, batch_size=512. Use torch.cuda.synchronize() before timing.",
+      "step2": "Compute mean and std of time per epoch across the 10 epochs (discard first epoch as warmup).",
+      "step3": "Report overhead as percentage increase over SupCon baseline. Target: CG-SupCon overhead < 10% (expected < 5% given O(C^2) CGA cost).",
+      "step4": "Save timing results to exp/overhead/timing_results.json.",
+      "step5": "Estimated time: ~15 minutes total."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Embedding geometry and confusion analysis",
+    "description": "Analyze the learned embedding geometry to validate that CGA breaks ETF symmetry in a confusion-structured way.",
+    "steps": {
+      "step1": "For SupCon and CG-SupCon (best seed): extract class mean embeddings from the test set (average L2-normalized embeddings per class). Compute pairwise cosine similarity matrix (100x100 for CIFAR-100).",
+      "step2": "Compute ETF deviation: variance of off-diagonal pairwise cosine similarities. SupCon should have low variance (near-ETF). CG-SupCon should have higher variance (broken ETF).",
+      "step3": "Compute hierarchy correlation: Spearman rank correlation between pairwise embedding distances and ground-truth superclass co-membership (binary: 1 if same superclass, 0 otherwise). CG-SupCon should have higher correlation (Spearman rho improvement > 0.1 over SupCon).",
+      "step4": "Compute confusion reduction: for the top-20 most confused class pairs (from SupCon), measure the reduction in confusion values in CG-SupCon.",
+      "step5": "Verify Theorem 1 empirically: check that inter-class cosine similarities are monotonically ordered by confusion strength. Compute Spearman correlation between confusion values c(i,j) and cosine similarities p_i.p_j. Should be strongly negative for CG-SupCon.",
+      "step6": "Save analysis to results/geometry_analysis.json.",
+      "step7": "Estimated time: ~10 minutes (analysis on saved embeddings, no training)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "[Tier 2] Few-shot evaluation",
+    "description": "Evaluate frozen embeddings on few-shot classification tasks. Tests whether structured geometry improves low-data generalization.",
+    "steps": {
+      "step1": "Use the full CIFAR-100-trained encoders from SupCon and CG-SupCon. Sample 5-way tasks from all 100 classes.",
+      "step2": "For each task: sample 5 classes, k support samples per class (k=1 and k=5), 15 query samples per class. Use nearest-centroid classification on L2-normalized embeddings.",
+      "step3": "Run 600 episodes for each setting (5-way 1-shot, 5-way 5-shot) with seeds [42, 43, 44]. Report mean accuracy and 95% CI.",
+      "step4": "Compare SupCon vs CG-SupCon. CG-SupCon should show 2-5% improvement since structured geometry helps when data is scarce.",
+      "step5": "Save results to exp/fewshot/results_seed{N}.json.",
+      "step6": "Estimated time: ~10 minutes total (no training, just evaluation)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "[Tier 2] CIFAR-100-C corruption robustness",
+    "description": "Evaluate on corrupted test images to test robustness of learned representations.",
+    "steps": {
+      "step1": "Download CIFAR-100-C (15 corruption types x 5 severity levels). If not available via standard download, generate corruptions using torchvision transforms or the imagecorruptions library.",
+      "step2": "For SupCon and CG-SupCon (seed=42): evaluate the linear classifier on each corruption at severity 5 (most severe). Report per-corruption and mean accuracy.",
+      "step3": "Compute mean Corruption Error (mCE) relative to CE baseline following standard protocol.",
+      "step4": "CG-SupCon should show 1-3% improvement in mean corruption accuracy due to more structured geometry.",
+      "step5": "Save results to exp/corruption/results.json.",
+      "step6": "Estimated time: ~20 minutes (evaluation only, no training)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "[Tier 2] Stability analysis: class-pair vs instance-level",
+    "description": "Validate that class-pair confusion is more stable than instance-level hardness, supporting the theoretical motivation.",
+    "steps": {
+      "step1": "Using CG-SupCon checkpoints at epochs 50, 100, 150, 200 for 3 seeds: extract (a) top-20 most confused class pairs from confusion matrix, (b) top-20 hardest negative instances (by embedding distance to anchor).",
+      "step2": "Compute Kendall tau rank correlation of top-20 rankings between: (a) different epochs same seed, (b) different seeds same epoch.",
+      "step3": "Report mean Kendall tau for class-pair rankings (expected > 0.7) and instance-level rankings (expected < 0.4).",
+      "step4": "This validates that class-pair confusion provides a more stable signal for geometric alignment.",
+      "step5": "Save results to exp/stability/results.json.",
+      "step6": "Estimated time: ~10 minutes (analysis on saved checkpoints)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "[Tier 2] Tiny-ImageNet evaluation",
+    "description": "Test scalability to 200 classes on Tiny-ImageNet.",
+    "steps": {
+      "step1": "Download Tiny-ImageNet (200 classes, 100K train, 10K val, 64x64). Create data loaders with augmentation adapted for 64x64 (RandomResizedCrop(64)).",
+      "step2": "Train SupCon and CG-SupCon with ResNet-18 for 100 epochs each, seed=42. Same optimizer settings but adjust lr schedule for 100 epochs.",
+      "step3": "Linear eval for 100 epochs. Evaluate top-1, top-5 accuracy.",
+      "step4": "Save results to exp/tinyimagenet/results_{method}_seed42.json.",
+      "step5": "Estimated time: ~40 minutes total (2 runs x 20 min each)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "[Tier 2] CIFAR-10 sanity check",
+    "description": "Verify the method works on a simpler dataset. With only 10 classes, the benefit should be smaller but still present.",
+    "steps": {
+      "step1": "Train CE, SupCon, and CG-SupCon on CIFAR-10 with ResNet-18, 200 epochs, seeds [42, 43, 44].",
+      "step2": "Use CIFAR-10 normalization: mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010).",
+      "step3": "Report top-1 accuracy. Gains should be smaller (0.5-1%) since only 10 classes means less inter-class confusion structure to exploit.",
+      "step4": "Save results to exp/cifar10/results_{method}_seed{N}.json.",
+      "step5": "Estimated time: ~30 minutes total (9 runs x ~3 min each)."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Aggregate all results, compute statistics, and evaluate against the 8 success criteria.",
+    "steps": {
+      "step1": "Create aggregate_results.py that reads all results JSON files and computes: mean +/- std across seeds for each method and metric.",
+      "step2": "Statistical tests: paired t-test (5 seeds) between CG-SupCon and each baseline on CIFAR-100 top-1 accuracy. Report p-values. Success criterion 1: p < 0.05 vs SupCon.",
+      "step3": "Evaluate success criterion 2: CG-SupCon > HardNeg-CL and TCL on CIFAR-100 top-1.",
+      "step4": "Evaluate success criterion 3: CG-SupCon > Pairwise Reweighting on CIFAR-100 top-1.",
+      "step5": "Evaluate success criterion 4: CGA-only variant > SupCon (CGA is primary contributor).",
+      "step6": "Evaluate success criterion 5: within-superclass accuracy improvement > between-superclass improvement.",
+      "step7": "Evaluate success criterion 6: hierarchy correlation Spearman rho improvement > 0.1 over SupCon.",
+      "step8": "Evaluate success criterion 7: gains hold on at least one additional dataset.",
+      "step9": "Evaluate success criterion 8: wall-clock overhead < 10%.",
+      "step10": "Save comprehensive results table to results/results.json with all metrics, p-values, and success criteria pass/fail.",
+      "step11": "Estimated time: ~5 minutes (analysis only)."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables for the paper, covering main results, ablations, geometry analysis, and sensitivity.",
+    "steps": {
+      "step1": "Create figures/create_figures.py that generates all plots.",
+      "step2": "Table 1 (Main Results): CIFAR-100 comparison table with all methods. Columns: Method, Top-1 (mean +/- std), Top-5, Within-SC, Between-SC, ETF Dev, Hier. Corr., Time/epoch. Bold best, underline second best. Save as figures/table1_main_results.tex and .csv.",
+      "step3": "Figure 1 (Embedding Geometry): 2D visualization (t-SNE or PCA) of class mean embeddings for SupCon vs CG-SupCon on CIFAR-100. Color by superclass. CG-SupCon should show more superclass-clustered structure. Save as figures/figure1_geometry.pdf and .png.",
+      "step4": "Figure 2 (Confusion-Distance Correlation): Scatter plot of confusion c(i,j) vs cosine similarity p_i.p_j for all class pairs, separately for SupCon and CG-SupCon. CG-SupCon should show stronger negative correlation (validating Theorem 1). Save as figures/figure2_confusion_distance.pdf and .png.",
+      "step5": "Figure 3 (Ablation Bar Chart): Grouped bar chart showing accuracy of 4 ablation variants (SupCon, +CGA, +AdaptTemp, +Both). Shows CGA is the primary contributor. Save as figures/figure3_ablation.pdf and .png.",
+      "step6": "Figure 4 (Sensitivity Heatmap): Heatmap of alpha vs lambda with accuracy as color. Show robustness across hyperparameter range. Save as figures/figure4_sensitivity.pdf and .png.",
+      "step7": "Figure 5 (Training Dynamics): Plot CGA loss and confusion matrix entropy over training epochs. Show that confusion matrix stabilizes and CGA loss decreases. Save as figures/figure5_training_dynamics.pdf and .png.",
+      "step8": "Table 2 (Ablation): Detailed ablation results. Save as figures/table2_ablation.tex and .csv.",
+      "step9": "[Tier 2] Figure 6 (Stability Analysis): Box plot comparing Kendall tau of class-pair rankings vs instance-level rankings across seeds/epochs.",
+      "step10": "[Tier 2] Table 3 (Additional Datasets): Results on CIFAR-10, Tiny-ImageNet, CIFAR-100-C.",
+      "step11": "Estimated time: ~15 minutes."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Runtime budget and execution order",
+    "description": "Plan the sequential execution order to maximize GPU utilization within the 8-hour budget on 1x A6000.",
+    "steps": {
+      "step1": "Phase 1 - Baselines (~3.7h sequential): CE baseline 5 seeds (30 min), SupCon baseline 5 seeds (50 min), HardNeg-CL 5 seeds (50 min), TCL 3 seeds (30 min), Pairwise Reweight 3 seeds (30 min), VarCon-T 3 seeds (36 min).",
+      "step2": "Phase 2 - Grid search (~1.5h): alpha/lambda grid 9 configs (90 min). Select best hyperparameters.",
+      "step3": "Phase 3 - Main + Ablation (~2.5h): CG-SupCon CGA-only 5 seeds (50 min), CG-SupCon full 5 seeds (60 min), Ablation variant C 3 seeds (36 min).",
+      "step4": "Phase 4 - Analysis (~0.5h): Overhead measurement (15 min), Geometry analysis (10 min), Statistical tests (5 min).",
+      "step5": "Phase 5 - Visualization (~0.25h): Generate all figures and tables (15 min).",
+      "step6": "Total Tier 1: ~8h. If behind schedule, apply cutback: reduce TCL/VarCon-T to 1 seed (saves 40 min), reduce sensitivity boundary configs (saves 40 min).",
+      "step7": "Tier 2 experiments (if time allows, ~2h): CIFAR-10 (30 min), Few-shot eval (10 min), CIFAR-100-C (20 min), Stability analysis (10 min), Tiny-ImageNet (40 min).",
+      "step8": "Key optimization: reuse CGA-only and full CG-SupCon results from main experiment in ablation study (saves ~100 min of redundant training)."
+    }
+  }
+]

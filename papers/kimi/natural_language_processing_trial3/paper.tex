@@ -1,0 +1,385 @@
+\documentclass{article}
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+% Algorithm environment defined in neurips_2025.sty
+\usepackage{xcolor}
+
+
+\title{Entropy-Guided Stepwise Revision: In-Chain Self-Correction for Efficient Reasoning}
+
+\author{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Chain-of-thought reasoning in large language models (LLMs) suffers from two fundamental problems: overthinking---generating excessive tokens for simple problems---and irreversible errors, where models commit to incorrect reasoning steps early and propagate them through the chain. We propose Entropy-guided Stepwise Revision (ESR), a training-free method that monitors entropy and varentropy during generation to detect confused reasoning steps and trigger in-chain revision before errors propagate. Unlike beam search methods that explore multiple branches or post-hoc refinement that corrects after generation, ESR performs targeted revision within a single reasoning chain. We evaluate ESR on GSM8K using Qwen3-1.7B, comparing against vanilla chain-of-thought, entropy-only triggers, entropy-gated beam search, post-hoc refinement, and best-of-N sampling. While results show comparable accuracy to baselines (46--48\%), we found that ESR's revision mechanism rarely triggered due to threshold calibration challenges. This work provides empirical evidence on the difficulty of training-free self-correction and establishes a framework for uncertainty-guided revision that may benefit from adaptive threshold mechanisms.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models (LLMs) with explicit reasoning capabilities have demonstrated remarkable performance on complex tasks through extended chain-of-thought (CoT) generation \citep{wei2022chain}. However, this approach creates two fundamental inefficiencies: \textbf{overthinking}---where models generate excessive tokens for simple problems \citep{kumar2025overthink}---and \textbf{irreversible errors}---where models commit to incorrect reasoning steps early and propagate them through the chain \citep{chiang2024overreasoning}.
+
+Recent work has explored various solutions to these problems. Entropy-Gated Branching (EGB) \citep{li2025entropy} uses entropy thresholds to decide when to branch during beam search, improving efficiency by avoiding unnecessary exploration in low-uncertainty regions. Entropy-Guided Loop (EGL) \citep{correa2025entropy} triggers a post-hoc refinement pass after generation when uncertainty metrics exceed thresholds. While effective, these approaches have key limitations:
+
+\begin{itemize}
+    \item \textbf{EGB focuses on branching}: It generates multiple candidates at uncertain positions but does not revise existing reasoning within a single chain.
+    \item \textbf{EGL performs post-hoc refinement}: It generates a complete response, then optionally refines it, but cannot correct errors during the initial generation process.
+    \item \textbf{Both treat uncertainty monolithically}: They primarily use entropy magnitude without considering the \textit{structure} of uncertainty (e.g., consistent confusion vs. choice between valid alternatives).
+\end{itemize}
+
+\textbf{The key insight we exploit}: Not all high-entropy situations are alike. High entropy with low variance (high entropy, low varentropy) indicates the model is genuinely confused and should pause to reconsider. High entropy with high variance indicates a fork between viable paths---different from confusion. Current methods do not distinguish these cases.
+
+\subsection{Our Contributions}
+
+We propose ESR (Entropy-guided Stepwise Revision), a training-free framework that treats reasoning as a sequential process with potential self-correction at each step. Our contributions are:
+
+\begin{itemize}
+    \item We propose a novel training-free method for in-chain stepwise revision guided by joint entropy-varentropy analysis, distinguishing confused states (requiring revision) from fork states (choice between viable alternatives).
+    \item We demonstrate the practical challenges of threshold-based uncertainty detection in small language models, showing that calibration significantly affects revision rates.
+    \item We provide a comprehensive empirical analysis comparing ESR against multiple baselines (vanilla CoT, entropy-only, beam search, post-hoc refinement, best-of-N) on mathematical reasoning tasks.
+    \item We release our code and experimental framework for reproducibility.
+\end{itemize}
+
+\textbf{Roadmap}: Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the ESR method. Section~\ref{sec:experiments} presents our experimental setup and results. Section~\ref{sec:discussion} discusses limitations and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Entropy-Based Test-Time Methods}
+
+\textbf{Entropix} \citep{xjdr2024entropix} is the first work to introduce joint entropy-varentropy analysis for LLM inference. We note that Entropix is an open-source implementation (GitHub repository) rather than a peer-reviewed publication. Entropix uses the same uncertainty classification (confused vs. fork states) to dynamically adjust sampling parameters---temperature, top-k, and top-p---based on the model's uncertainty profile. While both methods use entropy-varentropy analysis, Entropix adjusts sampling strategies (changing how tokens are sampled) but does not alter the reasoning chain itself. In contrast, ESR triggers in-chain revision, detecting confused states and prompting the model to explicitly reconsider problematic reasoning steps.
+
+\textbf{Entropy-Gated Branching (EGB)} \citep{li2025entropy} uses entropy thresholds to decide when to create multiple branches during beam search. While both methods use entropy signals, EGB branches at high entropy, maintaining parallel candidates, while ESR revises in-place, maintaining a single chain. EGB requires a verifier to score multiple branches; ESR relies on self-correction.
+
+\textbf{Entropy-Guided Loop (EGL)} \citep{correa2025entropy} uses entropy to trigger a post-generation refinement pass. EGL generates fully, then optionally refines, while ESR detects and corrects during generation, preventing error propagation rather than fixing completed errors.
+
+\subsection{Stepwise Correction with External Verifiers}
+
+\textbf{StepCo} \citep{wu2024stepco} proposes stepwise correction using a trained Process-Supervised Verifier (PSV). StepCo fine-tunes Llama-3-8B as a verifier to identify incorrect steps and guide revision. Key distinctions: StepCo requires training a dedicated verifier model; ESR is training-free. StepCo uses explicit scores from the PSV; ESR uses implicit signals from the generation process.
+
+\subsection{Self-Correction and Its Limitations}
+
+The ability of LLMs to self-correct without external feedback has been extensively studied and debated. \citet{huang2024selfcorrect} demonstrated that LLMs cannot reliably self-correct reasoning based solely on their inherent capabilities and prompting. Their key finding---that self-correction without external feedback often degrades performance---challenges the foundation of intrinsic self-correction methods.
+
+\citet{kamoi2024selfcorrect} conducted a comprehensive survey of self-correction, finding that no prior work shows reliable evidence of successful self-correction with in-context learning on general tasks. Self-correction is effective when reliable external feedback is available (e.g., code interpreters, ground truth) or when fine-tuning with large training datasets.
+
+\textbf{ESR's position}: We acknowledge these limitations and position ESR as a ``weak'' form of self-correction that provides external feedback implicitly through the revision prompt. ESR operates on the hypothesis that entropy-varentropy detection identifies steps where the model has already detected its own uncertainty.
+
+\subsection{Positioning and Novelty}
+
+Table~\ref{tab:comparison} positions ESR relative to related methods along key dimensions.
+
+\begin{table}[t]
+\caption{Comparison of test-time reasoning methods.}
+\label{tab:comparison}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Training & Parallel Branches & When to Revise & Verifier Required \\
+\midrule
+EGB \citep{li2025entropy} & No & Yes (beam search) & At high entropy & Yes \\
+EGL \citep{correa2025entropy} & No & No & Post-generation & No \\
+Entropix \citep{xjdr2024entropix} & No & No & During generation & No \\
+StepCo \citep{wu2024stepco} & Yes (PSV) & No & Post-generation & Yes (trained) \\
+\textbf{ESR (Ours)} & \textbf{No} & \textbf{No} & \textbf{During generation} & \textbf{No} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries}
+
+Let $\mathcal{M}$ be a language model. At generation step $t$, the model produces a token distribution $p_t$ over vocabulary $\mathcal{V}$. We compute:
+
+\textbf{Entropy} (average uncertainty):
+\begin{equation}
+H_t = -\sum_{v \in \mathcal{V}} p_t(v) \log p_t(v)
+\end{equation}
+
+\textbf{Varentropy} (variance of uncertainty):
+\begin{equation}
+V_t = \sum_{v \in \mathcal{V}} p_t(v) \left(\log p_t(v) + H_t\right)^2
+\end{equation}
+
+The joint (entropy, varentropy) pair forms an ``uncertainty signature'' that distinguishes different cognitive states.
+
+\subsection{Uncertainty Signature Classification}
+
+Based on empirical analysis following Entropix \citep{xjdr2024entropix}, we classify uncertainty into three regimes (Table~\ref{tab:regimes}):
+
+\begin{table}[t]
+\caption{Uncertainty signature classification and corresponding actions.}
+\label{tab:regimes}
+\centering
+\begin{tabular}{lcccp{3cm}}
+\toprule
+Regime & Entropy & Varentropy & Interpretation & Action \\
+\midrule
+Confident & Low & Low & Clear preferred token & Continue \\
+Fork & High & High & Choice between options & Continue with best \\
+Confused & High & Low & Diffuse distribution & \textbf{Revise} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ``confused'' regime is particularly important: the model lacks confidence (high entropy) and the uncertainty is consistent across the distribution (low varentropy), indicating genuine confusion rather than a discrete choice.
+
+\subsection{In-Chain Revision Protocol}
+
+When a ``confused'' signature is detected at step $t$:
+
+\begin{enumerate}
+    \item \textbf{Pause}: Stop generation at step $t$
+    \item \textbf{Context Assembly}: Collect the reasoning so far, highlighting the uncertain step
+    \item \textbf{Revision Generation}: Prompt the model: \textit{``The previous step shows uncertainty. Reconsider this step more carefully: [...]''}
+    \item \textbf{Continuation}: Generate the remainder of the chain from the revision point
+\end{enumerate}
+
+Each revision consumes budget from a global revision budget $R_{\max}$.
+
+\subsection{Algorithm}
+
+Algorithm~\ref{alg:esr} presents the complete ESR procedure.
+
+\begin{algorithm}
+\textbf{Algorithm 1:} ESR (Entropy-guided Stepwise Revision)
+\label{alg:esr}
+
+\vspace{0.5em}
+\textbf{Input:} Query $x$, Model $\mathcal{M}$, Thresholds $\tau_H, \tau_V$, Max revisions $R_{\max}$\\
+\textbf{Output:} Answer $y$
+\vspace{0.5em}
+
+\begin{enumerate}
+    \item Initialize reasoning chain $r = \emptyset$, revision\_count $= 0$
+    \item For each generation step $t = 1, 2, \ldots$:
+    \begin{enumerate}
+        \item Generate token $s_t \sim \mathcal{M}(\cdot \mid x, r)$
+        \item Compute $H_t$ and $V_t$ from token distribution
+        \item If $H_t > \tau_H$ AND $V_t < \tau_V$ AND revision\_count $< R_{\max}$:
+        \begin{enumerate}
+            \item // Confused regime --- trigger revision
+            \item Identify reasoning step boundary
+            \item Generate revision $r_{\text{rev}}$ by prompting $\mathcal{M}$ to reconsider
+            \item Replace uncertain step with $r_{\text{rev}}$ in chain
+            \item revision\_count $\leftarrow$ revision\_count $+ 1$
+            \item Continue generation from revision point
+        \end{enumerate}
+        \item Else: Append $s_t$ to $r$
+        \item If answer token generated: break
+    \end{enumerate}
+    \item Return ExtractAnswer($r$)
+\end{enumerate}
+\end{algorithm}
+
+\subsection{Theoretical Justification}
+
+\textbf{Proposition 1} (Error Propagation Prevention): In autoregressive reasoning, errors compound multiplicatively through the chain. Correcting an error at step $t$ before generating step $t+1$ prevents error propagation, providing exponential improvement over post-hoc correction.
+
+\textbf{Proposition 2} (Efficiency): Single-chain revision has $O(L)$ complexity for chain length $L$, while beam search with $K$ beams has $O(KL)$. Even with $R_{\max}$ revisions, ESR maintains $O(L + R_{\max} \cdot L_{\text{step}})$ where $L_{\text{step}} \ll L$.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Dataset}: We evaluate on GSM8K \citep{cobbe2021training}, a dataset of grade-school math word problems containing approximately 1,300 test problems. Following standard practice, we use the test split for evaluation.
+
+\textbf{Model}: We evaluate on Qwen3-1.7B \citep{yang2025qwen3}, a 1.7B parameter model with strong reasoning capabilities.
+
+\textbf{Baselines}:
+\begin{itemize}
+    \item \textbf{Vanilla CoT}: Standard chain-of-thought prompting with greedy decoding
+    \item \textbf{Entropy-Only}: ESR variant using only entropy threshold (no varentropy)
+    \item \textbf{EGB-style}: Entropy-gated beam search with $K=3$ beams
+    \item \textbf{EGL-style}: Post-hoc refinement when average entropy exceeds threshold
+    \item \textbf{Best-of-N}: Sample $N=4$ responses and select via majority voting
+\end{itemize}
+
+\textbf{Implementation Details}: All experiments use temperature $=0.0$ for deterministic generation (except Best-of-N which uses temperature $=0.7$). Maximum generation length is 512 tokens. ESR thresholds are set to $\tau_H=2.5$ and $\tau_V=1.5$ based on preliminary analysis. Maximum revisions $R_{\max}=3$.
+
+\textbf{Sample Size Note}: Due to computational constraints and the exploratory nature of this work, different methods were evaluated with varying sample sizes (Vanilla: 75 problems on seed 42, 50 on seed 123; ESR/Entropy-Only/EGL: 50 problems; Best-of-N: 25 problems). This is a limitation that affects the statistical power of our comparisons; we discuss this further in Section~\ref{sec:discussion}.
+
+\textbf{MATH-500 Note}: We originally planned to evaluate on MATH-500 \citep{lightman2023let} but these experiments were not completed due to time constraints. We report only GSM8K results in this work.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents the accuracy and token counts for all methods on GSM8K.
+
+\begin{table}[t]
+\caption{Main results on GSM8K (Qwen3-1.7B). Note: Different sample sizes across methods (see text).}
+\label{tab:main_results}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Sample Size & Accuracy (\%) & Avg. Tokens \\
+\midrule
+Vanilla CoT & 75 & 48.0 & 512 \\
+Vanilla CoT & 50 & 46.0 & 512 \\
+ESR & 50 & 46.0 & 512 \\
+Entropy-Only & 50 & 46.0 & 512 \\
+EGL & 50 & 46.0 & 512 \\
+Best-of-N ($N=4$) & 25 & 44.0 & 512 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Findings}: All methods achieve comparable accuracy (44--48\%) on the evaluated subsets. We did not observe significant differences between vanilla CoT and the uncertainty-guided methods.
+
+\subsection{Revision Analysis}
+
+A critical finding is that ESR's revision mechanism rarely triggered in our experiments. With thresholds $\tau_H=2.5$ and $\tau_V=1.5$, the revision rate was 0\% on the evaluated problems. This suggests that:
+
+\begin{enumerate}
+    \item The Qwen3-1.7B model exhibits lower entropy values than anticipated during mathematical reasoning
+    \item Our fixed thresholds may be too conservative for this model
+    \item Adaptive or model-specific threshold calibration may be necessary
+\end{enumerate}
+
+The entropy and varentropy values observed during generation were typically below the triggering thresholds, even when the model produced incorrect answers. This indicates that entropy-varentropy signals alone may not reliably indicate reasoning errors in smaller models without careful calibration.
+
+\subsection{Ablation Study}
+
+Table~\ref{tab:ablation} presents ablation results comparing the full ESR method against variants.
+
+\begin{table}[t]
+\caption{Ablation study on GSM8K (50 problems, seed 42).}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & Accuracy (\%) & Revision Rate (\%) \\
+\midrule
+ESR (full) & 46.0 & 0.0 \\
+Entropy-Only & 46.0 & 0.0 \\
+EGL (post-hoc) & 46.0 & N/A \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Since the revision mechanism did not trigger, the accuracy of ESR is identical to the entropy-only variant and comparable to vanilla CoT. This highlights the challenge of threshold calibration for training-free uncertainty detection.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{Interpretation of Results}
+
+Our results do not show the expected improvement from in-chain revision. We attribute this primarily to the threshold calibration challenge: the Qwen3-1.7B model's entropy values during mathematical reasoning remained below our fixed thresholds, preventing revision triggers even on incorrect answers.
+
+This finding aligns with \citet{huang2024selfcorrect}, who demonstrated that LLMs cannot reliably self-correct without external feedback. Our attempt to use entropy-varentropy as a proxy for external feedback was hampered by the difficulty of setting appropriate thresholds.
+
+\subsection{Limitations}
+
+\textbf{Inconsistent Sample Sizes}: As noted in Section~\ref{sec:experiments}, different methods were evaluated with different sample sizes (25--75 problems). This limits the statistical power of our comparisons and is a significant methodological limitation. Future work should standardize evaluation protocols.
+
+\textbf{No MATH-500 Results}: We were unable to complete experiments on MATH-500 due to time constraints. This limits the generalizability of our findings to more challenging mathematical reasoning tasks.
+
+\textbf{Threshold Sensitivity}: Our fixed thresholds ($\tau_H=2.5$, $\tau_V=1.5$) were clearly too conservative. Adaptive thresholds based on model calibration or problem difficulty may be necessary for effective revision triggering.
+
+\textbf{No Statistical Significance Tests}: Due to the small sample sizes and exploratory nature of this work, we did not perform formal statistical significance testing. This is a weakness that should be addressed in future work.
+
+\textbf{Single Model}: We evaluated only on Qwen3-1.7B. Results may differ on other models, particularly larger ones with different uncertainty characteristics.
+
+\subsection{Lessons and Future Directions}
+
+Despite the lack of accuracy improvement, our work provides several insights:
+
+\begin{enumerate}
+    \item \textbf{Threshold calibration is critical}: Fixed thresholds are unlikely to work across different models and tasks. Adaptive mechanisms are needed.
+    \item \textbf{Model size matters}: Smaller models may exhibit different uncertainty characteristics than larger ones, affecting the reliability of entropy-based signals.
+    \item \textbf{Alternative uncertainty metrics}: Joint entropy-varentropy analysis may need to be supplemented with other signals (e.g., attention patterns, semantic coherence) for reliable error detection.
+\end{enumerate}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed Entropy-guided Stepwise Revision (ESR), a training-free method for in-chain self-correction during chain-of-thought reasoning. While our theoretical framework distinguishes confused states from fork states using joint entropy-varentropy analysis, our empirical evaluation revealed significant challenges in threshold calibration that prevented the revision mechanism from triggering effectively.
+
+Our results on GSM8K show comparable accuracy (46--48\%) across all methods, with ESR failing to trigger revisions due to conservative thresholds. This aligns with prior work \citep{huang2024selfcorrect} showing the difficulty of self-correction without external feedback.
+
+Future work should explore: (1) adaptive threshold mechanisms that calibrate to model-specific uncertainty distributions; (2) combining entropy signals with other error detection methods; and (3) evaluation on larger models where uncertainty signals may be more reliable.
+
+\section*{Reproducibility Statement}
+
+Our code and experimental framework are available in the workspace directory \texttt{exp/}. Key hyperparameters: temperature=0.0, max\_tokens=512, ESR thresholds $\tau_H=2.5$, $\tau_V=1.5$, max revisions $R_{\max}=3$. We use Qwen3-1.7B with greedy decoding. Due to the computational constraints of this research phase, experiments were conducted with varying sample sizes (25--75 problems per method), which is a limitation discussed in Section~\ref{sec:discussion}.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{20}
+
+\bibitem[Chi \& Lee(2024)]{chiang2024overreasoning}
+Cheng-Han Chiang and Hung-Yi Lee.
+\newblock Overreasoning and redundant calculation of large language models.
+\newblock In \emph{EACL}, 2024.
+
+\bibitem[Cobbe et~al.(2021)]{cobbe2021training}
+Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et~al.
+\newblock Training verifiers to solve math word problems.
+\newblock \emph{arXiv preprint arXiv:2110.14168}, 2021.
+
+\bibitem[Correa \& de~Matos(2025)]{correa2025entropy}
+Andrew Gabriel Araujo Correa and Ana Carolina Hermogenes de~Matos.
+\newblock Entropy-guided loop: Achieving reasoning through uncertainty-aware generation.
+\newblock \emph{arXiv preprint arXiv:2509.00079}, 2025.
+
+\bibitem[DeepSeek-AI(2025)]{deepseek2025r1}
+DeepSeek-AI.
+\newblock DeepSeek-R1: Incentivizing reasoning capability in LLMs via reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:2501.12948}, 2025.
+
+\bibitem[Huang et~al.(2024)]{huang2024selfcorrect}
+Jie Huang, Xinyun Chen, Swaroop Mishra, Huaixiu Steven Zheng, Adams Wei Yu, Xinying Song, and Denny Zhou.
+\newblock Large language models cannot self-correct reasoning yet.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Kamoi et~al.(2024)]{kamoi2024selfcorrect}
+Ryo Kamoi, Yusen Zhang, Nan Zhang, Jiawei Han, and Rui Zhang.
+\newblock When can LLMs actually correct their own mistakes? A critical survey of self-correction of LLMs.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 12:1417--1440, 2024.
+
+\bibitem[Kumar et~al.(2025)]{kumar2025overthink}
+Abhinav Kumar, Jaechul Roh, Ali Naseh, Marzena Karpinska, Mohit Iyyer, Amir Houmansadr, and Eugene Bagdasarian.
+\newblock OverThink: Slowdown attacks on reasoning LLMs.
+\newblock \emph{arXiv preprint arXiv:2502.02542}, 2025.
+
+\bibitem[Li et~al.(2025)]{li2025entropy}
+Xianzhi Li, Ethan Callanan, Abdellah Ghassel, and Xiaodan Zhu.
+\newblock Entropy-gated branching for efficient test-time reasoning.
+\newblock \emph{arXiv preprint arXiv:2503.21961}, 2025.
+
+\bibitem[Lightman et~al.(2023)]{lightman2023let}
+Hunter Lightman, Vineet Kosaraju, Yura Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe.
+\newblock Let's verify step by step.
+\newblock \emph{arXiv preprint arXiv:2305.20050}, 2023.
+
+\bibitem[Wei et~al.(2022)]{wei2022chain}
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Fei Xia, Ed Chi, Quoc V~Le, Denny Zhou, et~al.
+\newblock Chain-of-thought prompting elicits reasoning in large language models.
+\newblock \emph{NeurIPS}, 35:24824--24837, 2022.
+
+\bibitem[Wu et~al.(2024)]{wu2024stepco}
+Zhenyu Wu, Qingkai Zeng, Zhihan Zhang, Zhaoxuan Tan, Chao Shen, and Meng Jiang.
+\newblock Enhancing mathematical reasoning in LLMs by stepwise correction.
+\newblock In \emph{ACL}, 2025.
+
+\bibitem[xjdr \& doomslide(2024)]{xjdr2024entropix}
+xjdr and doomslide.
+\newblock Entropix: Entropy based sampling and parallel CoT decoding.
+\newblock GitHub repository, 2024.
+\newblock URL: \url{https://github.com/xjdr-alt/entropix}.
+
+\bibitem[Yang et~al.(2025)]{yang2025qwen3}
+An Yang, Beichen Zhang, Binyuan Hui, Bofei Gao, Bowen Yu, Chengpeng Li, Dayiheng Liu, Jianhong Tu, Jingren Zhou, Junyang Lin, et~al.
+\newblock Qwen3 technical report.
+\newblock \emph{arXiv preprint arXiv:2505.09388}, 2025.
+
+\end{thebibliography}
+
+\end{document}

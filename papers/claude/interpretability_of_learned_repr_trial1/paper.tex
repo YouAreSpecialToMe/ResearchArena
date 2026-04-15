@@ -1,0 +1,439 @@
+\documentclass[final]{article}
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{natbib}
+
+% Custom commands
+\newcommand{\core}{\text{core}}
+\newcommand{\periph}{\text{periph}}
+\newcommand{\cscore}{c}
+\newcommand{\uscore}{u}
+
+\title{The Convergent Core: Connecting Seed Stability, Cross-Model Universality, and Causal Importance of Sparse Autoencoder Features}
+
+\author{
+  Anonymous Authors
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Sparse autoencoders (SAEs) are widely used to extract interpretable features from language model representations, yet recent work shows that SAEs trained with different random seeds learn substantially different features. Simultaneously, SAE feature \emph{spaces} exhibit surprising universality across different model architectures. We present the first systematic study connecting three dimensions of SAE feature quality---seed stability, cross-model universality, and causal importance---on the same set of features. We train TopK SAEs with 5 random seeds each on GPT-2 Small, Pythia-160M, and Pythia-410M, computing a \emph{convergence score} for each feature based on cross-seed decoder similarity. We find that seed-stable features are strongly predictive of cross-model universality (Spearman $\rho = 0.28$--$0.68$, $p < 10^{-297}$ across all three models), and that convergence score is uniquely suited for universality prediction---outperforming activation frequency among active features on 2 of 3 models ($\rho = 0.34$--$0.38$ vs.\ $\rho = -0.54$--$0.17$). However, we discover that among active features, seed-stable features are \emph{not} more causally important per-feature than seed-variable ones (Cohen's $d = -0.18$ to $-0.31$), revealing that universality and causal importance are partially dissociated axes of feature quality. Our findings provide a principled, computation-free method for identifying universal SAE features.
+\end{abstract}
+
+\section{Introduction}
+
+Sparse autoencoders (SAEs) have emerged as the dominant tool for mechanistic interpretability of large language models (LLMs), decomposing dense, polysemantic neural activations into sparse, monosemantic features \citep{cunningham2023sparse, bricken2023monosemanticity}. These features have enabled circuit discovery \citep{marks2025sparse}, model steering \citep{templeton2024scaling}, and systematic understanding of model behaviors. However, a critical tension has emerged regarding the reliability of individual SAE features.
+
+On one hand, \citet{paulo2025sparse} demonstrated that SAEs trained on the same model and data with different random seeds learn substantially different features---only approximately 30\% of features are shared across seeds for a 131K-latent SAE on Llama 3 8B. On the other hand, \citet{lan2024universal} and \citet{thasarathan2025universal} have shown that SAE feature \emph{spaces} exhibit remarkable universality across entirely different model architectures. This presents a paradox: \textbf{how can individual features be unreliable across random seeds, yet the feature spaces they span be universal across models?}
+
+We hypothesize that SAE feature dictionaries contain two distinct populations: a \textbf{convergent core} of features that are reliably discovered regardless of initialization and correspond to genuine computational primitives shared across models, and a \textbf{variable periphery} of features that represent arbitrary decompositions of a complementary subspace. We further test whether convergent core features are more causally important for model behavior.
+
+This paper presents the first systematic study connecting three dimensions of SAE feature quality---\textbf{seed stability}, \textbf{cross-model universality}, and \textbf{causal importance}---on the same set of features across three language models. Our contributions are:
+\begin{itemize}
+    \item We establish a strong, statistically significant connection between seed stability and cross-model universality (Spearman $\rho = 0.28$--$0.68$, $p \approx 0$ on all three models), providing the first empirical link between these two notions of feature quality.
+    \item We demonstrate that convergence score is \emph{uniquely} suited for predicting cross-model universality: among active features, it is the best universality predictor on 2 of 3 models (combined $\rho = 0.345$--$0.380$), while activation frequency---the best causal importance predictor---is anti-correlated with universality on 2 models.
+    \item We reveal the surprising finding that among active features, seed-stable features are \emph{not} individually more causally important than seed-variable ones, demonstrating that universality and causal importance are partially dissociated axes of feature quality.
+    \item We show that the variable periphery spans a geometrically consistent subspace across seeds, carrying complementary information necessary for full reconstruction.
+\end{itemize}
+
+The remainder of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our methodology. Section~\ref{sec:experiments} presents experimental results, beginning with our primary finding on universality prediction (Section~\ref{sec:universality}). Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Sparse Autoencoders for Interpretability.}
+SAEs were introduced for LLM interpretability by \citet{cunningham2023sparse} and \citet{bricken2023monosemanticity}, who showed that sparse dictionary learning decomposes polysemantic neurons into monosemantic features. \citet{gao2024scaling} scaled SAEs to GPT-4 with 16M latents and introduced TopK SAEs with scaling laws. \citet{templeton2024scaling} demonstrated SAE features for model steering in Claude 3 Sonnet. \citet{karvonen2025saebench} provided comprehensive benchmarks, and \citet{chanin2025absorption} identified feature splitting and absorption as failure modes. Our work builds on this foundation but asks \emph{which} features are reliable.
+
+\paragraph{SAE Reproducibility.}
+\citet{paulo2025sparse} first showed that SAEs trained with different seeds learn different features. \citet{jedryszek2026stable} demonstrated that L2 weight regularization improves seed consistency and doubles steering success rates. \citet{marks2024enhancing} proposed Mutual Feature Regularization, training multiple SAEs jointly to encourage shared features. Unlike these works that modify SAE training to improve stability, we \textbf{exploit natural variation across seeds as a diagnostic signal} to identify which features correspond to genuine model representations.
+
+\paragraph{Feature Universality.}
+\citet{lan2024universal} quantified feature space universality across LLMs via sparse autoencoders, showing that SAE feature spaces are similar under rotation-invariant transformations, with semantic subspaces showing especially high cross-model similarity. \citet{thasarathan2025universal} introduced Universal SAEs for cross-model concept alignment in vision models. Our work connects universality to seed stability---testing whether features that are universal across models are the same ones that are stable across seeds.
+
+\paragraph{Feature Quality and Evaluation.}
+\citet{karvonen2025saebench} provides benchmarks across interpretability, reconstruction, and disentanglement. \citet{paulo2024autointerp} developed automated interpretability scoring with intervention-based metrics. \citet{bussmann2025matryoshka} introduced Matryoshka SAEs for hierarchical feature organization. \citet{engels2025multidim} demonstrated that some features are irreducibly multi-dimensional, suggesting that seed-variable features may represent different 1D projections of the same multi-dimensional feature. Our convergence score complements these approaches by providing a training-free quality signal.
+
+\section{Method}
+\label{sec:method}
+
+Our framework consists of three stages: (1) multi-seed SAE training to identify seed-stable features, (2) cross-model alignment to measure universality, and (3) causal assessment via zero-ablation. We additionally analyze the geometric structure of core and peripheral feature subspaces. All experiments use TopK SAEs; generalization to other architectures (e.g., ReLU SAEs with $L_1$ penalty) is left to future work.
+
+\subsection{Multi-Seed SAE Training and Convergence Score}
+
+For each model $M$ in our suite, we train $K{=}5$ TopK SAEs \citep{gao2024scaling} with different random seeds on the same layer's residual stream activations, using dictionary size $D{=}16{,}384$ and sparsity $k{=}64$.
+
+\paragraph{Convergence Score.} For a reference seed $s_0$ and feature $f_i$ in SAE$_{s_0}$, the convergence score is:
+\begin{equation}
+    \cscore(f_i) = \frac{1}{K-1} \sum_{j \neq 0} \max_{f' \in \text{SAE}_{s_j}} \cos(\mathbf{d}_i^{s_0}, \mathbf{d}_{f'}^{s_j})
+    \label{eq:convergence}
+\end{equation}
+where $\mathbf{d}_i^{s}$ denotes the decoder vector of feature $i$ in seed $s$. This measures how reliably a feature's direction is recovered across seeds. We verify robustness to the choice of reference seed (Section~\ref{sec:ablations}).
+
+\paragraph{Core/Peripheral Classification.} A feature is classified as \textbf{core} if its best-match decoder cosine similarity exceeds $\tau = 0.6$ in at least 50\% of non-reference seeds, and as \textbf{peripheral} otherwise. We sweep $\tau \in \{0.5, 0.6, 0.7, 0.8, 0.9, 0.95\}$ in ablation studies (Section~\ref{sec:ablations}).
+
+\subsection{Cross-Model Universality Measurement}
+
+To align features across models with different architectures, we follow the activation-correlation approach of \citet{lan2024universal}. We run both models on the same held-out text corpus, collect SAE feature activations at each token position, and compute pairwise Pearson correlations between features across models. For each feature $f_i$ in model $A$, its cross-model alignment score is:
+\begin{equation}
+    \uscore(f_i) = \frac{1}{|\mathcal{M} \setminus \{A\}|} \sum_{B \in \mathcal{M} \setminus \{A\}} \max_{f' \in \text{SAE}_B} |\text{corr}(\mathbf{a}_i^A, \mathbf{a}_{f'}^B)|
+    \label{eq:universality}
+\end{equation}
+where $\mathbf{a}_i^A$ is the activation vector of feature $i$ across the shared corpus in model $A$, and $\mathcal{M}$ is the set of models.
+
+Our central hypothesis is that seed-stable features have higher cross-model alignment scores, evaluated via Spearman rank correlation between $\cscore$ and $\uscore$.
+
+\subsection{Causal Importance Assessment}
+
+For each feature $f_i$, we measure causal importance via zero-ablation: set $f_i$'s activation to zero during a forward pass and measure the KL divergence between the original and perturbed output distributions:
+\begin{equation}
+    \text{CI}(f_i) = \frac{1}{N} \sum_{x \in \mathcal{D}} D_{\text{KL}}\!\left(p_{\text{orig}}(\cdot | x) \,\|\, p_{\text{ablated}(f_i)}(\cdot | x)\right)
+    \label{eq:causal}
+\end{equation}
+where $\mathcal{D}$ is a held-out evaluation set. We compare causal importance distributions of core vs.\ peripheral features using the Mann--Whitney $U$ test and Cohen's $d$ effect size.
+
+\subsection{Subspace Analysis}
+
+To understand whether the variable periphery represents genuine structure or pure noise, we analyze the geometric consistency of peripheral decoder subspaces across seeds. For each pair of seeds $(s_a, s_b)$, we compute principal angles between the subspaces spanned by their peripheral decoder vectors and compare against a null distribution constructed by randomly partitioning features into core/peripheral-sized groups (100 random partitions).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Models and Data.} We use three language models: GPT-2 Small (85M parameters, 12 layers), Pythia-160M (12 layers), and Pythia-410M (24 layers) \citep{biderman2023pythia}. We train SAEs on middle-layer residual stream activations (layer 6 for GPT-2 Small and Pythia-160M, layer 12 for Pythia-410M). Training data consists of 10M tokens from OpenWebText (GPT-2) or The Pile (Pythia models), with 50K token positions held out for evaluation. This reduced training budget (vs.\ the 50--100M tokens used in prior work) is a significant limitation discussed in Section~\ref{sec:limitations}.
+
+\paragraph{SAE Configuration.} We use TopK SAEs with dictionary size $D{=}16{,}384$, $k{=}64$ active features per input, Adam optimizer with learning rate $3{\times}10^{-4}$ and cosine decay, batch size 4096, and 1000-step linear warmup. We train 5 seeds per model (seeds: 42, 123, 456, 789, 1024), yielding 15 SAEs total.
+
+\paragraph{Baselines for Feature Quality Prediction.} We compare convergence score against: (1)~\textbf{Random partition}---randomly assign features to predicted quality bins; (2)~\textbf{Activation frequency}---mean fraction of tokens where a feature is active; (3)~\textbf{Decoder norm}---$L_2$ norm of the decoder vector; (4)~\textbf{Activation magnitude}---mean activation value when active; (5)~\textbf{Combined logistic regression}---trained on all four simple features with 5-fold cross-validation.
+
+\subsection{SAE Training Quality}
+
+\begin{table}[t]
+\caption{SAE training metrics averaged across 5 seeds per model. All SAEs achieve consistent reconstruction quality within each model. Dead feature fraction is high due to the reduced training budget (10M tokens) and large dictionary size ($16{,}384$) relative to the active count ($k{=}64$).}
+\label{tab:training}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Model & $d_{\text{model}}$ & MSE & Explained Var.\ $\uparrow$ & $L_0$ & Dead Frac. \\
+\midrule
+GPT-2 Small & 768 & $0.977 \pm 0.006$ & $0.990 \pm 0.001$ & 64.0 & $0.775 \pm 0.011$ \\
+Pythia-160M & 768 & $0.059 \pm 0.001$ & $0.957 \pm 0.001$ & 64.0 & $0.911 \pm 0.003$ \\
+Pythia-410M & 1024 & $0.073 \pm 0.001$ & $0.991 \pm 0.001$ & 64.0 & $0.752 \pm 0.008$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:training} summarizes training metrics. All 15 SAEs achieve high explained variance (${\geq}95.7\%$) and consistent $L_0{=}64$. The high dead feature fraction (75--91\%) is a consequence of both the large overcomplete dictionary and the reduced training budget (10M tokens vs.\ the 50--100M used in prior work). This inflates the peripheral category with near-dead features, which we account for by conducting active-features-only analyses throughout. We emphasize that the 2.7--10.9\% core fractions reported below should be interpreted as lower bounds; longer training would likely yield larger convergent cores by reviving currently dead features.
+
+\subsection{Convergence Score Distribution}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1_convergence_distribution.pdf}
+\caption{Distribution of feature convergence scores across all 16,384 features for each model. Vertical dashed lines mark thresholds $\tau \in \{0.7, 0.8, 0.9\}$. The distributions are strongly right-skewed: most features have low convergence scores (seed-variable), while a small fraction consistently emerges across seeds (core). GPT-2 Small has the largest core fraction (10.9\%), Pythia-160M the smallest (2.7\%).}
+\label{fig:convergence}
+\end{figure}
+
+Figure~\ref{fig:convergence} shows the distribution of convergence scores. All three models exhibit a strongly right-skewed distribution, with most features having low convergence scores and a small tail of highly convergent features. The core fraction varies across models: GPT-2 Small (10.9\%, 1{,}790 features), Pythia-410M (8.5\%, 1{,}398 features), and Pythia-160M (2.7\%, 443 features). The smaller core in Pythia-160M is consistent with its higher dead feature fraction and smaller effective dictionary utilization.
+
+\paragraph{Robustness to Reference Seed.} The convergence score ranking is essentially invariant to reference seed choice: Spearman $\rho$ between rankings computed from different reference seeds deviates by $< 0.002$ from perfect correlation across all models.
+
+\subsection{Seed Stability Predicts Cross-Model Universality}
+\label{sec:universality}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig2_stability_vs_universality.pdf}
+\caption{Scatter plots of convergence score vs.\ cross-model alignment score for all active features in each model. Core features (blue) cluster in the upper-right, indicating that seed-stable features are also more universal across models. Spearman $\rho$ and $p$-values are shown.}
+\label{fig:stability_universality}
+\end{figure}
+
+\begin{table}[t]
+\caption{Seed stability--universality correlation. Spearman $\rho$ between convergence score and cross-model alignment score. 95\% confidence intervals from 10{,}000 bootstrap resamples. All three models exceed the $\rho > 0.2$ success criterion.}
+\label{tab:universality}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Model & Spearman $\rho$ $\uparrow$ & 95\% CI & $p$-value \\
+\midrule
+GPT-2 Small & \textbf{0.677} & [0.668, 0.687] & $< 10^{-300}$ \\
+Pythia-160M & 0.282 & [0.266, 0.299] & $3.2 \times 10^{-298}$ \\
+Pythia-410M & \textbf{0.651} & [0.640, 0.662] & $< 10^{-300}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:stability_universality} and Table~\ref{tab:universality} present our primary finding: \textbf{seed stability strongly predicts cross-model universality}. The Spearman rank correlation between convergence score and cross-model alignment score is positive and highly significant on all three models ($\rho = 0.28$--$0.68$, all $p < 10^{-297}$). Fisher's combined $p$-value across models is $p \approx 0$. Core features have substantially higher mean universality scores than peripheral features (e.g., $0.393$ vs.\ $0.058$ for Pythia-160M, a $6.8\times$ ratio).
+
+This confirms that features reliably recovered across random seeds correspond to genuine representational structure shared across independently trained models.
+
+\paragraph{Convergence Score Is Uniquely Suited for Universality Prediction.}
+
+\begin{table}[t]
+\caption{Universality prediction: convergence score vs.\ baselines. \textbf{Left:} Among all features (including dead), activation frequency achieves the highest $\rho$ due to its correlation with feature liveness. \textbf{Right:} Among active features only---the scientifically meaningful comparison---convergence score (combined) is the best predictor on Pythia-160M and Pythia-410M. Activation frequency becomes anti-correlated with universality on 2 of 3 models.}
+\label{tab:universality_baselines}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{3}{c}{All Features ($\rho$)} & \multicolumn{3}{c}{Active Features Only ($\rho$)} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Predictor & GPT-2 & P-160M & P-410M & GPT-2 & P-160M & P-410M \\
+\midrule
+Convergence (comb.) & 0.677 & 0.282 & 0.651 & $-0.044$ & \textbf{0.345} & \textbf{0.380} \\
+Act.\ Frequency & \textbf{0.800} & \textbf{0.563} & \textbf{0.783} & $-0.536$ & $-0.383$ & 0.172 \\
+Act.\ Magnitude & 0.800 & 0.563 & 0.786 & $-0.453$ & $-0.081$ & 0.323 \\
+Decoder Norm & $-0.089$ & $-0.054$ & $-0.099$ & 0.011 & 0.035 & 0.010 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A key question is whether convergence score provides unique value over simpler baselines for universality prediction. Table~\ref{tab:universality_baselines} reveals a striking pattern. Among all features, activation frequency appears strongest ($\rho = 0.56$--$0.80$), but this is driven by the correlation between feature liveness and both convergence and universality. When we restrict to \emph{active features only}---the scientifically meaningful comparison---convergence score (combined) becomes the best predictor on 2 of 3 models (Pythia-160M: $\rho = 0.345$ vs.\ $\rho = -0.383$ for frequency; Pythia-410M: $\rho = 0.380$ vs.\ $\rho = 0.172$). Remarkably, activation frequency is \emph{anti-correlated} with universality among active features on GPT-2 Small ($\rho = -0.536$) and Pythia-160M ($\rho = -0.383$), meaning frequently-activating features are \emph{less} universal.
+
+We note that the combined convergence score yields near-zero correlation on GPT-2 Small among active features ($\rho = -0.044$, $p = 0.02$); the activation-only variant of convergence performs somewhat better on this model ($\rho = -0.049$, also near-zero), making the active-features-only universality prediction successful on 2 of 3 models rather than all 3. The all-features correlation remains strong on all models because dead features have both low convergence and low universality.
+
+This establishes convergence score's unique value proposition: it is the only metric that reliably identifies universal features among active features, where simpler alternatives fail or provide misleading signals.
+
+\subsection{Causal Importance: A Surprising Dissociation}
+\label{sec:causal}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_causal_importance.pdf}
+\caption{Causal importance of core vs.\ peripheral features. Contrary to our initial hypothesis, peripheral features exhibit higher per-feature causal importance (larger KL divergence upon ablation) than core features on all three models.}
+\label{fig:causal}
+\end{figure}
+
+\begin{table}[t]
+\caption{Causal importance of core vs.\ peripheral features (active features only). Negative Cohen's $d$ indicates peripheral features have \emph{higher} per-feature causal importance. This finding is consistent across all three models and directly contradicts our initial hypothesis (Success Criterion~2).}
+\label{tab:causal}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+Model & $n_{\core}^{\text{active}}$ & $n_{\periph}^{\text{active}}$ & Core KL & Periph.\ KL & Cohen's $d$ & $p$-value \\
+\midrule
+GPT-2 Small & 1{,}486 & 1{,}762 & 0.0035 & 0.0180 & $-0.232$ & $8.5\!\times\!10^{-6}$ \\
+Pythia-160M & 431 & 916 & 0.0054 & 0.0343 & $-0.311$ & $1.6\!\times\!10^{-5}$ \\
+Pythia-410M & 1{,}175 & 2{,}346 & 0.0024 & 0.0115 & $-0.177$ & $5.3\!\times\!10^{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:causal} and Table~\ref{tab:causal} reveal a surprising finding: \textbf{among active features, peripheral features have higher per-feature causal importance than core features}. The effect is consistent across all three models (Cohen's $d = -0.18$ to $-0.31$, all $p < 10^{-4}$), directly contradicting our initial hypothesis that convergent features would be more functionally important.
+
+We note an important subtlety: when dead features (which have zero causal importance by definition) are included, the comparison changes because peripheral features have a much higher dead fraction (80--94\% vs.\ 2--9\%; Table~\ref{tab:properties}). The active-features-only analysis is more scientifically meaningful, as dead features trivially have zero importance.
+
+Despite the negative Cohen's $d$ for the core/peripheral binary classification, convergence score as a \emph{continuous} predictor still shows positive rank correlation with causal importance (Spearman $\rho = 0.39$--$0.62$, all $p \approx 0$). This arises because convergence score also captures whether a feature is alive (high convergence $\rightarrow$ high probability of being active $\rightarrow$ nonzero importance).
+
+\subsection{Feature Quality Prediction}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig4_roc_curves.pdf}
+\caption{ROC curves for predicting high-importance features (top 20\% by causal importance) using different quality metrics. On Pythia-410M, all metrics produce informative predictions. On GPT-2 Small and Pythia-160M, all-features AUC could not be computed due to degenerate score distributions from high dead feature fractions.}
+\label{fig:roc}
+\end{figure}
+
+\begin{table}[t]
+\caption{Feature quality prediction for causal importance. \textbf{Top:} Spearman $\rho$ between predictor and causal importance (KL divergence). \textbf{Bottom:} AUC for predicting top-20\% importance features. AUC is reported separately for all features and active features only. For GPT-2 Small and Pythia-160M, all-features AUC could not be computed ($\dagger$) because the 77--91\% dead feature fraction creates degenerate score distributions.}
+\label{tab:baselines}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{GPT-2 Small} & \multicolumn{2}{c}{Pythia-160M} & \multicolumn{2}{c}{Pythia-410M} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & $\rho$ & AUC & $\rho$ & AUC & $\rho$ & AUC \\
+\midrule
+\multicolumn{7}{c}{\textit{All features}} \\
+\midrule
+Random & --- & 0.500 & --- & 0.500 & --- & 0.500 \\
+Decoder Norm & $-0.087$ & $\dagger$ & $-0.046$ & $\dagger$ & $-0.088$ & 0.455 \\
+Act.\ Magnitude & 0.719 & $\dagger$ & 0.599 & $\dagger$ & 0.685 & 0.927 \\
+Act.\ Frequency & \textbf{0.827} & $\dagger$ & \textbf{0.620} & $\dagger$ & \textbf{0.772} & \textbf{0.979} \\
+Convergence & 0.619 & $\dagger$ & 0.392 & $\dagger$ & 0.621 & 0.939 \\
+Combined (LR) & --- & $\dagger$ & --- & $\dagger$ & --- & 0.943 \\
+\midrule
+\multicolumn{7}{c}{\textit{Active features only}} \\
+\midrule
+Convergence (comb.) & --- & 0.456 & --- & 0.575 & --- & 0.680 \\
+Convergence (act.) & --- & 0.450 & --- & \textbf{0.616} & --- & \textbf{0.736} \\
+Act.\ Frequency & --- & 0.306 & --- & 0.309 & --- & 0.516 \\
+Act.\ Magnitude & --- & 0.364 & --- & 0.533 & --- & 0.632 \\
+Combined (LR) & --- & \textbf{0.948} & --- & 0.945 & --- & 0.943 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:baselines} compares feature quality predictors for causal importance. Among all features, activation frequency achieves the highest Spearman correlation ($\rho = 0.62$--$0.83$), consistently outperforming convergence score ($\rho = 0.39$--$0.62$). This is expected: activation frequency directly measures how often a feature participates in computation.
+
+On Pythia-410M, the only model where all-features AUC could be computed, convergence score achieves $\text{AUC} = 0.939$, outperforming the random baseline (0.500) and decoder norm (0.455), though falling short of activation frequency (0.979). Among active features only, convergence score (activation variant) achieves AUC of $0.616$--$0.736$ on the Pythia models, outperforming both activation frequency ($0.309$--$0.516$) and activation magnitude ($0.533$--$0.632$). The combined logistic regression achieves the highest active-only AUC ($0.943$--$0.948$) by integrating multiple signals.
+
+Critically, convergence score's primary value lies not in predicting causal importance---where activation frequency suffices among all features---but in predicting \emph{universality} (Table~\ref{tab:universality_baselines}), where it uniquely excels among active features. These two prediction tasks require fundamentally different signals.
+
+\subsection{Subspace Analysis}
+\label{sec:subspace}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig5_subspace_analysis.pdf}
+\caption{\textbf{Left:} Mean principal angles between decoder subspaces across seed pairs for core, peripheral, and null (random partition) feature sets. Peripheral subspaces are significantly more consistent than the null baseline on all models. \textbf{Center:} Reconstruction quality (explained variance) using feature subsets---all subsets exceed $>$99.8\% due to the massively overcomplete dictionary, rendering this analysis uninformative (see Section~\ref{sec:limitations}). \textbf{Right:} Feature properties comparing core vs.\ peripheral features.}
+\label{fig:subspace}
+\end{figure}
+
+\begin{table}[t]
+\caption{Subspace consistency and feature properties. Peripheral subspace principal angles are well below the null 5th percentile on all models, indicating the periphery spans a consistent geometric subspace across seeds. Act.\ Freq.\ Ratio and E--D Align Ratio show the ratio of core to peripheral values.}
+\label{tab:subspace}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Model & Periph.\ Angle $\downarrow$ & Null 5th pct & Core Angle & Act.\ Freq.\ Ratio & E-D Align Ratio \\
+\midrule
+GPT-2 Small & \textbf{0.209} & 0.456 & 0.498 & $6.3\times$ & $3.2\times$ \\
+Pythia-160M & \textbf{0.206} & 0.938 & 0.954 & $12.3\times$ & $7.6\times$ \\
+Pythia-410M & \textbf{0.221} & 0.621 & 0.658 & $5.3\times$ & $3.1\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:subspace} and Figure~\ref{fig:subspace} confirm that the variable periphery is not noise: \textbf{peripheral decoder subspaces are significantly more consistent across seeds than random partitions} (principal angles 0.21--0.22 vs.\ null 5th percentiles of 0.46--0.94). This supports the interpretation that the periphery represents different but valid decompositions of a genuine complementary subspace.
+
+\paragraph{Reconstruction quality.} All feature subsets---core only, peripheral only, or random---achieve $>$99.8\% explained variance (Figure~\ref{fig:subspace}, center). This is uninformative for distinguishing subsets because the dictionary is massively overcomplete ($16{,}384$ features for $d_{\text{model}} = 768$ or $1024$), meaning any reasonably sized subset can reconstruct the signal. A discriminative evaluation would require smaller dictionary sizes (e.g., $4{,}096$) or per-token error analysis; we leave this to future work.
+
+\begin{table}[t]
+\caption{Detailed feature properties for core vs.\ peripheral features. Core features are characterized by higher activation frequency, higher magnitude, stronger encoder--decoder alignment, and much lower dead fraction.}
+\label{tab:properties}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{GPT-2 Small} & \multicolumn{2}{c}{Pythia-160M} & \multicolumn{2}{c}{Pythia-410M} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+Property & Core & Periph. & Core & Periph. & Core & Periph. \\
+\midrule
+Act.\ Frequency & 0.016 & 0.002 & 0.037 & 0.003 & 0.015 & 0.003 \\
+Act.\ Magnitude & 6.07 & 2.84 & 1.22 & 0.25 & 1.39 & 0.96 \\
+E--D Alignment & 0.645 & 0.199 & 0.752 & 0.099 & 0.635 & 0.204 \\
+Dead Fraction & 0.085 & 0.856 & 0.018 & 0.941 & 0.062 & 0.803 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Core features exhibit strikingly different properties from peripheral features (Table~\ref{tab:properties}): they activate 5--12$\times$ more frequently, have 1.5--5$\times$ higher activation magnitude, and show 3--8$\times$ higher encoder--decoder alignment. Crucially, core features have dramatically lower dead fraction (2--9\% vs.\ 80--94\%), confirming they capture the most actively used representational directions.
+
+\subsection{Qualitative Feature Examples}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig7_feature_examples.pdf}
+\caption{Qualitative examples of top core and peripheral features in GPT-2 Small, showing feature index, convergence score, activation frequency, and top-activating contexts. Core features tend to activate on broad, common patterns, while peripheral features activate on rarer, more specific contexts. Brackets indicate the token with peak activation.}
+\label{fig:qualitative}
+\end{figure}
+
+Figure~\ref{fig:qualitative} shows qualitative examples of the highest-convergence core features and lowest-convergence peripheral features in GPT-2 Small. Core features tend to respond to broad, frequently occurring patterns (e.g., common syntactic structures, punctuation, function words), while peripheral features often fire on rarer, more context-specific inputs. This is consistent with our quantitative finding that core features are more universal but less individually impactful: they capture shared linguistic primitives whose individual ablation causes less disruption precisely because their information is broadly distributed.
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig6_ablations.pdf}
+\caption{\textbf{Left:} Effect of number of seeds on convergence score quality (Spearman $\rho$ with causal importance). Even 2 seeds provide most of the signal. \textbf{Center:} Impact of matching method. Top-1 and greedy matching outperform Hungarian matching. \textbf{Right:} Effect of threshold $\tau$ on Cohen's $d$ between core and peripheral causal importance.}
+\label{fig:ablations}
+\end{figure}
+
+We ablate four components of our methodology (Figure~\ref{fig:ablations}):
+
+\paragraph{Number of Seeds.} Even 2 seeds capture most of the convergence signal (Spearman $\rho$ with causal importance drops by $< 0.01$ from 5 to 2 seeds on GPT-2 Small: $0.624 \rightarrow 0.620$). This suggests the convergent core is a robust structural property, not an artifact of averaging over many seeds.
+
+\paragraph{Matching Method.} Top-1 matching (allowing many-to-one) outperforms greedy and Hungarian matching. On GPT-2 Small: top-1 $\rho = 0.624$, greedy $\rho = 0.619$, Hungarian $\rho = 0.272$. Hungarian matching suffers because enforcing 1-1 constraints forces poor matches for non-core features.
+
+\paragraph{Similarity Metric.} Activation correlation alone produces higher correlations with causal importance than decoder cosine similarity alone (e.g., GPT-2 Small: $\rho = 0.739$ vs.\ $0.624$), suggesting functional similarity better predicts importance than geometric similarity.
+
+\paragraph{Threshold Sensitivity.} Higher $\tau$ produces smaller cores with larger effect sizes. For Pythia-410M, Cohen's $d$ increases from $0.003$ at $\tau = 0.5$ to $0.395$ at $\tau = 0.95$, but the core shrinks from 1{,}773 to just 6 features. The default threshold ($\tau = 0.6$, $\geq$50\% seeds) balances core size and discriminative power.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Convergence Score as a Universality Predictor}
+
+Our central finding is that convergence score provides a \emph{unique} signal for identifying cross-model universal features. While simpler metrics like activation frequency are strong predictors of causal importance, they fail---and can even be misleading---for universality prediction among active features (Table~\ref{tab:universality_baselines}). This has immediate practical implications for comparative mechanistic interpretability: when aligning features across models, convergence score identifies the most alignable features without requiring access to other models, making it a useful preprocessing step for cross-model analysis.
+
+The strong correlation between seed stability and universality ($\rho = 0.28$--$0.68$) also provides theoretical insight into the structure of neural network representations. Features that are ``attractors'' of the SAE optimization landscape---recovered regardless of initialization---tend to correspond to representational directions that are shared across independently trained architectures. This suggests a deep connection between optimization geometry and representational universality.
+
+\subsection{The Universality--Importance Dissociation}
+
+Our discovery that seed-stable features are \emph{not} more causally important per-feature (Cohen's $d = -0.18$ to $-0.31$ in the wrong direction) reveals that ``feature quality'' is inherently multi-dimensional. We propose two complementary explanations:
+
+\textbf{Active peripheral features are rare but impactful.} Peripheral features have very high dead fractions (80--94\%), but the few that activate on a given input fire with purpose. Their instability across seeds means they represent different valid decompositions of a subspace, but when a particular decomposition fires, it captures input-specific structure that the convergent core misses. This is analogous to how rare but specific words carry more information than common function words.
+
+\textbf{Core features capture shared, redundant structure.} Universal features likely correspond to broadly shared linguistic primitives (e.g., positional encodings, common syntactic patterns) that are important in aggregate but individually less disruptive to ablate because their information is partially redundant across features. The qualitative examples in Figure~\ref{fig:qualitative} support this: core features activate on common, broadly-distributed patterns.
+
+\subsection{The Periphery Is Not Noise}
+
+The geometric consistency of peripheral subspaces across seeds (Table~\ref{tab:subspace}) has an important implication: the ``unreliable'' features identified by \citet{paulo2025sparse} collectively represent genuine complementary structure. This suggests that the ${\sim}70\%$ of features that are not shared across seeds are not failures of SAE training, but rather different valid bases for the same information-carrying subspace.
+
+\subsection{Different Metrics for Different Goals}
+
+Our results reveal that no single metric captures all aspects of feature quality:
+\begin{itemize}
+    \item \textbf{For identifying universal features} (e.g., comparative mechanistic analysis across models): use \emph{convergence score}. It uniquely predicts cross-model universality among active features.
+    \item \textbf{For identifying causally important features} (e.g., model steering, circuit analysis): use \emph{activation frequency}. It is the strongest single predictor of causal importance.
+    \item \textbf{For feature selection in downstream applications}: use a \emph{combined} signal, as the logistic regression baseline ($\text{AUC} \approx 0.95$) demonstrates that integrating multiple simple metrics outperforms any single one.
+\end{itemize}
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+\textbf{Reduced training scale.} Our experiments use 10M training tokens per SAE, substantially less than the 50--100M typically used in the literature. This results in high dead feature fractions (75--91\%) that dominate the peripheral category: the vast majority of ``peripheral'' features are simply dead features that never had sufficient training signal to specialize. This confounds the core/peripheral distinction in ways that active-features-only analyses only partially address, since the effective sample sizes of active peripheral features (916--2{,}346) are relatively small. The 2.7--10.9\% core fractions we report are likely underestimates of the true convergent core size with adequate training. Retraining with ${\geq}50$M tokens would dramatically reduce dead feature fractions and produce a more meaningful core/peripheral split where the distinction genuinely reflects seed stability rather than feature liveness.
+
+\textbf{TopK SAEs only.} We evaluate only TopK SAEs \citep{gao2024scaling}. \citet{paulo2025sparse} found TopK SAEs show greater seed sensitivity than ReLU SAEs, so the convergent core phenomenon may differ for other architectures. The planned ReLU SAE comparison was not conducted due to computational constraints. Even a reduced ReLU comparison (e.g., 3 seeds on a single model) would substantially strengthen generalizability claims, and we consider this the most important extension.
+
+\textbf{GPT-2 active-feature anomaly.} The convergence score achieves near-zero correlation with universality among active features on GPT-2 Small ($\rho = -0.044$), in contrast to the positive correlations on both Pythia models. This model-specific failure warrants investigation; possible explanations include differences in the training data distribution (OpenWebText vs.\ Pile) or the smaller effective core size after removing dead features.
+
+\textbf{Model scale.} We evaluate on small models (85M--410M parameters). Larger models with richer representations may exhibit different patterns of seed stability and universality.
+
+\textbf{Single layer.} We analyze a single middle layer per model. Seed stability and universality patterns may differ across layers, particularly between early, middle, and late layers.
+
+\textbf{Single-feature ablation.} Our causal importance analysis is limited to single-feature ablation, which does not capture feature interactions. The causal importance of a feature may depend on its role within a circuit rather than its individual effect.
+
+\textbf{Uninformative reconstruction analysis.} The reconstruction quality comparison yields $>$99.8\% explained variance for all feature subsets, providing no discriminative power between core and peripheral features. This is an inherent limitation of using a massively overcomplete dictionary ($16{,}384$ features for $d_{\text{model}} \leq 1{,}024$). Future work should use smaller dictionary sizes (e.g., $4{,}096$) or per-token error metrics on rare inputs to make this analysis discriminative.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented the first joint analysis of seed stability, cross-model universality, and causal importance of sparse autoencoder features. Our experiments across three language models reveal that seed-stable features strongly predict cross-model universality (Spearman $\rho = 0.28$--$0.68$), establishing convergence score as a unique, computation-free tool for identifying universal features---outperforming all baselines among active features on 2 of 3 models. Surprisingly, these convergent features are not individually more causally important than seed-variable ones among active features (Cohen's $d = -0.18$ to $-0.31$), revealing that universality and causal importance are partially dissociated axes of feature quality. We further demonstrated that the variable periphery spans a geometrically consistent subspace across seeds, suggesting that peripheral features represent different but valid decompositions of complementary structure rather than pure noise.
+
+These findings have practical implications: convergence score provides a training-free method for identifying universal features suitable for comparative mechanistic analysis, while simpler metrics like activation frequency remain superior for predicting causal importance. The partial dissociation between universality and causal importance suggests that ``feature quality'' is inherently multi-dimensional, and different downstream applications should use different quality signals. Future work should extend this analysis to larger models and multiple layers, evaluate other SAE architectures (particularly ReLU SAEs), train with substantially larger token budgets (${\geq}50$M) to reduce dead feature fractions and produce a cleaner core/peripheral separation, investigate the relationship between multi-dimensional features \citep{engels2025multidim} and peripheral variability, and use smaller dictionary sizes to enable discriminative reconstruction comparisons.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\appendix
+
+\section{Additional Training Details}
+
+All SAEs were trained on a single NVIDIA GPU with 10M tokens per SAE. Training used the Adam optimizer with learning rate $3 \times 10^{-4}$ and cosine decay to $1 \times 10^{-5}$, batch size 4096, and 1000-step linear warmup. Decoder columns were constrained to unit norm. Seeds used: \{42, 123, 456, 789, 1024\}. Total training time for all 15 SAEs was approximately 30 minutes.
+
+\section{Per-Model Convergence Score Distributions}
+
+The convergence score distributions (Figure~\ref{fig:convergence}) show that GPT-2 Small and Pythia-410M have similar core fractions (10.9\% and 8.5\%), while Pythia-160M has a much smaller core (2.7\%). This correlates with the dead feature fraction: Pythia-160M has the highest dead fraction (91.1\%), leaving fewer features to form a convergent core.
+
+\section{Active-Only Universality Analysis}
+
+Among active features, the activation-only variant of convergence score provides a useful alternative to the combined score. On Pythia-160M, activation-only convergence achieves $\rho = 0.394$ (vs.\ $0.345$ for combined) and AUC $= 0.616$ (vs.\ $0.575$ for combined) for universality prediction. On Pythia-410M, the activation variant yields $\rho = 0.464$---the highest single-metric correlation with universality among active features. However, on GPT-2 Small, both variants produce near-zero correlations. These results suggest that the activation-based signal captures complementary information about feature reproducibility, particularly for the Pythia models trained on the same data distribution (The Pile).
+
+\end{document}

@@ -1,0 +1,170 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze CPU Only Study Scope",
+    "description": "Set up one reproducible LLVM workspace for a bounded empirical test of whether mutation-typed intervening summaries add value beyond `LastRunTracking` under a strict 2-core, 8-hour budget.",
+    "steps": {
+      "step1": "Use one Linux environment with `cmake`, `ninja`, `clang`, `lld`, `python3`, `/usr/bin/time -v`, `jq`, `pandas`, `numpy`, `scikit-learn`, `matplotlib`, and `seaborn`. Save package versions, LLVM commit hash, kernel version, CPU model, RAM size, and `gpus_available=0` in `artifacts/env_manifest.json`.",
+      "step2": "Build LLVM once in `Release` mode with `-DLLVM_ENABLE_PROJECTS='clang;lld' -DCMAKE_BUILD_TYPE=Release -DLLVM_BUILD_TESTS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF` and `ninja -j2`. Reuse this single build for all methods so policy logic is the only moving part.",
+      "step3": "Instrument only `InstCombinePass` and `SimplifyCFGPass` for the primary study. Compile optional hooks for `LCSSAPass`, but keep them disabled unless the full two-pass study finishes and the pilot still leaves more than 90 minutes of slack.",
+      "step4": "Expose one compiler flag such as `--rerun-policy={stock,last_run_tracking,learned_change,mutation_debt,rule_guardrail,run_once}` so all baselines, the main method, and ablations use the same compiler binary and measurement harness.",
+      "step5": "Hard-cap execution at 2 concurrent CPU jobs, never oversubscribe cores during timing runs, and state explicitly in every artifact manifest that this plan uses CPU parallelism only because no GPU is available."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Freeze Benchmarks Folds And Seeds",
+    "description": "Choose a small cross-suite benchmark set that supports transfer testing while remaining feasible on 2 CPU cores.",
+    "steps": {
+      "step1": "Construct a benchmark pool from `CTMark`, `cBench`, and `PolyBench/C`. Start with 4 programs per suite, 12 total, selecting programs that compile under stock `-O3` in roughly 3 minutes or less and whose optional runtime harness completes in roughly 60 seconds or less.",
+      "step2": "Create `artifacts/benchmark_manifest.csv` with columns `suite`, `benchmark`, `source_path`, `compile_command`, `run_command`, `expected_output_or_checksum`, `estimated_o3_compile_sec`, `estimated_runtime_sec`, and `runnable_for_runtime_check`.",
+      "step3": "Define 3 leave-one-suite-out folds: `train=CTMark+cBench,test=PolyBench/C`; `train=CTMark+PolyBench/C,test=cBench`; `train=cBench+PolyBench/C,test=CTMark`.",
+      "step4": "Use seeds `{11,17,29}` for model randomness, labeled-opportunity sampling order, and threshold tie-breaking. Apply the same seeds to `learned_change` and `mutation_debt`; deterministic baselines still use the same benchmark order for fairness.",
+      "step5": "If the pilot misses any feasibility gate, reduce immediately to 3 programs per suite, 9 total, while preserving all 3 suites, all 3 folds, both target passes, and the same 3 seeds."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run A Go No Go Pilot",
+    "description": "Use a small pilot to decide whether the study can stay within budget and whether the label density is high enough to justify learned policies.",
+    "steps": {
+      "step1": "Select 1 representative benchmark from each suite, 3 pilot programs total. Compile each program 3 times with plain stock `-O3` and 3 times with tracing enabled to estimate compile-time noise and instrumentation overhead.",
+      "step2": "For each pilot benchmark and target pass, record the number of repeated opportunities, median trace size, median traced compile time, and median time for one single-rerun counterfactual replay to the next mandatory sweep point.",
+      "step3": "Project total study wall time using pilot medians and the formula `total_time = LLVM_build + stock_trace_collection + sampled_replays + baseline_eval + main_eval + required_ablations + plotting`, dividing only independent jobs across the 2 CPU lanes.",
+      "step4": "Proceed with the 12-program plan only if traced compile-time overhead is at most 15 percent, projected total wall time is at most 8 hours, and at least one primary pass shows at least 24 candidate repeated opportunities in the pilot.",
+      "step5": "If any gate fails, switch immediately to the 9-program plan and pre-register the final paper as a possible boundary study comparing `LastRunTracking` with `RuleGuardrail` if debt labels remain too sparse."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Extract Mandatory Sweep Points",
+    "description": "Define the recovery point for each repeated target-pass opportunity using the stock `-O3` pipeline before any learning or policy evaluation.",
+    "steps": {
+      "step1": "Dump the stock `-O3` textual pass pipeline and save both the raw pipeline string and a parsed occurrence table for module, CGSCC, function, and loop pass-manager nests.",
+      "step2": "For each target pass kind `P` and IR unit kind `U`, assign every static occurrence in the stock pipeline a unique ordinal `static_occurrence_id(P,U,k)` while preserving nesting context so same-named passes in different nests are not conflated.",
+      "step3": "During traced compilation, log each dynamic invocation with `(pass_kind, ir_unit_kind, ir_unit_identifier, static_occurrence_id, dynamic_index)` and map it to the next later stock occurrence of the same pass kind on the same IR unit kind.",
+      "step4": "Define the mandatory sweep point for an opportunity as that next later mapped invocation if at least one non-analysis transform pass on the same IR unit kind lies between the two occurrences. If no such later occurrence exists, mark the opportunity `unsweepable` and exclude it from debt-label training and learned-policy evaluation.",
+      "step5": "Save sweep-point artifacts in `artifacts/sweep_points/` and manually validate the mapping on 3 pilot traces for both `InstCombinePass` and `SimplifyCFGPass`."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Collect Mutation Features And Debt Labels",
+    "description": "Generate the cheap mutation summaries and counterfactual labels needed to test whether typed mutations improve decisions beyond `LastRunTracking`.",
+    "steps": {
+      "step1": "On each training fold, run traced stock `-O3` on training benchmarks only. For every repeated `InstCombinePass` or `SimplifyCFGPass` opportunity, log pass wall time, whether `LastRunTracking` would allow skipping, and the mutation counters accumulated since the previous execution of that same pass kind on that IR unit.",
+      "step2": "Record the feature fields `inst_count_bucket_delta`, `bb_count_delta`, `cfg_edge_delta`, `branch_simplify_or_edge_split_seen`, `phi_delta_sign`, `loop_structure_changed`, `constant_exposure_delta_sign`, `memop_delta_sign`, `callsite_delta_sign`, and `simplifycfg_option_compatibility_bit`.",
+      "step3": "Sample at most 12 repeated opportunities per training benchmark per target pass for counterfactual replay, stratified by whether `LastRunTracking` says skip or run.",
+      "step4": "For each sampled opportunity, run one counterfactual compilation that suppresses only that immediate rerun, forces the scheduled execution at the mandatory sweep point, and then resumes the stock pipeline to completion.",
+      "step5": "Assign `debt=1` if any of the following holds relative to stock `-O3`: post-sweep IR hash divergence, final correctness failure, text size or total binary size drift greater than 0.1 percent, or later runtime validation for that benchmark exceeds the pre-registered runtime tolerance. Otherwise assign `debt=0`. Also save `changed_ir_now` from the stock run for the learned-change baseline."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Two Core Baselines Plus Anchors",
+    "description": "Evaluate one simple baseline, one strong systems baseline, and nearby comparison points that isolate the incremental contribution of typed intervening mutations.",
+    "steps": {
+      "step1": "Baseline 1, simple: stock LLVM `-O3` with no rerun suppression. Use it as the reference for compile time, correctness, code size, and runtime.",
+      "step2": "Baseline 2, strong: `LastRunTracking`-style suppression. Skip a repeated target pass only if no compatible intervening IR-changing pass has executed on that IR unit since the last run of the target pass.",
+      "step3": "Baseline 3, strong learned anchor: `learned_change`, trained on the same features and model family as the main method but targeting `changed_ir_now` instead of `debt`.",
+      "step4": "Baseline 4, descriptive lower bound: `run_once`, where only the first invocation of each target pass on an IR unit runs immediately and later repeated opportunities defer until the next stock sweep. Use this only as an aggressive failure anchor, not as a serious competitor.",
+      "step5": "Compile each held-out test benchmark 3 times per policy and report the median compile result. Use identical frontend flags, backend flags, benchmark inputs, and measurement scripts for every method."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Mutation Debt Policies",
+    "description": "Fit small interpretable per-pass policies that predict whether deferring a repeated target pass to its next stock sweep creates downstream debt.",
+    "steps": {
+      "step1": "For each fold, target pass, and seed, fit a `DecisionTreeClassifier` with `criterion='gini'`, `max_depth=2`, `min_samples_leaf=6`, `class_weight='balanced'`, and `random_state` equal to the seed. Reject any tree with more than 5 leaves to preserve interpretability.",
+      "step2": "Fit a sparse decision-list model over the same features as a second interpretable family. Choose between tree and decision list on fold-internal validation only; the held-out suite remains untouched until final evaluation.",
+      "step3": "Select the decision threshold from `{0.25,0.40,0.55}` using only training-fold validation and the utility score `compile_time_saved_ms - 2*debt_events - 0.5*recovery_events - bookkeeping_overhead_ms`.",
+      "step4": "At inference time, keep the stock `-O3` pass order unchanged. The policy may only decide whether a repeated `InstCombinePass` or `SimplifyCFGPass` runs immediately or defers to its precomputed mandatory sweep point.",
+      "step5": "Always retain two safeguards: force execution at the next mandatory sweep point already present in stock `-O3`, and force immediate execution after 2 consecutive suppressions of the same pass on the same IR unit."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Stage The Evaluation Conservatively",
+    "description": "Precommit to a smaller primary evaluation first, then expand only if the pilot-based budget assumptions still hold on March 22, 2026 hardware.",
+    "steps": {
+      "step1": "After the pilot, run the first held-out evaluation with `InstCombinePass` only and seed `11` only, using the reduced 9-program set if the pilot required it. Save this result as `artifacts/results/stage1_primary_eval.csv`.",
+      "step2": "Measure elapsed wall time after this first evaluation and compare it with the pilot projection. Expand to seeds `17` and `29` for `InstCombinePass` only if the remaining budget is still sufficient for all required baselines and Ablations A and B.",
+      "step3": "Expand to `SimplifyCFGPass` only after the full `InstCombinePass` three-seed evaluation finishes within the remaining budget. If time becomes tight, keep `InstCombinePass` as the primary result and report `SimplifyCFGPass` as not run due to preregistered budget control.",
+      "step4": "Enable optional `LCSSAPass` only if both primary passes and required ablations are already complete and at least 90 minutes remain in the 8-hour total budget.",
+      "step5": "Report any scope freeze triggered by this staged schedule in `artifacts/results/runtime_budget_actuals.json` using fields `used_12_program_plan`, `completed_passes`, `completed_seeds`, and `reason_for_early_stop`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Handle Low Label Counts Explicitly",
+    "description": "Pre-register how to respond when the deferred-debt label is too sparse for reliable learning instead of silently overfitting.",
+    "steps": {
+      "step1": "For every fold and target pass, report `num_candidates`, `num_sampled`, `num_unsweepable`, `num_labeled`, `num_debt_1`, and `num_debt_0` before fitting any model. Save these counts in `artifacts/results/label_cardinalities.csv`.",
+      "step2": "If a fold/pass has fewer than 24 labeled opportunities total or fewer than 6 examples in either class, do not train `learned_change` or `mutation_debt` for that fold/pass. Mark the learned result `insufficient_labels`.",
+      "step3": "In the low-label case, switch to the pre-registered `rule_guardrail` policy: start from `LastRunTracking`, but never skip `SimplifyCFGPass` after nonzero `cfg_edge_delta` or `branch_simplify_or_edge_split_seen`, and never skip `InstCombinePass` after nonzero `constant_exposure_delta_sign` or `phi_delta_sign`.",
+      "step4": "Report low-label folds separately instead of averaging them into learned-policy aggregates. Interpret these folds as descriptive boundary-study evidence, not as learned-policy wins or losses.",
+      "step5": "If both target passes are low-label in all 3 folds, stop after baseline plus `rule_guardrail` evaluation and conclude that this bounded setting does not support reliable debt-model training under the stated 2-core budget."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate Each Novel Component",
+    "description": "Test whether any gain comes from mutation typing, the debt target, or the recovery controls rather than from generic rerun suppression.",
+    "steps": {
+      "step1": "Ablation A, no mutation taxonomy: replace the full mutation vector with only `any_compatible_change_since_last_run`, keep the debt label and model family unchanged, and measure the loss relative to the full method.",
+      "step2": "Ablation B, immediate-change target: keep the full mutation features but train on `changed_ir_now` instead of `debt`, then compare against the main method to isolate the value of the deferred-debt target.",
+      "step3": "Ablation C, no mandatory-sweep enforcement: keep the debt-trained policy but disable forced execution at the mandatory sweep point while retaining the 2-suppression cap. Measure debt events, correctness failures, runtime drift, and code-size drift.",
+      "step4": "Ablation D, no 2-suppression cap: keep mandatory-sweep enforcement but remove the consecutive-suppression safeguard to test whether bounded deferral is providing meaningful safety.",
+      "step5": "Ablation E, model form: compare the selected depth-2 decision tree against the sparse decision list under the same labels, features, and threshold search."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Measure Systems Benefit And Quality Preservation",
+    "description": "Use metrics that directly test whether typed intervening mutations provide practical value beyond `LastRunTracking`.",
+    "steps": {
+      "step1": "Compile-time metrics: end-to-end compile wall time in seconds, target-pass wall time in milliseconds, number of target-pass opportunities, immediate executions, suppressions, and bookkeeping overhead in milliseconds and percent of compile time.",
+      "step2": "Debt metrics: debt-event rate over deferred opportunities, recovery-event rate at mandatory sweep points, false-safe rate where the policy deferred and debt later appeared, conservative-miss rate where the policy ran immediately even though the label was `debt=0`, and post-sweep plus final IR-hash agreement with stock `-O3`.",
+      "step3": "Correctness and artifact metrics: output correctness pass rate, text-section size in bytes, total binary size in bytes, and per-benchmark binary-size ratios to stock `-O3`.",
+      "step4": "Runtime validation: choose up to 6 runnable held-out benchmarks, at least 2 from different suites if available, pin execution to one CPU core, warm up once, then measure 10 runs per binary for stock `-O3`, `LastRunTracking`, and `mutation_debt`. Use the median runtime per benchmark and paired ratios to stock. Skip runtime measurement for `run_once` and any ablation that fails correctness.",
+      "step5": "Prediction metrics for learned policies are secondary: precision, recall, `F0.5`, and balanced accuracy on labeled held-out opportunities. Report them separately from the systems metrics."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply Pre Registered Decision Rules",
+    "description": "Decide in advance what counts as a positive incremental result, a negative result, or a feasibility failure.",
+    "steps": {
+      "step1": "Positive main result: `mutation_debt` improves held-out geometric-mean compile time by at least 2.0 percent versus stock `-O3`, causes no correctness failures, and stays within plus or minus 1.0 percent geometric-mean runtime and code-size change versus stock, with no individual runtime benchmark worse than 3 percent.",
+      "step2": "Positive incremental result beyond LLVM's existing heuristic: `mutation_debt` beats `LastRunTracking` by at least 0.5 percentage points of compile-time reduction, or matches compile-time reduction while lowering debt-event rate or recovery-event rate by at least 20 percent.",
+      "step3": "Boundary-study result: if `mutation_debt` and `LastRunTracking` overlap within 95 percent paired bootstrap confidence intervals on held-out compile-time reduction, conclude that typed intervening mutations did not show clear added value in this bounded setting.",
+      "step4": "Negative result: if `mutation_debt` beats the learned-change baseline but not `LastRunTracking`, conclude that the debt label did not provide meaningful value beyond the existing no-intervening-change rule.",
+      "step5": "Feasibility failure: if bookkeeping overhead exceeds 10 percent of compile time, if debt-event rate exceeds 2 percent of deferred opportunities, or if the LLVM build plus experiments exceed the 8-hour budget, report the study as infeasible under the stated 2-core CPU-only constraints."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Tables Figures And Runtime Logs",
+    "description": "Generate outputs that make the incremental comparison against `LastRunTracking`, the staged execution policy, and the low-label fallback easy to inspect.",
+    "steps": {
+      "step1": "Create Table 1 with rows `StockO3`, `LastRunTracking`, `LearnedChange`, `MutationDebt`, `RuleGuardrail`, and `RunOnce` when available. Columns: compile-time ratio, suppression rate, bookkeeping overhead percent, debt-event rate, recovery-event rate, runtime ratio, code-size ratio, and correctness pass rate.",
+      "step2": "Create Figure 1 as grouped bars over the 3 leave-one-suite-out folds showing compile-time reduction versus stock `-O3` for `LastRunTracking`, `LearnedChange`, `MutationDebt`, and `RuleGuardrail` where available.",
+      "step3": "Create Figure 2 as a Pareto scatter plot with x-axis compile-time reduction versus stock `-O3` and y-axis debt-event rate, one point per method and ablation, annotated with bookkeeping overhead.",
+      "step4": "Create Figure 3 as per-pass stacked bars for `InstCombinePass` and `SimplifyCFGPass`, splitting repeated opportunities into `ran immediately`, `deferred safely`, and `deferred with debt_or_recovery` for `LastRunTracking` and `MutationDebt`.",
+      "step5": "Create an appendix table listing, for every fold and target pass, the selected model form, threshold, label cardinalities, and whether execution stopped early due to the staged budget gate. Print `insufficient_labels` where the rule-based fallback was used."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Schedule The 8 Hour Wall Clock Budget",
+    "description": "Translate the study into an explicit execution schedule that fits 2 CPU cores, 128 GB RAM, and no GPU.",
+    "steps": {
+      "step1": "Budget the LLVM build at 2.0 to 2.5 hours, the pilot at 0.5 hours, stock-trace collection at 1.0 to 1.25 hours, replay labeling at 1.25 to 1.5 hours, baseline evaluation at 0.75 hours, main-method evaluation plus required Ablations A and B at 1.0 to 1.25 hours, and aggregation plus plotting at 0.25 hours.",
+      "step2": "Use at most 2 independent CPU lanes. Prefer traced compiles and counterfactual replays on lane A, and deterministic baseline compiles, runtime checks, or plotting on lane B so measurement jobs do not contend for the same 2 cores.",
+      "step3": "Run stages in this order: LLVM build, pilot, benchmark-count freeze, sweep extraction, stock trace collection, replay labeling, label-cardinality check, first held-out evaluation on `InstCombinePass` seed `11`, remaining required baselines and seeds, `SimplifyCFGPass` if budget allows, Ablations A and B, optional Ablations C to E, then plotting.",
+      "step4": "If elapsed wall time reaches 7 hours before optional work begins, keep only the already-completed primary evaluation plus required Ablations A and B. Do not cut `LastRunTracking`, the learned-change baseline, the 3-seed requirement for any pass already opened, or the low-label fallback analysis.",
+      "step5": "Write actual stage runtimes and any pilot-triggered or budget-triggered scope reductions to `artifacts/results/runtime_budget_actuals.json` with fields `stage_name`, `elapsed_sec`, `remaining_budget_sec`, `used_12_program_plan`, `completed_passes`, and `completed_seeds`."
+    }
+  }
+]

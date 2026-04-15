@@ -1,0 +1,206 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up Python environment and dependencies",
+    "description": "Install all required Python packages for the discrete-event simulator, statistical analysis, and visualization. No GPU or special hardware needed.",
+    "steps": {
+      "step1": "Create a Python virtual environment: python3 -m venv venv && source venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy matplotlib seaborn pandas",
+      "step3": "Install additional packages: pip install simpy heapq-max tqdm jsonschema",
+      "step4": "Create the project directory structure: mkdir -p src/ tests/ results/ figures/ data/ traces/",
+      "step5": "Verify installation by running: python -c 'import numpy, scipy, matplotlib, pandas, simpy; print(\"All dependencies OK\")'",
+      "step6": "Set global random seed policy: all experiments use seeds [42, 123, 456] unless otherwise noted"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement EEVDF discrete-event simulator core",
+    "description": "Build the core discrete-event simulator implementing the EEVDF scheduling algorithm with virtual runtime tracking, lag computation, and deadline-based task selection. This is the foundation for all experiments.",
+    "steps": {
+      "step1": "Implement the Task class in src/task.py with fields: task_id, weight, vruntime, deadline, eligible_time, lag, total_cpu_time, direct_cpu_time, displaced_cpu_time, cgroup_id",
+      "step2": "Implement the EEVDFScheduler class in src/scheduler.py: (a) enqueue/dequeue tasks, (b) update vruntime on each tick (vruntime += delta / weight), (c) compute eligible time and virtual deadline, (d) select task with earliest eligible virtual deadline, (e) track per-task lag = ideal_time - actual_time",
+      "step3": "Implement the CPU class in src/cpu.py modeling M cores, each running the EEVDF scheduler independently with per-core run queues and load balancing",
+      "step4": "Implement the RelayEntity class in src/relay.py modeling async execution: (a) worker threads (io_uring io-wq style, per-task), (b) shared kernel threads (kworker, ksoftirqd style), (c) softirq context. Each relay has: service_time_distribution, cgroup_attribution_policy (none/partial/full), priority_inheritance (bool)",
+      "step5": "Implement the DisplacementModel in src/displacement.py: given a task's displacement_ratio alpha_i, split each CPU burst into direct (1-alpha_i)*burst and displaced alpha_i*burst portions. Displaced work is submitted to the appropriate RelayEntity",
+      "step6": "Implement the SimulationEngine in src/engine.py using an event-driven loop (heapq-based priority queue of events): TASK_ARRIVE, TASK_SCHEDULE, TASK_PREEMPT, RELAY_START, RELAY_COMPLETE, TICK events. Time granularity: 1 microsecond. Simulation duration: configurable (default 10 seconds of simulated time)",
+      "step7": "Implement metrics collection in src/metrics.py: (a) per-task effective CPU share = (direct_time + displaced_time) / total_sim_time, (b) scheduler-reported CPU share = direct_time / total_sim_time, (c) Jain's fairness index J = (sum(x_i))^2 / (N * sum(x_i^2)), (d) per-cgroup CPU accounting (reported vs actual), (e) lag distribution statistics",
+      "step8": "Write unit tests in tests/test_scheduler.py: (a) test EEVDF selects earliest eligible virtual deadline, (b) test vruntime advances proportionally to weight, (c) test fairness index = 1.0 for N identical CPU-bound tasks with alpha=0, (d) test lag bounds |lag_i| <= Q for all tasks"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic workload traces and displacement profiles",
+    "description": "Create parameterized workload generators that produce realistic CPU burst and I/O patterns. These traces drive the simulator across all experiments.",
+    "steps": {
+      "step1": "Implement WorkloadGenerator in src/workload.py with configurable parameters: N (num processes), burst_time_distribution (exponential with mean 1-10ms), inter_arrival_distribution (Poisson), displacement_ratio_distribution (Beta or fixed), total_demand_rate per process",
+      "step2": "Create displacement profiles matching real mechanisms: (a) io_uring_io_wq: alpha ~ Beta(3, 7), mean ~0.30, per-task workers, partial cgroup attribution; (b) io_uring_sqpoll: alpha ~ Beta(2, 5), mean ~0.28, shared thread, weak attribution; (c) softirq_network: alpha ~ Beta(2, 8), mean ~0.20, no cgroup attribution; (d) workqueue_cmwq: alpha ~ Beta(1, 9), mean ~0.10, no attribution; (e) cpu_bound: alpha = 0, full attribution",
+      "step3": "Create workload scenario configs as JSON files in data/: (a) homogeneous_io.json: N=16 processes all with io_uring profile; (b) heterogeneous_mixed.json: N/2 io_uring + N/2 cpu_bound; (c) container_colocation.json: K=4 cgroups with different profiles; (d) scaling.json: template for N in {4,8,16,32,64,128,256}; (e) bursty.json: alpha varies sinusoidally over time with period 500ms",
+      "step4": "Create trace-driven workload configs: (a) database_ycsb.json: 70% read (high io_uring), 30% compute, alpha~0.35; (b) webserver.json: mixed I/O and CPU, alpha~0.20; (c) ml_inference.json: CPU-intensive with periodic I/O bursts, alpha~0.08",
+      "step5": "Validate workload generator: run each scenario for 1 second of simulated time, verify (a) arrival rate matches configured rate within 5%, (b) displacement ratio matches configured distribution within 10%, (c) total CPU utilization is as expected"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: No-displacement EEVDF (ideal fairness)",
+    "description": "Run the EEVDF simulator with all processes being pure CPU-bound (alpha=0 for all). This establishes the ideal fairness baseline where the scheduler has perfect information. This is the simple baseline.",
+    "steps": {
+      "step1": "Configure: N in {4, 8, 16, 32, 64, 128}, M=2 cores, all alpha_i=0, equal weights, simulation time=10s, seeds=[42, 123, 456]",
+      "step2": "For each (N, seed) combination, run the simulator and record: (a) Jain's fairness index on CPU shares, (b) per-task lag distribution (mean, p50, p99, max), (c) per-task CPU share (should be ~1/N each), (d) total simulation wall-clock time",
+      "step3": "Verify Jain's fairness index >= 0.99 for all N values (sanity check that EEVDF is correctly implemented)",
+      "step4": "Save results to results/baseline_no_displacement.csv with columns: N, M, seed, jain_fairness, mean_lag, p99_lag, max_lag, wall_time_seconds",
+      "step5": "Report mean and std of Jain's fairness index across seeds for each N"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Uniform displacement (homogeneous async)",
+    "description": "Run with all processes having the same displacement ratio (alpha=0.3 for all). Per Theorem 2, uniform displacement should preserve relative fairness. This is the strong baseline showing that displacement alone doesn't break fairness — heterogeneity does.",
+    "steps": {
+      "step1": "Configure: N in {4, 8, 16, 32, 64, 128}, M=2 cores, all alpha_i=0.3 (fixed), equal weights, simulation time=10s, seeds=[42, 123, 456]",
+      "step2": "For each (N, seed), run simulator and record: (a) Jain's fairness index on scheduler-reported shares, (b) Jain's fairness index on effective shares (including displaced time), (c) per-task effective CPU share, (d) per-cgroup accounting gap (if applicable)",
+      "step3": "Verify that Jain's fairness on effective shares >= 0.95 (confirming Theorem 2: uniform displacement preserves fairness)",
+      "step4": "Compare scheduler-reported fairness vs effective fairness — they should be similar under uniform displacement",
+      "step5": "Save results to results/baseline_uniform_displacement.csv with columns: N, M, seed, alpha, jain_reported, jain_effective, mean_share_gap, wall_time_seconds"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 1: Displacement ratio characterization",
+    "description": "Quantify displacement ratios for each modeled async mechanism using the simulator parameterized with realistic profiles. Validates that displacement is quantitatively significant (>=10% of total CPU time).",
+    "steps": {
+      "step1": "For each displacement profile (io_uring_io_wq, io_uring_sqpoll, softirq_network, workqueue_cmwq), configure N=16 processes all using that profile, M=2 cores, simulation time=10s, seeds=[42, 123, 456]",
+      "step2": "Measure per-mechanism: (a) mean displacement ratio (actual vs configured), (b) fraction of total system CPU time consumed by relay entities, (c) distribution of relay entity service times, (d) fraction of CPU time with no cgroup attribution",
+      "step3": "Create a mixed workload: 4 processes per mechanism type (16 total), measure aggregate displacement",
+      "step4": "Save results to results/displacement_characterization.csv with columns: mechanism, N, seed, mean_alpha, relay_cpu_fraction, unattributed_fraction, mean_relay_service_time_us",
+      "step5": "Verify success criterion: at least one mechanism shows >=10% displacement"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Fairness violation under heterogeneous displacement",
+    "description": "Core experiment measuring how heterogeneous displacement ratios degrade scheduler fairness. Tests Theorems 1 and 3 by varying N and the variance of displacement ratios.",
+    "steps": {
+      "step1": "Configure heterogeneous workloads: N/2 processes with alpha drawn from Beta(3,7) (I/O-heavy, mean ~0.30) and N/2 with alpha=0 (CPU-bound). N in {4, 8, 16, 32, 64, 128, 256}, M=2 cores, seeds=[42, 123, 456]",
+      "step2": "For each (N, seed), run simulator and compute: (a) Jain's fairness index on scheduler-reported shares (J_reported), (b) Jain's fairness index on effective shares (J_effective), (c) maximum effective share ratio max(share_i)/min(share_i), (d) per-task lag including displaced time",
+      "step3": "Also run with M in {4, 8} for N=32 to test multi-core scaling",
+      "step4": "Compute analytical bound from Theorem 1: max fairness violation = max(alpha_i) - min(alpha_i). Compare simulation results against bound",
+      "step5": "Compute analytical prediction from Theorem 3: fairness violation ~ N * Var(alpha). Fit regression of (J_reported - J_effective) vs N*Var(alpha) and report R-squared",
+      "step6": "Save results to results/fairness_violation.csv with columns: N, M, seed, jain_reported, jain_effective, max_share_ratio, analytical_bound, actual_violation, var_alpha",
+      "step7": "Verify success criterion: J_effective < 0.9 for N >= 8 under heterogeneous displacement"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Cgroup accounting accuracy",
+    "description": "Measure how much CPU time leaks out of cgroup accounting due to displacement in a multi-tenant container scenario.",
+    "steps": {
+      "step1": "Configure K cgroups: K in {2, 4, 8, 16}. For K=4: cgroup_0 = 4 io_uring-heavy processes (alpha~0.30), cgroup_1 = 4 CPU-bound (alpha=0), cgroup_2 = 4 network-heavy (alpha~0.20), cgroup_3 = 4 workqueue-heavy (alpha~0.10). Total N=4*K. M=2 cores. Each cgroup limited to 1/K of total CPU. Seeds=[42, 123, 456]",
+      "step2": "For each configuration, measure: (a) cgroup-reported CPU usage vs cgroup CPU limit, (b) cgroup actual CPU usage (including displaced time attributed to that cgroup's processes), (c) leakage = actual - reported for each cgroup, (d) leakage as fraction of cgroup limit",
+      "step3": "Test with different cgroup attribution policies: (a) none: no displaced time attributed to cgroups, (b) partial: io_uring workers attributed (since Linux 5.12), others not, (c) full: all displaced time attributed (CCP)",
+      "step4": "Save results to results/cgroup_accounting.csv with columns: K, cgroup_id, cgroup_type, seed, reported_cpu, actual_cpu, leakage_abs, leakage_fraction, attribution_policy",
+      "step5": "Verify: I/O-intensive cgroups exceed limits by >=15% under 'none' attribution"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 4: Causal Charge Propagation (CCP) evaluation",
+    "description": "Evaluate the three CCP propagation strategies (immediate, batched, statistical) for their effectiveness in restoring fairness and their overhead.",
+    "steps": {
+      "step1": "Implement CCP in src/ccp.py with three strategies: (a) ImmediateCCP: at each scheduler tick, charge displaced time to originating task's vruntime. Overhead model: +1 vruntime update per relay completion. (b) BatchedCCP: accumulate displaced time, charge every batch_interval_ms (test 1, 5, 10, 50 ms). Overhead model: +1 update per batch per active relay. (c) StatisticalCCP: maintain exponential moving average of each task's displacement ratio, proactively charge estimated displaced time at each tick. Overhead model: +1 multiply per tick per task",
+      "step2": "Use the heterogeneous workload from Experiment 2 (N/2 io-heavy + N/2 cpu-bound). N=32, M=2 cores, seeds=[42, 123, 456]",
+      "step3": "For each CCP strategy, run simulator and measure: (a) Jain's fairness index on effective shares after CCP (J_ccp), (b) scheduling overhead = additional_operations / total_operations as percentage, (c) convergence time: time from workload start until J_ccp >= 0.95 (or report if never reached)",
+      "step4": "For BatchedCCP, sweep batch_interval_ms in {1, 5, 10, 50} and report fairness vs overhead trade-off",
+      "step5": "For StatisticalCCP, sweep EMA smoothing factor in {0.01, 0.05, 0.1, 0.5} and report accuracy vs overhead",
+      "step6": "Run CCP under the bursty workload scenario (alpha varies sinusoidally) to test convergence under non-stationary conditions. Measure fairness as a time series (1ms resolution)",
+      "step7": "Save results to results/ccp_evaluation.csv with columns: strategy, param_value, N, seed, jain_no_ccp, jain_with_ccp, overhead_pct, convergence_time_ms",
+      "step8": "Verify success criteria: at least one strategy achieves J_ccp >= 0.95 with overhead <= 5%"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Sensitivity to displacement ratio variance",
+    "description": "Ablation study isolating the effect of displacement ratio variance (Var(alpha)) on fairness violation, testing Theorem 3's prediction that violation scales as N * Var(alpha).",
+    "steps": {
+      "step1": "Fix N=32, M=2. Vary Var(alpha) by drawing alpha_i from Beta distributions with different shape parameters while keeping mean alpha constant at 0.15: (a) low var: Beta(15, 85), Var~0.001; (b) medium var: Beta(3, 17), Var~0.012; (c) high var: Beta(1, 5.67), Var~0.031; (d) extreme var: half at alpha=0, half at alpha=0.30, Var~0.0225. Seeds=[42, 123, 456]",
+      "step2": "For each variance level, measure J_effective and compute (J_reported - J_effective) as the fairness gap",
+      "step3": "Plot fairness gap vs Var(alpha) and fit linear regression. Report R-squared to validate Theorem 3",
+      "step4": "Save results to results/ablation_variance.csv with columns: var_level, var_alpha, mean_alpha, seed, jain_reported, jain_effective, fairness_gap"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Sensitivity to system load",
+    "description": "Test how system CPU utilization affects displacement-induced unfairness. At high load, scheduling decisions matter more.",
+    "steps": {
+      "step1": "Fix N=32, M=2, heterogeneous alpha (N/2 io-heavy alpha~0.30, N/2 cpu-bound alpha=0). Vary target system utilization: {0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95} by scaling process arrival rates. Seeds=[42, 123, 456]",
+      "step2": "For each utilization level, measure: (a) J_effective, (b) mean and p99 scheduling lag, (c) CCP overhead at each load level (using BatchedCCP with 10ms interval)",
+      "step3": "Save results to results/ablation_load.csv with columns: target_utilization, actual_utilization, seed, jain_effective, mean_lag_us, p99_lag_us, ccp_overhead_pct"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Sensitivity to number of cores",
+    "description": "Test how the number of CPU cores affects displacement-induced unfairness. More cores mean more opportunities for relay entities to execute concurrently.",
+    "steps": {
+      "step1": "Fix N=32, heterogeneous alpha (N/2 io-heavy, N/2 cpu-bound). Vary M in {1, 2, 4, 8, 16, 32}. Seeds=[42, 123, 456]",
+      "step2": "For each M, measure: (a) J_effective, (b) relay entity contention (queue wait time), (c) CCP overhead",
+      "step3": "Save results to results/ablation_cores.csv with columns: M, N, seed, jain_effective, relay_wait_time_us, ccp_overhead_pct"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: CCP component ablation",
+    "description": "Ablate individual components of the CCP mechanism to understand each component's contribution to fairness restoration.",
+    "steps": {
+      "step1": "Using BatchedCCP (10ms interval) as the full CCP mechanism, test the following ablations: (a) full CCP: tagging + tracking + propagation (baseline), (b) no propagation: tag and track but don't update vruntime (measures tracking overhead alone), (c) no tracking: propagate based on fixed estimated alpha (tests if per-submission tracking is needed vs. aggregate estimation), (d) no tagging: attribute all relay work equally to all processes (tests if causal attribution matters)",
+      "step2": "Run each ablation with N=32, M=2, heterogeneous alpha, seeds=[42, 123, 456]",
+      "step3": "Measure: J_effective, overhead_pct, convergence_time_ms for each ablation",
+      "step4": "Save results to results/ablation_ccp_components.csv with columns: ablation, seed, jain_effective, overhead_pct, convergence_time_ms"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 5: Trace-driven validation",
+    "description": "Validate the formal model and simulator using workload parameters derived from realistic application profiles (YCSB database, web server, ML inference).",
+    "steps": {
+      "step1": "Load trace-driven workload configs (database_ycsb.json, webserver.json, ml_inference.json). For each trace: create a co-location scenario with 3 cgroups (one per workload type), 8 processes each, M=2 cores, seeds=[42, 123, 456]",
+      "step2": "Run simulator and measure: (a) J_effective for the mixed workload, (b) per-workload-type effective CPU share vs scheduler-reported share, (c) cgroup accounting leakage per workload type",
+      "step3": "Compare simulation J_effective against analytical prediction from Theorem 1. Report the prediction error as |J_sim - J_analytical| / J_analytical",
+      "step4": "Run CCP (BatchedCCP, 10ms) on each trace-driven scenario and measure fairness restoration",
+      "step5": "Save results to results/trace_validation.csv with columns: trace_scenario, seed, jain_effective, jain_analytical, prediction_error, jain_with_ccp, ccp_overhead_pct",
+      "step6": "Verify: analytical bounds match simulation within 15%"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical significance and success criteria evaluation",
+    "description": "Aggregate results across all experiments, compute confidence intervals, and formally evaluate all success criteria from the hypothesis.",
+    "steps": {
+      "step1": "For each experiment, compute mean and 95% confidence interval across 3 seeds for all key metrics",
+      "step2": "Evaluate success criterion 1: displacement >= 10% of total CPU time. Report the maximum observed displacement fraction across all mechanism profiles with CI",
+      "step3": "Evaluate success criterion 2: J_effective < 0.9 for N >= 8 under heterogeneous displacement. Report J_effective with CI for each N",
+      "step4": "Evaluate success criterion 3: CCP restores J >= 0.95 with overhead <= 5%. Report best CCP configuration with CI on both fairness and overhead",
+      "step5": "Evaluate success criterion 4: analytical bounds match simulation within 15%. Report prediction error across all validated scenarios with CI",
+      "step6": "Create a summary table in results/success_criteria.csv: criterion, metric, threshold, observed_value, ci_lower, ci_upper, pass_fail",
+      "step7": "Perform Welch's t-test comparing J_effective (no CCP) vs J_effective (with CCP) for the best CCP strategy, report p-value"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables for the research paper. Target 6-8 figures covering the main results, ablations, and CCP evaluation.",
+    "steps": {
+      "step1": "Figure 1 (Displacement taxonomy): Bar chart showing mean displacement ratio for each async mechanism (io_uring_io_wq, io_uring_sqpoll, softirq_network, workqueue_cmwq) with error bars across seeds. Include a horizontal line at 10% threshold. Save as figures/fig1_displacement_ratios.pdf",
+      "step2": "Figure 2 (Fairness violation scaling): Line plot of J_effective vs N (log scale x-axis) for three conditions: no displacement (baseline 1), uniform displacement (baseline 2), heterogeneous displacement (experiment 2). Shaded regions for CI across seeds. Save as figures/fig2_fairness_scaling.pdf",
+      "step3": "Figure 3 (Scheduler view vs reality): Side-by-side bar chart for N=32 showing per-task CPU share as reported by scheduler vs effective share (including displaced time). Group tasks by type (io-heavy vs cpu-bound). Save as figures/fig3_scheduler_vs_reality.pdf",
+      "step4": "Figure 4 (Cgroup leakage): Stacked bar chart showing cgroup-reported vs actual CPU usage for K=4 cgroups under three attribution policies (none, partial, full/CCP). Save as figures/fig4_cgroup_leakage.pdf",
+      "step5": "Figure 5 (CCP evaluation): (a) Line plot of J_effective vs batch_interval_ms for BatchedCCP, with overhead on secondary y-axis. (b) Scatter plot of fairness vs overhead for all three CCP strategies. Save as figures/fig5_ccp_evaluation.pdf",
+      "step6": "Figure 6 (CCP convergence under burstiness): Time series plot showing J_effective over time under bursty workload for no-CCP, ImmediateCCP, BatchedCCP, StatisticalCCP. Save as figures/fig6_ccp_convergence.pdf",
+      "step7": "Figure 7 (Sensitivity analysis): 2x2 subplot grid: (a) fairness gap vs Var(alpha), (b) fairness gap vs system load, (c) fairness gap vs num cores, (d) CCP component ablation bar chart. Save as figures/fig7_sensitivity.pdf",
+      "step8": "Figure 8 (Analytical validation): Scatter plot of analytical prediction vs simulation result for J_effective, with y=x reference line. Points colored by workload scenario. Report R-squared. Save as figures/fig8_analytical_validation.pdf",
+      "step9": "Table 1: Summary of displacement mechanisms taxonomy (mechanism, relay entity, displacement type, cgroup attribution). Format as LaTeX table",
+      "step10": "Table 2: Success criteria summary table. Format as LaTeX table",
+      "step11": "Use consistent style: matplotlib with seaborn 'paper' context, font size 12, figsize=(7, 4.5) for single-column, (14, 4.5) for double-column. Color palette: seaborn 'colorblind' for accessibility"
+    }
+  }
+]

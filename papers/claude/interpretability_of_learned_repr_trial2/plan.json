@@ -1,0 +1,156 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for SAE analysis, model loading, and evaluation. Verify CUDA availability and GPU memory.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision transformers datasets sae-lens transformer-lens einops jaxtyping",
+      "step2": "Install analysis packages: pip install scikit-learn scipy matplotlib seaborn pandas numpy tqdm",
+      "step3": "Verify GPU: run a quick script that checks torch.cuda.is_available(), prints GPU name, VRAM, and CUDA version",
+      "step4": "Verify SAE Lens installation: load a small test SAE to confirm the library works (e.g., list available GPT-2 Small SAEs from the SAE Lens repository)",
+      "step5": "Create directory structure: exp/ with subdirectories data/, results/, figures/, logs/, and shared/ for utility code"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare capability evaluation datasets",
+    "description": "Download and preprocess evaluation datasets for 6 model capabilities. Each dataset provides examples where GPT-2 Small must exercise a specific capability. We use 500 examples per capability (3000 total) to keep compute manageable while ensuring statistical significance.",
+    "steps": {
+      "step1": "Factual Knowledge — Download LAMA TREx subset via HuggingFace datasets. Format as cloze prompts (e.g., 'The capital of France is [MASK]'). Filter to relations where GPT-2 Small gets >20% accuracy (at least 500 examples). Save as JSON with fields: prompt, target_token, relation_type.",
+      "step2": "Syntactic Processing — Download BLiMP (Benchmark of Linguistic Minimal Pairs) via HuggingFace. Use the subject_verb_agreement_* and anaphor_agreement subsets. Format as pairs of (grammatical, ungrammatical) sentences. GPT-2 should assign higher probability to the grammatical one. Select 500 pairs. Save as JSON with fields: good_sentence, bad_sentence, phenomenon.",
+      "step3": "Semantic Understanding — Download WiC (Word-in-Context) dataset via HuggingFace. Format as sentence pairs with a target word; task is to predict if the word has the same sense. Filter to examples GPT-2 can distinguish (>55% accuracy via embedding similarity). Select 500 examples. Save as JSON.",
+      "step4": "Sentiment Analysis — Download SST-2 (Stanford Sentiment Treebank) validation set via HuggingFace. Format as sentence + binary label (positive/negative). Select 500 examples where GPT-2 shows sentiment-correlated next-token predictions. Save as JSON.",
+      "step5": "Named Entity Recognition — Create 500 custom prompts from CoNLL-2003 entities. Format: 'In Paris, the company [entity] is a [MASK]' where GPT-2 should predict entity type (person/org/location). Filter to examples with >30% accuracy. Save as JSON with fields: prompt, entity, entity_type.",
+      "step6": "Simple Reasoning — Create 500 simple logical completion tasks. Include: numerical successor ('After 3 comes [MASK]'), simple analogies ('Dog is to puppy as cat is to [MASK]'), negation handling, and basic causal inference. Filter to examples GPT-2 gets right >25% of the time. Save as JSON.",
+      "step7": "For each dataset, compute and log GPT-2 Small baseline accuracy (or probability preference for BLiMP) to confirm the model exercises each capability. Save statistics to data/dataset_stats.json.",
+      "step8": "Create a unified DataLoader class in shared/data_utils.py that loads any capability dataset by name, tokenizes with GPT-2 tokenizer, and provides batched iteration with fields needed for attribution (input_ids, attention_mask, target_position, target_token_id, capability_label)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Load SAEs and compute gradient-based feature attribution",
+    "description": "Load pre-trained SAEs from SAE Lens for GPT-2 Small at all 12 residual stream layers. For each capability and layer, compute gradient × activation importance scores for all SAE features. This is the core computation that maps features to capabilities. Use 3 random seeds for data subsampling to get error bars.",
+    "steps": {
+      "step1": "Load GPT-2 Small via TransformerLens (HookedTransformer). Load pre-trained SAEs from SAE Lens for residual stream positions at layers 0-11. Use the standard 32768-feature (32K) ReLU SAE as the primary architecture. Log SAE metadata (dict_size, activation_dim, l0_sparsity) to results/sae_metadata.json.",
+      "step2": "Implement the gradient-based feature attribution function in shared/attribution.py: For a given input batch, SAE layer, and capability-specific loss function, compute importance(f_i, x) = |a_i(x) * grad_{a_i} L(x)| where a_i is the SAE feature activation and L is the task loss. Use torch.autograd.grad with create_graph=False for efficiency. Return a tensor of shape (batch_size, n_features).",
+      "step3": "Define capability-specific loss functions in shared/losses.py: (a) Factual/NER/Reasoning: negative log-probability of the target token at the target position. (b) Syntax (BLiMP): log-probability difference between good and bad continuations. (c) Sentiment: log-probability of positive vs negative sentiment words at the final position. (d) Semantics (WiC): cosine similarity between contextualized embeddings of the target word in the two sentences.",
+      "step4": "Run attribution for all 6 capabilities × 12 layers × 3 seeds. For each seed, randomly subsample 300 examples from each capability dataset. Process in batches of 16. For each batch: (a) forward pass through GPT-2 with SAE hook at the target layer, (b) compute capability-specific loss, (c) backpropagate to get gradients w.r.t. SAE feature activations, (d) compute importance scores. Aggregate by averaging importance across examples. Save per-seed results to results/attribution_seed{s}_layer{l}_cap{c}.pt. Estimated time: ~90 minutes (12 layers × 6 caps × 300 examples × ~0.08s per example).",
+      "step5": "Aggregate across seeds: compute mean and std of importance scores for each (capability, layer, feature) triple. Save to results/attribution_aggregated.pt. Also save the top-100 feature indices per (capability, layer) pair to results/top_features.json for downstream experiments."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute Functional Localization Index (FLI)",
+    "description": "Compute the FLI metric for each capability at each layer using the aggregated attribution scores. FLI = 1 - H(p_c) / H(u) where p_c is the normalized importance distribution and u is uniform. This quantifies whether capabilities are localized (high FLI) or distributed (low FLI) in feature space.",
+    "steps": {
+      "step1": "Load aggregated attribution results from results/attribution_aggregated.pt.",
+      "step2": "For each (capability, layer) pair: (a) normalize the mean importance vector to a probability distribution p_c (add small epsilon=1e-10 for numerical stability), (b) compute Shannon entropy H(p_c) = -sum(p_c * log(p_c)), (c) compute uniform entropy H(u) = log(n_features), (d) compute FLI = 1 - H(p_c) / H(u). Also compute the effective number of features = exp(H(p_c)) as an intuitive measure.",
+      "step3": "Compute FLI for each seed separately, then report mean ± std across seeds.",
+      "step4": "Save results to results/fli_scores.json with structure: {capability: {layer: {fli_mean, fli_std, effective_features_mean, effective_features_std}}}.",
+      "step5": "Identify the 'peak layer' for each capability: the layer with highest mean importance (sum of top-100 feature importances). Save to results/peak_layers.json. This will be used for focused causal validation."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal validation via activation patching",
+    "description": "Validate that gradient-based attribution identifies causally important features by performing targeted zero-ablation on top features at the peak layer for each capability. Compare performance drop from ablating top-K features vs. random-K features.",
+    "steps": {
+      "step1": "For each capability, identify its peak layer and top-50 features from the attribution results.",
+      "step2": "Implement ablation in shared/ablation.py: Hook into the SAE at the target layer. For specified feature indices, set their activations to zero (zero ablation) or to the mean activation computed over 1000 random examples (mean ablation). Reconstruct the modified activation and replace the original residual stream.",
+      "step3": "For each of 3 seeds, subsample 200 evaluation examples per capability. Measure: (a) baseline performance (no ablation), (b) performance after ablating top-50 features, (c) performance after ablating a random set of 50 features (average over 5 random sets), (d) performance after ablating top-10, top-20, top-50, top-100 features (dose-response curve). Performance metric is task-specific accuracy or probability score as defined in losses.py.",
+      "step4": "Compute the 'causal fidelity' ratio: (performance_drop_top50) / (performance_drop_random50). A high ratio confirms gradient attribution identifies genuinely causal features. Report mean ± std across seeds.",
+      "step5": "Save all ablation results to results/causal_validation.json with structure per capability: {baseline_perf, ablated_top50_perf, ablated_random50_perf, ablated_topK_perf for K in [10,20,50,100], causal_fidelity_ratio, seed-level breakdown}. Estimated time: ~60 minutes (6 caps × 200 examples × multiple ablation conditions × ~0.05s per example)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Capability overlap matrix and feature sharing analysis",
+    "description": "Compute pairwise overlap of top features between all capability pairs to reveal the modular vs. shared organization of the feature space.",
+    "steps": {
+      "step1": "For each layer, compute the pairwise overlap matrix O where O_{ij} = |TopK(c_i) ∩ TopK(c_j)| / K using K=100 features from the aggregated attribution results.",
+      "step2": "Compute the overlap matrix at the peak layer of each capability (use the per-capability peak, evaluating overlap at each capability's own peak layer).",
+      "step3": "Also compute a 'global overlap matrix' by taking the union of top-100 features across all layers per capability, then computing pairwise Jaccard similarity.",
+      "step4": "Perform hierarchical clustering on the overlap matrix using Ward's method to identify capability clusters.",
+      "step5": "For each feature in the top-100 of any capability, count how many capabilities it supports (feature 'breadth' or 'polysemanticity score'). Compute the distribution of feature breadth.",
+      "step6": "Save results to results/capability_overlap.json: overlap matrices per layer, global overlap matrix, clustering dendrogram data, feature breadth distribution."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Dark matter analysis — probing SAE features vs. residuals",
+    "description": "Train linear probes on SAE feature activations and on SAE reconstruction residuals for each capability. Compare probe accuracy to measure how much capability-relevant information is captured by features vs. lost in the residual.",
+    "steps": {
+      "step1": "For each capability, collect SAE feature activations and residuals at the peak layer for 500 examples (400 train, 100 test). SAE residual = original_activation - SAE_reconstruction. Store both tensors.",
+      "step2": "Define probe targets: (a) Factual: binary correct/incorrect prediction. (b) Syntax: binary grammatical/ungrammatical preference. (c) Sentiment: positive/negative. (d) Semantics: same/different sense. (e) NER: entity type (3-way). (f) Reasoning: correct/incorrect. All are classification tasks.",
+      "step3": "Train logistic regression probes (sklearn LogisticRegression with L2 regularization, C=1.0) on: (a) SAE feature activations only, (b) SAE residual only, (c) full original activation (upper bound), (d) random features of same dimensionality as residual (lower bound/control). Use 3-fold cross-validation on the train set for any hyperparameter selection.",
+      "step4": "Compute the 'dark matter ratio' for each capability: probe_accuracy_residual / probe_accuracy_features. A high ratio means more capability-relevant information is in the residual (dark matter). Report accuracy and dark matter ratio ± std across 3 seeds.",
+      "step5": "Save results to results/dark_matter_probes.json: per-capability probe accuracies for each condition, dark matter ratios, confidence intervals. Estimated time: ~20 minutes (probes are fast, main cost is collecting activations)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: SAE architecture comparison (ReLU L1 vs TopK, 16K vs 32K)",
+    "description": "Repeat FLI computation and key analyses with different SAE architectures and dictionary sizes to test whether localization patterns are properties of the model or artifacts of the SAE.",
+    "steps": {
+      "step1": "Load additional SAEs from SAE Lens: (a) TopK SAE with 32K features if available, else use a different L1 coefficient variant, (b) ReLU SAE with 16K features. Log which specific SAE checkpoints are used.",
+      "step2": "For each alternative SAE, repeat the gradient-based attribution for all 6 capabilities at 3 key layers per capability (peak layer ± 1) using 1 seed with 300 examples. This reduces compute while still testing architecture sensitivity.",
+      "step3": "Compute FLI for each alternative SAE at these layers. Compare FLI scores across SAE architectures using Spearman rank correlation (do capabilities maintain their relative localization ordering?).",
+      "step4": "Compute feature overlap between the primary SAE and each alternative: for each capability at the peak layer, what fraction of top-100 features (by attribution) in one SAE correspond to similar features in the other (measured by decoder weight cosine similarity > 0.7)?",
+      "step5": "Save results to results/architecture_comparison.json: FLI scores per architecture, Spearman correlations, cross-architecture feature correspondence. Estimated time: ~45 minutes (reduced layer/seed coverage)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Attribution method comparison",
+    "description": "Compare gradient × activation against simpler attribution baselines to validate that our method provides meaningful importance rankings.",
+    "steps": {
+      "step1": "Implement alternative attribution methods in shared/attribution.py: (a) Activation magnitude only: importance(f_i) = |a_i(x)| (ignores downstream effect), (b) Gradient magnitude only: importance(f_i) = |grad_{a_i} L(x)| (ignores activation), (c) Random baseline: random importance scores.",
+      "step2": "Run all 3 alternative methods + our gradient × activation method for all 6 capabilities at their peak layers, using 1 seed with 300 examples each.",
+      "step3": "Evaluate each method by its causal fidelity: ablate top-50 features identified by each method and measure performance drop. The method that identifies the most causally important features is the most faithful.",
+      "step4": "Also compare FLI scores across methods to check if the localization finding is robust to attribution method choice.",
+      "step5": "Save results to results/attribution_ablation.json: per-method causal fidelity scores, FLI scores, and rankings. Estimated time: ~30 minutes."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Sensitivity to top-K threshold",
+    "description": "Test how sensitive the FLI and overlap results are to the choice of K (number of top features considered).",
+    "steps": {
+      "step1": "Recompute FLI for K values in [10, 25, 50, 100, 200, 500] (FLI uses the full distribution, but we also compute a truncated version focusing on top-K features).",
+      "step2": "Recompute capability overlap matrices for each K value.",
+      "step3": "Compute the rank correlation of capability ordering (by FLI) across different K values. High correlation means the localization finding is robust.",
+      "step4": "Compute the Jaccard stability of the top-K sets: for each capability, how much does the top-K set change as K varies (overlap between top-K and top-2K sets)?",
+      "step5": "Save results to results/topk_sensitivity.json. Estimated time: ~10 minutes (reuses precomputed attributions)."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical tests and success criteria evaluation",
+    "description": "Formally evaluate all success criteria with appropriate statistical tests. Determine if the hypothesis is confirmed, partially supported, or refuted.",
+    "steps": {
+      "step1": "Success Criterion 1 (FLI variation): Compute the ratio of max FLI to min FLI across capabilities. Test with one-way ANOVA across capabilities. Target: ratio ≥ 2.0 with p < 0.05.",
+      "step2": "Success Criterion 2 (Localization predicts causal faithfulness): Compute Spearman correlation between FLI and causal fidelity ratio across all 6 capabilities × 12 layers. Target: correlation > 0.5 with p < 0.05. Also compare: for the 3 most localized vs. 3 most distributed capabilities, is the mean performance drop from top-50 ablation >3× larger for localized ones?",
+      "step3": "Success Criterion 3 (Dark matter dependence): Compute Spearman correlation between FLI and dark matter ratio. Target: negative correlation (lower FLI → higher dark matter ratio) with coefficient < -0.5 and p < 0.05. Compare residual probe accuracy for top-3 localized vs. top-3 distributed capabilities.",
+      "step4": "Success Criterion 4 (Cross-architecture consistency): Compute Spearman correlation of FLI rankings between primary and alternative SAE architectures. Target: correlation > 0.7.",
+      "step5": "Success Criterion 5 (Localization predicts interpretability): For top-20 features per capability, compute an automated interpretability proxy: the maximum cosine similarity between each feature's decoder weight and any token embedding in GPT-2's vocabulary (a measure of 'token interpretability'). Compare scores for localized vs. distributed capability features. Target: significantly higher scores for localized capabilities (t-test, p < 0.05).",
+      "step6": "Compile all results into results/success_criteria_evaluation.json with each criterion marked as 'confirmed', 'partially_supported', or 'refuted', along with the statistical evidence.",
+      "step7": "Write a narrative summary to results/findings_summary.md describing the main findings, which criteria passed/failed, and implications."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures summarizing all experimental results for the paper. Use consistent styling (matplotlib with seaborn, colorblind-friendly palette).",
+    "steps": {
+      "step1": "Figure 1 — Feature-Capability Heatmap: A 12×6 heatmap (layers × capabilities) showing the sum of top-100 feature importances at each position. Use a diverging colormap normalized per capability. Annotate peak layers. Save as figures/figure1_feature_capability_heatmap.pdf and .png.",
+      "step2": "Figure 2 — Functional Localization Index: (a) Bar chart of FLI at peak layer for each capability, sorted from most to least localized, with error bars across seeds. (b) Line plot of FLI across layers for each capability, showing different layer profiles. Save as figures/figure2_fli.pdf.",
+      "step3": "Figure 3 — Causal Validation: (a) Dose-response curves: x-axis = number of features ablated (10, 20, 50, 100), y-axis = normalized performance remaining, one curve per capability. (b) Bar chart comparing top-50 ablation vs. random-50 ablation performance drop for each capability. Save as figures/figure3_causal_validation.pdf.",
+      "step4": "Figure 4 — Capability Overlap Matrix: (a) 6×6 heatmap of pairwise feature overlap at peak layers, annotated with values. (b) Dendrogram from hierarchical clustering. (c) Histogram of feature breadth (how many capabilities each feature supports). Save as figures/figure4_overlap.pdf.",
+      "step5": "Figure 5 — Dark Matter Analysis: Grouped bar chart showing probe accuracy for each capability under 4 conditions (features only, residual only, full activation, random control). Color-code by localized vs. distributed. Save as figures/figure5_dark_matter.pdf.",
+      "step6": "Figure 6 — Architecture Comparison: Scatter plot of FLI (primary SAE) vs FLI (alternative SAE) for all capability × layer combinations, with regression line and Spearman r. Save as figures/figure6_architecture_comparison.pdf.",
+      "step7": "Table 1 — Main Results: LaTeX table with columns: Capability, Peak Layer, FLI (mean±std), Effective Features, Causal Fidelity Ratio, Dark Matter Ratio, Top-Feature Interpretability Score. Save as figures/table1_main_results.tex.",
+      "step8": "Table 2 — Ablation Results: LaTeX table summarizing attribution method comparison and top-K sensitivity. Save as figures/table2_ablations.tex.",
+      "step9": "Apply consistent figure styling: font size 10pt for labels, 8pt for tick labels, figure width 6.5 inches (single column) or 3.25 inches (double column), DPI 300 for PNG, vector PDF. Use colorblind-friendly palette (seaborn 'colorblind' or custom). Save all matplotlib settings in shared/plot_config.py."
+    }
+  }
+]

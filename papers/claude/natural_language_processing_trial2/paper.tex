@@ -1,0 +1,602 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{microtype}
+
+\newcommand{\speccheck}{\textsc{SpecCheck}}
+\newcommand{\aucroc}{\text{AUC-ROC}}
+\newcommand{\aucpr}{\text{AUC-PR}}
+
+\title{SpecCheck: Testing Confidence Monotonicity Across Specificity Levels\\for LLM Hallucination Detection---A Negative Result}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language models (LLMs) frequently hallucinate specific details while retaining approximately correct general knowledge, suggesting that a model's confidence should increase monotonically as a claim is made more abstract.
+We propose \speccheck{}, a training-free framework that tests this \emph{confidence monotonicity} hypothesis by generating a ``specificity ladder'' for each atomic claim---a sequence of progressively abstracted versions---and checking whether the model's logprob-based confidence increases monotonically.
+We evaluate \speccheck{} on three benchmarks (FActScore, LongFact, TruthfulQA) across three open-source LLMs (Llama-3.1-8B, Mistral-7B, Qwen2.5-7B).
+Our results are largely negative: \speccheck{} achieves AUC-ROC of 0.48--0.62 across settings, consistently underperforming SelfCheckGPT (0.51--0.73) and logprob confidence baselines.
+The confidence monotonicity hypothesis holds for the majority of claims regardless of factuality, yielding insufficient discriminative power.
+However, we find that \speccheck{} provides a modest complementary signal when combined with existing methods via logistic regression (+0.3--2.1 AUC-ROC points on FActScore).
+We present this work as an honest analysis of a principled but unsuccessful approach, providing insights into why specificity-based probing fails and when it may offer marginal value.
+\end{abstract}
+
+%% ============================================================
+\section{Introduction}
+\label{sec:intro}
+%% ============================================================
+
+Large language models generate fluent text that frequently mixes accurate information with fabricated details---so-called hallucinations~\citep{min2023factscore, manakul2023selfcheckgpt}.
+A common pattern is that models hallucinate at the level of \emph{specific details} (exact dates, precise numbers, particular names) while retaining approximately correct general knowledge (the rough time period, the order of magnitude, the category of entity).
+For example, a model might correctly associate Einstein with the Nobel Prize in the early 20th century but hallucinate the exact year or the specific field.
+
+This observation motivates a natural hypothesis: if a model truly knows a fact, its confidence should be monotonically non-decreasing as the claim becomes more abstract.
+A model should be at least as confident about ``Einstein won the Nobel Prize in the 1920s'' as about ``Einstein won the Nobel Prize in 1921.''
+Violations of this \emph{confidence monotonicity} across a \emph{specificity ladder}---a sequence of the same claim at decreasing levels of detail---could serve as a hallucination signal.
+
+Existing hallucination detection methods operate at a single level of specificity: they verify claims against external knowledge~\citep{min2023factscore, wei2024longform} or check cross-sample consistency~\citep{manakul2023selfcheckgpt, farquhar2024detecting}.
+None exploit the specificity structure of claims.
+
+We propose \speccheck{}, a training-free framework that (1)~decomposes LLM outputs into atomic claims, (2)~generates a specificity ladder for each claim via prompted abstraction, (3)~estimates confidence at each level via logprob-based yes/no probing, and (4)~detects hallucinations by testing for monotonicity violations.
+
+\textbf{Our results are largely negative.}
+\speccheck{} underperforms SelfCheckGPT and simple logprob baselines across all three benchmarks and all three models.
+The core issue is that confidence monotonicity holds for the majority of claims \emph{regardless of factuality}---both true and hallucinated claims exhibit similar monotonicity patterns, providing insufficient discriminative power.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose and rigorously test the confidence monotonicity hypothesis for hallucination detection, providing a principled negative result.
+    \item We conduct extensive experiments across 3~models, 3~benchmarks, and multiple ablations, demonstrating where and why the approach fails.
+    \item We show that \speccheck{} provides a modest complementary signal when combined with existing methods, suggesting the specificity dimension captures some independent information.
+\end{itemize}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:related} reviews related work.
+Section~\ref{sec:method} describes the \speccheck{} framework.
+Section~\ref{sec:experiments} presents our experimental setup and results.
+Section~\ref{sec:analysis} provides analysis and ablations.
+Section~\ref{sec:discussion} discusses limitations.
+Section~\ref{sec:conclusion} concludes.
+
+
+%% ============================================================
+\section{Related Work}
+\label{sec:related}
+%% ============================================================
+
+\paragraph{Hallucination Detection.}
+FActScore~\citep{min2023factscore} pioneered atomic claim decomposition and verification against a knowledge source.
+SAFE~\citep{wei2024longform} extends this with search-augmented verification.
+Both require external knowledge bases, whereas \speccheck{} is self-contained.
+SelfCheckGPT~\citep{manakul2023selfcheckgpt} detects hallucinations by checking consistency across multiple sampled outputs---if a fact appears consistently across independent samples, it is likely known by the model.
+Semantic entropy~\citep{farquhar2024detecting} clusters semantically equivalent responses and computes entropy over meaning clusters, providing answer-level uncertainty.
+\speccheck{} differs by probing the \emph{same claim at different specificity levels} rather than comparing different complete responses or relying on external verification.
+
+\paragraph{Uncertainty and Calibration.}
+Verbalized confidence methods elicit numerical confidence scores directly from LLMs~\citep{kadavath2022language}.
+Self-consistency~\citep{wang2023selfconsistency} uses sampling agreement as a proxy for confidence.
+These operate at the response level; \speccheck{} extends self-assessment to the claim level across multiple granularities.
+
+\paragraph{Abstraction in LLMs.}
+Step-Back Prompting~\citep{zheng2024stepback} uses abstraction to improve reasoning by first answering a more general question.
+\speccheck{} applies a similar abstraction idea but for \emph{detection} rather than generation, and does so systematically across multiple levels.
+
+Unlike prior work, \speccheck{} is the first method to probe model confidence across a spectrum of specificity levels for the same underlying fact.
+Our negative results reveal important limitations of this approach.
+
+
+%% ============================================================
+\section{Method}
+\label{sec:method}
+%% ============================================================
+
+\speccheck{} operates in four stages.
+Given an LLM-generated passage, we:
+(1)~decompose it into atomic claims,
+(2)~generate a specificity ladder for each claim,
+(3)~estimate confidence at each specificity level, and
+(4)~detect hallucinations via monotonicity testing.
+
+\subsection{Claim Decomposition}
+
+Following FActScore~\citep{min2023factscore}, we decompose long-form generations into atomic claims using a structured prompt.
+Each atomic claim is a single, self-contained factual assertion (e.g., ``Marie Curie won the Nobel Prize in Physics in 1903'').
+
+\subsection{Specificity Ladder Generation}
+
+For each atomic claim $c_0$ (the original, most specific version), we prompt the same LLM to generate a sequence $c_1, c_2, c_3$ at decreasing specificity levels:
+\begin{itemize}
+    \item \textbf{Level 0 (Original)}: The exact claim. E.g., ``Marie Curie won the Nobel Prize in Physics in 1903.''
+    \item \textbf{Level 1 (Approximate)}: Precise values replaced with ranges. E.g., ``Marie Curie won the Nobel Prize in Physics in the early 1900s.''
+    \item \textbf{Level 2 (Category)}: Specific instances replaced with categories. E.g., ``Marie Curie won a Nobel Prize in a science field.''
+    \item \textbf{Level 3 (Abstract)}: Most general version. E.g., ``Marie Curie won a major scientific award.''
+\end{itemize}
+
+We use few-shot prompting with diverse examples covering numerical, temporal, entity, and categorical claim types.
+For claims with clear numerical values, we also employ template-based abstraction as a fallback.
+Generation uses temperature~0 for deterministic ladder construction.
+
+\subsection{Multi-Granularity Confidence Estimation}
+
+For each claim version $c_k$ at level $k \in \{0, 1, 2, 3\}$, we estimate the model's confidence via logprob-based probing.
+Specifically, we formulate a yes/no question: ``Is the following statement true? \texttt{"}$c_k$\texttt{"} Answer with Yes or No.''
+We run a single forward pass and extract the softmax probability over the ``Yes'' and ``No'' tokens:
+\begin{equation}
+    \text{conf}(c_k) = \frac{\exp(\text{logit}_{\text{Yes}})}{\exp(\text{logit}_{\text{Yes}}) + \exp(\text{logit}_{\text{No}})}
+\end{equation}
+We sum probabilities across token variants (``Yes''/``yes''/`` Yes'').
+
+\subsection{Monotonicity-Based Detection}
+
+Given the confidence sequence $[\text{conf}(c_0), \text{conf}(c_1), \text{conf}(c_2), \text{conf}(c_3)]$, we define:
+\begin{align}
+    M(c_0) &= \frac{1}{3} \sum_{k=1}^{3} \mathbf{1}[\text{conf}(c_k) \geq \text{conf}(c_{k-1})] \label{eq:mono} \\
+    S(c_0) &= 1 - M(c_0) + \alpha \cdot (\text{conf}(c_3) - \text{conf}(c_0)) \label{eq:speccheck}
+\end{align}
+where $M$ is the monotonicity score (fraction of adjacent pairs satisfying monotonicity), $S$ is the \speccheck{} score combining monotonicity violations with the confidence gap, and $\alpha = 0.5$ is a weighting parameter.
+A high \speccheck{} score indicates potential hallucination.
+
+\textbf{Hypothesis.} If a model truly knows a fact, confidence should be monotonically non-decreasing as specificity decreases (i.e., $M = 1$).
+Violations ($M < 1$) signal that the model's knowledge is unreliable at the specific level of detail.
+
+
+%% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+%% ============================================================
+
+\subsection{Setup}
+
+\paragraph{Models.}
+We evaluate three open-source instruction-tuned LLMs: Llama-3.1-8B-Instruct, Mistral-7B-Instruct-v0.3, and Qwen2.5-7B-Instruct, representing three major model families.
+All models run in float16 on a single NVIDIA A6000 (48GB).
+
+\paragraph{Benchmarks.}
+We use three hallucination evaluation benchmarks:
+\begin{itemize}
+    \item \textbf{FActScore}~\citep{min2023factscore}: Biography generation for 100~entities, with ground-truth atomic facts for verification.
+    \item \textbf{LongFact}~\citep{wei2024longform}: Long-form factuality across 50~diverse prompts, with NLI-based labeling using DeBERTa-v3-base-mnli.
+    \item \textbf{TruthfulQA}~\citep{lin2022truthfulqa}: 200~questions testing truthfulness in short-form generation.
+\end{itemize}
+
+Each model generates responses for all benchmarks, which are decomposed into atomic claims and labeled as factual or hallucinated.
+Across models and datasets, we evaluate approximately 460--1,640 claims per model-dataset pair ($\sim$45\% hallucination prevalence on FActScore/LongFact, 50\% on TruthfulQA).
+
+\paragraph{Baselines.}
+\begin{itemize}
+    \item \textbf{SelfCheckGPT}~\citep{manakul2023selfcheckgpt}: Generate $N{=}5$ alternative responses; check cross-sample consistency via NLI prompting.
+    \item \textbf{Verbalized Confidence}: Prompt the model to rate its confidence on a 0--100 scale.
+    \item \textbf{Logprob Confidence}: Average token log-probability of the original claim (equivalent to \speccheck{} with $K{=}0$).
+    \item \textbf{Random}: Uniform random scores averaged across 3~seeds (42, 123, 456) for stability.
+\end{itemize}
+
+Semantic Entropy Probes~\citep{kossen2024semantic}, originally planned as a baseline, were excluded because they require supervised training on annotated data, making direct comparison with our training-free methods inappropriate.
+
+\paragraph{Metrics.}
+We report AUC-ROC and AUC-PR for binary hallucination detection.
+AUC-PR is more informative when class prevalence varies.
+We include 95\% bootstrap confidence intervals computed with 10,000 resamples where indicated.
+
+\subsection{Main Results}
+
+Tables~\ref{tab:main_factscore}--\ref{tab:main_truthfulqa} present per-model results.
+Table~\ref{tab:cross_model} summarizes cross-model averages with standard deviations.
+
+\begin{table}[t]
+\centering
+\caption{Hallucination detection on \textbf{FActScore} (per model). Best in \textbf{bold}. $\uparrow$~=~higher is better.}
+\label{tab:main_factscore}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{Llama-3.1-8B} & \multicolumn{2}{c}{Mistral-7B} & \multicolumn{2}{c}{Qwen2.5-7B} \\
+Method & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ \\
+\midrule
+\speccheck{} & .552 & .488 & .609 & .540 & .623 & .548 \\
+SelfCheckGPT & .629 & .573 & \textbf{.733} & \textbf{.660} & \textbf{.723} & \textbf{.662} \\
+Verbalized & \textbf{.682} & .581 & .615 & .539 & .707 & .607 \\
+Logprob & .697 & \textbf{.585} & .653 & .555 & .689 & .599 \\
+Random & .503 & .457 & .508 & .458 & .479 & .436 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Hallucination detection on \textbf{LongFact} (per model). Best in \textbf{bold}. $\uparrow$~=~higher is better.}
+\label{tab:main_longfact}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{Llama-3.1-8B} & \multicolumn{2}{c}{Mistral-7B} & \multicolumn{2}{c}{Qwen2.5-7B} \\
+Method & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ \\
+\midrule
+\speccheck{} & .534 & .491 & .514 & .462 & .517 & .455 \\
+SelfCheckGPT & .598 & \textbf{.568} & \textbf{.569} & \textbf{.499} & \textbf{.614} & \textbf{.533} \\
+Verbalized & .598 & .518 & .547 & .468 & .577 & .488 \\
+Logprob & \textbf{.610} & .541 & .526 & .478 & .529 & .464 \\
+Random & .517 & .473 & .484 & .449 & .518 & .463 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Hallucination detection on \textbf{TruthfulQA} (per model). Best in \textbf{bold}. $\uparrow$~=~higher is better. All methods perform near random chance (prevalence~=~0.50).}
+\label{tab:main_truthfulqa}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{Llama-3.1-8B} & \multicolumn{2}{c}{Mistral-7B} & \multicolumn{2}{c}{Qwen2.5-7B} \\
+Method & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ \\
+\midrule
+\speccheck{} & .486 & .477 & .487 & .489 & .481 & .485 \\
+SelfCheckGPT & .510 & \textbf{.515} & \textbf{.539} & .512 & \textbf{.543} & \textbf{.529} \\
+Verbalized & \textbf{.521} & .507 & .524 & \textbf{.515} & .540 & .517 \\
+Logprob & .503 & .507 & .509 & .508 & .513 & .512 \\
+Random & .520 & .515 & .493 & .497 & .504 & .504 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Cross-model averages (mean $\pm$ std across 3 models). $\uparrow$~=~higher is better.}
+\label{tab:cross_model}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{FActScore} & \multicolumn{2}{c}{LongFact} & \multicolumn{2}{c}{TruthfulQA} \\
+Method & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ \\
+\midrule
+\speccheck{} & .595{\scriptsize$\pm$.031} & .525{\scriptsize$\pm$.027} & .522{\scriptsize$\pm$.009} & .469{\scriptsize$\pm$.016} & .484{\scriptsize$\pm$.003} & .484{\scriptsize$\pm$.005} \\
+SelfCheckGPT & \textbf{.695}{\scriptsize$\pm$.047} & \textbf{.631}{\scriptsize$\pm$.041} & \textbf{.594}{\scriptsize$\pm$.019} & \textbf{.533}{\scriptsize$\pm$.028} & \textbf{.531}{\scriptsize$\pm$.015} & \textbf{.519}{\scriptsize$\pm$.008} \\
+Verbalized & .668{\scriptsize$\pm$.039} & .575{\scriptsize$\pm$.028} & .574{\scriptsize$\pm$.021} & .491{\scriptsize$\pm$.021} & .528{\scriptsize$\pm$.008} & .513{\scriptsize$\pm$.005} \\
+Logprob & .680{\scriptsize$\pm$.019} & .579{\scriptsize$\pm$.018} & .555{\scriptsize$\pm$.039} & .494{\scriptsize$\pm$.033} & .508{\scriptsize$\pm$.004} & .509{\scriptsize$\pm$.002} \\
+Random & .497{\scriptsize$\pm$.013} & .450{\scriptsize$\pm$.010} & .506{\scriptsize$\pm$.016} & .462{\scriptsize$\pm$.010} & .506{\scriptsize$\pm$.011} & .505{\scriptsize$\pm$.007} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Key findings.}
+(1)~\speccheck{} consistently underperforms SelfCheckGPT, verbalized confidence, and logprob confidence across all model-dataset combinations.
+On FActScore, SelfCheckGPT achieves mean AUC-ROC of 0.695 vs.\ 0.595 for \speccheck{}---a 10-point gap.
+(2)~On TruthfulQA, all methods perform near random chance (AUC-ROC~$\approx$~0.50), including established baselines.
+This suggests that claim-level hallucination detection on TruthfulQA's short-form QA is fundamentally difficult at this model scale.
+(3)~\speccheck{}'s best performance is on FActScore with Qwen2.5-7B (AUC-ROC~=~0.623), but even here it falls well short of SelfCheckGPT (0.723).
+All \speccheck{} vs.\ SelfCheckGPT bootstrap $p$-values exceed 0.9, confirming \speccheck{} does not outperform SelfCheckGPT on any setting.
+
+
+%% ============================================================
+\section{Analysis}
+\label{sec:analysis}
+%% ============================================================
+
+\subsection{Why Does Confidence Monotonicity Fail?}
+\label{sec:monotonicity_analysis}
+
+Table~\ref{tab:monotonicity} reports the perfect monotonicity rate---the fraction of claims where confidence is strictly non-decreasing across all 4~levels---for factual vs.\ hallucinated claims.
+
+\begin{table}[t]
+\centering
+\caption{Perfect monotonicity rates (fraction of claims with non-decreasing confidence across all levels) for factual vs.\ hallucinated claims. Higher separation indicates stronger discriminative signal.}
+\label{tab:monotonicity}
+\begin{tabular}{llccc}
+\toprule
+Model & Dataset & Factual & Halluc. & Difference \\
+\midrule
+\multirow{3}{*}{Llama}
+  & FActScore  & 0.335 & 0.224 & +0.111 \\
+  & LongFact   & 0.462 & 0.382 & +0.080 \\
+  & TruthfulQA & 0.377 & 0.385 & $-$0.008 \\
+\midrule
+\multirow{3}{*}{Mistral}
+  & FActScore  & 0.788 & 0.633 & +0.155 \\
+  & LongFact   & 0.839 & 0.837 & +0.002 \\
+  & TruthfulQA & 0.792 & 0.809 & $-$0.017 \\
+\midrule
+\multirow{3}{*}{Qwen}
+  & FActScore  & 0.797 & 0.622 & +0.175 \\
+  & LongFact   & 0.796 & 0.755 & +0.041 \\
+  & TruthfulQA & 0.618 & 0.641 & $-$0.023 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The results reveal several key issues:
+
+\textbf{Monotonicity holds for most claims regardless of factuality.}
+For Mistral and Qwen on FActScore, 63--80\% of \emph{hallucinated} claims exhibit perfect monotonicity.
+The hypothesis predicted $<$60\% monotonicity for hallucinated claims and $>$85\% for factual claims; neither threshold is consistently met.
+
+\textbf{Separation is dataset-dependent.}
+On FActScore, there is a meaningful gap (11--18 percentage points for Mistral/Qwen), but on LongFact the gap shrinks to 0--8 points, and on TruthfulQA the direction \emph{reverses}: hallucinated claims actually have \emph{higher} monotonicity rates than factual ones.
+
+\textbf{The monotonicity reversal on TruthfulQA} likely occurs because TruthfulQA specifically targets common misconceptions.
+The model may be confidently wrong at all specificity levels for these ``common knowledge'' falsehoods, leading to smooth (monotonic) confidence curves even for hallucinated content.
+
+\subsection{Combination with Existing Methods}
+
+Despite its weak standalone performance, \speccheck{} may capture information complementary to existing methods.
+Table~\ref{tab:combination} shows results of combining methods via 5-fold cross-validated logistic regression on FActScore (the strongest benchmark for all methods).
+
+\begin{table}[t]
+\centering
+\caption{Combination results on FActScore via logistic regression (5-fold CV, mean $\pm$ std). Adding \speccheck{} to baselines provides a modest improvement on Mistral and Qwen.}
+\label{tab:combination}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{Llama-3.1-8B} & \multicolumn{2}{c}{Mistral-7B} & \multicolumn{2}{c}{Qwen2.5-7B} \\
+Combination & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ & ROC$\uparrow$ & PR$\uparrow$ \\
+\midrule
+SelfCheck only     & .622{\scriptsize$\pm$.003} & .568{\scriptsize$\pm$.003} & .715{\scriptsize$\pm$.003} & .637{\scriptsize$\pm$.006} & .715{\scriptsize$\pm$.002} & .647{\scriptsize$\pm$.008} \\
+All baselines      & .675{\scriptsize$\pm$.004} & .593{\scriptsize$\pm$.003} & .719{\scriptsize$\pm$.003} & .643{\scriptsize$\pm$.004} & .738{\scriptsize$\pm$.001} & .660{\scriptsize$\pm$.004} \\
+All + \speccheck{} & .678{\scriptsize$\pm$.002} & .590{\scriptsize$\pm$.002} & \textbf{.740}{\scriptsize$\pm$.003} & \textbf{.659}{\scriptsize$\pm$.002} & \textbf{.747}{\scriptsize$\pm$.001} & \textbf{.681}{\scriptsize$\pm$.001} \\
+SC + \speccheck{}  & .649{\scriptsize$\pm$.003} & .571{\scriptsize$\pm$.003} & .735{\scriptsize$\pm$.003} & .654{\scriptsize$\pm$.000} & .727{\scriptsize$\pm$.001} & .664{\scriptsize$\pm$.003} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Adding \speccheck{} to the full baseline set improves AUC-ROC by 0.3 points (Llama), 2.1 points (Mistral), and 0.9 points (Qwen) on FActScore.
+The improvement is negligible for Llama but more consistent for Mistral and Qwen, where \speccheck{} adds 1.6--2.1 AUC-PR points.
+On LongFact and TruthfulQA (not shown), combination improvements are negligible or negative, consistent with the weak standalone performance on those benchmarks.
+
+\subsection{Ablation: Ladder Depth}
+
+Table~\ref{tab:ablation_depth} shows AUC-ROC for different numbers of specificity levels on FActScore.
+
+\begin{table}[t]
+\centering
+\caption{Effect of ladder depth $K$ on FActScore AUC-ROC. $K{=}3$ and $K{=}4$ are identical because the $K{=}4$ generation produced the same ladders as $K{=}3$ (see Section~\ref{sec:discussion}).}
+\label{tab:ablation_depth}
+\begin{tabular}{lcccc}
+\toprule
+Model & $K{=}1$ & $K{=}2$ & $K{=}3$ & $K{=}4$ \\
+\midrule
+Llama   & .502 & .567 & .552 & .552 \\
+Mistral & .554 & .587 & .609 & .609 \\
+Qwen    & .532 & .580 & .623 & .623 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Performance generally increases from $K{=}1$ to $K{=}3$ for Mistral and Qwen, with $K{=}2$ performing best for Llama.
+$K{=}3$ and $K{=}4$ produce identical results because the model failed to generate meaningful additional specificity levels beyond the 4 already defined, highlighting that the specificity hierarchy has a natural ceiling.
+
+\subsection{Ablation: Score Variants}
+
+Table~\ref{tab:ablation_variants} compares different aggregation strategies for the confidence sequence on FActScore.
+
+\begin{table}[t]
+\centering
+\caption{Score variant comparison on FActScore (AUC-ROC). The default \speccheck{} score ($\alpha{=}0.5$) performs best for Mistral and Qwen; pure monotonicity ($\alpha{=}0$) is slightly better for Llama.}
+\label{tab:ablation_variants}
+\begin{tabular}{lccc}
+\toprule
+Variant & Llama & Mistral & Qwen \\
+\midrule
+\speccheck{} ($\alpha{=}0.5$) & .552 & \textbf{.609} & \textbf{.623} \\
+Pure Monotonicity ($\alpha{=}0$) & \textbf{.564} & .583 & .590 \\
+Max Violation     & .544 & .606 & .622 \\
+Confidence Gap    & .414 & .427 & .393 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The combined \speccheck{} score and pure monotonicity perform similarly, while the confidence gap alone performs \emph{worse than random} (AUC-ROC~$<$~0.5), indicating that the absolute confidence difference between abstract and specific claims does not reliably signal hallucination.
+
+\subsection{Claim Type Analysis}
+
+We categorize claims into entity-specific, numerical, temporal, and general types.
+On FActScore, entity-specific claims show the most consistent \speccheck{} signal across models (AUC-ROC 0.58--0.65), while numerical claims show high AUC-PR (0.57--0.71) driven primarily by high hallucination prevalence in that category rather than genuine discriminative power.
+Contrary to our hypothesis that \speccheck{} would excel on claims with clear specificity structure (numerical, temporal), the results are inconsistent across models.
+Figure~\ref{fig:claim_types} visualizes the per-type breakdown.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure_6_claim_types.pdf}
+\caption{\speccheck{} AUC-ROC by claim type on FActScore across three models. Entity-specific claims show the most consistent signal. Numerical and temporal claims, where we hypothesized the strongest performance, are inconsistent.}
+\label{fig:claim_types}
+\end{figure}
+
+
+%% ============================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+%% ============================================================
+
+\paragraph{Why does the hypothesis fail?}
+We identify three reasons why confidence monotonicity is a weak hallucination signal:
+(1)~\textbf{Confident hallucination}: Models that confidently hallucinate at the specific level tend to remain confident at all abstraction levels, producing monotonic curves for false claims.
+(2)~\textbf{Noisy ladder generation}: LLM-generated abstraction introduces semantic drift---the abstract version may not be a strict generalization of the original claim, contaminating the confidence signal.
+(3)~\textbf{Logprob saturation}: For claims the model ``wants to say yes to,'' logprob confidence is often near 1.0 at all levels, leaving no room for monotonic increase regardless of factuality.
+
+\paragraph{The N=5/N=10 sampling bug.}
+Our ablation comparing sampling-based confidence estimation with $N{=}5$ and $N{=}10$ samples produced identical results across all three random seeds (42, 123, 456).
+This indicates a bug in the sampling experiment (likely a seed initialization issue causing both conditions to use the same samples).
+We report this transparently rather than presenting flawed ablation results.
+The logprob-based method used in all main experiments is unaffected by this issue.
+
+\paragraph{Hallucination Granularity Index.}
+Our proposal included a Hallucination Granularity Index to identify \emph{which level of detail} is unreliable.
+Given the weak standalone detection performance, the planned 50-case manual evaluation of granularity accuracy was not conducted, as the underlying detection signal is too noisy to support meaningful granularity assessment.
+The granularity concept remains theoretically interesting but cannot be validated until the core detection signal improves.
+
+\paragraph{Additional limitations.}
+(1)~We evaluate only 7--8B parameter models; larger models may exhibit different confidence patterns.
+(2)~FActScore and LongFact labeling relies on automated NLI-based verification, which introduces label noise.
+(3)~We use the same model for both generation and ladder construction, which may bias the abstraction toward the model's own patterns.
+(4)~Semantic Entropy Probes~\citep{kossen2024semantic} were excluded; future work should compare against trained methods.
+(5)~The $K{=}4$ ladder depth was not genuinely different from $K{=}3$, suggesting our abstraction prompting approach has limitations in producing fine-grained intermediate levels.
+
+
+%% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%% ============================================================
+
+We proposed \speccheck{}, a training-free framework for hallucination detection based on testing confidence monotonicity across specificity levels.
+Our extensive experiments across 3~models and 3~benchmarks yield a clear negative result: \speccheck{} underperforms established baselines like SelfCheckGPT (mean AUC-ROC 0.595 vs.\ 0.695 on FActScore, 0.484 vs.\ 0.531 on TruthfulQA).
+The core issue is that confidence monotonicity holds for the majority of claims regardless of factuality, providing insufficient discriminative power.
+
+Our analysis reveals that the hypothesis fails because models that hallucinate specific details often do so with consistent confidence across abstraction levels.
+However, we find a modest complementary signal when \speccheck{} is combined with existing methods (+0.3--2.1 AUC-ROC points on FActScore), suggesting the specificity dimension captures some independent information.
+
+We believe negative results are valuable for the community: the confidence monotonicity hypothesis is intuitively compelling and might have been independently proposed.
+Our thorough evaluation demonstrates its limitations and identifies conditions under which multi-granularity probing may offer marginal value.
+Future work could explore whether larger models exhibit stronger monotonicity separation, whether verified abstraction (e.g., using a separate model for ladder generation) yields cleaner signals, or whether the specificity dimension can be better leveraged within ensemble frameworks.
+
+
+%% ============================================================
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Farquhar et~al.(2024)]{farquhar2024detecting}
+Sebastian Farquhar, Jannik Kossen, Lorenz Kuhn, and Yarin Gal.
+\newblock Detecting hallucinations in large language models using semantic entropy.
+\newblock \emph{Nature}, 630(8017):625--630, 2024.
+
+\bibitem[Kadavath et~al.(2022)]{kadavath2022language}
+Saurav Kadavath, Tom Conerly, Amanda Askell, Tom Henighan, et~al.
+\newblock Language models (mostly) know what they know.
+\newblock \emph{arXiv preprint arXiv:2207.05221}, 2022.
+
+\bibitem[Kossen et~al.(2024)]{kossen2024semantic}
+Jannik Kossen, Jiatong Han, Lorenz Kuhn, Yarin Gal, and Sebastian Farquhar.
+\newblock Semantic entropy probes: Robust and cheap hallucination detection in {LLM}s.
+\newblock \emph{arXiv preprint arXiv:2406.15927}, 2024.
+
+\bibitem[Lin et~al.(2022)]{lin2022truthfulqa}
+Stephanie Lin, Jacob Hilton, and Owain Evans.
+\newblock {TruthfulQA}: Measuring how models mimic human falsehoods.
+\newblock In \emph{Proceedings of ACL}, 2022.
+
+\bibitem[Manakul et~al.(2023)]{manakul2023selfcheckgpt}
+Potsawee Manakul, Adian Liusie, and Mark J.F. Gales.
+\newblock {SelfCheckGPT}: Zero-resource black-box hallucination detection for generative large language models.
+\newblock In \emph{Proceedings of EMNLP}, 2023.
+
+\bibitem[Min et~al.(2023)]{min2023factscore}
+Sewon Min, Kalpesh Krishna, Xinxi Lyu, Mike Lewis, Wen-tau Yih, Pang~Wei Koh, Mohit Iyyer, Luke Zettlemoyer, and Hannaneh Hajishirzi.
+\newblock {FActScore}: Fine-grained atomic evaluation of factual precision in long form text generation.
+\newblock In \emph{Proceedings of EMNLP}, 2023.
+
+\bibitem[Wang et~al.(2023)]{wang2023selfconsistency}
+Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc~V. Le, Ed~H. Chi, Sharan Narang, Aakanksha Chowdhery, and Denny Zhou.
+\newblock Self-consistency improves chain of thought reasoning in language models.
+\newblock In \emph{Proceedings of ICLR}, 2023.
+
+\bibitem[Wei et~al.(2024)]{wei2024longform}
+Jerry Wei, Chengrun Yang, Xinying Song, Yifeng Lu, Nathan Hu, et~al.
+\newblock Long-form factuality in large language models.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[Zheng et~al.(2024)]{zheng2024stepback}
+Huaixiu~Steven Zheng, Swaroop Mishra, Xinyun Chen, Heng-Tze Cheng, Ed~H. Chi, Quoc~V. Le, and Denny Zhou.
+\newblock Take a step back: Evoking reasoning via abstraction in large language models.
+\newblock In \emph{Proceedings of ICLR}, 2024.
+
+\end{thebibliography}
+
+
+%% ============================================================
+\appendix
+\section{Additional Figures}
+\label{sec:appendix}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure_1_method_overview.pdf}
+\caption{Overview of the \speccheck{} pipeline. An atomic claim is abstracted into a specificity ladder, confidence is estimated at each level via logprob probing, and monotonicity is tested. The top example (factual claim) shows monotonically increasing confidence; the bottom (hallucinated) shows a violation at Level~1.}
+\label{fig:method}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure_3_monotonicity_analysis.pdf}
+\caption{Monotonicity analysis. Left: distribution of monotonicity scores for factual vs.\ hallucinated claims. Right: average confidence profiles across specificity levels. The substantial overlap between distributions explains the weak discriminative power of the monotonicity signal.}
+\label{fig:monotonicity}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure_2_main_results.pdf}
+\caption{Main results visualization across all benchmarks. \speccheck{} consistently underperforms SelfCheckGPT and logprob-based confidence.}
+\label{fig:main_results}
+\end{figure}
+
+%% ============================================================
+\section{Reproducibility Details}
+\label{sec:reproducibility}
+%% ============================================================
+
+\paragraph{Model loading.}
+All three models (Llama-3.1-8B-Instruct, Mistral-7B-Instruct-v0.3, Qwen2.5-7B-Instruct) were loaded in FP16 precision (\texttt{torch.float16}) using HuggingFace Transformers with \texttt{device\_map="cuda"} on a single NVIDIA A6000 (48GB).
+No quantization was applied.
+Left-padding was used for batched inference with decoder-only models.
+Random seeds 42, 123, and 456 were used for all stochastic components.
+
+\paragraph{Claim decomposition prompt.}
+\begin{quote}\small\ttfamily
+Break the following text into independent atomic facts. Each fact should be a single, self-contained sentence that can be verified as true or false independently. Output one fact per line, numbered. Do not include opinions or subjective statements.
+
+Text: \{text\}
+
+Atomic facts:
+\end{quote}
+
+\paragraph{Specificity ladder generation prompt (K=3).}
+\begin{quote}\small\ttfamily
+Given a factual claim, rewrite it at three levels of decreasing specificity. Each level should be less specific but still capture the core meaning.
+
+Example 1:\\
+Level 0 (Original): Albert Einstein was born on March 14, 1879 in Ulm, Germany.\\
+Level 1 (Approximate): Albert Einstein was born around 1879 in southern Germany.\\
+Level 2 (Category): Albert Einstein was born in the late 19th century in Germany.\\
+Level 3 (Abstract): Albert Einstein was born in Europe.
+
+[Two additional examples omitted for brevity.]
+
+Now rewrite this claim:\\
+Level 0 (Original): \{claim\}\\
+Level 1 (Approximate):
+\end{quote}
+Ladder generation used temperature~0. Invalid ladders (where a more abstract level introduced new specific information) were flagged and re-generated.
+
+\paragraph{Confidence estimation prompt.}
+\begin{quote}\small\ttfamily
+Is the following statement true? "\{claim\}" Answer with Yes or No.
+\end{quote}
+Confidence was computed as the softmax probability of ``Yes'' vs.\ ``No'' tokens (summing across casing variants) from a single forward pass.
+
+\paragraph{Verbalized confidence prompt.}
+\begin{quote}\small\ttfamily
+Rate your confidence that the following statement is true on a scale of 0 to 100, where 0 means certainly false and 100 means certainly true. Only output the number.\\
+Statement: "\{claim\}"
+\end{quote}
+
+\paragraph{Generation parameters.}
+Biography and long-form generation used \texttt{max\_new\_tokens=256} (FActScore) or \texttt{512} (LongFact), with \texttt{temperature=0.7}, \texttt{top\_p=0.9}.
+TruthfulQA answers used \texttt{max\_new\_tokens=128}.
+SelfCheckGPT generated $N{=}5$ alternative responses per prompt at \texttt{temperature=1.0}, \texttt{top\_p=0.95}.
+
+\paragraph{Computational cost.}
+The full pipeline for one model takes approximately 3--4 hours on a single A6000: generation and claim decomposition ($\sim$50 min), specificity ladder generation ($\sim$20 min), confidence estimation ($\sim$10 min per dataset), and baseline computation ($\sim$60 min for SelfCheckGPT, $\sim$5 min each for verbalized and logprob baselines).
+Total wall-clock time for all 3 models, all experiments, and ablations was approximately 14 hours.
+
+
+\end{document}

@@ -1,0 +1,348 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+
+\title{Do Shared Decoders Improve Prototype-Edit Reusability on Frozen CLIP Features?}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\clip}{\mathrm{CLIP}}
+\newcommand{\dino}{\mathrm{DINO}}
+\newcommand{\relu}{\mathrm{ReLU}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Sparse autoencoders already support concept discovery and steering in vision-language representations, so the remaining question in this setting is not whether CLIP features can be edited at all, but whether a specific inductive bias improves the reuse of one prototype edit across unseen examples. We study that question on frozen CLIP ViT-B/32 image features by comparing a standard sparse autoencoder (SAE), a shift-only sparse autoencoder baseline (SSAE), and an anchor-shift decoder (ASD) that reconstructs activations and paired differences with one shared decoder. Reusable prototypes are estimated from training pairs only and evaluated on held-out examples with target-change, non-target preservation, and their harmonic mean, reliability. On 3D Shapes, ASD improves over SAE at the selected edit scale $\gamma=0.5$ (0.921 $\pm$ 0.001 vs.\ 0.901 $\pm$ 0.000 reliability) but does not improve over SSAE (0.922 $\pm$ 0.001). On CelebA, ASD underperforms both SSAE and SAE in CLIP-space reliability (0.759 $\pm$ 0.011 vs.\ 0.771 $\pm$ 0.008 and 0.765 $\pm$ 0.005), and the same ordering remains after a fixed CLIP-to-DINOv2 bridge evaluation (0.742 $\pm$ 0.010 vs.\ 0.761 $\pm$ 0.013 and 0.758 $\pm$ 0.002). In this frozen-feature benchmark, shared decoding is not supported as a reliable improvement over shift-only sparse coding for reusable prototype edits.
+\end{abstract}
+
+\section{Introduction}
+
+Sparse autoencoders are now widely used to probe and steer learned representations, including in vision-language models \citep{pach2025monosemantic, joseph2025steeringclip, gu2026lucid}. That prior work raises the bar for novelty here. The relevant open question is narrower: if one wants a sparse \emph{prototype edit} learned from paired examples and reused on unseen examples, does sharing a decoder between activation reconstruction and difference reconstruction help?
+
+We study that question on frozen CLIP ViT-B/32 image features \citep{radford2021clip}. The comparison is intentionally narrow. SAE reconstructs single CLIP features, SSAE reconstructs paired CLIP-feature differences \citep{joshi2025ssae}, and ASD reconstructs both with a shared decoder and separate anchor and shift encoders. The benchmark emphasizes transfer rather than pair-specific fit: prototypes are estimated from training pairs only and applied to held-out source examples.
+
+Three setup choices matter for interpretation and are therefore stated up front rather than deferred to limitations. First, ASD is \emph{not} parameter matched to SAE or SSAE: the saved training artifacts report 4,460,544 parameters for ASD versus 2,623,488 for SAE and SSAE. Second, the ablations do not receive a fresh tuning sweep; they reuse the ASD pilot hyperparameters selected on 3D Shapes seed 11. Third, the default edit scale $\gamma \in \{0.5, 1.0, 1.5\}$ is selected from validation reliability using only the seed-11 checkpoints of the three primary methods. These choices make the study an auditable benchmark, but not a perfectly controlled causal comparison.
+
+We evaluate on 3D Shapes and CelebA \citep{liu2015deep}. For 3D Shapes, exact factor labels support clean target-versus-nuisance measurements. For CelebA, semantically close pairs are mined in frozen DINOv2-small space \citep{oquab2024dinov2} while all training and editing remain in CLIP space, and a fixed CLIP-to-DINO bridge provides a second evaluation geometry.
+
+Our findings are negative in the way most relevant to the motivating hypothesis. ASD improves over vanilla SAE on 3D Shapes, but it does not beat SSAE there. On CelebA it underperforms SSAE in both CLIP-space and bridge-space reliability. The ablations are directionally informative but, because they reuse pilot hyperparameters, we treat them as descriptive stress tests rather than evidence that one ASD component causally helps or hurts.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate a benchmark for \emph{prototype-edit reusability} on frozen CLIP image features, using training-pair prototypes and held-out transfer evaluation rather than pair-specific reconstructions.
+  \item We provide an auditable comparison of SAE, SSAE, and ASD on 3D Shapes and CelebA, including explicit reporting of parameter mismatch, seed-11-only $\gamma$ selection, and ablations that reuse pilot hyperparameters.
+  \item We show that shared decoding is unsupported as a robust improvement over SSAE in this regime: ASD reaches 0.921 reliability on 3D Shapes versus 0.922 for SSAE, and 0.759 CLIP / 0.742 DINO-bridge reliability on CelebA versus 0.771 / 0.761 for SSAE.
+\end{itemize}
+
+Section~\ref{sec:related} positions the paper against the closest sparse-editing work. Section~\ref{sec:method} defines the models and evaluation protocol. Section~\ref{sec:experiments} gives setup, results, and ablations. Section~\ref{sec:discussion} discusses interpretation limits, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Shift-based sparse coding is the closest comparison.}
+The nearest baseline is the shift-only formulation of \citet{joshi2025ssae}, titled \emph{Sparse Shift Autoencoders for Identifying Concepts from Large Language Model Activations}. That work argues that sparse coding of activation differences can yield more identifiable steering directions than sparse coding of activations alone. Our paper does not compete on identifiability theory. It asks a narrower empirical question: once evaluation is centered on reusable prototype edits in frozen CLIP image features, does adding activation reconstruction with a shared decoder help beyond shift-only sparse coding?
+
+\paragraph{CLIP sparse autoencoders already support interpretation and steering.}
+\citet{pach2025monosemantic} show that sparse autoencoders can recover monosemantic features in vision-language models, while \citet{joseph2025steeringclip} and \citet{zaigrajew2025clip} study sparse features and interventions in CLIP-like settings. Those papers substantially reduce the novelty of any general claim that sparse codes make CLIP interpretable or steerable. Relative to them, our contribution is a benchmark question about \emph{prototype reuse}: whether one prototype edit learned from training pairs transfers to unseen examples with high target specificity and low collateral drift.
+
+\paragraph{Nearby sparse-steering vision work optimizes a different endpoint.}
+\citet{chatzoudis2025visualsparsesteering} also study sparse steering vectors in frozen vision-language representations, but their target is downstream zero-shot classification accuracy rather than held-out prototype transfer. That distinction matters here. Our benchmark does not ask whether sparse edits improve a classifier; it asks whether one attribute prototype learned from training pairs can be reused on unseen sources while preserving non-target attributes and factors.
+
+\paragraph{Shared sparse spaces are adjacent but not the same problem.}
+\citet{nasirisarvi2025sparc} and \citet{gu2026lucid} study shared or aligned sparse spaces across models or modalities. ASD is much narrower. It shares a decoder only within one frozen CLIP image space, and it is evaluated only on whether that sharing improves the transferability of sparse edits. This makes those papers adjacent prior art rather than direct baselines.
+
+\paragraph{Reliability framing and claim calibration.}
+\citet{canby2024reliable} argue that interventions should be judged by both target completeness and non-target selectivity. We adopt that framing directly through reliability, the harmonic mean of target-change and non-target preservation. We also follow cautionary work on sparse autoencoder interpretation \citep{leask2025canonical, jedryszek2026stable} by treating negative results and uncertainty reporting as central outcomes rather than as secondary diagnostics.
+
+Unlike prior work that emphasizes feature discovery, monosemanticity, or downstream steering gains, this paper asks a tighter question: does shared decoding improve reusable prototype edits over the few closest baselines once the benchmark is narrowed to frozen CLIP features and audited with uncertainty-aware metrics?
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setup}
+
+Let $h(x) \in \R^d$ denote a frozen CLIP image feature and let $\Delta h = h(x') - h(x)$ for a source-target pair $(x,x')$. For each target attribute or factor $a$, training pairs define one reusable prototype edit that is later applied to held-out source examples. The evaluation question is whether the prototype changes the intended target while preserving non-target factors.
+
+\subsection{Models}
+
+\paragraph{SAE.}
+SAE learns a nonnegative code $z(x) \in \R_+^k$ and decoder $W \in \R^{d \times k}$:
+\[
+z(x) = \relu(E_{\mathrm{sae}}(h(x))), \qquad \hat{h}(x) = W z(x).
+\]
+Its loss is
+\[
+\mathcal{L}_{\mathrm{sae}} = \|h(x) - \hat{h}(x)\|_2^2 + \lambda_1 \|z(x)\|_1.
+\]
+
+\paragraph{SSAE.}
+SSAE learns a signed shift code $s(x,x') \in \R^k$ for deltas:
+\[
+s(x,x') = E_{\mathrm{ssae}}(\Delta h), \qquad \widehat{\Delta h} = W s(x,x').
+\]
+Its loss is
+\[
+\mathcal{L}_{\mathrm{ssae}} = \|\Delta h - \widehat{\Delta h}\|_2^2 + \lambda_1 \|s(x,x')\|_1.
+\]
+
+\paragraph{ASD.}
+ASD uses separate anchor and shift encoders with one shared decoder $W$:
+\[
+z(x) = \relu(E_z(h(x))), \qquad s(x,x') = E_s(\Delta h).
+\]
+It reconstructs both activations and deltas,
+\[
+\hat{h}(x) = W z(x), \qquad \widehat{\Delta h} = W s(x,x'),
+\]
+and optimizes
+\[
+\mathcal{L}_{\mathrm{asd}} =
+\|h(x)-\hat{h}(x)\|_2^2
++ \|\Delta h-\widehat{\Delta h}\|_2^2
++ \lambda_{\mathrm{sparse}} \left(\|z(x)\|_1 + \|s(x,x')\|_1\right)
++ \lambda_{\mathrm{tie}} \left\|s(x,x') - \mathrm{sg}\left(z(x') - z(x)\right)\right\|_1,
+\]
+where $\mathrm{sg}(\cdot)$ is stop-gradient. The tie term does not claim a new identifiability result; it only encourages the same decoder basis to support both reconstruction views.
+
+\subsection{Prototype Edits}
+
+Methods construct pair edits in their native form:
+\[
+v_{\mathrm{sae}}(x,x') = W\left(z(x') - z(x)\right), \qquad
+v_{\mathrm{ssae}}(x,x') = W s(x,x'), \qquad
+v_{\mathrm{asd}}(x,x') = W s(x,x').
+\]
+For each target $a$, we estimate one reusable prototype from training pairs only:
+\[
+v_a = \frac{1}{|P_a|} \sum_{(x,x') \in P_a} v(x,x').
+\]
+The decoded prototype is normalized as
+\[
+\bar{v}_a = \frac{v_a}{\|v_a\|_2 + \varepsilon}.
+\]
+If $\alpha_a$ denotes the median norm of CLIP deltas for target $a$ on the training pairs, the applied edit is
+\[
+h_{\mathrm{edit}} = h(x) + \gamma \alpha_a \bar{v}_a,
+\]
+with $\gamma \in \{0.5, 1.0, 1.5\}$.
+
+\subsection{Evaluation Metrics}
+
+Each prototype is applied to held-out source examples and scored with fixed probes:
+\begin{itemize}
+  \item \textbf{Target-change}: whether the probe predicts the intended post-edit target value.
+  \item \textbf{Non-target preservation}: the mean fraction of non-target factors or attributes whose predicted values do not change after editing.
+  \item \textbf{Reliability}: the harmonic mean of target-change and non-target preservation,
+  \[
+  \mathrm{Rel}(t,p) = \frac{2tp}{t+p}.
+  \]
+\end{itemize}
+
+For 3D Shapes, all probes are multiclass logistic regressions on CLIP features. For CelebA, both CLIP-space and DINO-space probes are binary logistic regressions, and DINO-space evaluation uses a fixed ridge bridge fit from untouched CLIP features to untouched DINO features.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets and splits.}
+For 3D Shapes, the saved split artifact contains 36,000 sampled images split into 24,000 train, 6,000 validation, and 6,000 test examples. A factor-retention screen on validation CLIP probes keeps \texttt{floor\_hue} (macro-F1 1.0000), \texttt{shape} (0.9998), and \texttt{object\_hue} (0.9952), while dropping \texttt{scale} (0.7865). Pair budgets are 18,000 train, 4,500 validation, and 4,500 test pairs.
+
+For CelebA, the saved split artifact contains 18,000 train, 3,000 validation, and 3,000 test images. The target attributes are \texttt{Smiling}, \texttt{Eyeglasses}, and \texttt{Wearing\_Hat}; no attribute substitution was required. Pair mining yields 1,500 training pairs, 300 validation pairs, and 300 test pairs per attribute after DINO-space filtering.
+
+\paragraph{Representations, probes, and pair mining.}
+All training and editing use frozen CLIP ViT-B/32 pooled pre-projection features. DINOv2-small is used only for CelebA pair mining and for the bridge-space audit. On CelebA, validation AUCs of the CLIP probes are 0.9770 for Smiling, 0.9990 for Eyeglasses, and 0.9903 for Wearing\_Hat; the DINO probe AUCs are 0.9625, 0.9933, and 0.9861. The fixed CLIP-to-DINO ridge bridge selects $\alpha=10.0$ and reaches validation MSE 1.6985. Median DINO distances of retained CelebA training pairs are 28.02 for Smiling, 33.99 for Eyeglasses, and 36.29 for Wearing\_Hat.
+
+\paragraph{Training protocol and caveats.}
+All primary runs report seeds $\{11,22,33\}$. The three primary methods share the same optimizer family, learning rate, batch size, early-stopping rule, and candidate edit scales. However, the comparison has three explicit caveats. First, ASD is not parameter matched: the saved training summaries report 4,460,544 parameters for ASD versus 2,623,488 for SAE and SSAE. Second, ablations reuse the pilot ASD hyperparameters selected from the 3D Shapes seed-11 sweep in \texttt{exp/pilot\_asd/results.json}; they are not re-tuned separately. Third, the default $\gamma$ is selected in \texttt{exp/evaluate/results.json} by averaging validation reliability over the three primary methods using only seed-11 checkpoints, yielding $\gamma=0.5$ for both datasets. We therefore interpret the ablations descriptively and avoid presenting the setup as fully controlled.
+
+\paragraph{Aggregation rules.}
+Table~\ref{tab:aggregation} makes the reported aggregations explicit. This small table is included because the paper mixes seed-level summaries, per-example bootstrap intervals, and a dataset-level hierarchical bootstrap, and those aggregation levels should be visible where the experiments are introduced.
+Appendix~\ref{app:repro} then ties those aggregation rules to the concrete artifact files, including the corrected \texttt{asd\_no\_tie} config logs and the regenerated reference audit.
+
+\begin{table}[t]
+\caption{How reported numbers are aggregated. The same saved artifacts are used throughout the paper.}
+\label{tab:aggregation}
+\centering
+\small
+\begin{tabular}{p{0.20\linewidth}p{0.28\linewidth}p{0.42\linewidth}}
+\toprule
+Quantity & Source artifact & Aggregation rule \\
+\midrule
+Main-table mean $\pm$ std & \texttt{results.csv}, selected $\gamma$ rows & Mean and standard deviation over the three seed-level target means. \\
+Per-target bootstrap CI & \texttt{exp/evaluate/results.json} / \texttt{outputs/tables/bootstrap\_cis.csv} & Paired bootstrap over held-out test examples for ASD-minus-baseline reliability at the selected $\gamma$. \\
+CelebA dataset-level CI & \texttt{results.json} & Hierarchical bootstrap over seeds and test instances for the overall ASD-minus-SSAE reliability gap. \\
+Default $\gamma$ & \texttt{exp/evaluate/results.json} & Validation reliability averaged over targets and primary methods using seed-11 checkpoints only. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Results}
+
+Table~\ref{tab:3d-main} reports 3D Shapes at the selected $\gamma=0.5$. Shared decoding clearly helps relative to SAE, raising mean reliability from 0.901 $\pm$ 0.000 to 0.921 $\pm$ 0.001. However, it does not improve over SSAE, which slightly leads overall at 0.922 $\pm$ 0.001. The strongest target-level evidence against ASD over SSAE is \texttt{floor\_hue}, where the saved bootstrap interval for ASD$-$SSAE is entirely negative, $[-0.0063,-0.0016]$. The only target with a fully positive ASD$-$SSAE interval is \texttt{shape}, at $[0.0001,0.0030]$.
+
+\begin{table}[t]
+\caption{3D Shapes results at the selected $\gamma=0.5$. Reliability columns are means $\pm$ standard deviations over the three seed-level target means from \texttt{results.csv}. Reconstruction columns use the saved \texttt{reconstruction\_mse} and \texttt{delta\_reconstruction\_mse} values from the same artifact family. Higher is better for reliability; lower is better for reconstruction error. Best values in each column are in \textbf{bold}.}
+\label{tab:3d-main}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Method & Reliability $\uparrow$ & Floor hue $\uparrow$ & Object hue $\uparrow$ & Shape $\uparrow$ & Recon. MSE $\downarrow$ & Delta MSE $\downarrow$ \\
+\midrule
+SAE & 0.901 $\pm$ 0.000 & 0.930 $\pm$ 0.000 & 0.915 $\pm$ 0.000 & \textbf{0.858 $\pm$ 0.000} & 0.0153 $\pm$ 0.0000 & 0.0288 $\pm$ 0.0005 \\
+SSAE & \textbf{0.922 $\pm$ 0.001} & \textbf{0.964 $\pm$ 0.000} & \textbf{0.947 $\pm$ 0.002} & 0.856 $\pm$ 0.002 & --- & \textbf{0.0102 $\pm$ 0.0001} \\
+ASD & 0.921 $\pm$ 0.001 & 0.961 $\pm$ 0.001 & 0.946 $\pm$ 0.002 & 0.857 $\pm$ 0.001 & \textbf{0.0141 $\pm$ 0.0000} & 0.0105 $\pm$ 0.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:3dshapes} shows the same target-level pattern visually. Shared decoding helps relative to activation-only sparse coding, but those gains are concentrated where shift-only coding is already strong.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/3dshapes_reliability.png}
+\caption{3D Shapes prototype reliability at $\gamma=0.5$. Each point is the mean over three seeds for one retained factor; vertical bars show $\pm 1$ seed standard deviation. The plot matches the per-target values summarized in Table~\ref{tab:3d-main}.}
+\label{fig:3dshapes}
+\end{figure}
+
+Table~\ref{tab:celeba-main} gives the CelebA results. Here the motivating hypothesis fails more clearly. In CLIP space, ASD reaches 0.759 $\pm$ 0.011 reliability, below SSAE at 0.771 $\pm$ 0.008 and SAE at 0.765 $\pm$ 0.005. The largest deficit is on \texttt{Smiling}, where ASD reaches 0.523 $\pm$ 0.044 and SSAE reaches 0.566 $\pm$ 0.027. The same ranking remains after the CLIP-to-DINO bridge: ASD reaches 0.742 $\pm$ 0.010 versus 0.761 $\pm$ 0.013 for SSAE and 0.758 $\pm$ 0.002 for SAE. The saved hierarchical bootstrap interval for the overall CelebA ASD$-$SSAE gap is $[-0.044, 0.013]$ with mean $-0.012$.
+
+\begin{table}[t]
+\caption{CelebA results at the selected $\gamma=0.5$. Values are means $\pm$ standard deviations over the three seed-level target means. \texttt{CLIP rel.} uses the saved \texttt{reliability} metric and \texttt{DINO rel.} uses \texttt{dino\_reliability} after the fixed CLIP-to-DINO ridge bridge. Best values in each column are in \textbf{bold}.}
+\label{tab:celeba-main}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & CLIP rel. $\uparrow$ & DINO rel. $\uparrow$ & Eyeglasses $\uparrow$ & Smiling $\uparrow$ & Wearing Hat $\uparrow$ \\
+\midrule
+SAE & 0.765 $\pm$ 0.005 & 0.758 $\pm$ 0.002 & 0.850 $\pm$ 0.002 & 0.549 $\pm$ 0.012 & 0.896 $\pm$ 0.003 \\
+SSAE & \textbf{0.771 $\pm$ 0.008} & \textbf{0.761 $\pm$ 0.013} & 0.850 $\pm$ 0.006 & \textbf{0.566 $\pm$ 0.027} & 0.897 $\pm$ 0.007 \\
+ASD & 0.759 $\pm$ 0.011 & 0.742 $\pm$ 0.010 & \textbf{0.856 $\pm$ 0.006} & 0.523 $\pm$ 0.044 & \textbf{0.899 $\pm$ 0.006} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/celeba_main_comparison.png}
+\caption{CelebA reliability at $\gamma=0.5$. The left panel shows CLIP-space reliability and the right panel shows DINO-bridge reliability after the fixed ridge map. Each bar averages the three seed-level target scores in \texttt{results.csv}.}
+\label{fig:celeba}
+\end{figure}
+
+\paragraph{Efficiency and sparsity.}
+The negative conclusion is not explained by hidden edit-magnitude inflation: all methods use the same $\alpha_a$ scaling rule and the same selected $\gamma$. At $\gamma=0.5$, ASD uses fewer active latents than SSAE on both datasets, averaging 437.7 versus 875.6 active latents on 3D Shapes and 548.7 versus 947.9 on CelebA, while prototype sparsity remains close to 750 decoded dimensions for both methods. Runtime also favors SSAE: on CelebA the mean saved training runtime is 0.010 minutes for SSAE, 0.037 for SAE, and 0.089 for ASD.
+
+\subsection{Gamma Sensitivity}
+
+Figure~\ref{fig:gamma} shows reliability as a function of edit scale. Because the selected $\gamma$ is chosen globally per dataset rather than per method, it is not necessarily each method's own optimum. On 3D Shapes, moving from $\gamma=0.5$ to $\gamma=1.0$ improves all three primary methods, but SSAE still remains slightly ahead of ASD at 0.9513 versus 0.9508. On CelebA, both ASD and SSAE improve from $\gamma=0.5$ to $\gamma=1.0$, yet the seed-11 validation rule still selects $\gamma=0.5$ overall. This matters for interpretation: the selected default is auditable, but it should not be over-read as a fully tuned operating point for every method.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/gamma_sensitivity.png}
+\caption{Reliability versus edit scale $\gamma$. Each line averages the saved \texttt{reliability} metric over targets and seeds for one dataset-method pair. Solid lines denote 3D Shapes and dashed lines denote CelebA.}
+\label{fig:gamma}
+\end{figure}
+
+\subsection{Ablations}
+
+Table~\ref{tab:ablation} reports the ASD-family ablations at the same selected $\gamma=0.5$. These numbers are useful for stress testing the design, but they should not be given a strong causal interpretation because the ablations reuse the pilot hyperparameters selected for full ASD on 3D Shapes seed 11 and do not get a separate tuning pass. Under that caveat, the pattern is inconsistent across datasets. On 3D Shapes, removing the tie term slightly improves over full ASD (0.923 vs.\ 0.921), while removing decoder sharing hurts (0.919). On CelebA, the direction flips: removing decoder sharing improves to 0.762 and removing the tie term drops to 0.756. The safest conclusion is therefore not that one component ``causes'' the gain or loss, but that the full shared-decoder-plus-tie design does not show a stable advantage under this benchmark.
+
+\begin{table}[t]
+\caption{Ablation results at the selected $\gamma=0.5$. Values are means $\pm$ standard deviations over three seeds. Reliability columns come from the saved \texttt{reliability} and \texttt{dino\_reliability} metrics, and the reconstruction column comes from \texttt{delta\_reconstruction\_mse}.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & 3D Shapes rel. $\uparrow$ & CelebA rel. $\uparrow$ & 3D Shapes delta MSE $\downarrow$ & CelebA DINO rel. $\uparrow$ \\
+\midrule
+ASD & 0.921 $\pm$ 0.001 & 0.759 $\pm$ 0.011 & 0.0105 $\pm$ 0.0000 & 0.742 $\pm$ 0.010 \\
+ASD-no-tie & \textbf{0.923 $\pm$ 0.001} & 0.756 $\pm$ 0.027 & \textbf{0.0090 $\pm$ 0.0002} & 0.735 $\pm$ 0.044 \\
+ASD-no-share & 0.919 $\pm$ 0.001 & \textbf{0.762 $\pm$ 0.013} & 0.0107 $\pm$ 0.0001 & \textbf{0.751 $\pm$ 0.010} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ablation} visualizes the same pattern as deltas relative to full ASD. The sign flip between datasets is the key result.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/ablation_effects.png}
+\caption{Ablation deltas relative to full ASD at $\gamma=0.5$. Positive values favor the ablation and negative values favor full ASD.}
+\label{fig:ablation}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main empirical result is modest but clear: sharing a decoder between activation reconstruction and shift reconstruction does not provide a reliable advantage over SSAE for reusable prototype edits on frozen CLIP image features. The strongest positive evidence for ASD is only relative to SAE on 3D Shapes. That gain does not carry over to real-image attributes or to the bridge-space audit on CelebA.
+
+Several limitations constrain the scope of the conclusion.
+\begin{itemize}
+  \item The benchmark is frozen-feature only. We do not edit pixels, text tokens, or generator internals, so the conclusions should not be generalized to broader controllability claims.
+  \item The comparison is split- and optimizer-matched, but not parameter matched. ASD has substantially more parameters than SAE or SSAE, so the result is not ``ASD loses because it is smaller'' but it is also not a clean architecture-only isolation.
+  \item The default edit scale is chosen from seed-11 primary checkpoints only. This is transparent and reproducible, but it is still a small-sample model-selection rule.
+  \item The ablations reuse pilot hyperparameters and should therefore be read as robustness checks, not as clean component-attribution experiments.
+  \item CelebA covers only three visible attributes mined with DINO-nearest neighbors. The benchmark does not test more entangled or lower-coverage attributes.
+  \item The DINO bridge is intentionally lightweight. It reduces dependence on a single geometry, but it is not a semantic equivalence test.
+  \item All primary conclusions rely on three seeds. We report standard deviations and saved bootstrap intervals, but strong inferential claims would require a larger run budget.
+\end{itemize}
+
+One practical interpretation is that shift-only sparse coding already captures most of the useful inductive bias for prototype reuse in this frozen-feature regime. Adding anchor reconstruction may improve activation fidelity, but it also appears capable of biasing the decoder toward bases that are less useful for transporting sparse, target-specific edits.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We studied whether a shared decoder improves reusable prototype edits on frozen CLIP image features. In the benchmark implemented here, the answer is no in the sense relevant to the motivating hypothesis. ASD improves over SAE on 3D Shapes, reaching 0.921 reliability versus 0.901, but it does not improve over SSAE at 0.922. On CelebA, ASD falls below both SSAE and SAE in CLIP-space reliability (0.759 vs.\ 0.771 and 0.765), and the same ordering persists after the CLIP-to-DINO bridge evaluation (0.742 vs.\ 0.761 and 0.758).
+
+The broader implication is methodological rather than architectural. A reusable-edit benchmark can reject an intuitively appealing inductive bias even when that bias improves some reconstruction metrics. Future work should revisit shared decoding with stronger pair supervision, per-ablation re-tuning, more robust edit-scale selection, and settings beyond frozen pooled CLIP features.
+
+\appendix
+\section{Reproducibility and Artifact Map}
+\label{app:repro}
+
+Table~\ref{tab:artifact-map} consolidates the exact selection and aggregation pipeline in one place. The same information is also exported as \texttt{outputs/tables/reproducibility\_audit.csv}. Two details are worth stating explicitly. First, every quoted number in the paper comes from \texttt{results.csv}, \texttt{results.json}, or \texttt{outputs/tables/bootstrap\_cis.csv}. Second, the \texttt{asd\_no\_tie} provenance issue noted in self-review has been repaired at the artifact level: the saved \texttt{outputs/metrics/asd\_no\_tie\_*} config and train files now record \texttt{lambda\_tie=0.0}, matching the loss used for those ablation runs.
+
+\begin{table}[h]
+\caption{Compact artifact map for the reported results. Paths are relative to the paper workspace root.}
+\label{tab:artifact-map}
+\centering
+\small
+\begin{tabular}{p{0.29\linewidth}p{0.23\linewidth}p{0.40\linewidth}}
+\toprule
+Paper claim or object & Artifact & Selection or aggregation rule \\
+\midrule
+Main tables and quoted means/stds & \texttt{results.csv} & Keep rows with $\gamma=\texttt{selected\_gamma[dataset]}$; average reliability within each seed over targets, then report mean $\pm$ std across seeds unless stated otherwise. \\
+Per-target ASD-minus-baseline CIs & \texttt{outputs/tables/bootstrap\_cis.csv} & Paired bootstrap over held-out test examples at the selected $\gamma$. \\
+CelebA dataset-level ASD-minus-SSAE gap & \texttt{results.json} & Hierarchical bootstrap over seeds and target-level rows, plus a paired sign permutation test over the three seed-level gaps. \\
+Selected edit scales & \texttt{outputs/metrics/selected\_gammas.json} & Choose from $\{0.5,1.0,1.5\}$ using validation reliability averaged over primary methods from seed-11 checkpoints only. \\
+Ablation hyperparameters & \texttt{outputs/metrics/pilot\_asd\_3dshapes\_seed11.json} & Reuse the best 3D Shapes seed-11 ASD pilot hyperparameters for \texttt{asd\_no\_tie} and \texttt{asd\_no\_share}. \\
+Run-level provenance & \texttt{outputs/metrics/*\_\{config,train\}.json} & Store optimizer settings, dataset, method, seed, and training metrics for every run; \texttt{asd\_no\_tie} now logs \texttt{lambda\_tie=0.0}. \\
+Reference verification & \texttt{outputs/tables/reference\_audit.csv} & Lists each directly discussed related-work citation with its canonical source URL. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

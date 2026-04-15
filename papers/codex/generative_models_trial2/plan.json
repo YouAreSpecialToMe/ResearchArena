@@ -1,0 +1,105 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze the exact software and hardware budget",
+    "description": "Lock one minimal stack for Stable Diffusion v1.5 generation, early-feature extraction, probe training, and GenEval evaluation so every comparison is compute-matched and reproducible on one RTX A6000 within an 8-hour wall-clock cap.",
+    "steps": {
+      "step1": "Create one Python 3.10 environment with torch>=2.2, torchvision, diffusers>=0.30, transformers>=4.45, accelerate, xformers, scipy, scikit-learn, pandas, numpy, pillow, matplotlib, seaborn, tqdm, and the official GenEval evaluation code. Do not add larger generators, extra training frameworks, or LLM-based evaluators.",
+      "step2": "Use Stable Diffusion v1.5 as the only generator, resolution 512x512, DDIM sampler, 20 denoising steps, classifier-free guidance 7.5, fp16 weights, and xformers attention. Keep all generator weights frozen for every experiment.",
+      "step3": "Define one UNet forward pass on one latent at one denoising step as one budget unit. All B40 methods must consume exactly 40 such units per prompt-seed trial. Report preview decode time, probe inference time, and evaluation-script time separately from UNet units.",
+      "step4": "Use experiment seeds {11, 17, 23} for the held-out method comparison. Use separate fixed supervision seeds {101, 202, 303, 404} when collecting completed train and validation trajectories. Save every latent seed tensor so all methods share identical candidate pools.",
+      "step5": "Acknowledge hardware limits explicitly: there is 1 GPU, so GPU jobs run sequentially. Use the 4 CPU cores in parallel only for prompt parsing, GenEval label aggregation, bootstrap resampling, permutation testing, and figure generation while the GPU queue is active."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build a benchmark-aligned supervision set with stronger labels",
+    "description": "Use one fixed GenEval-centered split and train on completed-image labels that are as close as possible to the final evaluation target, then quantify label noise on a smaller manually verified subset instead of relying mainly on proxy supervision.",
+    "steps": {
+      "step1": "Freeze one prompt split of 240 GenEval prompts: 120 train, 40 validation, and 80 test. Stratify by prompt family so count, attribute-binding, and relation templates appear in all three partitions. Save prompt IDs in split files and never change them after generation starts.",
+      "step2": "Implement a deterministic parser that converts each prompt into benchmark-aligned atomic constraints with fields {constraint_id, type, object_a, object_b if present, attribute if present, count_target if present, relation_label if present}. Restrict the study to prompts whose constraints are extracted unambiguously.",
+      "step3": "Audit 30 randomly sampled train or validation prompts by hand before data generation. Require at least 95 percent exact atomic-parse accuracy. If the audit fails, fix the parser, rerun the audit, and only then freeze the parser rules.",
+      "step4": "For each of the 120 train prompts, generate 4 completed trajectories with supervision seeds {101, 202, 303, 404}, yielding 480 train images. For each of the 40 validation prompts, generate the same 4 completed trajectories, yielding 160 validation images. These counts must stay consistent with proposal.md.",
+      "step5": "Run the official GenEval evaluation pipeline, or an exact benchmark-faithful local reproduction, on every completed train and validation image to obtain final atomic success labels for each parsed constraint. Derive the scalar target from those same atomic labels, using both mean atomic success and exact-all-correct as stored fields so ranking sensitivity can be checked without changing supervision data.",
+      "step6": "Create a manually verified subset of 80 completed images sampled only from the 640 train-plus-validation images, stratified across count, attribute-binding, and relation prompts and across easy versus hard cases. For each image, record binary atomic correctness by human inspection in a CSV with columns {image_id, prompt_id, constraint_id, human_label, notes}.",
+      "step7": "Use the 80-image manually verified subset for two narrow purposes only: estimate label-noise rate by constraint type and recalibrate decision thresholds in a sensitivity analysis. Do not replace the full supervision pool with human labels, and do not collect any human labels on the held-out 80-prompt test set.",
+      "step8": "Keep the 80 GenEval test prompts untouched until the parser, feature set, probe architecture, training hyperparameters, calibration choice, and mandatory ablations are frozen on train plus validation only."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Establish fair fixed-budget baselines",
+    "description": "Compare the decomposed target against a simple uninformed policy, a strong practical full-completion policy, and the matched scalar early-target baseline that isolates the contribution claim.",
+    "steps": {
+      "step1": "Simple baseline: Random Prune-Continue at B40. For each prompt-seed pair, sample N=6 candidates for tau=4 steps, choose one candidate uniformly at random, continue it for the remaining 16 steps, and evaluate the final image. This uses exactly 6x4 + 1x16 = 40 UNet units.",
+      "step2": "Strong baseline: Best-of-2 Full Completion at B40. Generate 2 full 20-step candidates for each prompt-seed pair and select the better final image with a frozen generic reranker defined before validation, preferring PickScore and falling back to CLIP ViT-L/14 prompt-image similarity if PickScore is unavailable.",
+      "step3": "Critical matched baseline: Scalar Early Target at B40. Use the same tau=4 prefixes, the same feature vector, the same probe trunk, the same calibration protocol, and the same N=6 to K=1 continuation schedule as the main method, but predict one scalar final-success target instead of per-constraint targets.",
+      "step4": "Run all baselines on the same held-out 80 GenEval test prompts and the same experiment seeds {11, 17, 23}. Reuse the exact latent candidate pools across Random, Scalar, and the main method so differences come only from ranking policy rather than sampling noise.",
+      "step5": "Store one JSON record per prompt-seed-method trial with fields {prompt_id, seed, method, candidate_scores, selected_candidate, final_image_path, total_unet_units, wall_clock_seconds} so later evaluation and plotting use the same raw outputs."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train the decomposed early-ranking probe",
+    "description": "Test the central empirical question by holding prefix length, generator, features, budget, and probe capacity fixed while changing only whether the early target is decomposed into atomic benchmark constraints or collapsed into one scalar.",
+    "steps": {
+      "step1": "For every completed train and validation trajectory, replay only the first tau=4 denoising steps and collect online early features without storing full attention tensors. Decode one 256x256 preview at step 4 for lightweight visual embedding features.",
+      "step2": "Build one shared trajectory feature vector containing: token-linked cross-attention entropy, cross-attention top-mass coverage, temporal deltas of those statistics across steps 1 through 4, conditional-versus-unconditional noise-prediction L2 disagreement norms, latent mean and variance statistics, and one frozen CLIP ViT-L/14 image embedding from the step-4 preview. Do not use benchmark detectors or prompt-specific heuristics as training labels.",
+      "step3": "Create one constraint-level training instance for each parsed atomic constraint by concatenating the trajectory feature vector with parser metadata {constraint type, count target if present, relation label if present, attribute ID if present}. This produces the decomposed training set.",
+      "step4": "Train the decomposed probe with a shared MLP trunk of widths [256, 128], GELU activations, dropout 0.1, and three type-specific sigmoid heads for {count, attribute_binding, relation}. Use AdamW with learning rate 1e-3, weight decay 1e-4, batch size 256 constraint instances, maximum 30 epochs, and early stopping with patience 5 on validation macro-AUC.",
+      "step5": "Train the scalar probe with the exact same shared trunk, optimizer, regularization, batch size, and stopping rule, replacing the type-specific heads with one scalar sigmoid head trained on mean atomic success. Save a second validation-only checkpoint trained on exact-all-correct to confirm that conclusions do not depend on one scalarization choice.",
+      "step6": "Calibrate decomposed head probabilities and scalar scores on the 40 validation prompts only. Compare temperature scaling and isotonic regression and keep whichever gives lower validation expected calibration error. Freeze the calibration choice before opening the 80-prompt test split.",
+      "step7": "For each held-out prompt and each experiment seed in {11, 17, 23}, sample 6 partial trajectories to tau=4, score all six with the decomposed probe and the scalar probe separately, continue only the top-ranked candidate for 16 additional steps, and save the final image and ranking logs.",
+      "step8": "Define the decomposed continuation score as the mean calibrated probability across all atomic constraints for that prompt. Also save per-type means for count, attribute-binding, and relation so failures can be analyzed by constraint family."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run only the ablations needed to test the claim",
+    "description": "Use a minimal ablation set that directly challenges the two substantive design choices in the study: decomposed targets and the small preview-enhanced feature set.",
+    "steps": {
+      "step1": "Ablation 1, target structure: compare the full decomposed probe against the matched scalar early-target probe under identical generator, prefixes, features, training data, probe trunk, calibration, and B40 budget. This is the primary comparison and must run across all 3 experiment seeds.",
+      "step2": "Ablation 2, head specialization: replace the three type-specific binary heads with one shared binary head applied to all constraint instances while keeping decomposition and parser metadata. This tests whether any gain comes from decomposition itself or from type-specific prediction heads. Run this across all 3 experiment seeds.",
+      "step3": "Ablation 3, feature source: remove the step-4 CLIP preview embedding and keep only diffusion-internal attention and denoiser-disagreement features. This tests whether the result depends entirely on the preview embedding rather than early diffusion signals. Run this first on seed 11 and expand to all 3 seeds only if the runtime guard still clears comfortably.",
+      "step4": "Sensitivity analysis on label quality: recalibrate the full decomposed probe and the matched scalar probe using thresholds informed by the 80 manually verified train-plus-validation images, then rerun seed 11 on the held-out test split. The purpose is to check whether the sign of the main result is stable under reduced label noise."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Predeclare metrics, statistics, and failure conditions",
+    "description": "Evaluate both generation quality and decision quality with fixed metrics, 3-seed aggregation, and prompt-level uncertainty analysis so the conclusion can be either positive or negative.",
+    "steps": {
+      "step1": "Primary held-out metric is the official GenEval overall score on the 80-prompt test set, averaged over seeds {11, 17, 23}. Also report category means for count, attribute-binding, and relation subsets, using the same prompt partition for every method.",
+      "step2": "Probe-quality metrics on validation are macro-AUC, macro-average precision, Brier score, and expected calibration error for the decomposed heads, plus ROC-AUC, mean absolute error, and Brier score for the scalar head. Report these before test results to show how well early scores predict final outcomes.",
+      "step3": "Decision-quality metric is continuation hit rate on seed 11 only: among the 6 prefix candidates for each prompt, measure how often the early policy selects the candidate that would have achieved the best final GenEval score if all 6 had been fully completed. Compute this diagnostic only after the main 3-seed comparison is finished.",
+      "step4": "Systems metrics are total UNet units, mean wall-clock seconds per prompt, peak GPU memory, and percentage of wall-clock time spent in denoising, preview decoding, probe inference, and final evaluation.",
+      "step5": "Use prompt-level paired bootstrap with 10000 resamples on the 80 held-out prompts for the decomposed-minus-scalar GenEval difference, averaging first across the 3 seeds per prompt. Also run a paired permutation test on prompt-level deltas.",
+      "step6": "Primary success criterion: the decomposed early target must beat the matched scalar early target on 3-seed mean GenEval overall by at least 1.5 absolute points or by a bootstrap 95 percent confidence interval entirely above zero. If neither condition holds, treat the central hypothesis as unsupported.",
+      "step7": "Secondary success criteria: the decomposed target must outperform Random Prune-Continue and must match or beat Best-of-2 Full Completion at the same B40 budget either on GenEval overall or on the average of count and relation category scores. If it loses clearly to the strong baseline, state that the decomposition helps relative to scalar ranking but is not competitive enough overall.",
+      "step8": "Failure conditions are predefined: report a negative result if the 3-seed average advantage over the scalar baseline disappears, if the manually verified-label sensitivity check reverses the sign of the main effect, or if non-denoising overhead exceeds 25 percent of wall-clock time and erodes the practical value of the policy."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce the tables and figures needed for the paper",
+    "description": "Generate compact artifacts that make the narrow empirical question legible: does decomposing early ranking targets help fixed-budget continuation on compositional prompts?",
+    "steps": {
+      "step1": "Create one main results table with rows {Random Prune-Continue, Best-of-2 Full Completion, Scalar Early Target, Decomposed Early Target} and columns {budget, GenEval overall, count, attribute-binding, relation, mean seconds per prompt, UNet units}. Save as CSV and a paper-ready markdown table.",
+      "step2": "Create one ablation table with rows {scalar target, shared-head decomposition, no-preview features, manual-label sensitivity} and columns {GenEval overall delta, count delta, attribute-binding delta, relation delta, runtime delta}.",
+      "step3": "Plot bootstrap confidence intervals for decomposed-minus-scalar and decomposed-minus-Best-of-2 on the held-out GenEval test set. Save both PNG and PDF versions.",
+      "step4": "Plot calibration curves for the count, attribute-binding, and relation heads on validation, plus a scatter plot relating step-4 score margin to final GenEval gain on the held-out test set.",
+      "step5": "Assemble 6 qualitative case studies from the held-out test split. For each case, show the prompt, parsed atomic constraints, six step-4 previews, decomposed and scalar scores, selected candidate index, and final output. Require at least 3 cases where the decomposed target fixes a localized count or relation failure that the scalar target misses."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Gate execution with measured runtime before optional work",
+    "description": "Use measured A6000 latencies to verify that the mandatory package fits inside 8 hours and explicitly exclude transfer, human test-set evaluation, and oracle extras from the base plan.",
+    "steps": {
+      "step1": "Before the full run, measure mean wall-clock time for 20 tau=4 prefixes and 20 full 20-step completions on the target A6000. Record the mean and standard deviation for denoising time and preview decode time.",
+      "step2": "Estimate the mandatory GPU load from measured latencies using these fixed counts: 640 full train-plus-validation completions, 640 tau=4 feature replays, and held-out evaluation over 80 prompts x 3 seeds with one shared 6-prefix pool plus 3 continuation policies {Random, Scalar, Decomposed}.",
+      "step3": "Reserve at most 1.5 GPU hours for the required ablations {shared-head decomposition across 3 seeds, no-preview seed-11 run, manual-label sensitivity seed-11 run}. If the measured runtime forecast exceeds 8 hours total, drop the no-preview all-seed expansion and keep only the mandatory target-structure and shared-head ablations.",
+      "step4": "Do not schedule transfer evaluation, test-set human comparison, B60 sweeps, or oracle Best-of-6 analysis in this plan. Those extras are excluded unless the measured mandatory-package forecast leaves at least 90 idle minutes after all core runs, in which case they should be documented as post-plan add-ons rather than part of the acceptance criteria."
+    }
+  }
+]

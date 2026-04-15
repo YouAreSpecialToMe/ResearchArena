@@ -1,0 +1,48 @@
+{
+  "title": "DebtAware: A Pilot-First Empirical Test of Mutation-Typed Rerun Suppression Beyond LLVM LastRunTracking",
+  "description": "DebtAware is a bounded LLVM extension study, not a new pass-skipping framework. It tests whether, for repeated cleanup-pass reruns inside stock `-O3`, mutation-typed intervening summaries add measurable value beyond LLVM's 2024 `LastRunTracking` heuristic when deciding whether a rerun can be deferred to its next stock sweep point.",
+  "motivation": "The nearby space is already crowded by ML-guided pass skipping, pass-dependence modeling, and LLVM's own rerun-suppression support, so the contribution has to be framed as an incremental empirical test rather than a novel optimization method. The real gap is whether a slightly richer but still cheap and interpretable summary of intervening mutations gives any practical benefit after `LastRunTracking` already knows whether compatible change occurred at all.",
+  "proposed_approach": "Patch LLVM's new pass manager for `InstCombinePass` and `SimplifyCFGPass`, with `LCSSAPass` enabled only if a 3-program pilot leaves more than 90 minutes of slack after the main study. Extract mandatory sweep points from the stock `-O3` pipeline by mapping each dynamic repeated pass invocation to the next later stock occurrence of the same pass kind on the same IR unit kind, collect cheap mutation summaries between reruns, and label at most 12 repeated opportunities per training benchmark per target pass by single-rerun counterfactual replay. Fit only tiny interpretable per-pass decision trees or decision lists when each fold/pass has at least 24 labeled opportunities and at least 6 examples in each class; otherwise fall back to a fixed rule-guardrail policy layered on top of `LastRunTracking` and report the result as a boundary study. Precommit to a smaller primary evaluation first by running `InstCombinePass` with seed `11` before expanding to the remaining seeds and to `SimplifyCFGPass`.",
+  "related_work": [
+    {
+      "title": "Towards Compile-Time-Reducing Compiler Optimization Selection via Machine Learning",
+      "authors": "Tarindu Jayatilaka, Hideto Ueno, Giorgis Georgakoudis, Eunjung Park, Johannes Doerfert",
+      "how_it_differs": "This is the closest published pass-skipping paper and already predicts whether scheduled LLVM optimizations will modify IR. DebtAware is narrower: it asks whether mutation typing adds value beyond modern `LastRunTracking`, and it predicts deferred-rerun debt rather than immediate IR modification."
+    },
+    {
+      "title": "[RFC][Pipeline] Avoid running transform passes that have just been run",
+      "authors": "dtcxzyw",
+      "how_it_differs": "This LLVM 2024 RFC provides the direct systems baseline by suppressing reruns when no compatible intervening change occurred. DebtAware treats that heuristic as the baseline to beat rather than a novelty claim."
+    },
+    {
+      "title": "Efficient compiler optimization by modeling passes dependence",
+      "authors": "Jianfeng Liu, Jianbin Fang, Ting Wang, Jing Xie, Chun Huang, Zheng Wang",
+      "how_it_differs": "DCO models pass dependence to build optimization subsequences for iterative compilation. DebtAware keeps the stock `-O3` pipeline fixed and studies only whether a single already-scheduled rerun should execute immediately or wait for its next stock occurrence."
+    },
+    {
+      "title": "Learning Compiler Pass Orders using Coreset and Normalized Value Prediction",
+      "authors": "Youwei Liang, Kevin Stone, Ali Shameli, Chris Cummins, Mostafa Elhoushi, Jiadong Guo, Benoit Steiner, Xiaomeng Yang, Pengtao Xie, Hugh Leather, Yuandong Tian",
+      "how_it_differs": "This work targets pass-order selection in a large optimization space. DebtAware does not change pass order and instead evaluates a local rerun-deferral decision inside LLVM's existing `-O3` pipeline."
+    },
+    {
+      "title": "Leveraging Compilation Statistics for Compiler Phase Ordering",
+      "authors": "Jiayu Zhao, Chunwei Xia, Zheng Wang",
+      "how_it_differs": "CITROEN uses compilation statistics to guide phase-ordering search and reject poor pass sequences more quickly. DebtAware borrows the idea that low-cost compiler-side statistics can be informative, but applies it to a much smaller binary decision beyond `LastRunTracking` rather than to phase-ordering search."
+    },
+    {
+      "title": "Protean Compiler: An Agile Framework to Drive Fine-grain Phase Ordering",
+      "authors": "Amir H. Ashouri, Shayan Shirahmad Gale Bagi, Kavin Satheeskumar, Tejas Srikanth, Jonathan Zhao, Ibrahim Saidoun, Ziwen Wang, Bryan Chan, Tomasz S. Czajkowski",
+      "how_it_differs": "Protean represents newer LLVM-integrated phase-ordering work. It still searches or predicts optimization subsequences, whereas DebtAware keeps the stock pipeline unchanged and tests only the incremental value of typed intervening mutations for rerun suppression."
+    }
+  ],
+  "hypothesis": "For a tiny set of repeatedly invoked LLVM cleanup passes, mutation-typed rerun suppression trained on a deferred-debt label will deliver a small compile-time gain over stock `-O3` and may, in some folds, outperform LLVM's `LastRunTracking` heuristic; if it does not, the study will still produce a credible negative boundary result showing that typed intervening mutations do not add enough value beyond the binary no-intervening-change rule under a strict 2-core CPU budget.",
+  "success_criteria": [
+    "Positive main result: at least 2.0% held-out compile-time reduction versus stock `-O3`.",
+    "Positive incremental result versus `LastRunTracking`: at least 0.5 percentage points more compile-time reduction, or matched compile-time savings with at least 20% fewer debt events or recovery events.",
+    "No held-out benchmark correctness failures.",
+    "Runtime and code-size guardrails remain within plus or minus 1.0% geometric-mean change versus stock `-O3`, with no individual runtime benchmark worse than 3%.",
+    "Bookkeeping overhead remains below 10% of compile time.",
+    "Pilot-first feasibility: traced compile-time overhead stays at or below 15%, projected total wall time stays within 8 hours, and at least one primary pass yields 24 candidate repeated opportunities in the 3-program pilot.",
+    "If a fold/pass has fewer than 24 labeled opportunities or fewer than 6 examples in either class, do not claim a learned-policy win and fall back to the pre-registered rule-guardrail boundary study."
+  ]
+}

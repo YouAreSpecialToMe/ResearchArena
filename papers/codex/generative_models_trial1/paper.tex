@@ -1,0 +1,285 @@
+\documentclass{article}
+
+\usepackage{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xspace}
+
+\newcommand{\method}{Assign-and-Verify\xspace}
+\newcommand{\daam}{DAAM\xspace}
+\newcommand{\sdxl}{SDXL\xspace}
+
+\title{When Assignment Matters: A Pilot Study of DAAM-Assisted Compositional Text-to-Image Reranking}
+
+\author{Anonymous Authors}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Compositional text-to-image reranking only helps if the verifier grounds prompt slots to the right image regions. We study this issue in a deliberately narrow setting: training-free reranking over a fixed \sdxl best-of-4 candidate cache. Building on our proposal, we implement \method, which parses prompts into object groups and atomic constraints, proposes detector boxes, augments slot-to-box assignment with generator-native \daam attention mass, and verifies attributes and relations on the assigned regions. The completed evidence in this workspace is a pilot rather than a full benchmark sweep. The saved summary covers 30 development prompt-seed decisions and compares five rerankers on the same cached candidates. Detector-only structured reranking and crop-structured SigLIP each achieve an all-atoms-pass mean of 0.6000, while the full \method pipeline reaches 0.5333. The most informative ablation removes explicit null and count handling and improves all-atoms-pass to 0.8000. We therefore report a negative pilot result: explicit assignment remains the right variable to analyze, but the current \daam-assisted instantiation does not outperform strong non-\daam structured baselines. The paper contributes a reproducible formulation, a complete reranking pipeline, and a constrained experimental record that sharpens the next revision target from ``add more cues'' to ``fix assignment calibration.''
+\end{abstract}
+
+\section{Introduction}
+
+Compositional text-to-image failures are now well documented. Even when images are photorealistic, requested objects may disappear, colors may bind to the wrong entity, and left-right relations may invert \citep{ghosh2023geneval,huang2023t2icompbench}. These errors have motivated both generation-time interventions \citep{hu2024token,Dat_2025_ICCV,zhang-wan-2025-r,rastegar2025infsplign} and post-hoc evaluators or rerankers \citep{deiseroth2022logicrank,miranda2025simplestructure,hosseini2025t2ifineeval,wan2025compalign}.
+
+This paper targets a narrower question inside post-hoc reranking. Before a verifier can judge whether ``the red cube is left of the blue sphere,'' it must decide which region corresponds to each prompt slot. That slot-to-region assignment is often treated as an internal detail, but it is plausibly a major source of reranking error.
+
+We therefore ask a falsifiable question: under a fixed \sdxl best-of-4 candidate budget, does better slot assignment improve compositional reranking, and does \daam help because it changes assignment rather than only because it perturbs final scores?
+
+The answer supported by the current workspace is cautious. We completed the method implementation, a smoke test, a 40-prompt development cache, and a 10-prompt pilot reranking slice with three seeds per prompt. On the saved 30 prompt-seed decisions, detector-only structured reranking and crop-structured SigLIP both reach an all-atoms-pass mean of 0.6000, while the full \method pipeline reaches 0.5333. The strongest ablation is not the full system but the variant that removes explicit null and count handling, which reaches 0.8000. The evidence therefore supports a negative pilot conclusion: assignment is still the right lens, but the current \daam-assisted design does not yet justify stronger claims.
+
+Our contributions are:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item We formulate compositional reranking as an explicit slot-assignment problem with repeated-object demand units and null matches, adapted directly from the proposal in this workspace.
+  \item We implement a complete training-free reranking pipeline that combines detector boxes, cached \daam traces, crop-based SigLIP verification, relation geometry, and a shared soft conjunction over atomic scores.
+  \item We report an honest negative pilot result from saved experiment outputs: the current \daam-assisted method does not beat strong non-\daam structured baselines on the available development slice, while a null/count ablation improves the most.
+\end{itemize}
+
+Section~\ref{sec:related} positions the work, Section~\ref{sec:method} describes the method, Section~\ref{sec:experiments} presents the completed pilot evidence, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Compositional evaluation benchmarks.}
+GenEval and T2I-CompBench established object-centric evaluation for text-to-image alignment, with special emphasis on count, attribute binding, and simple spatial relations \citep{ghosh2023geneval,huang2023t2icompbench}. Our paper inherits this framing and similarly focuses on prompts that can be grounded with 2D boxes.
+
+\paragraph{Post-hoc reranking and evaluators.}
+LogicRank composes logical evidence to rerank generated images \citep{deiseroth2022logicrank}. Miranda et al.\ show that simple structured inference can outperform whole-image scoring \citep{miranda2025simplestructure}. T2I-FineEval and CompAlign decompose prompts into finer atomic checks and move toward region-aware or question-based evaluation \citep{hosseini2025t2ifineeval,wan2025compalign}. These methods already cover much of the evaluator design space. Our claim is therefore narrower: we isolate explicit assignment itself as the primary variable of interest.
+
+\paragraph{Generation-time semantic binding.}
+Token Merging, VSC, R-Bind, and InfSplign intervene during generation or around the denoising process to improve semantic binding or spatial alignment \citep{hu2024token,Dat_2025_ICCV,zhang-wan-2025-r,rastegar2025infsplign}. They target a different operating point from ours. We assume a user already has a small candidate pool and wants a post-hoc selector rather than a new generator.
+
+\paragraph{Generator-native grounding cues.}
+\daam was introduced as an interpretability method for diffusion cross-attention maps rather than as a calibrated grounding module \citep{tang2023daam}. We therefore treat it as a noisy auxiliary assignment cue, not as a trusted localization oracle.
+
+\begin{table}[t]
+\caption{Positioning of \method relative to nearby compositional reranking and evaluation work. The intended novelty is narrow: explicit slot assignment is the main analysis target.}
+\label{tab:positioning}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Regions & Atomic comp. & Slot assign. & Native grounding & Post-hoc \\
+\midrule
+LogicRank \citep{deiseroth2022logicrank} & \checkmark & \checkmark & partial &  & \checkmark \\
+Simple structure \citep{miranda2025simplestructure} & \checkmark & \checkmark & partial &  & \checkmark \\
+T2I-FineEval \citep{hosseini2025t2ifineeval} & \checkmark & \checkmark & partial &  & \checkmark \\
+CompAlign \citep{wan2025compalign} & partial & \checkmark &  &  & \checkmark \\
+\method & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setting}
+
+For each prompt $p$ and seed $s$, a fixed \sdxl generator produces $K=4$ candidate images once. The reranker then selects one cached candidate without modifying generation. Prompts are parsed into:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item object groups with optional requested counts,
+  \item attribute atoms linked to one group, and
+  \item relation atoms restricted to \texttt{left of}, \texttt{right of}, \texttt{above}, and \texttt{below}.
+\end{itemize}
+
+For repeated objects such as ``two red apples,'' we create exchangeable demand units only for matching. Each unit may match one real box or one explicit null node. This makes under-count failures representable instead of forcing the verifier to hallucinate correspondences.
+
+\subsection{Detector Proposals and Cached \daam Features}
+
+Each candidate image is paired with GroundingDINO-Tiny boxes and lightweight cached \daam traces. The proposal in \texttt{proposal.md} stores aggregated phrase heatmaps rather than raw attention tensors. At reranking time, each phrase heatmap is reduced to normalized attention mass inside each candidate box.
+
+For slot $s$ and candidate box $b$, the full method uses
+\begin{equation}
+\mathrm{compat}(s,b) =
+z(\mathrm{det\_conf}(s,b)) +
+z(\mathrm{attn\_mass}(s,b)) +
+z(\mathrm{size\_prior}(s,b)),
+\end{equation}
+where $z(\cdot)$ denotes within-image standardization over the boxes proposed for that phrase. Detector-only variants drop the \daam term.
+
+\subsection{Assignment with Null Nodes}
+
+Assignment is a small capacitated matching problem. Each slot or repeated-object demand unit may match one real box or one null node, and each real box has capacity one. The pipeline stores the chosen box, runner-up box, and assignment margin for later audit.
+
+For a group $g$ with requested count $c_g$, distinct non-null matches $m_g$, and leftover high-confidence same-noun boxes counted by $\mathrm{extra}(g)$, the count score is
+\begin{equation}
+\mathrm{count}(g) = \exp(-|m_g-c_g|)\exp(-0.5\,\mathrm{extra}(g)).
+\end{equation}
+
+\subsection{Atomic Verification}
+
+The verifier is deliberately simple because the method claim should sit in assignment rather than in a large evaluation stack.
+
+\paragraph{Existence and count.}
+Existence depends on whether an assignment is non-null. Repeated-object groups use the count score above.
+
+\paragraph{Attribute binding.}
+For an assigned crop $c_s$, positive phrase $p^{+}$, and in-prompt counterfactual negatives $N(s)$, the attribute score is
+\begin{equation}
+\mathrm{attr}(s) =
+\sigma\left(
+\frac{\mathrm{sim}(c_s,p^{+}) - \max_{n\in N(s)} \mathrm{sim}(c_s,n)}
+{\tau_{\mathrm{attr}}}
+\right),
+\end{equation}
+where $\mathrm{sim}$ is SigLIP image-text similarity and $\sigma$ is the logistic sigmoid. The counterfactual ablation keeps the same assignment but removes the negative-margin comparison.
+
+\paragraph{Relations.}
+For slots $a$ and $b$ with relation $r$,
+\begin{equation}
+\mathrm{rel}(a,b,r) =
+\sigma\left(\frac{\mathrm{margin}_r(\mathrm{box}_a,\mathrm{box}_b)}{\tau_r}\right).
+\end{equation}
+
+\subsection{Shared Aggregation}
+
+All structured rerankers use the same soft conjunction
+\begin{equation}
+\mathrm{score}(I)=
+\exp\left(
+\frac{1}{J}\sum_{j=1}^{J}\log(\epsilon+\mathrm{atom}_j)
+\right),
+\end{equation}
+with $\epsilon=10^{-4}$. Sharing the aggregation across methods is important because it reduces the chance that observed differences come from the combiner rather than from assignment or verification.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Completed Experimental Scope}
+
+The proposal and plan target a broader study than what was completed in this workspace. The intended setup uses \sdxl at $512\times512$, 30 denoising steps, classifier-free guidance 7.5, seeds $\{11,22,33\}$, and a shared best-of-4 cache. The saved generation artifact confirms a 40-prompt development cache with 480 images (\texttt{exp/generate\_cache/results.json}). The smoke test processed 30 images with a mean runtime of 3.3816 seconds per image and peak VRAM 7.6564 GB (\texttt{exp/smoke\_test/results.json}).
+
+However, the completed reranking summary is narrower. The top-level \texttt{results.json} reports a pilot covering 30 development prompt-seed decisions. The compared methods are:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item best-of-4 global SigLIP,
+  \item detector-only structured reranking,
+  \item crop-structured SigLIP,
+  \item \daam-assisted reranking without counterfactual attribute scoring, and
+  \item the full \method pipeline.
+\end{itemize}
+
+Every number reported below is taken directly from saved outputs under \texttt{results.json}, \texttt{artifacts/tables/main\_results.csv}, or \texttt{results/ablations.jsonl}.
+
+\subsection{What Was Not Completed}
+
+The original paper plan aimed to report slot-assignment accuracy on a manually annotated set, plus official GenEval and T2I-CompBench metrics. Those results are not available in-workspace. The top-level summary explicitly marks manual grounding as skipped because no human labels were available, and the notes state that official benchmark evaluation was not run. As a result, the quantitative evidence in this draft is limited to the implemented verifier metrics:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item all-atoms-pass,
+  \item final structured score, and
+  \item reranking latency.
+\end{itemize}
+
+This limitation matters for interpretation. The paper can describe the planned mechanism test, but it cannot claim that \daam improved assignment accuracy because no human grounding labels were completed.
+
+\subsection{Main Pilot Results}
+
+Table~\ref{tab:main-results} shows the main comparison. The strongest structured baselines are detector-only structured reranking and crop-structured SigLIP, both at 0.6000 all-atoms-pass. The full \method pipeline reaches 0.5333, matching the \daam-without-counterfactual variant exactly on this slice. The gap is small in absolute size but unfavorable to the proposed method, and it directly contradicts the hoped-for mechanism story.
+
+\begin{table*}[t]
+\caption{Pilot development results on 30 prompt-seed decisions. Best values in each metric column are shown in \textbf{bold}. Higher is better for all-atoms-pass and final score; lower is better for latency.}
+\label{tab:main-results}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & All-atoms-pass $\uparrow$ & Final score $\uparrow$ & Latency (s) $\downarrow$ \\
+\midrule
+Best-of-4 global SigLIP & 0.0000 $\pm$ 0.0000 & 0.0057 $\pm$ 0.0155 & \textbf{0.0000 $\pm$ 0.0000} \\
+Detector-only structured & \textbf{0.6000 $\pm$ 0.4983} & \textbf{0.6526 $\pm$ 0.2793} & 0.9536 $\pm$ 0.4456 \\
+Crop-structured SigLIP & \textbf{0.6000 $\pm$ 0.4983} & \textbf{0.6526 $\pm$ 0.2793} & 0.8691 $\pm$ 0.2666 \\
+\daam without counterfactual & 0.5333 $\pm$ 0.5074 & 0.6148 $\pm$ 0.3114 & 0.8866 $\pm$ 0.2652 \\
+\method & 0.5333 $\pm$ 0.5074 & 0.6148 $\pm$ 0.3114 & 0.9025 $\pm$ 0.2775 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Two conclusions follow. First, structured reranking matters: all three structured methods dominate global whole-image SigLIP on this pilot. Second, the saved evidence does not support the claim that adding \daam to the present assignment pipeline improves reranking.
+
+Figure~\ref{fig:method-comparison} visualizes the same pattern. The important takeaway is not that \method narrowly loses, but that the current \daam-assisted design is not the source of the gain achieved by structured reranking.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/method_comparison.png}
+\caption{Pilot all-atoms-pass comparison. Structured reranking helps substantially over global SigLIP, but the current \daam-assisted variant does not beat the strongest non-\daam baselines on the saved development slice.}
+\label{fig:method-comparison}
+\end{figure}
+
+\subsection{Ablations}
+
+The ablations are more informative than the main table because they expose where the current method fails. Table~\ref{tab:ablations} summarizes the four completed ablations from \texttt{results.json} and \texttt{results/ablations.jsonl}.
+
+\begin{table}[t]
+\caption{Pilot ablations on the same 30 prompt-seed decisions. ``Assignment w/o \daam'' removes \daam from the compatibility score, ``No counterfactual'' removes in-prompt negative attribute scoring, ``Mean aggregation'' changes the combiner, and ``No null/count'' disables explicit null and count penalties.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Variant & All-atoms-pass $\uparrow$ & Final score $\uparrow$ & Latency (s) $\downarrow$ \\
+\midrule
+Full \method & 0.5333 $\pm$ 0.5074 & 0.6148 $\pm$ 0.3114 & 0.9025 $\pm$ 0.2775 \\
+Assignment w/o \daam & 0.6000 $\pm$ 0.4983 & 0.6526 $\pm$ 0.2793 & 1.0152 $\pm$ 0.5688 \\
+No counterfactual & 0.5333 $\pm$ 0.5074 & 0.6148 $\pm$ 0.3114 & 0.8908 $\pm$ 0.2681 \\
+Mean aggregation & 0.5000 $\pm$ 0.5085 & 0.6412 $\pm$ 0.3036 & 0.8956 $\pm$ 0.2644 \\
+No null/count & \textbf{0.8000 $\pm$ 0.4068} & \textbf{0.8889 $\pm$ 0.2045} & \textbf{0.8811 $\pm$ 0.2703} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ablations} shows the all-atoms-pass differences visually. Three observations matter.
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item Removing \daam from assignment improves all-atoms-pass from 0.5333 to 0.6000, which goes against the motivating hypothesis.
+  \item Removing counterfactual attribute scoring changes nothing on the saved slice.
+  \item Removing explicit null/count handling improves all-atoms-pass to 0.8000, the largest change in the study.
+\end{itemize}
+
+Taken together, these results suggest that the current bottleneck is not simply a weak grounding cue. The larger issue is assignment calibration, especially around count and null penalties.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/pilot_ablation.png}
+\caption{Pilot ablation comparison. The strongest variant removes explicit null and count handling, indicating that the current implementation is more limited by assignment calibration than by missing \daam evidence.}
+\label{fig:ablations}
+\end{figure}
+
+\subsection{Interpretation}
+
+The pilot supports two restrained claims. First, region-aware structured reranking is clearly better than whole-image SigLIP on this development slice. Second, the specific \daam-assisted mechanism proposed here is not yet helping. In the current implementation, the negative evidence is consistent across both the main comparison and the assignment-source ablation.
+
+That makes the next iteration clearer than the original hypothesis did. The immediate engineering target is not ``add a stronger grounding signal'' but ``repair null and count scoring so that explicit assignment helps rather than hurts.''
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+This paper is complete as a method-and-pilot write-up, but it is not a complete benchmark study.
+
+The main limitation is scope. Although the workspace includes a 40-prompt development cache and a broader experiment plan, the completed reranking summary covers only 30 prompt-seed decisions. A second limitation is the missing primary mechanism metric: the planned manual grounding study was not completed, so slot-assignment accuracy, group-count accuracy, and null-decision accuracy are unavailable. A third limitation is external validity. The workspace notes explicitly state that official GenEval and T2I-CompBench evaluation were not run, so the reported metrics are internal verifier outcomes rather than benchmark-standard scores.
+
+There is also a substantive method limitation. The null/count ablation is much stronger than the full model. That means the current explicit handling of missing objects and repeated counts is not yet well calibrated. In other words, assignment may indeed matter, but the present scoring rule for assignment failures is not good enough to establish the intended causal story.
+
+These limitations still make the pilot useful. They reduce the next revision to three concrete tasks: complete the manual annotation protocol, run official benchmark evaluation, and redesign or retune null/count scoring before claiming that \daam improves post-hoc compositional reranking.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \method, a training-free compositional reranker that combines detector boxes, cached \daam traces, explicit slot assignment, crop-based verification, and soft conjunction over atomic scores. The paper's intended contribution is narrow: to test whether better assignment explains better reranking under a fixed candidate cache.
+
+The completed pilot does not support that hypothesis. On the saved 30 development prompt-seed decisions, detector-only structured reranking and crop-structured SigLIP each reach 0.6000 all-atoms-pass, while the full method reaches 0.5333. The strongest ablation removes explicit null/count handling and reaches 0.8000. The right conclusion is therefore conservative: explicit assignment remains a useful analytic lens, but this \daam-assisted instantiation is not yet a convincing improvement over strong non-\daam baselines.
+
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\end{document}

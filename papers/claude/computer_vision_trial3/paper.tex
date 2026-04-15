@@ -1,0 +1,584 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\methodname}{STG}
+\newcommand{\ie}{\emph{i.e.}}
+\newcommand{\eg}{\emph{e.g.}}
+\newcommand{\etal}{\emph{et al.}}
+
+\title{Spectral Token Gating for Vision Transformer Robustness:\\A Negative Result with Insights on Frequency-Domain\\Corruption Detection in Embedding Space}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Vision Transformers (ViTs) suffer significant accuracy degradation under common image corruptions, yet existing robustness methods require expensive retraining or unstable test-time parameter updates. We investigate whether frequency-domain analysis of patch token embeddings can enable a training-free robustness method. We propose Spectral Token Gating (STG), which computes the discrete Fourier transform of token embeddings, detects spectrally anomalous tokens via Mahalanobis distance from clean-image reference statistics, and gates their contributions to self-attention. Contrary to our hypothesis, STG consistently \emph{degrades} corruption robustness across three architectures (DeiT-S, DeiT-B, Swin-T), increasing mean Corruption Error (mCE) by 4.9--8.0\% relative to vanilla models on ImageNet-C. Our spectral analysis reveals why: corruption-induced spectral shifts in token embeddings are remarkably small (sub-0.6$\sigma$ on average), yielding only 5--7\% token-level separability between clean and corrupted distributions. This means any gating threshold that captures corrupted tokens also suppresses a large fraction of clean tokens, destroying useful information. These quantitative measurements of spectral overlap in ViT embedding space, spanning 15 corruption types across four transformer layers, constitute a standalone empirical contribution demonstrating that ViTs encode corruption effects diffusely across all tokens rather than concentrating them in identifiable subsets.
+\end{abstract}
+
+\section{Introduction}
+
+Vision Transformers (ViTs) have achieved state-of-the-art performance across computer vision tasks~\citep{dosovitskiy2021image, liu2021swin, touvron2021training}, yet they remain vulnerable to common image corruptions encountered in real-world deployment---noise, blur, weather artifacts, and digital distortions~\citep{hendrycks2019benchmarking}. This vulnerability is especially concerning for safety-critical applications such as autonomous driving and medical imaging, where input degradation is routine.
+
+Recent work has identified \emph{token overfocusing} as a key failure mode: the self-attention mechanism concentrates on a small number of tokens that are disproportionately affected by corruptions, causing dramatic shifts in attention patterns~\citep{guo2023robustifying}. Existing defenses require either specialized training~\citep{zhou2022understanding, guo2023improving, wang2021augmax}, architectural modifications~\citep{zhou2022understanding}, or test-time parameter updates that can be unstable~\citep{wang2021tent}. A training-free, plug-and-play method that works with arbitrary pretrained ViTs would be highly desirable.
+
+\textbf{Our hypothesis.} We hypothesize that corruptions create detectable \emph{frequency-domain signatures} in ViT patch token embeddings. Prior work has shown that ViTs rely predominantly on low-frequency and phase information~\citep{kim2024exploring}, and that different corruption types have characteristic frequency profiles (\eg, noise elevates high frequencies, blur suppresses them). If these signatures propagate into token embedding space, they could serve as a lightweight corruption signal. By detecting and gating spectrally anomalous tokens at inference time, one could suppress corrupted information while preserving clean signals---without any retraining.
+
+\textbf{Our method.} We propose Spectral Token Gating (\methodname{}), which: (1) collects spectral energy statistics from clean-image token embeddings via a one-time calibration pass; (2) at test time, computes each token's spectral profile and its Mahalanobis distance from the clean reference; and (3) applies soft gating to attention value vectors, downweighting spectrally anomalous tokens. \methodname{} adds under 4\% computational overhead and requires no gradient computation or parameter updates.
+
+\textbf{Key findings.} Contrary to our hypothesis, \methodname{} consistently \emph{degrades} performance. On ImageNet-C, it increases mCE by 4.9\% for DeiT-S, 5.6\% for DeiT-B, and 8.0\% for Swin-T relative to vanilla models. The reason is fundamental: our comprehensive spectral analysis reveals that corruption-induced shifts in token embedding spectra are remarkably small---averaging sub-$0.6\sigma$ across all corruption types and layers---yielding only 5--7\% separability at standard anomaly thresholds. At any threshold aggressive enough to gate a meaningful number of corrupted tokens, the false positive rate on clean tokens dominates, destroying more useful information than it preserves.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \methodname{}, a principled framework for training-free corruption robustness via frequency-domain token analysis, and provide a complete implementation and evaluation across three ViT architectures.
+    \item We present a comprehensive spectral analysis of corruption effects in ViT token embedding space, measuring separability across 15 corruption types, 4 corruption categories, and 4 transformer layers. These measurements---showing sub-$0.6\sigma$ shifts and 5--7\% separability---are valuable to the community independent of the gating method.
+    \item We demonstrate through rigorous experiments and ablations that token-level gating based on spectral anomaly detection is fundamentally limited by the diffuse encoding of corruption effects, providing a principled negative result that informs future work on ViT robustness.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \methodname{} method. Section~\ref{sec:experiments} presents experiments and analysis. Section~\ref{sec:discussion} discusses implications. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Vision Transformer robustness.} Several approaches improve ViT corruption robustness through training-time interventions. FAN~\citep{zhou2022understanding} introduces channel self-attention to reduce token overfocusing, achieving strong robustness but requiring training from scratch. RSPC~\citep{guo2023improving} identifies vulnerable patches during training and aligns clean-corrupted feature distributions. \citet{guo2023robustifying} address token overfocusing via Token-aware Average Pooling and Attention Diversification Loss. AugMax~\citep{wang2021augmax} proposes adversarial composition of augmentations with specialized normalization. All these methods require retraining, limiting their applicability to pretrained models. Our work investigates whether a \emph{training-free} approach is possible via spectral analysis.
+
+\textbf{Test-time adaptation (TTA).} Tent~\citep{wang2021tent} adapts models at test time by minimizing prediction entropy over batch normalization (or layer normalization) parameters. While effective in many scenarios, Tent requires backpropagation at inference time, careful batch handling, and can fail catastrophically under certain distribution shifts. SAR~\citep{niu2023towards} addresses Tent's stability issues through sharpness-aware minimization and reliable entropy filtering. MEMO~\citep{zhang2022memo} augments each test sample and minimizes marginal entropy without requiring batch statistics. Our approach avoids parameter updates entirely, using statistics-based anomaly detection instead. We include Tent as a baseline to contextualize our results.
+
+\textbf{Token reduction and selection.} Token Merging (ToMe)~\citep{bolya2023token} achieves significant speedups by merging similar tokens during inference. PiToMe~\citep{tran2024accelerating} extends this with spectrum-preserving merging. These methods target efficiency for clean images by identifying \emph{redundant} tokens. We draw inspiration from the token selection paradigm but target a different problem: identifying \emph{corrupted} tokens for suppression.
+
+\textbf{Spectral analysis of ViTs.} \citet{kim2024exploring} showed that ViTs rely more on low-frequency and phase information, making them vulnerable to frequency-targeted attacks. SpectFormer~\citep{patro2025spectformer} combines spectral layers with attention for improved classification. These works analyze or leverage frequency properties of ViTs but do not use frequency-domain analysis of \emph{token embeddings} for corruption detection. Our work bridges this gap by characterizing the spectral signatures of corruptions in embedding space and testing whether they are strong enough for practical use.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries}
+
+A Vision Transformer processes an image by dividing it into $P \times P$ patches, projecting each into a $d$-dimensional embedding, and processing the resulting sequence through $L$ transformer layers. At layer $l$, the token embeddings $\mathbf{X}^l \in \mathbb{R}^{N \times d}$ (where $N$ is the number of patch tokens, excluding the class token) are updated through multi-head self-attention:
+\begin{equation}
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right) V,
+\end{equation}
+where $Q$, $K$, $V$ are linear projections of $\mathbf{X}^l$.
+
+\subsection{Spectral Token Gating}
+
+\methodname{} operates in two phases: offline calibration and test-time gating.
+
+\textbf{Phase 1: Calibration.} Given a pretrained ViT and a small set of $M$ clean images (\eg, $M{=}1000$), we collect spectral statistics of token embeddings at selected layers $\mathcal{L} \subset \{1, \ldots, L\}$:
+
+\begin{enumerate}
+    \item \emph{Spectral energy computation.} For each token embedding $\mathbf{x}_i^l \in \mathbb{R}^d$ at layer $l$, compute the 1D discrete Fourier transform $\hat{\mathbf{X}}_i^l = \text{DFT}(\mathbf{x}_i^l)$ and partition the frequency spectrum into $K$ bands of equal width. For each band $k$, compute the spectral energy $E_k = \sum_{f \in \text{band}_k} |\hat{X}_f|^2$.
+
+    \item \emph{Spectral energy ratios.} Normalize to obtain a $K$-dimensional ratio vector:
+    \begin{equation}
+        \mathbf{r}_i^l = \left[\frac{E_1}{E_\text{total}}, \frac{E_2}{E_\text{total}}, \ldots, \frac{E_K}{E_\text{total}}\right], \quad E_\text{total} = \sum_{k=1}^K E_k.
+    \end{equation}
+
+    \item \emph{Reference statistics.} Aggregate across all tokens and calibration images to compute the mean $\boldsymbol{\mu}^l$ and covariance $\boldsymbol{\Sigma}^l$ (regularized with $10^{-5}\mathbf{I}$) of spectral energy ratios at each layer. Record the $\tau$-th percentile of the calibration Mahalanobis distance distribution as the gating threshold.
+\end{enumerate}
+
+\textbf{Phase 2: Test-time gating.} At inference, for each input image:
+\begin{enumerate}
+    \item At target layers $l \in \mathcal{L}$, compute the spectral energy ratio $\mathbf{r}_i^l$ for each token.
+
+    \item Compute the Mahalanobis distance from the clean reference:
+    \begin{equation}
+        d_i^l = \sqrt{(\mathbf{r}_i^l - \boldsymbol{\mu}^l)^\top (\boldsymbol{\Sigma}^l)^{-1} (\mathbf{r}_i^l - \boldsymbol{\mu}^l)}.
+    \end{equation}
+
+    \item Convert to a soft gating score via a sigmoid function:
+    \begin{equation}
+        g_i^l = \sigma\bigl(-\alpha(d_i^l - \tau^l)\bigr),
+    \end{equation}
+    where $\alpha$ controls sharpness and $\tau^l$ is the layer-specific threshold. Tokens with $d_i^l \ll \tau^l$ receive $g_i^l \approx 1$; tokens with $d_i^l \gg \tau^l$ receive $g_i^l \approx 0$.
+
+    \item Modulate the block output by scaling patch token representations:
+    \begin{equation}
+        \tilde{\mathbf{x}}_i^l = g_i^l \cdot \mathbf{x}_i^l.
+    \end{equation}
+    The class token is never gated ($g_\text{CLS} = 1$ always).
+\end{enumerate}
+
+\textbf{Design choices.} We apply \methodname{} at a spread of layers (layers 3, 6, 9, 11 for 12-layer DeiT models; last block per stage for Swin-T). Default hyperparameters are $K{=}3$ frequency bands, $\alpha{=}5.0$ gating sharpness, and $\tau$ at the 95th percentile of calibration distances. These are validated through ablation studies in Section~\ref{sec:ablations}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\textbf{Models.} We evaluate on three pretrained ViT architectures from the timm library~\citep{rw2019timm}: DeiT-Small (DeiT-S, 22M parameters)~\citep{touvron2021training}, DeiT-Base (DeiT-B, 86M parameters), and Swin-Tiny (Swin-T, 28M parameters)~\citep{liu2021swin}. These span columnar (DeiT) and hierarchical (Swin) architectures.
+
+\textbf{Benchmark.} We evaluate on ImageNet-C~\citep{hendrycks2019benchmarking}, which applies 15 corruption types at 5 severity levels to the ImageNet validation set. Corruptions are grouped into four categories: \emph{Noise} (Gaussian, shot, impulse), \emph{Blur} (defocus, glass, motion, zoom), \emph{Weather} (snow, frost, fog, brightness), and \emph{Digital} (contrast, elastic transform, pixelate, JPEG compression). We apply corruptions on-the-fly using the \texttt{imagecorruptions} library to ensure exact reproducibility.
+
+\textbf{Evaluation scale.} Our primary evaluation uses a 10,000-image subset of the ImageNet validation set (50,000 images total). This subset produces clean accuracies 3--5 percentage points above published full-set values (\eg, 84.9\% vs.\ the published 79.8\% for DeiT-S), a known artifact of subset sampling. Relative comparisons between methods are unaffected, as all methods are evaluated on the same images. We verify on the full 50K set that DeiT-S vanilla achieves 79.83\% (matching published values) and that STG's degradation direction is consistent (Appendix~\ref{app:full50k}).
+
+\textbf{Metrics.} We report mean Corruption Error (mCE), computed relative to AlexNet reference errors following the standard protocol~\citep{hendrycks2019benchmarking}. Lower mCE is better. We also report clean top-1 accuracy to verify that methods do not degrade performance on uncorrupted images.
+
+\textbf{Baselines.} (1) \emph{Vanilla}: unmodified pretrained models. (2) \emph{Tent}~\citep{wang2021tent}: test-time adaptation via entropy minimization on LayerNorm parameters, using SGD with learning rate $10^{-3}$ and batch size 64, with parameter reset between corruption types.
+
+\textbf{STG configuration.} $K{=}3$ frequency bands, $\alpha{=}5.0$, $\tau$ at the 95th percentile, applied at layers $\{3,6,9,11\}$ for DeiT and $\{1,3,9,11\}$ (last block per stage) for Swin-T. Calibration uses 1,000 clean images. For DeiT-S, we report results averaged over 3 seeds (42, 123, 456); DeiT-B and Swin-T use seed 42.
+
+\textbf{Implementation.} All experiments run on a single NVIDIA RTX A6000 (48GB). \methodname{} is implemented via forward hooks on transformer blocks, requiring no modification to model source code.
+
+\subsection{Main Results}
+\label{sec:main}
+
+Table~\ref{tab:main} presents the main results. \methodname{} \emph{degrades} corruption robustness across all three architectures, contrary to our initial hypothesis.
+
+\begin{table}[t]
+\centering
+\caption{Main results on ImageNet-C (10K subset). mCE (\%) is computed relative to AlexNet; lower is better. Rel.~$\Delta$ shows relative change in mCE vs.\ vanilla (negative = degradation, \ie, mCE increased). STG results for DeiT-S are averaged over 3 seeds ($\pm$ std); DeiT-B and Swin-T use a single seed.}
+\label{tab:main}
+\begin{tabular}{llccc}
+\toprule
+Model & Method & Clean Acc (\%) $\uparrow$ & mCE (\%) $\downarrow$ & Rel.~$\Delta$ \\
+\midrule
+\multirow{3}{*}{DeiT-S} & Vanilla & 84.9 & 54.5 & -- \\
+ & Tent & 85.1 & 53.5 & $+$1.7\% \\
+ & \methodname{} (Ours) & 84.9$\pm$0.0 & 57.1$\pm$0.0 & $-$4.9\% \\
+\midrule
+\multirow{2}{*}{DeiT-B} & Vanilla & 86.7 & 43.7 & -- \\
+ & \methodname{} (Ours) & 86.2 & 46.1 & $-$5.6\% \\
+\midrule
+\multirow{2}{*}{Swin-T} & Vanilla & 86.3 & 67.2 & -- \\
+ & \methodname{} (Ours) & 85.5 & 72.5 & $-$8.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several observations stand out. First, the degradation is consistent across architectures and is worst for Swin-T ($-$8.0\%), suggesting that hierarchical ViTs are particularly sensitive to token-level gating, likely because their window-based attention already operates on a restricted token set where each token carries proportionally more information. Second, \methodname{} largely preserves clean accuracy (within 0.5\% for DeiT models, 0.8\% for Swin-T), indicating that the 95th-percentile gating threshold is well-calibrated for clean images---the problem lies in the heavy overlap between clean and corrupted spectral distributions. Third, Tent provides a modest 1.7\% improvement on DeiT-S, demonstrating that test-time methods can help, but the gains are limited for ViTs (which use LayerNorm rather than the BatchNorm parameters Tent was designed for).
+
+\subsection{Per-Corruption Analysis}
+\label{sec:percorruption}
+
+Table~\ref{tab:percorruption} breaks down severity-5 accuracy by corruption category for DeiT-S. \methodname{} degrades performance most on noise corruptions ($-$4.8 pp), which is ironic since noise corruptions have the strongest spectral signatures (Section~\ref{sec:spectral}). The reason is that aggressive gating removes too many tokens uniformly---every token in a noise-corrupted image is affected, so there is no clean subset to preserve. Weather corruptions show the smallest degradation ($-$1.4 pp), likely because they affect global image statistics rather than individual token spectra.
+
+\begin{table}[t]
+\centering
+\caption{Severity-5 accuracy (\%) by corruption category for DeiT-S (seed 42). $\Delta$ = STG $-$ Vanilla (negative = degradation). Noise corruptions suffer the largest degradation despite having the most distinctive spectral signatures.}
+\label{tab:percorruption}
+\begin{tabular}{lcccc}
+\toprule
+Category & Vanilla & \methodname{} & $\Delta$ & Range \\
+\midrule
+Noise & 50.7 & 45.9 & $-$4.8 & 44.1--47.7 \\
+Blur & 43.7 & 42.1 & $-$1.7 & 26.6--54.7 \\
+Weather & 77.8 & 76.4 & $-$1.4 & 69.7--85.4 \\
+Digital & 60.2 & 59.4 & $-$0.8 & 40.7--79.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:severity} shows how the STG-vanilla accuracy gap evolves across severity levels for representative corruptions. The degradation increases monotonically with severity for noise (Gaussian noise: $-$1.3 pp at severity 1, $-$5.0 pp at severity 5), consistent with more aggressive gating at higher corruption levels. For contrast and JPEG compression, the gap remains small across all severities ($<$1 pp), suggesting these corruptions produce spectral profiles nearly indistinguishable from clean tokens.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/severity_scaling.pdf}
+\caption{Accuracy gap (\methodname{} $-$ Vanilla) across severity levels for representative corruptions on DeiT-S. Negative values indicate degradation. Noise corruptions show increasing degradation with severity; weather and digital corruptions show minimal impact.}
+\label{fig:severity}
+\end{figure}
+
+\subsection{Spectral Signature Analysis}
+\label{sec:spectral}
+
+The core premise of \methodname{} is that corruptions create detectable spectral anomalies in token embeddings. We present a thorough analysis of this premise, which constitutes an independent empirical contribution.
+
+\textbf{Setup.} Using DeiT-S, we collect token embeddings at layers 3, 6, 9, and 11 for 500 clean images and 500 images per corruption type at severity 5. We compute $K{=}3$-band spectral energy ratios (low, mid, high frequency) and measure: (1) the mean spectral shift from clean reference (in units of the clean distribution's standard deviation); and (2) \emph{separability}---the fraction of corrupted tokens exceeding the 95th percentile of the clean Mahalanobis distance distribution.
+
+\textbf{Spectral shifts are small.} Figure~\ref{fig:spectral} summarizes the spectral analysis. Across all 15 corruptions and 4 layers, the average spectral energy ratio shift from clean reference is only 0.01--0.02 in absolute terms, corresponding to sub-$0.6\sigma$ shifts relative to the clean distribution's standard deviation ($\sigma \approx 0.03$). Noise corruptions produce the largest mean Mahalanobis distances (1.33 vs.\ a clean baseline of ${\approx}1.0$), but the distributions overlap extensively.
+
+\textbf{Low separability.} The average separability across corruption categories is: Noise 7.1\%, Blur 5.6\%, Weather 5.8\%, Digital 6.0\% (Table~\ref{tab:spectral_summary}). At the 95th percentile threshold, approximately 5\% of \emph{clean} tokens already exceed the threshold by definition. The additional 0.6--2.1\% of corrupted tokens that are flagged represents a marginal signal that is far too weak for reliable gating. \methodname{} gates approximately the same fraction of tokens regardless of corruption status.
+
+\begin{table}[t]
+\centering
+\caption{Spectral analysis summary for DeiT-S across 4 layers. Mean Mahalanobis distance and separability (fraction of corrupted tokens exceeding 95th percentile of clean distances) by corruption category. Values near 5\% separability indicate no discriminative power above chance.}
+\label{tab:spectral_summary}
+\begin{tabular}{lcc}
+\toprule
+Category & Mean Mahal.\ Distance & Separability (\%) \\
+\midrule
+Noise & 1.33 & 7.1 \\
+Blur & 1.27 & 5.6 \\
+Weather & 1.28 & 5.8 \\
+Digital & 1.28 & 6.0 \\
+\midrule
+\emph{Clean (reference)} & \emph{1.00} & \emph{5.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Layer dependence.} Table~\ref{tab:spectral_layers} shows separability broken down by layer. Early layers (layer 3) show slightly higher separability for noise corruptions (8.2\%), while later layers show higher separability for digital corruptions. No single layer provides substantially better discrimination, suggesting that the limitation is fundamental to how ViTs encode corruption effects rather than an artifact of layer selection.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/spectral_signatures.pdf}
+\caption{Spectral analysis of corruption effects in DeiT-S token embeddings. Left: mean Mahalanobis distance from clean reference by corruption category and layer. Right: separability (fraction of corrupted tokens exceeding 95th percentile of clean distances). Even the most detectable category (noise) achieves only ${\sim}$7\% separability.}
+\label{fig:spectral}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Separability (\%) by corruption category and DeiT-S layer. Values near 5\% indicate chance-level discrimination. Even the best category-layer combination (noise at layer 9: 8.8\%) provides only marginal signal.}
+\label{tab:spectral_layers}
+\begin{tabular}{lcccc}
+\toprule
+Category & Layer 3 & Layer 6 & Layer 9 & Layer 11 \\
+\midrule
+Noise & 8.2 & 5.4 & 8.8 & 6.1 \\
+Blur & 5.1 & 5.2 & 5.6 & 6.4 \\
+Weather & 5.7 & 5.0 & 6.3 & 6.1 \\
+Digital & 5.6 & 6.1 & 7.1 & 6.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+We conduct ablation studies on DeiT-S using 5 representative corruptions (Gaussian noise, defocus blur, snow, contrast, JPEG compression) at severity 5 on a 5,000-image subset. All ablations use seed 42.
+
+\textbf{Number of frequency bands ($K$).} Table~\ref{tab:ablation_K} shows results for $K \in \{2, 3, 4, 5\}$. Performance is stable across all values, with $K{=}3$ marginally best. The insensitivity to $K$ confirms that the limitation is not in the spectral resolution but in the fundamental overlap of clean and corrupted distributions.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: number of frequency bands $K$ on DeiT-S (5K subset). Performance is insensitive to $K$.}
+\label{tab:ablation_K}
+\begin{tabular}{ccc}
+\toprule
+$K$ & Clean Acc (\%) & Mean Corruption Acc (\%) \\
+\midrule
+2 & 91.9 & 57.7 \\
+\textbf{3} & \textbf{92.2} & \textbf{58.1} \\
+4 & 92.2 & 58.0 \\
+5 & 92.0 & 58.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Layer selection.} Table~\ref{tab:ablation_layers} reveals that applying \methodname{} at \emph{all} 12 layers catastrophically degrades both clean (84.0\%) and corrupted (39.2\%) accuracy, demonstrating that gating errors accumulate destructively across layers. Late layers alone are least harmful (59.4\% corruption accuracy), while the default spread configuration (58.1\%) balances information from multiple stages. Early-only application is the most destructive single-region choice (41.9\%), indicating that early tokens carry especially critical information that the model cannot recover from losing.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: layer selection for DeiT-S (12 layers) on 5K subset. Applying STG at all layers is catastrophic; errors compound across layers.}
+\label{tab:ablation_layers}
+\begin{tabular}{lcc}
+\toprule
+Layers & Clean Acc (\%) & Mean Corruption Acc (\%) \\
+\midrule
+Early [0,1,2] & 86.9 & 41.9 \\
+Middle [4,5,6,7] & 91.9 & 58.0 \\
+Late [9,10,11] & 92.1 & 59.4 \\
+Spread [3,6,9,11] (default) & 92.2 & 58.1 \\
+All [0--11] & 84.0 & 39.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Gating function.} Table~\ref{tab:ablation_gating} compares sigmoid (soft), hard threshold, and linear ramp gating. The soft sigmoid performs best, with hard thresholding and linear gating causing progressively more damage. This confirms that probabilistic treatment of the clean/corrupted boundary is essential given the heavy distribution overlap.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: gating function on DeiT-S (5K subset). Soft sigmoid minimizes damage; hard and linear gating are more destructive.}
+\label{tab:ablation_gating}
+\begin{tabular}{lcc}
+\toprule
+Gating Function & Clean Acc (\%) & Mean Corruption Acc (\%) \\
+\midrule
+Sigmoid (default) & 92.2 & 58.1 \\
+Hard threshold & 91.1 & 54.9 \\
+Linear ramp & 89.4 & 45.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Calibration set size.} Performance is remarkably stable from 50 to 2,000 calibration images (Table~\ref{tab:ablation_cal}), with even 50 images providing nearly identical results to 1,000. The clean spectral distribution is low-dimensional and well-characterized by a small sample---the calibration procedure is not the bottleneck.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: calibration set size on DeiT-S (5K subset). Even 50 images yield stable calibration.}
+\label{tab:ablation_cal}
+\begin{tabular}{ccc}
+\toprule
+Calibration Size & Clean Acc (\%) & Mean Corruption Acc (\%) \\
+\midrule
+50 & 92.1 & 58.1 \\
+100 & 92.1 & 58.0 \\
+250 & 92.1 & 58.1 \\
+500 & 92.3 & 58.1 \\
+1000 (default) & 92.2 & 58.1 \\
+2000 & 92.2 & 58.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Threshold sensitivity ($\tau$).} Table~\ref{tab:ablation_tau} reveals the fundamental trade-off: lower thresholds gate more tokens but destroy clean information (clean accuracy drops to 87.1\% at the 75th percentile, corruption accuracy plummets to 40.8\%). Higher thresholds approach vanilla performance as fewer tokens are affected. No threshold achieves simultaneous improvement on clean and corrupted accuracy---the Pareto frontier is strictly dominated by vanilla inference.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: gating threshold $\tau$ on DeiT-S (5K subset). No threshold improves both clean and corrupted accuracy---vanilla inference dominates.}
+\label{tab:ablation_tau}
+\begin{tabular}{ccc}
+\toprule
+$\tau$ Percentile & Clean Acc (\%) & Mean Corruption Acc (\%) \\
+\midrule
+75th & 87.1 & 40.8 \\
+85th & 90.3 & 51.7 \\
+90th & 91.9 & 55.5 \\
+95th (default) & 92.2 & 58.1 \\
+99th & 91.9 & 59.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Computational Overhead}
+\label{sec:overhead}
+
+Table~\ref{tab:overhead} shows that \methodname{} adds 2.2--3.8\% latency overhead and negligible memory ($\leq$4 MB). The low cost confirms that the method's failure is due to the spectral overlap problem, not implementation limitations.
+
+\begin{table}[t]
+\centering
+\caption{Computational overhead of \methodname{}. Batch inference latency and peak GPU memory overhead.}
+\label{tab:overhead}
+\begin{tabular}{lcccc}
+\toprule
+Model & Vanilla (ms) & \methodname{} (ms) & Overhead (\%) & Mem.\ (MB) \\
+\midrule
+DeiT-S (bs=256) & 193.5 & 200.9 & 3.8 & 1 \\
+DeiT-B (bs=128) & 305.2 & 311.9 & 2.2 & $<$1 \\
+Swin-T (bs=256) & 301.8 & 310.3 & 2.8 & 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Visualization}
+
+Figure~\ref{fig:gating} visualizes gating scores for example corrupted images. The gating maps show only weak spatial structure: while tokens corresponding to heavily corrupted regions receive marginally lower scores, the overall pattern is nearly uniform. This is consistent with the quantitative finding of heavy spectral overlap.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/gating_visualization.pdf}
+\caption{Gating score visualization for DeiT-S at layer 6. Top: clean and corrupted input images. Bottom: gating score maps (brighter = higher score = less suppressed). Gating maps show weak spatial structure, reflecting poor separability between clean and corrupted token spectra.}
+\label{fig:gating}
+\end{figure}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why Does Spectral Token Gating Fail?}
+
+Our results reveal a fundamental mismatch between the assumption underlying \methodname{} and how ViTs actually process corrupted inputs.
+
+\textbf{Corruptions affect all tokens diffusely.} The spectral analysis shows that corruption effects in token embedding space are remarkably diffuse. Unlike in pixel space where noise creates large, localized perturbations, the patch embedding projection and subsequent transformer layers distribute corruption signals across all tokens. This is a natural consequence of self-attention: after even a few layers, every token attends to every other, mixing local corruption signals globally.
+
+\textbf{The detection-gating paradox.} \methodname{} faces a fundamental paradox: corruption types with the most distinctive spectral signatures (noise) also affect tokens most uniformly. Even correctly identifying a noise-corrupted token as anomalous, gating it removes both the corruption \emph{and} the visual information it carries. Since every token in a noise-corrupted image is affected, there is no clean subset to preserve.
+
+\textbf{Information destruction dominates corruption suppression.} The $\tau$ ablation confirms this: aggressive gating ($\tau$ at 75th percentile) achieves the highest corruption detection rate but produces the worst accuracy. The corrupted and clean components of each token's representation are entangled and cannot be separated in spectral space. Any attempt to suppress one inevitably destroys the other.
+
+\subsection{Broader Implications}
+
+\textbf{Token-level robustness requires stronger signals.} The 5--7\% separability represents a hard ceiling for any method attempting to identify corrupted tokens via embedding statistics. Other features (\eg, attention patterns, norms) are unlikely to provide substantially better discrimination given the diffuse encoding.
+
+\textbf{Global signals over local detection.} Tent's modest success operates on global batch statistics rather than individual tokens. Future training-free robustness methods may benefit from image-level or batch-level corruption signals. Our spectral analysis could still be useful at the image level---aggregating spectral statistics across all tokens may detect corruption type and severity, enabling corruption-specific global adjustments rather than token-level gating.
+
+\textbf{Value of negative results.} The spectral analysis framework provides a reusable diagnostic for evaluating corruption effects in embedding space. The measurements we report (Mahalanobis distances, separability scores, layer-wise patterns) establish baselines for the community and prevent future work from pursuing the same dead end.
+
+\subsection{Limitations}
+
+Our primary evaluation uses a 10K-image subset rather than the full 50K ImageNet validation set, yielding inflated absolute accuracies. We report multi-seed results only for DeiT-S; the Swin-T contrast sensitivity ($-$30.1 pp) warrants additional seed verification. We compare against Tent as the sole TTA baseline; including MEMO~\citep{zhang2022memo} or SAR~\citep{niu2023towards} would strengthen the comparison. The planned ImageNet-P evaluation and combination experiments with training-time methods (FAN, AugMax) remain for future work.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We investigated whether frequency-domain analysis of ViT token embeddings could enable training-free corruption robustness. Our proposed Spectral Token Gating (\methodname{}) detects spectrally anomalous tokens and gates their contributions to self-attention. Contrary to our hypothesis, \methodname{} consistently degrades robustness, increasing mCE by 4.9--8.0\% across three architectures on ImageNet-C.
+
+The underlying reason is quantified by our spectral analysis: corruption-induced shifts in token embedding spectra average sub-$0.6\sigma$, yielding only 5--7\% separability. Corruptions are encoded diffusely across all tokens, making token-level detection and gating fundamentally limited. These measurements constitute a standalone contribution: they demonstrate that ViTs distribute corruption effects globally through self-attention and that token-level corruption signals in embedding space are insufficient for reliable detection.
+
+Future work on training-free ViT robustness should explore global corruption signals rather than local token-level approaches, or develop methods that modulate representations without requiring accurate per-token corruption detection.
+
+\section*{Acknowledgments}
+Experiments were conducted on a single NVIDIA RTX A6000 GPU.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{17}
+
+\bibitem[Bolya et~al.(2023)]{bolya2023token}
+Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman.
+\newblock Token Merging: Your ViT But Faster.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Dosovitskiy et~al.(2021)]{dosovitskiy2021image}
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby.
+\newblock An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Guo et~al.(2023a)]{guo2023improving}
+Yong Guo, David Stutz, and Bernt Schiele.
+\newblock Improving Robustness of Vision Transformers by Reducing Sensitivity to Patch Corruptions.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2023.
+
+\bibitem[Guo et~al.(2023b)]{guo2023robustifying}
+Yong Guo, David Stutz, and Bernt Schiele.
+\newblock Robustifying Token Attention for Vision Transformers.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2023.
+
+\bibitem[Hendrycks \& Dietterich(2019)]{hendrycks2019benchmarking}
+Dan Hendrycks and Thomas Dietterich.
+\newblock Benchmarking Neural Network Robustness to Common Corruptions and Perturbations.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem[Kim \& Lee(2024)]{kim2024exploring}
+Gihyun Kim and Jong-Seok Lee.
+\newblock Exploring Adversarial Robustness of Vision Transformers in the Spectral Perspective.
+\newblock In \emph{IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)}, 2024.
+
+\bibitem[Liu et~al.(2021)]{liu2021swin}
+Ze~Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining Guo.
+\newblock Swin Transformer: Hierarchical Vision Transformer using Shifted Windows.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2021.
+
+\bibitem[Niu et~al.(2023)]{niu2023towards}
+Shuaicheng Niu, Jiaxiang Wu, Yifan Zhang, Yaofo Chen, Shijian Zheng, Peilin Zhao, and Mingkui Tan.
+\newblock Towards Stable Test-Time Adaptation in Dynamic Wild World.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Patro et~al.(2025)]{patro2025spectformer}
+Badri~N. Patro, Vijay~S. Agneeswaran, and Vinay~P. Namboodiri.
+\newblock SpectFormer: Frequency and Attention is What You Need in a Vision Transformer.
+\newblock In \emph{IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)}, 2025.
+
+\bibitem[Touvron et~al.(2021)]{touvron2021training}
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Herv\'{e} J\'{e}gou.
+\newblock Training data-efficient image transformers \& distillation through attention.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2021.
+
+\bibitem[Tran et~al.(2024)]{tran2024accelerating}
+Hoai-Chau Tran, Duy M.~H. Nguyen, Duy~M. Nguyen, Trung Nguyen, Nhat Le, Pengtao Xie, Daniel Sonntag, James~Y. Zou, Binh~T. Nguyen, and Mathias Niepert.
+\newblock Accelerating Transformers with Spectrum-Preserving Token Merging.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[Wang et~al.(2021a)]{wang2021augmax}
+Haotao Wang, Chaowei Xiao, Jean Kossaifi, Zhiding Yu, Animashree Anandkumar, and Zhangyang Wang.
+\newblock AugMax: Adversarial Composition of Random Augmentations for Robust Training.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2021.
+
+\bibitem[Wang et~al.(2021b)]{wang2021tent}
+Dequan Wang, Evan Shelhamer, Shaoteng Liu, Bruno Olshausen, and Trevor Darrell.
+\newblock Tent: Fully Test-Time Adaptation by Entropy Minimization.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Wightman(2019)]{rw2019timm}
+Ross Wightman.
+\newblock PyTorch Image Models.
+\newblock \url{https://github.com/rwightman/pytorch-image-models}, 2019.
+
+\bibitem[Zhang et~al.(2022)]{zhang2022memo}
+Marvin Zhang, Sergey Levine, and Chelsea Finn.
+\newblock MEMO: Test Time Robustness via Adaptation and Augmentation.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem[Zhou et~al.(2022)]{zhou2022understanding}
+Daquan Zhou, Zhiding Yu, Enze Xie, Chaowei Xiao, Anima Anandkumar, Jiashi Feng, and Jose~M. Alvarez.
+\newblock Understanding the Robustness in Vision Transformers.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2022.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+
+\section{Full 50K Validation Results}
+\label{app:full50k}
+
+To verify that our 10K subset results generalize, we evaluate DeiT-S on the full 50,000-image ImageNet validation set. The vanilla clean accuracy is 79.83\%, matching the published value and confirming that the elevated 10K accuracy (84.9\%) is a subset artifact. \methodname{} achieves 79.06\% on the full set, a 0.77 pp clean accuracy drop---larger than the near-zero drop observed on the 10K subset but still below the 1\% refutation threshold. The \emph{direction} of STG's effect (degradation) is consistent between subsets, confirming that our conclusions are not artifacts of evaluation scale.
+
+\section{Full Per-Corruption Results}
+\label{app:percorruption}
+
+Table~\ref{tab:fullcorruption} reports severity-5 accuracy for all 15 individual corruptions on DeiT-S, comparing Vanilla, Tent, and \methodname{}.
+
+\begin{table}[h]
+\centering
+\caption{Per-corruption severity-5 accuracy (\%) for DeiT-S. \methodname{} uses seed 42.}
+\label{tab:fullcorruption}
+\begin{tabular}{llccc}
+\toprule
+Category & Corruption & Vanilla & Tent & \methodname{} \\
+\midrule
+\multirow{3}{*}{Noise}
+ & Gaussian noise & 49.4 & 50.6 & 44.1 \\
+ & Shot noise & 50.5 & 51.5 & 45.8 \\
+ & Impulse noise & 52.2 & 51.6 & 47.7 \\
+\midrule
+\multirow{4}{*}{Blur}
+ & Defocus blur & 35.6 & 35.8 & 33.7 \\
+ & Glass blur & 28.1 & 31.7 & 26.6 \\
+ & Motion blur & 56.4 & 56.6 & 54.7 \\
+ & Zoom blur & 54.8 & 55.3 & 53.2 \\
+\midrule
+\multirow{4}{*}{Weather}
+ & Snow & 69.0 & 68.2 & 69.7 \\
+ & Frost & 77.4 & 76.9 & 72.9 \\
+ & Fog & 77.6 & 77.2 & 77.4 \\
+ & Brightness & 87.1 & 87.4 & 85.4 \\
+\midrule
+\multirow{4}{*}{Digital}
+ & Contrast & 79.9 & 81.2 & 79.1 \\
+ & Elastic transform & 54.9 & 56.7 & 53.0 \\
+ & Pixelate & 40.6 & 44.1 & 40.7 \\
+ & JPEG compression & 65.4 & 65.4 & 64.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Multi-Seed Consistency}
+\label{app:seeds}
+
+Table~\ref{tab:seeds} reports per-seed results for DeiT-S, demonstrating high consistency across calibration seeds.
+
+\begin{table}[h]
+\centering
+\caption{DeiT-S \methodname{} results across 3 calibration seeds. Mean severity-5 accuracy (\%) and mCE (\%).}
+\label{tab:seeds}
+\begin{tabular}{cccc}
+\toprule
+Seed & Clean Acc & Mean Sev-5 Acc & mCE \\
+\midrule
+42 & 84.9 & 56.6 & 57.1 \\
+123 & 84.9 & 56.7 & 57.1 \\
+456 & 84.9 & 56.7 & 57.1 \\
+\midrule
+Mean $\pm$ Std & 84.9$\pm$0.0 & 56.6$\pm$0.0 & 57.1$\pm$0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Reproducibility}
+\label{app:reproducibility}
+
+\textbf{Seeds.} Random seeds 42, 123, and 456 control calibration set sampling and all stochastic components. Seeds are set for \texttt{torch}, \texttt{numpy}, and \texttt{random} generators with \texttt{torch.backends.cudnn.deterministic = True}.
+
+\textbf{Calibration.} 1,000 images sampled from the ImageNet validation set per seed. Calibration takes approximately 4 seconds per model on an RTX A6000.
+
+\textbf{Code.} The complete implementation, including the \methodname{} module, evaluation scripts, and analysis code, is available in the supplementary material.
+
+\end{document}

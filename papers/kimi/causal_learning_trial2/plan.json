@@ -1,0 +1,284 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated Python environment and install all required packages for causal discovery experiments. All experiments run on CPU only.",
+    "steps": {
+      "step1": "Create virtual environment: python3 -m venv venv && source venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy scikit-learn matplotlib seaborn pandas",
+      "step3": "Install causal discovery packages: pip install causal-learn gCastle networkx",
+      "step4": "Install optimization and metrics: pip install cvxpy statsmodels",
+      "step5": "Verify installations by running: python -c 'import numpy; import causallearn; import networkx; print(\"OK\")'",
+      "step6": "Create output directories: mkdir -p results/{synthetic,real_world,ablations,figures} data/{raw,processed}"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Synthetic Benchmark Datasets",
+    "description": "Generate synthetic DAGs with varying properties for systematic evaluation. Graph sizes chosen for CPU-only feasibility.",
+    "steps": {
+      "step1": "Define graph parameters: n_nodes ∈ {10, 20, 30}, edge_density ∈ {1.0, 2.0} (expected edges per node), graph_types = ['ER', 'SF']",
+      "step2": "Define sample sizes: N ∈ {50, 100, 200, 500, 1000} - focus on small sample regime",
+      "step3": "Define data generating mechanisms: (a) Linear Gaussian with weights ∈ [-2, -0.5] ∪ [0.5, 2], noise std=1, (b) Linear non-Gaussian using Gumbel distribution, (c) Nonlinear using sine and quadratic functions, (d) ANM with Gaussian noise",
+      "step4": "Generate 50 random graphs per configuration (n_nodes × edge_density × graph_type) using random seeds 1-10",
+      "step5": "For each graph, generate datasets with sample sizes N using random seeds 1, 2, 3, 4, 5 (total 5 runs per configuration)",
+      "step6": "Save ground truth adjacency matrices to data/processed/ground_truth/{graph_id}.npy",
+      "step7": "Save datasets to data/processed/datasets/{graph_id}_N{N}_seed{seed}.npz",
+      "step8": "Compute and save dataset statistics: mean, std, correlation matrices for verification"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare Real-World Datasets",
+    "description": "Download and preprocess real-world benchmark datasets with known ground truth.",
+    "steps": {
+      "step1": "Download Sachs protein signaling dataset: 853 samples, 11 proteins, ground truth from literature",
+      "step2": "Preprocess Sachs: log-transform, standardize, handle missing values (impute with mean)",
+      "step3": "Load/construct Insurance benchmark (27 variables, known structure from literature)",
+      "step4": "Verify real-world data shapes: Sachs (853, 11), Insurance (N to be generated, 27)",
+      "step5": "Save processed datasets to data/processed/real_world/{dataset_name}.npz with keys 'data', 'true_dag'"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "PC Algorithm Baseline",
+    "description": "Run PC constraint-based algorithm as simple baseline. Uses conditional independence testing.",
+    "steps": {
+      "step1": "Import PC from causallearn.search.ConstraintBased.PC",
+      "step2": "Set hyperparameters: alpha=0.05 (significance level), indep_test='fisherz' for continuous data, stable=True for order-independent output",
+      "step3": "For each synthetic dataset (n_nodes ∈ {10, 20, 30}, N ∈ {50, 100, 200, 500, 1000}, 5 seeds): run PC algorithm",
+      "step4": "Record runtime for each run",
+      "step5": "Compute metrics against ground truth: SHD (Structural Hamming Distance), TPR (True Positive Rate), FDR (False Discovery Rate)",
+      "step6": "Save predictions to results/synthetic/pc/{config_id}.npz with keys 'prediction', 'runtime', 'metrics'",
+      "step7": "Run on real-world datasets (Sachs, Insurance) with same hyperparameters",
+      "step8": "Save real-world results to results/real_world/pc_{dataset}.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "NOTEARS Baseline",
+    "description": "Run NOTEARS differentiable baseline for continuous optimization comparison.",
+    "steps": {
+      "step1": "Implement or import NOTEARS linear: minimize least squares loss with acyclicity constraint h(W) = tr(exp(W∘W)) - d = 0",
+      "step2": "Set hyperparameters: lambda1=0.1 (sparsity), lambda2=0.0, max_iter=100, h_tol=1e-8, rho_max=1e+16, w_threshold=0.3",
+      "step3": "Use L-BFGS-B optimizer for CPU efficiency",
+      "step4": "For each synthetic dataset: run NOTEARS with 5 random seeds (1, 2, 3, 4, 5) for initialization",
+      "step5": "Record runtime per run",
+      "step6": "Compute metrics: SHD, TPR, FDR, number of iterations to convergence",
+      "step7": "Save results to results/synthetic/notears/{config_id}.npz",
+      "step8": "Run on real-world datasets, save to results/real_world/notears_{dataset}.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "GOLEM Baseline",
+    "description": "Run GOLEM likelihood-based method as strong recent differentiable baseline.",
+    "steps": {
+      "step1": "Implement GOLEM-EV (equal variance) variant: maximize likelihood with sparsity and DAG penalties",
+      "step2": "Set hyperparameters: lambda1=0.02 (L1 penalty), lambda2=5.0 (DAG penalty), equal_variances=True, num_iter=10000, learning_rate=0.001",
+      "step3": "Use Adam optimizer with early stopping if loss plateaus",
+      "step4": "For each synthetic dataset: run GOLEM with 5 random seeds for weight initialization",
+      "step5": "Record runtime and final loss value",
+      "step6": "Compute metrics: SHD, TPR, FDR, final acyclicity constraint value",
+      "step7": "Save results to results/synthetic/golem/{config_id}.npz",
+      "step8": "Run on real-world datasets, save to results/real_world/golem_{dataset}.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement SPICED Core Components",
+    "description": "Implement the three-phase SPICED algorithm: IT skeleton discovery, structural constraint extraction, and constrained optimization.",
+    "steps": {
+      "step1": "Implement Phase 1 (IT Skeleton Discovery): k-NN entropy estimation using Kraskov-Stogbauer-Grassberger method with k=5, compute directed information I(X→Y) using conditional mutual information, adaptive thresholding with permutation testing (100 permutations)",
+      "step2": "Implement Phase 2 (Structural Constraints): compute edge-connectivity using NetworkX, approximate feedback vertex set using greedy algorithm, extract modular decomposition if needed",
+      "step3": "Implement Phase 3 (Constrained Optimization): extend NOTEARS with structural constraint term c(W), formulate: min_W L(W) + λ₁h(W) + λ₂r(W) + λ₃c(W)",
+      "step4": "Implement warm-start: initialize W using IT scores from Phase 1",
+      "step5": "Set SPICED hyperparameters: k_neighbors=5, alpha=0.05, lambda1=0.1, lambda2=0.0, lambda3=0.01, max_iter=100, w_threshold=0.3",
+      "step6": "Create modular codebase: src/phase1_skeleton.py, src/phase2_constraints.py, src/phase3_optimization.py, src/spiced_main.py",
+      "step7": "Unit test each component on small 5-node graph with known structure"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SPICED on Synthetic Benchmarks",
+    "description": "Evaluate SPICED on full synthetic benchmark suite across all configurations.",
+    "steps": {
+      "step1": "For each synthetic dataset configuration (n_nodes ∈ {10, 20, 30}, graph_type ∈ ['ER', 'SF'], edge_density ∈ [1.0, 2.0], mechanism ∈ ['linear_gaussian', 'linear_nongaussian', 'nonlinear', 'anm'], N ∈ {50, 100, 200, 500, 1000}, seed ∈ {1,2,3,4,5}): run SPICED",
+      "step2": "Record per-phase runtime: t_skeleton, t_constraints, t_optimization, t_total",
+      "step3": "Record intermediate outputs: skeleton from Phase 1, structural parameters from Phase 2, optimization trajectory",
+      "step4": "Compute metrics: SHD, TPR, FDR, SID (for graphs < 20 nodes), F1 score",
+      "step5": "Save detailed results to results/synthetic/spiced/{config_id}.npz with all metrics and timing",
+      "step6": "Save summary statistics to results/synthetic/spiced_summary.csv with columns: method, n_nodes, graph_type, mechanism, N, seed, SHD, TPR, FDR, runtime"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SPICED on Real-World Datasets",
+    "description": "Evaluate SPICED on Sachs and Insurance benchmarks.",
+    "steps": {
+      "step1": "Run SPICED on Sachs dataset with 5 random seeds, record runtime and metrics",
+      "step2": "Run SPICED on Insurance dataset with 5 random seeds",
+      "step3": "Compare predicted edges against known ground truth for Sachs",
+      "step4": "Compute SHD, TPR, FDR for each run",
+      "step5": "Save results to results/real_world/spiced_sachs.json and spiced_insurance.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Phase 1 MI Estimation Method",
+    "description": "Compare k-NN entropy estimation (SPICED) vs kernel-based MI estimation to validate Phase 1 design.",
+    "steps": {
+      "step1": "Implement kernel-based MI estimator using scipy.stats.gaussian_kde as alternative",
+      "step2": "Run SPICED with k-NN estimation on subset: n_nodes ∈ {10, 20}, N ∈ {50, 100, 200}, 5 seeds",
+      "step3": "Run SPICED-variant with kernel-based estimation on same subset",
+      "step4": "Compare: SHD, TPR, FDR, runtime between k-NN and kernel methods",
+      "step5": "Statistical test: paired t-test on SHD differences across configurations",
+      "step6": "Save results to results/ablations/phase1_mi_method.npz"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Structural Constraints Effect",
+    "description": "Measure impact of structural constraint term c(W) on optimization quality.",
+    "steps": {
+      "step1": "Run SPICED with full structural constraints (lambda3=0.01)",
+      "step2": "Run SPICED without structural constraints (lambda3=0.0), keeping Phase 1 and 2 but not using constraints in optimization",
+      "step3": "Run on subset: n_nodes ∈ {10, 20, 30}, graph_type=['ER'], N ∈ {50, 100, 200, 500}, 5 seeds",
+      "step4": "Compare: SHD, convergence iterations, final acyclicity constraint value h(W)",
+      "step5": "Measure: number of times optimizer gets stuck in local minima (defined as h(W) > 1e-4 after max_iter)",
+      "step6": "Save results to results/ablations/structural_constraints.npz"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Information-Theoretic Initialization",
+    "description": "Compare IT-based warm start vs random initialization.",
+    "steps": {
+      "step1": "Run SPICED with IT initialization (Phase 1 scores as initial weights)",
+      "step2": "Run SPICED with random initialization (standard Gaussian, 5 different seeds)",
+      "step3": "Test on subset: n_nodes ∈ {10, 20}, N ∈ {50, 100, 200}, 5 seeds",
+      "step4": "Compare: SHD, convergence speed (iterations to h(W) < 1e-6), final SHD",
+      "step5": "Statistical test: paired t-test on SHD differences",
+      "step6": "Save results to results/ablations/initialization_method.npz"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity Analysis: Hyperparameters",
+    "description": "Analyze sensitivity of SPICED to key hyperparameters.",
+    "steps": {
+      "step1": "Vary k_neighbors ∈ {3, 5, 7, 10} for entropy estimation, test on n=20, N=100",
+      "step2": "Vary lambda1 (sparsity) ∈ {0.01, 0.05, 0.1, 0.2}, test on n=20, N=100",
+      "step3": "Vary lambda3 (structural constraint) ∈ {0.0, 0.001, 0.01, 0.1}, test on n=20, N=100",
+      "step4": "Vary w_threshold ∈ {0.1, 0.2, 0.3, 0.4} for edge selection",
+      "step5": "For each parameter, run on 10 different graphs with 3 seeds each",
+      "step6": "Plot SHD vs parameter value to identify sensitivity",
+      "step7": "Save results to results/ablations/sensitivity_{param}.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Scalability Analysis",
+    "description": "Measure runtime scaling with graph size and sample size.",
+    "steps": {
+      "step1": "Run SPICED on n_nodes ∈ {5, 10, 15, 20, 30, 50} with fixed N=500",
+      "step2": "Run SPICED on N ∈ {50, 100, 200, 500, 1000, 2000} with fixed n=20",
+      "step3": "Record breakdown: Phase 1 time (should scale as O(n²N log N)), Phase 2 time, Phase 3 time",
+      "step4": "Fit scaling curves: t = a·n^b, t = c·N^d",
+      "step5": "Verify SPICED runs in < 5 minutes for n=50 on 2 CPU cores (success criterion)",
+      "step6": "Save timing data to results/ablations/scalability.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Comparison of Methods",
+    "description": "Perform rigorous statistical tests to validate success criteria.",
+    "steps": {
+      "step1": "Load all synthetic results for PC, NOTEARS, GOLEM, SPICED",
+      "step2": "Primary criterion 1: For N ≤ 200, compare SPICED vs NOTEARS SHD on each of 4 mechanisms. Use paired Wilcoxon signed-rank test (non-parametric). Success if p < 0.05 and SPICED has lower median SHD for ≥3 mechanisms.",
+      "step3": "Primary criterion 2: Check SPICED runtime for n=50 graphs. Success if median runtime < 300 seconds (5 minutes).",
+      "step4": "Primary criterion 3: Check SPICED SHD on Sachs dataset. Success if median SHD < 10.",
+      "step5": "Compute effect sizes: Cohen's d for SHD differences between methods",
+      "step6": "Create summary table: method × metric (mean±std SHD, TPR, FDR, runtime)",
+      "step7": "Save statistical test results to results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Sample Efficiency Analysis",
+    "description": "Detailed analysis of sample efficiency claim: SPICED superior for N < 500.",
+    "steps": {
+      "step1": "Group results by sample size N ∈ {50, 100, 200, 500, 1000}",
+      "step2": "For each N, compute mean and std of SHD across all graph configurations",
+      "step3": "Plot SHD vs N for all methods (log scale on x-axis)",
+      "step4": "Identify crossover point where NOTEARS/GOLEM catch up to SPICED",
+      "step5": "Test hypothesis: SPICED advantage decreases with increasing N using correlation test",
+      "step6": "Compute relative improvement: (SHD_baseline - SHD_spiced) / SHD_baseline × 100%",
+      "step7": "Save analysis to results/sample_efficiency_analysis.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Robustness Analysis",
+    "description": "Test robustness across different data generating mechanisms and noise levels.",
+    "steps": {
+      "step1": "Analyze performance variance across 5 random seeds for each configuration",
+      "step2": "Compare performance across mechanisms: linear_gaussian, linear_nongaussian, nonlinear, anm",
+      "step3": "Test on graphs with latent confounders: generate data with 10% hidden variables, compare SPICED vs FCI",
+      "step4": "Analyze failure cases: identify configurations where SPICED performs poorly (SHD > 2× median)",
+      "step5": "Save robustness metrics to results/robustness_analysis.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Main Results Figures",
+    "description": "Create publication-quality figures for paper.",
+    "steps": {
+      "step1": "Figure 1 (Sample Efficiency): Line plot of SHD vs N (50-1000) for SPICED, NOTEARS, GOLEM, PC. Separate panels for ER and SF graphs. Include error bars (std across seeds).",
+      "step2": "Figure 2 (Scalability): Log-log plot of runtime vs n_nodes for all methods. Include fitted scaling curves.",
+      "step3": "Figure 3 (Ablation): Bar chart comparing SHD for full SPICED, no IT init, no structural constraints, kernel MI. Grouped by sample size.",
+      "step4": "Figure 4 (Real-World): Comparison of predicted vs true Sachs network as adjacency matrices for SPICED and baselines.",
+      "step5": "Save all figures to results/figures/ as PDF (vector) and PNG (raster)",
+      "step6": "Use consistent color scheme: SPICED=blue, NOTEARS=red, GOLEM=green, PC=orange, FCI=purple"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Tables",
+    "description": "Create LaTeX-ready tables for paper.",
+    "steps": {
+      "step1": "Table 1 (Main Results): Methods × [SHD, TPR, FDR, Runtime] for each (n_nodes, N) combination. Report mean ± std across seeds and graphs.",
+      "step2": "Table 2 (Sample Efficiency): Focus on N ≤ 200. Show relative improvement of SPICED over baselines.",
+      "step3": "Table 3 (Ablation Study): Component × [SHD, TPR, FDR] showing impact of each design choice.",
+      "step4": "Table 4 (Real-World): Results on Sachs and Insurance datasets.",
+      "step5": "Table 5 (Hyperparameter Sensitivity): Range and optimal values.",
+      "step6": "Save tables as LaTeX code to results/figures/tables.tex and CSV to results/tables/"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Supplementary Figures",
+    "description": "Create additional figures for appendix.",
+    "steps": {
+      "step1": "Figure S1: Convergence curves for Phase 3 optimization (loss vs iteration) for different initializations.",
+      "step2": "Figure S2: Heatmap of SHD across (n_nodes, N) grid for SPICED.",
+      "figure_S3": "Figure S3: Distribution of SHD differences (SPICED - NOTEARS) across configurations.",
+      "figure_S4": "Figure S4: Runtime breakdown by phase for SPICED across graph sizes.",
+      "figure_S5": "Figure S5: Effect of lambda3 (structural constraint weight) on final DAG quality.",
+      "step6": "Save to results/figures/supplementary/"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Success Criteria Verification",
+    "description": "Verify all success criteria are met and document any failures.",
+    "steps": {
+      "step1": "Check Primary Criterion 1: SPICED SHD < NOTEARS SHD for N ≤ 200 on ≥3 mechanisms. Document p-values and effect sizes.",
+      "step2": "Check Primary Criterion 2: SPICED runtime < 5 min for n=50. Document median runtime across 5 runs.",
+      "step3": "Check Primary Criterion 3: SPICED SHD < 10 on Sachs. Document median SHD and comparison to baselines.",
+      "step4": "Check Secondary Criteria: structural constraints improve convergence, IT init outperforms random, method works across data types.",
+      "step5": "Document any failure modes encountered: e.g., N < 50 unreliable, dense graphs problematic.",
+      "step6": "Create summary report: results/success_criteria_report.md with PASS/FAIL for each criterion"
+    }
+  }
+]

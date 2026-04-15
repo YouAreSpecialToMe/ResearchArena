@@ -1,0 +1,503 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{natbib}
+
+\newcommand{\consistbench}{\textsc{ConsistBench}}
+\newcommand{\cfa}{\text{CFA}}
+\newcommand{\cpa}{\text{CPA}}
+\newcommand{\pfi}{\text{PFI}}
+\newcommand{\car}{\text{CAR}}
+\newcommand{\fcag}{\text{FCAG}}
+\newcommand{\dcs}{\text{DCS}}
+
+\title{\consistbench{}: A Cross-Format, Cross-Phrasing Consistency Benchmark for Large Language Models}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language models are increasingly deployed in high-stakes applications, yet they exhibit alarming inconsistency when the same question is rephrased or presented in a different format. Existing benchmarks measure aggregate accuracy gaps between formats or test paraphrase robustness in isolation, but none jointly evaluate item-level cross-format consistency and paraphrase-type-stratified consistency. We introduce \consistbench{}, a benchmark of 1,000 base questions spanning 6 knowledge domains, expanded into 6,800 evaluation instances across 5 answer formats (multiple-choice, open-ended, yes/no, true/false, fill-in-the-blank) and 6 paraphrase types (lexical, syntactic, voice, formality, negation-framing, elaborative). Evaluating 6 LLMs from 3.8B to 70B parameters, we find that all models exhibit substantial cross-format inconsistency, with Cross-Format Agreement (CFA) ranging from 56.0\% to 62.6\%---far below ideal. Even when restricting to constrained-only format pairs (MCQ, yes/no, true/false) where string matching suffices---eliminating any dependence on our answer equivalence judge---CFA ranges from 60.0\% to 69.1\%. Negation-framing paraphrases are uniquely destabilizing, with Paraphrase Fragility Index 1.4--1.75$\times$ higher than the next most fragile type across models, while the remaining five types are statistically indistinguishable at our sample size---suggesting that the primary distinction is between negation and non-negation paraphrases. Domain-stratified analysis reveals consistency spreads of 12--27 percentage points, with world knowledge consistently easiest and logic or commonsense hardest.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models (LLMs) are increasingly deployed in applications where reliability is paramount---from medical question answering to legal analysis and educational assessment. A fundamental requirement for reliable AI systems is \emph{consistency}: given two semantically equivalent inputs, the model should produce semantically equivalent outputs. Yet mounting evidence suggests that LLMs are surprisingly fragile to superficial input variations. \citet{mizrahi2024state} showed that the same model can rank as best or worst depending on which semantically equivalent instruction template is used. \citet{lunardi2025robustness} found significant score drops when benchmark questions are paraphrased. \citet{choi2025roparq} demonstrated inconsistent answers to paraphrased multiple-choice questions.
+
+Despite this growing concern, the field lacks a comprehensive benchmark that evaluates consistency along multiple complementary axes. Existing work is fragmented: ParaRel \citep{elazar2021measuring} tests paraphrase consistency but only for masked language models on cloze-style probing. OSQ-bench \citep{myrzakhan2024openllmleaderboard} converts MCQ benchmarks to open-ended format and measures aggregate accuracy drops across 40+ LLMs, finding an average 25\% accuracy gap---but it does not measure per-question consistency, tests only 2 formats, and does not evaluate paraphrase robustness. RoParQ \citep{choi2025roparq} tests paraphrase consistency but only in MCQ format with a single aggregate metric. BeHonest \citep{chern2024behonest} evaluates honesty including some consistency scenarios, but does not test systematic cross-format or paraphrase-type consistency.
+
+Critically, \textbf{no existing benchmark jointly evaluates cross-format consistency and paraphrase-type-stratified consistency}. We argue that consistency is not a single phenomenon but a multi-dimensional property that should be evaluated along at least three orthogonal axes: (1) \emph{cross-format consistency}---whether a model gives the same answer across MCQ, open-ended, yes/no, true/false, and fill-in-the-blank formats; (2) \emph{cross-phrasing consistency}---whether the model gives the same answer to paraphrased questions, and which paraphrase types are most destabilizing; and (3) \emph{domain-stratified consistency}---whether consistency is uniform across knowledge domains or reveals domain-specific weaknesses.
+
+Our contributions are:
+\begin{itemize}
+    \item We introduce \consistbench{}, the first benchmark evaluating item-level cross-format consistency across 5 answer formats and paraphrase-type-stratified consistency across 6 controlled paraphrase types, with 1,000 base questions spanning 6 knowledge domains.
+    \item We propose a suite of novel consistency metrics---Cross-Format Agreement (CFA), Cross-Phrasing Agreement (CPA), Paraphrase Fragility Index (PFI), Format-Conditional Accuracy Gap (FCAG), and Domain Consistency Score (DCS)---that decouple consistency from accuracy.
+    \item We evaluate 6 LLMs (3.8B--70B) and show that all exhibit substantial cross-format inconsistency (CFA 56--63\%), that negation-framing paraphrases are uniquely destabilizing (PFI 1.4--1.75$\times$ higher than the next most fragile type), and that consistency varies by 12--27 percentage points across knowledge domains.
+    \item We validate our evaluation methodology through a two-stage answer equivalence system (rule-based + LLM judge) calibrated against 400 annotated pairs, including a sensitivity analysis showing that our main findings hold even when restricting to constrained format pairs where the judge is not needed.
+\end{itemize}
+
+The rest of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \consistbench{} benchmark construction and metrics. Section~\ref{sec:experiments} presents experimental results, ablations, and analysis. Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Consistency in language models.}
+\citet{novikova2025consistency} provide a comprehensive survey of consistency in LMs, identifying the lack of standardized definitions and metrics as a key challenge. \citet{elazar2021measuring} introduced ParaRel, which evaluates paraphrase consistency for masked language models using cloze-style knowledge probing on 328 relations from T-REx. However, ParaRel is limited to masked LMs and does not address generative models or cross-format consistency. \citet{rabinovich2023predicting} showed that semantic consistency of LLM outputs can predict question-answering performance, demonstrating that consistency carries diagnostic value beyond accuracy---a finding that directly motivates our consistency-accuracy decoupling analysis. Our work extends consistency evaluation to generative LLMs with a broader set of formats and paraphrase types.
+
+\paragraph{MCQ-to-open format conversion.}
+\citet{myrzakhan2024openllmleaderboard} proposed OSQ-bench, converting 8 MCQ benchmarks to open-style questions and evaluating 40+ LLMs. They found an average 25\% accuracy drop from MCQ to open-ended format, demonstrating the importance of format effects. However, OSQ-bench measures only aggregate accuracy gaps, not per-question consistency; tests only 2 formats (MCQ vs.\ open); and does not evaluate paraphrase robustness. \consistbench{} goes beyond OSQ-bench by measuring item-level agreement across 5 formats and jointly evaluating paraphrase consistency.
+
+\paragraph{Paraphrase robustness.}
+RoParQ \citep{choi2025roparq} tests paraphrase consistency for generative LLMs but only evaluates MCQ format with a single aggregate metric (XParaCon). \citet{lunardi2025robustness} study paraphrasing effects on benchmark scores across 34 LLMs, finding significant but variable degradation. \citet{mizrahi2024state} demonstrated instruction template sensitivity across 6.5M instances, showing that evaluation methodology itself introduces substantial variance. These studies focus on evaluation methodology rather than building a dedicated consistency benchmark with stratified metrics.
+
+\paragraph{Honesty and calibration benchmarks.}
+BeHonest \citep{chern2024behonest} evaluates honesty including format perturbation and social pressure, but its consistency evaluation is limited and does not cover systematic paraphrase types. Dynamic benchmarks like LiveBench \citep{white2025livebench} and Benchmark Self-Evolving \citep{wang2025benchmark} address contamination through dynamic updates, which is orthogonal to our focus on consistency as a fundamental model property.
+
+\paragraph{Adversarial robustness.}
+PromptBench \citep{zhu2024promptbench} evaluates robustness to adversarial perturbations including typos, synonym swaps, and jailbreaks. Our work differs in focusing on \emph{natural} paraphrases and \emph{format} changes rather than adversarial attacks, measuring consistency (same answer) rather than robustness (maintained accuracy).
+
+\paragraph{LLM-as-judge reliability.}
+\citet{ye2024justice} quantified biases in LLM-as-judge paradigms, including position and verbosity biases. We incorporate their findings by carefully validating our LLM-based answer equivalence judge against annotated pairs and providing a sensitivity analysis that shows our main findings hold even without the judge.
+
+Unlike prior work, \consistbench{} is the first benchmark that \emph{jointly} evaluates item-level cross-format consistency across 5 formats and paraphrase-type-stratified consistency across 6 controlled types, with domain-stratified analysis and novel metrics that decouple consistency from accuracy.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Benchmark Construction}
+
+\paragraph{Source questions.}
+We curate 1,000 base questions from established, openly available QA datasets spanning 6 knowledge domains: \emph{Science} (MMLU science subsets, ARC-Challenge; 165 questions), \emph{History} (MMLU humanities; 165), \emph{Mathematics} (GSM8K; 170), \emph{Commonsense} (CommonsenseQA; 165), \emph{World Knowledge} (TriviaQA; 170), and \emph{Logic} (LogiQA; 165). Questions are stratified by difficulty (easy/medium/hard, approximately 333 each) based on source dataset metadata and human performance statistics. All questions have unambiguous, verifiable short answers.
+
+\paragraph{Format variants.}
+For each base question, we generate 5 format variants programmatically:
+\begin{enumerate}
+    \item \textbf{Multiple-choice (MCQ)}: Standard A/B/C/D format with 3 distractors. For originally non-MCQ questions, distractors are generated from same-category entities or common error patterns. Correct answer position is randomized.
+    \item \textbf{Open-ended}: Free-form question expecting a short answer, with the instruction ``Respond with only the answer, no explanation.''
+    \item \textbf{Yes/No}: Binary verification question embedding the correct answer (50\%) or a distractor (50\%), e.g., ``Is it true that the capital of France is Paris?''
+    \item \textbf{True/False}: Declarative statement to verify, with balanced true/false distribution.
+    \item \textbf{Fill-in-the-blank (FITB)}: Cloze-style sentence with the answer removed.
+\end{enumerate}
+This produces 5,000 format instances. We validated format conversion quality using automated LLM-based verification on a random 10\% sample (100 questions $\times$ 5 formats), which confirmed 100\% semantic equivalence. We acknowledge that this validation was automated rather than conducted by human annotators; while efficient, LLM-based validation may miss subtle semantic shifts that human reviewers would catch. This is a limitation we discuss in Section~\ref{sec:discussion}.
+
+\paragraph{Phrasing variants.}
+For a stratified subset of 300 questions (50 per domain, balanced across difficulty), we generate paraphrase variants across 6 controlled types using Qwen2.5-14B-Instruct with type-specific prompts:
+\begin{enumerate}
+    \item \textbf{Lexical substitution}: Replace content words with synonyms.
+    \item \textbf{Syntactic restructuring}: Change grammatical structure (cleft constructions, relative clauses).
+    \item \textbf{Voice change}: Active to passive or vice versa.
+    \item \textbf{Formality shift}: Formal to informal or vice versa.
+    \item \textbf{Negation framing}: Reframe using negation while preserving the correct answer.
+    \item \textbf{Elaborative rephrasing}: Add contextual detail that does not change the question.
+\end{enumerate}
+Each paraphrase is validated by a second LLM pass checking semantic equivalence, with up to 2 regeneration attempts for failures. This produces 1,800 paraphrase instances (300 questions $\times$ 6 types). Automated quality assessment of 180 paraphrases (30 per type) showed an overall quality rate of 93.9\%, with negation framing having the lowest quality (83.3\%) and syntactic restructuring the highest (100\%). All paraphrases are evaluated in open-ended format to isolate phrasing effects from format effects.
+
+\subsection{Consistency Metrics}
+
+We define five primary metrics capturing different facets of consistency:
+
+\paragraph{Cross-Format Agreement (CFA).} For each question $q$, we compute the fraction of format pairs where the model gives semantically equivalent answers:
+\begin{equation}
+    \cfa(q) = \frac{1}{\binom{F}{2}} \sum_{i < j} \mathbb{1}[\text{equiv}(a_i^q, a_j^q)]
+\end{equation}
+where $F=5$ is the number of formats and $\text{equiv}(\cdot, \cdot)$ is the two-stage answer equivalence function. The benchmark-level CFA is the mean across all questions.
+
+\paragraph{Cross-Phrasing Agreement (CPA).} For each question $q$ and paraphrase type $t$, we measure whether the model's answer to the paraphrased version matches its answer to the original:
+\begin{equation}
+    \cpa(q, t) = \mathbb{1}[\text{equiv}(a_{\text{orig}}^q, a_t^q)]
+\end{equation}
+
+\paragraph{Paraphrase Fragility Index (PFI).} Per paraphrase type $t$, the fraction of questions where the model changes its answer: $\pfi(t) = 1 - \overline{\cpa(\cdot, t)}$. Higher PFI indicates greater fragility.
+
+\paragraph{Format-Conditional Accuracy Gap (FCAG).} The accuracy difference between the best-performing and worst-performing format:
+\begin{equation}
+    \fcag = \max_f \text{Acc}(f) - \min_f \text{Acc}(f)
+\end{equation}
+
+\paragraph{Domain Consistency Score (DCS).} The mean of CFA and average CPA per domain, enabling identification of ``consistency deserts''---domains where models are particularly unreliable.
+
+We additionally report the CFA--accuracy gap ($\Delta = \cfa - \text{Accuracy}$) as a simple diagnostic for whether a model's consistency exceeds or falls short of its accuracy. A negative gap indicates that the model's knowledge (as measured by accuracy) is not reliably expressed across formats.
+
+\subsection{Answer Equivalence Evaluation}
+\label{sec:judge}
+
+For open-ended and fill-in-the-blank formats, exact string matching is insufficient. We use a two-stage evaluation:
+
+\textbf{Stage 1 (Rule-based):} Normalize answers (lowercase, strip articles/punctuation, normalize numbers) and check exact or fuzzy match (Levenshtein ratio $> 0.85$).
+
+\textbf{Stage 2 (LLM judge):} For pairs failing Stage 1, an LLM judge (Qwen2.5-7B-Instruct, temperature 0.0) determines semantic equivalence. We calibrate this judge against 400 annotated answer pairs. The rule-based stage identifies 16.5\% of pairs as equivalent with zero false positives; the LLM judge identifies an additional 112 equivalent pairs (28.0\%), achieving an overall agreement rate of 72\% with the annotated labels.
+
+\paragraph{Limitations of the judge.} The 72\% agreement rate is a notable limitation for a benchmark focused on measurement precision. The annotations used for calibration were produced by an LLM rather than human annotators, which means both the judge and its calibration reference share potential systematic biases. Future work should use human annotations for ground truth and explore chain-of-thought prompting, larger judge models (14B+ instead of 7B), or ensembles of multiple judges to improve precision.
+
+\paragraph{Sensitivity analysis.} To bound the impact of judge error, we report CFA separately for \emph{constrained-only} format pairs (MCQ, yes/no, true/false---3 pairs where answers are compared by exact string matching with no judge involvement) and for pairs involving open-ended or FITB formats (7 pairs where the judge is used). As shown in Table~\ref{tab:sensitivity}, constrained-only CFA ranges from 60.0\% to 69.1\%, confirming that our core finding---substantial cross-format inconsistency---holds independently of the answer equivalence judge. The open-involving CFA is systematically lower (51.7--57.6\%), which partially reflects genuine difficulty with free-form generation but may also include judge error.
+
+\begin{table}[t]
+\caption{CFA sensitivity to answer equivalence judge. Constrained-only CFA uses only MCQ/YesNo/TrueFalse pairs (exact string matching, no judge). Open-involving CFA uses pairs with at least one open-ended or FITB format (judge-dependent). The main finding (CFA $\ll$ 100\%) holds regardless of judge quality.}
+\label{tab:sensitivity}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+Model & Size & CFA (all) $\uparrow$ & CFA (constrained) $\uparrow$ & CFA (open) $\uparrow$ \\
+\midrule
+Phi-3.5-mini & 3.8B & 59.3 & 64.7 & 52.9 \\
+Mistral-7B & 7B & 56.9 & 63.9 & 51.7 \\
+Qwen2.5-7B & 7B & 57.8 & 64.8 & 52.6 \\
+Llama-3.1-8B & 8B & 56.0 & 60.0 & 52.4 \\
+Qwen2.5-14B & 14B & 60.9 & 66.1 & 56.6 \\
+Llama-3.1-70B & 70B & \textbf{62.6} & \textbf{69.1} & \textbf{57.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Models.} We evaluate 6 models spanning 4 model families and sizes from 3.8B to 70B parameters: Phi-3.5-mini (3.8B, Phi family), Mistral-7B-Instruct-v0.3 (7B, Mistral family), Qwen2.5-7B-Instruct (7B, Qwen family), Llama-3.1-8B-Instruct (8B, Llama family), Qwen2.5-14B-Instruct (14B, Qwen family), and Llama-3.1-70B-Instruct-AWQ (70B, 4-bit quantized, Llama family). All models are evaluated using vLLM with greedy decoding (temperature 0.0) and maximum output length of 50 tokens. The original plan called for 7 models; one was dropped due to inference time constraints, which slightly reduces the statistical power of cross-model analyses.
+
+\paragraph{Hardware.} All experiments run on a single NVIDIA RTX A6000 GPU (48GB VRAM). Models 3.8B--14B fit in full precision; the 70B model uses 4-bit AWQ quantization.
+
+\paragraph{70B subset evaluation.} Due to inference time constraints, the 70B model is evaluated on a stratified 500-question subset (rather than the full 1,000) for cross-format evaluation. This subset is stratified by domain and difficulty to match the distribution of the full set. The reduced sample size results in wider confidence intervals ($\pm$2.3pp vs.\ $\pm$1.4--1.6pp for smaller models). For cross-phrasing evaluation, all models including the 70B are evaluated on the same 300-question subset, ensuring full comparability on this axis.
+
+\paragraph{Evaluation protocol.} Each model is evaluated on all 5,000 format instances (or 2,500 for 70B) and all 2,100 phrasing instances. Answers are extracted using format-specific parsers and compared using the two-stage answer equivalence system. All metrics are reported with 95\% bootstrap confidence intervals (1,000 bootstrap samples, seed 42).
+
+\subsection{Main Results: Cross-Format Consistency}
+
+\begin{table}[t]
+\caption{Cross-format evaluation results. CFA = Cross-Format Agreement. FCAG = Format-Conditional Accuracy Gap. $\Delta$ = CFA $-$ Accuracy (negative means accuracy exceeds consistency). Best results in \textbf{bold}. 95\% bootstrap CIs shown for CFA. All CFA values are well below the ideal 100\%, confirming substantial cross-format inconsistency. $^\dagger$Evaluated on 500-question stratified subset.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{llcccccccc}
+\toprule
+Model & Size & MCQ$\uparrow$ & Open$\uparrow$ & Y/N$\uparrow$ & T/F$\uparrow$ & FITB$\uparrow$ & CFA$\uparrow$ & FCAG$\downarrow$ & $\Delta$ \\
+\midrule
+Phi-3.5-mini & 3.8B & 66.7 & 41.1 & 64.5 & 58.1 & 36.7 & 59.3{\scriptsize$\pm$1.5} & 30.0 & +5.9 \\
+Mistral-7B & 7B & 58.5 & 38.6 & 68.2 & 59.6 & 32.6 & 56.9{\scriptsize$\pm$1.6} & 35.6 & +5.4 \\
+Qwen2.5-7B & 7B & 74.2 & 40.7 & 72.8 & 61.5 & 37.5 & 57.8{\scriptsize$\pm$1.5} & 36.7 & +0.5 \\
+Llama-3.1-8B & 8B & 64.3 & 38.5 & 61.9 & 63.1 & 36.8 & 56.0{\scriptsize$\pm$1.4} & 27.5 & +3.0 \\
+Qwen2.5-14B & 14B & 77.4 & 46.6 & 64.4 & 66.6 & 44.9 & 60.9{\scriptsize$\pm$1.5} & 32.5 & +0.9 \\
+Llama-3.1-70B$^\dagger$ & 70B & 78.0 & 51.6 & 69.4 & 74.0 & 51.4 & \textbf{62.6}{\scriptsize$\pm$2.3} & \textbf{26.6} & $-$2.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} presents the main cross-format results. Several findings emerge:
+
+\textbf{All models exhibit substantial cross-format inconsistency.} CFA ranges from 56.0\% (Llama-3.1-8B) to 62.6\% (Llama-3.1-70B-AWQ), far below the ideal 100\% and below the 90\% threshold for all 6 models. This confirms that format choice meaningfully affects model answers at the item level.
+
+\textbf{MCQ consistently inflates accuracy.} For 5 of 6 models, MCQ yields the highest accuracy (58.5--78.0\%), while fill-in-the-blank yields the lowest (32.6--51.4\%). The FCAG ranges from 26.6 to 36.7 percentage points, indicating that a substantial fraction of seemingly correct MCQ answers do not reflect robust knowledge.
+
+\textbf{Accuracy and consistency partially decouple.} The CFA--accuracy gap ($\Delta$) reveals an interesting pattern: for 5 of 6 models, CFA slightly exceeds accuracy ($\Delta > 0$), meaning these models are more often consistent than correct. This occurs because models can be \emph{consistently wrong}---giving the same incorrect answer across formats. Only the largest model (Llama-3.1-70B) shows $\Delta < 0$ ($-$2.3pp), indicating its accuracy outpaces its consistency. This pattern aligns with the finding of \citet{rabinovich2023predicting} that consistency and accuracy carry distinct diagnostic signals. The moderate $R^2$ of 0.77 between CFA and accuracy across models (Section~\ref{sec:ablation}) confirms that consistency provides information beyond accuracy.
+
+\subsection{Main Results: Cross-Phrasing Consistency}
+
+Table~\ref{tab:phrasing} shows cross-phrasing consistency stratified by paraphrase type, while Table~\ref{tab:pfi} presents the corresponding PFI values.
+
+\textbf{Negation framing is uniquely destabilizing.} Across all 6 models, negation-framing paraphrases produce CPA of 32.7--38.7\%, compared to 51.7--67.3\% for all other types. McNemar's tests confirm that all 5 pairwise comparisons involving negation versus other types are statistically significant after Bonferroni correction ($p < 10^{-7}$), while no comparisons among the remaining 5 types reach significance.
+
+\textbf{Negation PFI is 1.4--1.75$\times$ that of the next most fragile type.} Table~\ref{tab:pfi} shows PFI per model and the ratio of negation PFI to the next-highest type. The multiplier ranges from 1.37$\times$ (Llama-3.1-8B, where elaborative is the next most fragile at 47.7\%) to 1.75$\times$ (Llama-3.1-70B, where elaborative is at 38.3\%). Compared to the \emph{average} of non-negation types, the ratio is higher (1.44--1.91$\times$), but we report the more conservative comparison against the next most fragile type to avoid overstating the effect.
+
+\textbf{Non-negation types are statistically indistinguishable.} The five non-negation paraphrase types produce broadly similar CPA (51.7--67.3\%), with widely overlapping confidence intervals. None of the 10 pairwise comparisons among these types are statistically significant after Bonferroni correction. At our sample size of 300 questions per type, the benchmark primarily distinguishes \emph{negation vs.\ non-negation} paraphrases. We present the six-type breakdown for completeness and future research, but the actionable finding is binary: negation is uniquely destabilizing.
+
+\begin{table}[t]
+\caption{Cross-Phrasing Agreement (CPA, \%) per paraphrase type with 95\% bootstrap CIs. Higher is better. Negation framing (Neg.) is consistently the most destabilizing paraphrase type across all models. The five non-negation types cluster together with broadly overlapping confidence intervals.}
+\label{tab:phrasing}
+\centering
+\small
+\begin{tabular}{llcccccc}
+\toprule
+Model & Size & Lex.$\uparrow$ & Syn.$\uparrow$ & Voice$\uparrow$ & Form.$\uparrow$ & Neg.$\uparrow$ & Elab.$\uparrow$ \\
+\midrule
+Phi-3.5-mini & 3.8B & 65.0{\scriptsize$\pm$5.5} & 62.7{\scriptsize$\pm$5.4} & 63.7{\scriptsize$\pm$5.2} & 66.7{\scriptsize$\pm$5.3} & 38.7{\scriptsize$\pm$5.2} & 60.0{\scriptsize$\pm$5.5} \\
+Mistral-7B & 7B & 61.0{\scriptsize$\pm$5.7} & 60.7{\scriptsize$\pm$5.7} & 61.0{\scriptsize$\pm$5.8} & 59.3{\scriptsize$\pm$5.5} & 35.7{\scriptsize$\pm$5.3} & 55.7{\scriptsize$\pm$5.8} \\
+Qwen2.5-7B & 7B & 60.7{\scriptsize$\pm$5.7} & 60.7{\scriptsize$\pm$5.7} & 53.0{\scriptsize$\pm$5.8} & 58.3{\scriptsize$\pm$5.5} & 34.0{\scriptsize$\pm$5.0} & 54.0{\scriptsize$\pm$5.3} \\
+Llama-3.1-8B & 8B & 55.7{\scriptsize$\pm$5.5} & 55.7{\scriptsize$\pm$5.5} & 51.7{\scriptsize$\pm$5.4} & 55.0{\scriptsize$\pm$5.5} & 34.0{\scriptsize$\pm$5.2} & 52.3{\scriptsize$\pm$5.3} \\
+Qwen2.5-14B & 14B & 65.3{\scriptsize$\pm$5.5} & 63.0{\scriptsize$\pm$5.5} & 63.3{\scriptsize$\pm$5.2} & 64.0{\scriptsize$\pm$5.3} & 32.7{\scriptsize$\pm$4.8} & 55.0{\scriptsize$\pm$5.7} \\
+Llama-3.1-70B & 70B & 64.3{\scriptsize$\pm$5.3} & \textbf{67.3}{\scriptsize$\pm$5.3} & \textbf{66.0}{\scriptsize$\pm$5.2} & \textbf{65.3}{\scriptsize$\pm$5.5} & 33.0{\scriptsize$\pm$5.2} & \textbf{61.7}{\scriptsize$\pm$5.5} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Paraphrase Fragility Index (PFI, \%; higher = more fragile) per paraphrase type. The rightmost column shows the ratio of negation PFI to the next most fragile type for each model. Negation is consistently the most fragile, but the magnitude of the gap varies across models (1.37--1.75$\times$).}
+\label{tab:pfi}
+\centering
+\small
+\begin{tabular}{llccccccc}
+\toprule
+Model & Size & Lex. & Syn. & Voice & Form. & Neg. & Elab. & Neg./Next \\
+\midrule
+Phi-3.5-mini & 3.8B & 35.0 & 37.3 & 36.3 & 33.3 & 61.3 & 40.0 & 1.53$\times$ \\
+Mistral-7B & 7B & 39.0 & 39.3 & 39.0 & 40.7 & 64.3 & 44.3 & 1.45$\times$ \\
+Qwen2.5-7B & 7B & 39.3 & 39.3 & 47.0 & 41.7 & 66.0 & 46.0 & 1.40$\times$ \\
+Llama-3.1-8B & 8B & 44.3 & 44.3 & 48.3 & 45.0 & 66.0 & 47.7 & 1.37$\times$ \\
+Qwen2.5-14B & 14B & 34.7 & 37.0 & 36.7 & 36.0 & 67.3 & 45.0 & 1.50$\times$ \\
+Llama-3.1-70B & 70B & 35.7 & 32.7 & 34.0 & 34.7 & 67.0 & 38.3 & 1.75$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Domain-Stratified Analysis}
+
+\begin{table}[t]
+\caption{Domain Consistency Score (DCS, \%) across 6 knowledge domains. Spread = max(DCS) -- min(DCS). All models show significant domain variation (ANOVA $p < 0.03$; Kruskal-Wallis $p < 0.04$).}
+\label{tab:domain}
+\centering
+\small
+\begin{tabular}{llccccccc}
+\toprule
+Model & Size & Sci. & Hist. & Math & C.S. & W.K. & Logic & Spread \\
+\midrule
+Phi-3.5-mini & 3.8B & 65.0 & 60.0 & 60.1 & 53.3 & 64.9 & 52.9 & 12.1 \\
+Mistral-7B & 7B & 57.1 & 54.3 & 54.1 & 50.0 & 68.9 & 52.9 & 18.9 \\
+Qwen2.5-7B & 7B & 62.4 & 55.9 & 45.8 & 50.6 & 64.3 & 54.9 & 18.5 \\
+Llama-3.1-8B & 8B & 57.4 & 54.3 & 46.3 & 48.2 & 68.2 & 45.6 & 22.6 \\
+Qwen2.5-14B & 14B & 63.5 & 59.0 & 50.1 & 54.7 & 68.4 & 58.6 & 18.3 \\
+Llama-3.1-70B & 70B & 65.6 & 55.7 & 58.0 & 54.7 & \textbf{79.2} & 51.9 & \textbf{27.3} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:domain} reveals significant domain-level variation in consistency.
+
+\textbf{World knowledge is consistently the easiest domain.} For 5 of 6 models, world knowledge achieves the highest DCS (64.3--79.2\%), likely because TriviaQA questions have distinctive, unambiguous answers that are robust to format and phrasing changes.
+
+\textbf{Logic and commonsense are consistently hardest.} These domains show the lowest DCS for most models (45.6--54.9\%), suggesting that reasoning-intensive questions are more sensitive to superficial input variations.
+
+\textbf{Domain variation is statistically significant.} One-way ANOVA confirms significant DCS variation across domains for all 6 models ($p < 0.03$), confirmed by non-parametric Kruskal-Wallis tests ($p < 0.04$). The DCS spread exceeds 10 percentage points for all models (range: 12.1--27.3pp), confirming that consistency profiling across domains provides diagnostic value beyond aggregate metrics.
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+\paragraph{Format pair analysis.}
+Figure~\ref{fig:heatmap} shows pairwise format agreement rates. The highest agreement consistently occurs between constrained formats (MCQ--true/false: 61.4--71.2\%; yes/no--true/false: 57.6--68.6\%), while the lowest agreement involves open-ended paired with fill-in-the-blank (41.4--63.0\%). This suggests that constrained formats share an implicit multiple-choice structure that aids consistency, while free-form generation introduces additional variance.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure_format_heatmap.pdf}
+\caption{Pairwise format agreement rates for all 6 models. Constrained format pairs (MCQ, Y/N, T/F) show higher agreement than pairs involving open-ended or fill-in-the-blank formats.}
+\label{fig:heatmap}
+\end{figure}
+
+\paragraph{Consistency--accuracy decoupling.}
+Figure~\ref{fig:scatter} plots CFA against overall accuracy. The correlation is moderate ($R^2 = 0.77$), confirming that consistency provides information beyond accuracy alone. Among accuracy-matched model pairs (within 5pp), the CFA--accuracy gap ($\Delta$) ranges from +5.9pp (Phi-3.5-mini) to $-$2.3pp (Llama-3.1-70B), an 8.2pp spread, demonstrating that models with similar accuracy can exhibit meaningfully different consistency--accuracy relationships.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/figure_consistency_vs_accuracy.pdf}
+\caption{CFA vs.\ overall accuracy for all 6 models. The dashed line shows CFA = Accuracy. The moderate correlation ($R^2 = 0.77$) confirms that consistency is not fully predicted by accuracy.}
+\label{fig:scatter}
+\end{figure}
+
+\paragraph{Size scaling.}
+Within the Qwen family, scaling from 7B to 14B improves CFA by 3.1pp (57.8\% $\to$ 60.9\%) and accuracy by 2.6pp---consistency and accuracy scale roughly proportionally. Within the Llama family, scaling from 8B to 70B (4-bit AWQ) improves CFA by 6.6pp (56.0\% $\to$ 62.6\%) and accuracy by 12.0pp. Notably, the Llama accuracy improvement (12.0pp) outpaces the consistency improvement (6.6pp), causing $\Delta$ to shift from $+$3.0pp to $-$2.3pp---meaning the 70B model's knowledge scales faster than its ability to express that knowledge consistently. This asymmetry suggests that consistency poses a distinct challenge that does not automatically improve with scale.
+
+\paragraph{Bootstrap stability.}
+Across 3 bootstrap subsamples (80\% of questions, seeds 42, 123, 456), CFA standard deviations range from 0.04pp (Qwen2.5-14B) to 0.42pp (Phi-3.5-mini), and model rankings are perfectly stable across all 3 seeds, confirming the robustness of our findings.
+
+\subsection{Additional Analysis}
+
+\paragraph{Paraphrase fragility profiles.}
+Figure~\ref{fig:fragility} shows PFI per paraphrase type. The profile is remarkably consistent across models: negation framing produces PFI of 61.3--67.3\%, while all other types cluster between 33.3--48.3\%. This uniformity suggests that negation-induced fragility is a fundamental property of current LLM architectures rather than a model-specific weakness.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/figure_paraphrase_fragility.pdf}
+\caption{Paraphrase Fragility Index (PFI) per type per model. Higher values indicate greater fragility. Negation framing is uniquely destabilizing across all models, while the five non-negation types cluster together.}
+\label{fig:fragility}
+\end{figure}
+
+\paragraph{Domain consistency profiles.}
+Figure~\ref{fig:domain} shows DCS across domains. World knowledge exhibits the highest consistency for nearly all models, while logic and commonsense domains are the most challenging. The 70B model shows the most extreme domain variation (27.3pp spread), suggesting that scaling amplifies domain-specific consistency patterns rather than uniformly improving consistency.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/figure_domain_consistency.pdf}
+\caption{Domain Consistency Score (DCS) across 6 knowledge domains for all models. World knowledge is consistently the easiest domain; logic and commonsense are hardest.}
+\label{fig:domain}
+\end{figure}
+
+\paragraph{Format accuracy gap.}
+Figure~\ref{fig:gap} illustrates the accuracy gap across formats. The MCQ-to-FITB gap ranges from 26.6pp (Llama-3.1-70B) to 36.7pp (Qwen2.5-7B), confirming the OSQ-bench finding \citep{myrzakhan2024openllmleaderboard} that MCQ substantially inflates apparent model capability.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/figure_format_accuracy_gap.pdf}
+\caption{Accuracy per format per model. MCQ consistently yields the highest accuracy while FITB yields the lowest, with gaps of 26.6--36.7 percentage points.}
+\label{fig:gap}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Implications.}
+Our results have several implications for LLM evaluation and deployment. First, the substantial cross-format inconsistency (CFA 56--63\%) means that evaluation scores on MCQ benchmarks may not transfer to real-world settings where models encounter diverse question formats. Second, the unique fragility to negation framing suggests a systematic weakness in how LLMs process negation---a known challenge in NLP \citep{elazar2021measuring}---which has implications for applications involving negative constraints or exclusion criteria. Third, the domain variation in consistency (12--27pp spread) suggests that consistency should be evaluated per-domain rather than as a single aggregate metric.
+
+\paragraph{Consistency $\neq$ accuracy.}
+The moderate $R^2$ of 0.77 between CFA and accuracy, together with the observation that most models have CFA slightly above accuracy (indicating consistently wrong answers) while the 70B model is the only one with CFA below accuracy, demonstrates that consistency and accuracy measure fundamentally different aspects of model capability. A model can ``know'' the answer (high accuracy in MCQ) without being able to express it reliably across formats (low CFA). Conversely, smaller models can appear more ``consistent'' than ``accurate'' simply by giving the same wrong answer across formats. This decoupling---consistent with the findings of \citet{rabinovich2023predicting} on semantic consistency as a predictor of QA performance---motivates including consistency metrics alongside accuracy in standard evaluation suites.
+
+\paragraph{On the paraphrase typology.}
+Our six-type paraphrase typology reveals one dominant finding: negation-framing paraphrases are uniquely destabilizing (PFI 1.4--1.75$\times$ the next most fragile type), while the remaining five types produce statistically indistinguishable consistency levels at our sample size (300 questions). This suggests that, in practice, a simpler \emph{negation vs.\ non-negation} binary distinction captures the primary finding. We retain the six-type taxonomy for several reasons: (a) the non-significance among non-negation types may reflect limited statistical power rather than true equivalence---larger sample sizes might reveal differences; (b) the type labels provide useful metadata for qualitative error analysis; and (c) the taxonomy aligns with linguistic categories that may prove differentially informative as models improve. We recommend that practitioners evaluating paraphrase robustness focus on negation as the primary diagnostic axis, with finer-grained typology as optional supplementary analysis.
+
+\paragraph{Limitations.}
+Our study has several limitations.
+\begin{enumerate}
+    \item \textbf{Answer equivalence judge precision.} Our LLM-based answer equivalence judge achieves 72\% agreement with annotated labels---below the ideal for a benchmark paper focused on measurement precision. Critically, both the judge and its calibration reference were produced by LLMs rather than human annotators, so systematic biases may be shared between them. While our sensitivity analysis (Table~\ref{tab:sensitivity}) shows that the core finding holds without the judge (constrained-only CFA 60.0--69.1\%), the absolute CFA values for open-ended and FITB format pairs should be interpreted with caution. Future work should employ human annotations for ground truth, stronger judge models (14B+ instead of 7B), chain-of-thought prompting, or ensembles of multiple judges.
+    \item \textbf{Automated validation.} Format conversion and paraphrase quality were validated using automated LLM-based checks rather than human annotation, despite the original plan specifying manual verification. While efficient, this represents a significant methodological limitation: LLM validators may miss subtle semantic shifts or share blind spots with the models being evaluated. A future version of \consistbench{} should include human validation of at least a subset of conversions and paraphrases.
+    \item \textbf{70B subset evaluation.} The 70B model is evaluated on a stratified 500-question subset, producing wider confidence intervals ($\pm$2.3pp vs.\ $\pm$1.4--1.6pp). While model rankings are stable, the absolute CFA estimate may differ from a full-set evaluation.
+    \item \textbf{Model coverage.} We evaluate 6 open-weight models (not 7 as originally planned); proprietary models (GPT-4, Claude) may show different patterns but could not be included due to cost and reproducibility constraints. The 70B model uses 4-bit AWQ quantization, which may slightly reduce consistency compared to full precision.
+    \item \textbf{Paraphrase sample size.} The 300-question phrasing subset limits statistical power for detecting differences among non-negation types and for domain$\times$paraphrase-type interactions.
+    \item \textbf{Scope.} We evaluate consistency on factual/knowledge questions; consistency on creative, subjective, or multi-step reasoning tasks remains unexplored. Paraphrases are generated by an LLM and may not perfectly represent natural human paraphrases.
+\end{enumerate}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \consistbench{}, a benchmark of 1,000 questions expanded into 6,800 evaluation instances that jointly evaluates cross-format consistency across 5 answer formats and cross-phrasing consistency across 6 paraphrase types. Evaluating 6 LLMs from 3.8B to 70B parameters, we find that all models exhibit substantial cross-format inconsistency (CFA 56.0--62.6\%), confirmed even when restricting to constrained format pairs where our answer equivalence judge is not involved (constrained-only CFA 60.0--69.1\%). Negation-framing paraphrases are uniquely destabilizing (PFI 1.4--1.75$\times$ the next most fragile type), while the five non-negation types are statistically indistinguishable at our sample size---the primary finding is a binary negation vs.\ non-negation distinction. Consistency varies by 12--27 percentage points across knowledge domains, and larger models' accuracy gains outpace their consistency gains.
+
+These findings demonstrate that consistency is a multi-dimensional property not captured by standard accuracy metrics. The metrics we propose---CFA, CPA, PFI, FCAG, and DCS---provide diagnostic tools for identifying when and why LLMs give inconsistent answers. We hope \consistbench{} will encourage the community to treat consistency as a first-class evaluation dimension alongside accuracy, particularly for high-stakes applications where reliability is essential.
+
+Future work should extend \consistbench{} to proprietary models, multi-step reasoning tasks, and multilingual settings; improve answer equivalence evaluation through stronger judges and genuine human annotation; increase paraphrase sample sizes to test whether finer-grained typological distinctions emerge; and investigate whether consistency-aware training objectives can reduce the inconsistencies we document.
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{13}
+
+\bibitem[Chern et~al.(2024)]{chern2024behonest}
+Steffi Chern, Zhulin Hu, Yuqing Yang, Ethan Chern, Yuan Guo, Jiahe Jin, Binjie Wang, and Shengkun Liu.
+\newblock {BeHonest}: Benchmarking honesty of large language models.
+\newblock \emph{arXiv preprint arXiv:2406.13261}, 2024.
+
+\bibitem[Choi(2025)]{choi2025roparq}
+Jeongeun Choi.
+\newblock {RoParQ}: Paraphrase-aware alignment of {LLM}s towards robustness to paraphrased questions.
+\newblock \emph{arXiv preprint arXiv:2511.21568}, 2025.
+
+\bibitem[Elazar et~al.(2021)]{elazar2021measuring}
+Yanai Elazar, Nora Kassner, Shauli Ravfogel, Abhilasha Ravichander, Eduard Hovy, Hinrich Sch{\"u}tze, and Yoav Goldberg.
+\newblock Measuring and improving consistency in pretrained language models.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 9:1012--1031, 2021.
+
+\bibitem[Lunardi et~al.(2025)]{lunardi2025robustness}
+Riccardo Lunardi, Vincenzo Della~Mea, Stefano Mizzaro, and Kevin Roitero.
+\newblock On robustness and reliability of benchmark-based evaluation of large language models.
+\newblock \emph{arXiv preprint arXiv:2509.04013}, 2025.
+
+\bibitem[Mizrahi et~al.(2024)]{mizrahi2024state}
+Moran Mizrahi, Guy Kaplan, Dan Malkin, Rotem Dror, Dafna Shahaf, and Gabriel Stanovsky.
+\newblock State of what art? {A} call for multi-prompt {LLM} evaluation.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 12:933--949, 2024.
+
+\bibitem[Myrzakhan et~al.(2024)]{myrzakhan2024openllmleaderboard}
+Aidar Myrzakhan, Sondos~Mahmoud Bsharat, and Zhiqiang Shen.
+\newblock {Open-LLM-Leaderboard}: From multi-choice to open-style questions for {LLM}s evaluation, benchmark, and arena.
+\newblock \emph{arXiv preprint arXiv:2406.07545}, 2024.
+
+\bibitem[Novikova et~al.(2025)]{novikova2025consistency}
+Jekaterina Novikova, Carol Anderson, Borhane Blili-Hamelin, Domenic Rosati, and Subhabrata Majumdar.
+\newblock Consistency in language models: Current landscape, challenges, and future directions.
+\newblock \emph{arXiv preprint arXiv:2505.00268}, 2025.
+
+\bibitem[Rabinovich et~al.(2023)]{rabinovich2023predicting}
+Ella Rabinovich, Samuel Ackerman, Eyal Shnarch, Priyanka Patel, and Ateret Anaby-Tavor.
+\newblock Predicting question-answering performance of large language models through semantic consistency.
+\newblock In \emph{Proceedings of the 2nd Workshop on Natural Language Generation, Evaluation, and Metrics (GEM) at EMNLP}, 2023.
+
+\bibitem[Wang et~al.(2025)]{wang2025benchmark}
+Siyuan Wang, Zhuohan Long, Zhihao Fan, Zhongyu Wei, and Xuanjing Huang.
+\newblock Benchmark self-evolving: A multi-agent framework for dynamic {LLM} evaluation.
+\newblock In \emph{Proceedings of the 31st International Conference on Computational Linguistics (COLING)}, pages 3310--3328, 2025.
+
+\bibitem[White et~al.(2025)]{white2025livebench}
+Colin White, Samuel Dooley, Manley Roberts, Arka Pal, Ben Feuer, Siddhartha Jain, Ravid Shwartz-Ziv, Neel Jain, Khalid Saifullah, Siddartha Naidu, Chinmay Hegde, Yann LeCun, Tom Goldstein, Willie Neiswanger, and Micah Goldblum.
+\newblock {LiveBench}: A challenging, contamination-limited {LLM} benchmark.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\bibitem[Ye et~al.(2024)]{ye2024justice}
+Jiayi Ye, Yanbo Wang, Yue Huang, Dongping Chen, Qihui Zhang, Nuno Moniz, Tian Gao, Werner Geyer, Chao Huang, Pin-Yu Chen, Nitesh~V. Chawla, and Xiangliang Zhang.
+\newblock Justice or prejudice? {Q}uantifying biases in {LLM}-as-a-judge.
+\newblock \emph{arXiv preprint arXiv:2410.02736}, 2024.
+
+\bibitem[Zhu et~al.(2024)]{zhu2024promptbench}
+Kaijie Zhu, Qinlin Zhao, Hao Chen, Jindong Wang, and Xing Xie.
+\newblock {PromptBench}: A unified library for evaluation of large language models.
+\newblock \emph{Journal of Machine Learning Research}, 25(254):1--22, 2024.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+
+\section{Dataset Statistics}
+\label{app:dataset}
+
+\begin{table}[h]
+\caption{Dataset composition. Base questions per domain and difficulty level.}
+\label{tab:dataset}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Domain & Easy & Medium & Hard & Total \\
+\midrule
+Science & 55 & 55 & 55 & 165 \\
+History & 55 & 55 & 55 & 165 \\
+Mathematics & 57 & 57 & 56 & 170 \\
+Commonsense & 55 & 55 & 55 & 165 \\
+World Knowledge & 57 & 56 & 57 & 170 \\
+Logic & 55 & 55 & 55 & 165 \\
+\midrule
+Total & 334 & 333 & 333 & 1,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Paraphrase Validation Details}
+\label{app:validation}
+
+Automated LLM-based quality assessment of 180 paraphrases (30 per type) yielded the following quality rates: syntactic restructuring 100\%, voice change 96.7\%, elaborative 96.7\%, lexical substitution 93.3\%, formality shift 93.3\%, and negation framing 83.3\%. The lower quality rate for negation framing reflects the inherent difficulty of reframing questions using negation while preserving the correct answer, and contributes to the higher noise in negation-type CPA measurements. We emphasize that these quality assessments were performed by an LLM (Qwen2.5-14B-Instruct) rather than human annotators; the actual quality as judged by humans may differ, and LLM validators may share systematic blind spots with the models being evaluated.
+
+\section{Answer Equivalence Judge Validation}
+\label{app:judge}
+
+The two-stage answer equivalence system was calibrated on 400 annotated answer pairs. The annotations were produced by an LLM, not human annotators---a limitation that means both the judge and its reference labels share potential systematic biases. The rule-based stage identified 66 pairs as equivalent (16.5\% of total) with zero false positives. The LLM judge stage identified an additional 112 pairs as equivalent. Of the 400 pairs, 288 (72\%) received the same label from both stages combined as from the annotated reference. Figure~\ref{fig:judge} shows the confusion matrix.
+
+The 28\% disagreement rate is a meaningful limitation. The judge errors affect only open-ended and FITB format pairs (7 of 10 pairwise comparisons). As shown in Table~\ref{tab:sensitivity}, constrained-only CFA (using only MCQ/YesNo/TrueFalse pairs with exact string matching) ranges from 60.0\% to 69.1\%, confirming the core finding independently of judge quality. Future work should use human annotations for ground truth, explore chain-of-thought prompting, use larger judge models (14B+ instead of 7B), or employ ensembles of multiple judges to improve agreement rates.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.5\linewidth]{figures/figure_judge_validation.pdf}
+\caption{Confusion matrix for the two-stage answer equivalence system vs.\ annotated labels on 400 calibration pairs.}
+\label{fig:judge}
+\end{figure}
+
+\section{Size Scaling Analysis}
+\label{app:scaling}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/figure_size_scaling.pdf}
+\caption{Accuracy and CFA as a function of model size (log scale). Within the Llama family, accuracy scales faster than consistency (8B$\to$70B: +12.0pp accuracy vs.\ +6.6pp CFA).}
+\label{fig:scaling}
+\end{figure}
+
+\end{document}

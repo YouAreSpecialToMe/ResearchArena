@@ -1,0 +1,179 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and set up project structure",
+    "description": "Install all required Python packages and create the project directory structure for code, data, results, and figures.",
+    "steps": {
+      "step1": "Create directory structure: src/ (source code), data/ (datasets), results/ (experimental outputs), figures/ (plots for paper)",
+      "step2": "Install Python dependencies: pip install numpy scipy matplotlib seaborn pandas mmh3 xxhash bitarray tqdm",
+      "step3": "Verify installations by importing all packages in a test script",
+      "step4": "Set global random seeds: use seeds [42, 123, 456, 789, 1024] for all experiments. Each experiment must iterate over all 5 seeds and report mean +/- std."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic streams and download real-world data",
+    "description": "Prepare all datasets needed for experiments: synthetic Zipfian streams with varying skew, uniform streams, and CAIDA-like real-world traces. Since CAIDA requires a license, we generate realistic synthetic network traces with matching statistical properties as a proxy, plus use a publicly available web access log dataset.",
+    "steps": {
+      "step1": "Implement a Zipfian stream generator in src/data_gen.py: given universe_size, stream_length, and skew parameter alpha, generate a stream of items drawn from Zipf(alpha). Support alpha in {0.5, 0.8, 1.0, 1.2, 1.5, 2.0}. Default stream_length=10_000_000 (10M items), universe_size=1_000_000.",
+      "step2": "Implement a uniform stream generator: items drawn uniformly at random from [1, universe_size]. Same stream_length.",
+      "step3": "Implement a synthetic network trace generator: generate IP-like items with a heavy-tailed distribution mimicking real network traffic (Zipf alpha=1.1, universe=100K IPs, stream=10M packets). Include a 'watchlist' set of 1000 IPs.",
+      "step4": "Download a publicly available web access log dataset (e.g., NASA HTTP access logs from https://ita.ee.lbl.gov/html/contrib/NASA-HTTP.html or similar). Parse it to extract request URLs or IP addresses as stream items. If download fails, fall back to generating a synthetic web-log-like stream with a realistic frequency distribution (Zipf alpha=1.05, universe=50K URLs, stream=5M requests).",
+      "step5": "For each dataset, compute and save ground-truth statistics: true frequency of each item, true number of distinct items, true set of heavy hitters above various thresholds. Save as JSON files in data/.",
+      "step6": "Verify data generation: for Zipfian streams, plot the frequency rank distribution on log-log axes to confirm the expected power-law shape. Save plot as figures/data_distribution.pdf."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement core sketch data structures",
+    "description": "Implement all probabilistic data structures from scratch with precise memory accounting, so we can control exactly how much memory each sketch uses.",
+    "steps": {
+      "step1": "Implement BloomFilter in src/sketches.py: parameterized by number of bits m and number of hash functions k. Methods: insert(item), query(item) -> bool, memory_bytes() -> int. Use mmh3 or xxhash for hashing. Include the standard formula: optimal k = (m/n) * ln(2), FPR = (1 - e^(-kn/m))^k.",
+      "step2": "Implement CountMinSketch in src/sketches.py: parameterized by width w and depth d. Methods: insert(item, count=1), estimate(item) -> int, memory_bytes() -> int. Error guarantee: epsilon = e/w, delta = e^(-d). Use 4-byte counters.",
+      "step3": "Implement HyperLogLog in src/sketches.py: parameterized by number of registers m (must be power of 2, precision p where m=2^p). Methods: insert(item), estimate() -> float, memory_bytes() -> int. Standard error ~1.04/sqrt(m). Use 1-byte registers.",
+      "step4": "Implement memory_for_target_error() functions for each sketch type: given a target error parameter, return the minimum memory in bytes needed. BloomFilter: given target FPR and expected n, return optimal m. CMS: given target epsilon and delta, return w*d*4 bytes. HLL: given target relative error, return m registers.",
+      "step5": "Validate each sketch against known theoretical guarantees: insert N random items, measure empirical error, confirm it falls within the theoretical bounds. Run with N=1M items, report results. Also cross-validate against datasketch library if available.",
+      "step6": "Write unit tests in src/test_sketches.py to verify correctness of all sketch implementations."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement error propagation algebra and composition bounds",
+    "description": "Implement the core theoretical contribution: the error propagation model for heterogeneous sketch pipelines and the tight composition bounds for each canonical pipeline pattern.",
+    "steps": {
+      "step1": "Implement src/error_algebra.py with classes for each pipeline pattern. For Pipeline P1 (BF -> CMS): given BF FPR p and CMS error epsilon, compute the naive bound (union bound: p + epsilon) and the tight composition bound. The tight bound accounts for the fact that false positives from BF inflate the CMS stream by a factor (N_true + p * N_neg) / N_true, so effective CMS error = epsilon * (1 + p * N_neg / N_true). The end-to-end frequency estimate error for a true positive is epsilon * (N_true + p * N_neg) / w, while for a query item not in the filter, it's either 0 (true negative) or epsilon * (N_true + p * N_neg) / w (false positive, probability p).",
+      "step2": "For Pipeline P2 (CMS -> Threshold T -> HLL): given CMS with error epsilon and threshold T, compute the number of false heavy hitters. An item with true frequency f < T is falsely declared heavy if CMS estimate >= T, which happens when the CMS overestimate >= T - f. The tight bound uses the frequency distribution: E[false_HH] = sum over items with f < T of P(CMS_overestimate >= T - f). The naive bound treats all N_distinct items as potentially false heavy hitters. Downstream HLL sees true_HH + false_HH distinct items, so cardinality error = HLL_relative_error * (true_HH + E[false_HH]) + E[false_HH].",
+      "step3": "For Pipeline P3 (BF -> CMS -> Sum): given BF FPR p, CMS error epsilon, and set S of size s, the total frequency estimate = sum over items passing BF of CMS(item). Tight bound on aggregate error: the BF contributes p * N_neg phantom items each with expected CMS estimate of N/w (average overestimate), while true positives each have CMS error at most epsilon * N / w. Total error = s * epsilon * N/w + p * N_neg * N/w. Naive bound uses s * epsilon * N/w + p * N_neg * max_frequency.",
+      "step4": "Implement compute_tight_bound(pipeline_type, params) and compute_naive_bound(pipeline_type, params) functions that return the predicted end-to-end error for each pipeline configuration given sketch parameters and data statistics.",
+      "step5": "Write mathematical derivations as docstrings/comments in the code for reproducibility and paper writing."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement optimal memory allocation algorithm (SketchBudget)",
+    "description": "Implement the SketchBudget allocation algorithm: given a total memory budget and pipeline configuration, find the optimal distribution of memory across sketch stages to minimize end-to-end error.",
+    "steps": {
+      "step1": "Implement src/allocator.py with the following allocation strategies: (a) UniformAllocator: divides memory equally across stages. (b) IndependentAllocator: sizes each stage to achieve the same standalone error guarantee, distributing memory proportional to each sketch's space needs for equal per-stage error. (c) ProportionalAllocator: distributes memory proportional to each sketch type's standalone space requirement for a global target error. (d) SketchBudgetAllocator: our composition-aware optimal allocator.",
+      "step2": "For SketchBudget on 2-stage pipelines (P1: BF->CMS), derive and implement the closed-form optimal allocation. For BF: FPR(m_bf) = (1 - exp(-k*n/m_bf))^k with optimal k. For CMS: epsilon(m_cms) = e * d / m_cms (for fixed d). The total error E(m_bf, m_cms) = f(FPR(m_bf), epsilon(m_cms)) from our composition bounds. With m_bf + m_cms = M, use scipy.optimize.minimize_scalar on E(m_bf, M - m_bf) over m_bf in [m_min_bf, M - m_min_cms].",
+      "step3": "For general k-stage pipelines, implement the greedy marginal allocation heuristic: start with minimum memory per stage. Iteratively allocate delta_m bytes (e.g., 100 bytes) to whichever stage gives the largest decrease in end-to-end error. Continue until budget is exhausted. This has O(M/delta_m * k) iterations.",
+      "step4": "Also implement scipy.optimize.minimize (Nelder-Mead or L-BFGS-B with bounds) as a numerical optimizer for general pipelines, to compare against the greedy heuristic.",
+      "step5": "For each allocator, the output is a dictionary mapping stage names to memory allocations in bytes. Implement allocate(total_memory, pipeline_config, data_stats) -> {stage: bytes}.",
+      "step6": "Write unit tests verifying: (a) all allocators respect the total budget constraint, (b) SketchBudget allocation always produces equal or lower predicted error than Uniform, (c) greedy and numerical optimizer agree on 2-stage pipelines within 5%."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement pipeline simulation framework",
+    "description": "Implement the pipeline simulation that instantiates sketches with given memory allocations, processes a data stream, and measures end-to-end error.",
+    "steps": {
+      "step1": "Implement src/pipeline.py with classes Pipeline_P1, Pipeline_P2, Pipeline_P3. Each takes memory allocations for its stages and data statistics (for computing sketch parameters from memory).",
+      "step2": "Pipeline_P1 (BF -> CMS): Insert all stream items into BF. For each query item in the query set, check BF; if positive, query CMS for frequency. Measure: (a) mean absolute error of frequency estimates vs ground truth, (b) mean relative error for items with true frequency > 0, (c) false positive rate of the filter stage.",
+      "step3": "Pipeline_P2 (CMS -> Threshold -> HLL): Insert all stream items into CMS. For each distinct item, query CMS; if estimate >= threshold T, insert into HLL. Measure: (a) absolute error of HLL cardinality estimate vs true number of heavy hitters, (b) number of false heavy hitters, (c) number of missed heavy hitters.",
+      "step4": "Pipeline_P3 (BF -> CMS -> Sum): Insert stream items into BF (for set S membership). For items passing BF, insert into CMS. Query CMS for all items that passed BF and sum frequencies. Measure: (a) absolute error of total frequency estimate vs ground truth sum, (b) relative error of the aggregate.",
+      "step5": "Implement run_experiment(pipeline_type, allocator, total_memory, stream, query_set, ground_truth, seed) -> dict of metrics. This function creates the pipeline with the given allocation, processes the stream, evaluates metrics, and returns results as a dictionary.",
+      "step6": "Implement run_all_seeds(pipeline_type, allocator, total_memory, stream_gen_fn, query_set, ground_truth, seeds=[42,123,456,789,1024]) that runs the experiment for each seed and returns mean, std, min, max of each metric."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run baseline allocation experiments",
+    "description": "Run all three baseline allocation strategies (Uniform, Independent, Proportional) on all three pipeline configurations across all datasets and seeds. This establishes the comparison points for SketchBudget.",
+    "steps": {
+      "step1": "Define experimental grid: 3 pipelines (P1, P2, P3) x 3 baselines (Uniform, Independent, Proportional) x 6 memory budgets (10KB, 50KB, 100KB, 500KB, 1MB, 5MB) x 2 datasets (Zipfian alpha=1.0, synthetic network trace) x 5 seeds = 540 runs. Each run processes 10M stream items and takes ~5-10 seconds, so total ~1-1.5 hours on 2 cores with parallelism.",
+      "step2": "For Pipeline P1 (BF->CMS): query set = 10,000 items (5,000 in the watchlist/set S, 5,000 not in it). Threshold for P2: T = stream_length / (universe_size * 10) (items with frequency 10x the average). For P3: set S = watchlist of 1,000 items.",
+      "step3": "Run all baseline experiments using Python multiprocessing (2 workers). Save results as JSON files in results/baselines/ with naming convention: {pipeline}_{allocator}_{dataset}_{budget}_{seed}.json. Each file contains: allocations, per-stage parameters, all metrics, and runtime.",
+      "step4": "Aggregate baseline results into results/baselines_summary.csv: columns = pipeline, allocator, dataset, budget, metric_name, mean, std, min, max (aggregated over seeds)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SketchBudget allocation experiments",
+    "description": "Run the SketchBudget (composition-aware) allocation on the same experimental grid as baselines, to enable direct comparison.",
+    "steps": {
+      "step1": "Run SketchBudget allocator on the same grid: 3 pipelines x 6 memory budgets x 2 datasets x 5 seeds = 180 runs. Save results in results/sketchbudget/ with same naming convention.",
+      "step2": "For each run, also record: (a) the predicted end-to-end error from our tight composition bound, (b) the predicted error from the naive bound, (c) the actual observed error. This enables measuring bound tightness.",
+      "step3": "Record allocation time: measure wall-clock time for the SketchBudget optimizer to compute the allocation (excluding data processing time). Save alongside results.",
+      "step4": "Aggregate into results/sketchbudget_summary.csv with same format as baselines."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Bound tightness analysis",
+    "description": "Measure and compare the tightness of our composition bounds vs naive bounds across all configurations.",
+    "steps": {
+      "step1": "For each pipeline configuration and dataset, compute: (a) naive_bound / observed_error (naive tightness ratio), (b) tight_bound / observed_error (our tightness ratio). A ratio of 1.0 is perfectly tight; larger values indicate looser bounds.",
+      "step2": "Vary the data distribution: for Zipfian streams with alpha in {0.5, 0.8, 1.0, 1.2, 1.5, 2.0}, run SketchBudget at budget=500KB and measure bound tightness. This tests the distribution-awareness claim. Use 5 seeds per configuration.",
+      "step3": "Save results as results/bound_tightness.csv: columns = pipeline, dataset, alpha, budget, naive_tightness_ratio, tight_tightness_ratio, mean, std."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: pipeline depth scaling",
+    "description": "Test how the advantage of composition-aware allocation scales with pipeline depth. Construct extended pipelines with 2-5 stages.",
+    "steps": {
+      "step1": "Construct extended pipeline variants: depth-2 (BF->CMS), depth-3 (BF->CMS->HLL), depth-4 (BF->CMS->threshold->HLL), depth-5 (BF1->BF2->CMS->threshold->HLL, where BF1 is a coarse pre-filter and BF2 is a fine filter). Implement these as additional pipeline classes.",
+      "step2": "Run all 4 allocators (Uniform, Independent, Proportional, SketchBudget) on each pipeline depth at budget=500KB on Zipfian alpha=1.0 data with 5 seeds.",
+      "step3": "Measure: end-to-end error, improvement ratio of SketchBudget over best baseline, and allocation time. Save as results/ablation_depth.csv.",
+      "step4": "Test the theoretical claim: the gap between naive and tight bounds should grow as Omega(k) with pipeline depth k."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: memory budget sensitivity",
+    "description": "Analyze how the advantage of SketchBudget varies across a fine-grained range of total memory budgets.",
+    "steps": {
+      "step1": "For each pipeline (P1, P2, P3), run all 4 allocators at 20 memory budgets logarithmically spaced from 5KB to 10MB on Zipfian alpha=1.0 data with 5 seeds.",
+      "step2": "Compute: for each pipeline and budget, the relative improvement of SketchBudget over Uniform = (error_uniform - error_sketchbudget) / error_uniform * 100%.",
+      "step3": "Identify the memory budget at which SketchBudget achieves the same error as Uniform at a higher budget. This quantifies the 'memory savings' metric. Save as results/ablation_budget.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: greedy vs exact optimization",
+    "description": "Compare the greedy heuristic against the numerical optimizer to validate the approximation quality.",
+    "steps": {
+      "step1": "For Pipeline P1 (2-stage), compare: (a) closed-form optimal, (b) greedy heuristic (delta_m=100 bytes), (c) scipy Nelder-Mead optimizer. Run at budgets from 10KB to 1MB. Measure: allocated memory per stage, predicted error, actual error, and computation time.",
+      "step2": "For Pipelines P2 and P3, compare greedy vs Nelder-Mead at the same budget range.",
+      "step3": "Measure greedy heuristic runtime for synthetic pipelines with k=2,3,5,7,10 stages at budget=1MB. Verify it completes in under 1 second for all k<=10. Save as results/ablation_greedy.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: distribution sensitivity",
+    "description": "Test the impact of data distribution on SketchBudget's advantage, focusing on the claim that gains are larger for heavy-tailed distributions.",
+    "steps": {
+      "step1": "For Pipeline P2 (CMS->Threshold->HLL), which is most sensitive to the frequency distribution near the threshold, run all 4 allocators on Zipfian streams with alpha in {0.5, 0.8, 1.0, 1.2, 1.5, 2.0} at budget=500KB with 5 seeds.",
+      "step2": "Also run on Uniform distribution as a contrast (alpha=0, i.e., all items have roughly equal frequency). For this distribution, there should be minimal advantage from composition-aware allocation.",
+      "step3": "Measure: (a) end-to-end error for each allocator, (b) improvement ratio of SketchBudget over best baseline, (c) bound tightness ratio. Save as results/ablation_distribution.csv."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical evaluation of results against success criteria",
+    "description": "Perform rigorous statistical evaluation of results against the pre-defined success criteria.",
+    "steps": {
+      "step1": "For success criterion 1 (tighter bounds): for each pipeline and dataset, compute the mean and 95% CI of (naive_tightness_ratio - tight_tightness_ratio). Run a paired t-test to verify the tight bound is significantly tighter (p < 0.05).",
+      "step2": "For success criterion 2 (>= 20% error reduction): for each pipeline, compute the relative error reduction of SketchBudget over the best baseline at the median memory budget. Report mean +/- std across seeds. Use a one-sided paired t-test (p < 0.05) to verify significance.",
+      "step3": "For success criterion 3 (>= 25% memory savings): for each pipeline, find the memory budget at which SketchBudget achieves the same error as each baseline at their respective budget. Compute savings = 1 - M_sketchbudget / M_baseline. Report per-pipeline and average.",
+      "step4": "For success criterion 4 (greedy < 1 second for k<=10): report greedy runtime statistics from the ablation study.",
+      "step5": "For success criterion 5 (consistent across distributions): verify that SketchBudget outperforms baselines on both Zipfian and synthetic network trace data. Report per-dataset results.",
+      "step6": "Save complete evaluation results as results/evaluation_summary.json with all metrics, p-values, confidence intervals, and pass/fail for each success criterion."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables needed for the research paper.",
+    "steps": {
+      "step1": "Figure 1: Pipeline architecture diagrams for P1, P2, P3 showing data flow and error propagation. Create a clean schematic using matplotlib (box-and-arrow diagrams). Save as figures/pipeline_architectures.pdf.",
+      "step2": "Figure 2: Error vs Memory Budget curves for each pipeline. One subplot per pipeline, showing all 4 allocators as different colored lines with error bars (std across seeds). X-axis: memory budget (log scale), Y-axis: end-to-end error. Save as figures/error_vs_budget.pdf.",
+      "step3": "Figure 3: Bound tightness comparison. Bar chart showing naive vs tight tightness ratios for each pipeline at a representative budget. Include error bars. Save as figures/bound_tightness.pdf.",
+      "step4": "Figure 4: Memory allocation visualization. Stacked bar charts showing how each allocator distributes memory across stages for each pipeline at a representative budget. Save as figures/allocation_breakdown.pdf.",
+      "step5": "Figure 5: Pipeline depth scaling. Line plot showing SketchBudget improvement ratio over best baseline as a function of pipeline depth (2-5 stages). Save as figures/depth_scaling.pdf.",
+      "step6": "Figure 6: Distribution sensitivity. Line plot showing SketchBudget improvement ratio as a function of Zipfian alpha for Pipeline P2. Save as figures/distribution_sensitivity.pdf.",
+      "step7": "Table 1: Main results table. For each pipeline and allocator, report mean end-to-end error +/- std at budget=500KB. Include relative improvement of SketchBudget. Format as LaTeX table and save as figures/main_results_table.tex.",
+      "step8": "Table 2: Memory savings table. For each pipeline, report the memory budget needed by each allocator to achieve a target error, and the savings percentage. Save as figures/memory_savings_table.tex.",
+      "step9": "All figures should use consistent styling: matplotlib with seaborn style, font size 12, colorblind-friendly palette (tab10 or colorbrewer). Use PDF format for vector graphics."
+    }
+  }
+]

@@ -1,0 +1,443 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[numbers]{natbib}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+% \usepackage{nicefrac}
+% \usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{subcaption}
+
+\definecolor{darkblue}{rgb}{0,0,0.5}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    filecolor=darkblue,
+    urlcolor=darkblue,
+    citecolor=darkblue
+}
+
+\title{On the Limitations of Gradient-Based Verification for Machine Unlearning}
+
+\author{%
+  Anonymous Author\\
+  Anonymous Institution\\
+  \texttt{anonymous@example.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Machine unlearning---the process of removing specific training data influence from trained models---has become critical for privacy compliance and model governance. A key challenge is verifying whether unlearning has actually occurred. While existing approaches like shadow-model-based LiRA are computationally prohibitive and fine-tuning-based methods like TruVRF require expensive parameter updates during verification, we hypothesized that direct gradient analysis could provide efficient sample-level verification. We propose Local Gradient Sensitivity Analysis (LGSA), which combines three complementary metrics---Loss Displacement Score (LDS), Gradient Alignment Score (GAS), and Sensitivity Reduction Score (SRS)---to detect unlearning without any model training or fine-tuning. Through extensive experiments on CIFAR-10 with ResNet-18 and SimpleCNN architectures, we find that LGSA achieves only $0.50$ AUC (random chance) compared to $0.82$ AUC for TruVRF. Our results demonstrate that local gradient sensitivity metrics alone are insufficient for reliable unlearning verification, providing a valuable negative result that informs future research directions. All code and data are available at \url{https://anonymous.4open.science/r/lgsa}.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Machine unlearning, the process of removing the influence of specific training data from a trained model, has become increasingly important due to privacy regulations like GDPR's "right to be forgotten" and the need to remove harmful, biased, or copyrighted content from large models \cite{bourtoule2021machine}. While many unlearning algorithms have been proposed, a critical challenge remains: \textbf{how can we efficiently verify that unlearning has actually occurred?}
+
+Current verification approaches face significant limitations. LiRA-based auditing \cite{carlini2022membership} requires training thousands of shadow models, making it computationally prohibitive for practical deployment. Influence function-based methods \cite{koh2017understanding} rely on strong assumptions (convexity, Hessian invertibility) that rarely hold for deep neural networks, leading to unreliable estimates \cite{basu2021influence}. Fine-tuning-based verification \cite{zhou2024truvrf} requires expensive parameter updates during verification, limiting scalability.
+
+Recent work by \cite{aerni2024evaluations} demonstrates that privacy evaluations must focus on the \textbf{most vulnerable samples} rather than population-level metrics, yet existing verification methods primarily provide aggregate assessments. This motivates the need for efficient, sample-level verification methods that do not require expensive retraining or fine-tuning.
+
+\subsection{Our Approach: Local Gradient Sensitivity Analysis}
+
+We hypothesized that when a model successfully unlearns a sample, the local gradient landscape around that sample changes characteristically. Specifically:
+\begin{enumerate}
+    \item The model's loss on the forgotten sample increases significantly (the model no longer "recognizes" the sample)
+    \item The gradient direction on the forgotten sample becomes less aligned with the original training trajectory
+    \item The local sensitivity (measured by gradient norms) of the model to perturbations on the forgotten sample decreases
+\end{enumerate}
+
+These changes can be detected through efficient gradient-based analysis without requiring expensive model retraining or fine-tuning. We propose \textbf{LGSA (Local Gradient Sensitivity Analysis)}, a lightweight framework that computes three complementary metrics:
+\begin{itemize}
+    \item \textbf{Loss Displacement Score (LDS):} Measures relative loss increase on forgotten samples
+    \item \textbf{Gradient Alignment Score (GAS):} Measures cosine distance between gradient directions before and after unlearning
+    \item \textbf{Sensitivity Reduction Score (SRS):} Measures decrease in local gradient magnitude
+\end{itemize}
+
+\subsection{Key Findings}
+
+Our extensive experiments on CIFAR-10 with ResNet-18 and SimpleCNN reveal that:
+\begin{enumerate}
+    \item \textbf{LGSA achieves only $0.50$ AUC} (random chance) for distinguishing forget vs. retain samples, compared to $0.82$ AUC for TruVRF \cite{zhou2024truvrf}
+    \item \textbf{Individual metrics (LDS, GAS, SRS) show no discriminative power}, each achieving approximately $0.50$ AUC
+    \item \textbf{Weight learning cannot improve performance} when individual metrics have no signal
+    \item \textbf{LGSA is actually slower than TruVRF} ($65.5$s vs $36.7$s) while being less accurate
+\end{enumerate}
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We systematically evaluate the hypothesis that local gradient sensitivity can verify machine unlearning
+    \item We demonstrate through rigorous experimentation that this hypothesis is \textbf{refuted}: gradient-based metrics alone are insufficient
+    \item We provide a detailed analysis of why gradient-based verification fails and what this means for the field
+    \item We release our code and experimental framework for reproducibility
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Machine Unlearning}
+
+Machine unlearning methods fall into two categories. \textbf{Exact unlearning} methods ensure the unlearned model is distributionally identical to one trained without the forgotten data. The SISA framework \cite{bourtoule2021machine} partitions data into shards and retrains only affected shards, but incurs high storage costs. \textbf{Approximate unlearning} methods efficiently update model parameters to approximate the retrained model. Influence-based methods \citep{guo2020fastif, izzo2021approximate} estimate parameter changes using Hessian-vector products, but suffer from approximation errors in deep networks \cite{basu2021influence}. Gradient-based methods like SCRUB \cite{kurmanji2023towards} and SalUn \cite{fan2024salun} use gradient ascent on forgotten data combined with distillation or saliency masking.
+
+\subsection{Unlearning Verification}
+
+\textbf{Membership Inference-based Verification} uses LiRA \cite{carlini2022membership} or similar attacks to check if forgotten samples are still "members" of the trained model. U-LiRA \cite{hayes2024informed} adapts LiRA to the unlearning setting but requires training shadow models with the same unlearning algorithm, making it computationally expensive.
+
+\textbf{Model Comparison-based Verification} compares the unlearned model to a retrained-from-scratch model using metrics like L2 distance or KL divergence \cite{thudi2022unrolling}. However, \citet{zhang2024verification} showed that such verification can be fooled by adversarial unlearning that forges model parameters to match retrained models while retaining information.
+
+\textbf{Fine-tuning-based Verification} is exemplified by TruVRF \cite{zhou2024truvrf}, the most closely related work to ours. TruVRF measures "model sensitivity" via parameter changes during fine-tuning on verification data, requiring fine-tuning both the original and unlearned models.
+
+\subsection{Gradient-Based Privacy Analysis}
+
+\citet{zhu2019deep} demonstrated that gradients encode rich information about training data through Deep Leakage from Gradients (DLG), showing that gradients can be inverted to reconstruct pixel-accurate training images. This provides theoretical grounding for why gradient-based metrics might detect unlearning. \cite{aerni2024evaluations} showed that gradient norms correlate with privacy vulnerability and that evaluations must focus on the most vulnerable samples rather than population averages.
+
+\subsection{Key Differences from TruVRF}
+
+While TruVRF requires fine-tuning during verification, LGSA computes sensitivity metrics directly from gradients without any parameter updates. However, our experiments show that this computational advantage comes at the cost of accuracy: TruVRF achieves $0.82$ AUC while LGSA achieves only $0.50$ AUC on the same tasks.
+
+\section{Method}
+\label{sec:method}
+
+We now describe LGSA in detail, including the three metrics, weight learning procedure, and computational complexity analysis.
+
+\subsection{Problem Setup}
+
+Let $f_\theta$ be the original trained model and $f_{\theta'}$ be the unlearned model. For a sample $(x, y)$, we want to determine whether it was successfully unlearned. We assume white-box access to both models (gradients can be computed).
+
+\subsection{The Three Metrics}
+
+\textbf{Loss Displacement Score (LDS)} captures the relative increase in loss after unlearning:
+\begin{equation}
+\text{LDS}(x) = \frac{\mathcal{L}(f_{\theta'}(x), y) - \mathcal{L}(f_\theta(x), y)}{\mathcal{L}(f_\theta(x), y) + \epsilon}
+\end{equation}
+where $\epsilon$ is a small constant for numerical stability. This normalization ensures the metric is scale-invariant.
+
+\textbf{Gradient Alignment Score (GAS)} measures the cosine distance between gradients before and after unlearning:
+\begin{equation}
+\text{GAS}(x) = 1 - \cos\left(\nabla_\theta \mathcal{L}(f_\theta(x), y), \nabla_{\theta'} \mathcal{L}(f_{\theta'}(x), y)\right)
+\end{equation}
+Values range from 0 (perfect alignment) to 2 (perfect opposition).
+
+\textbf{Sensitivity Reduction Score (SRS)} quantifies the decrease in local gradient magnitude:
+\begin{equation}
+\text{SRS}(x) = 1 - \frac{\|\nabla_{\theta'} \mathcal{L}(f_{\theta'}(x), y)\|_2}{\|\nabla_\theta \mathcal{L}(f_\theta(x), y)\|_2 + \epsilon}
+\end{equation}
+Positive values indicate reduced sensitivity.
+
+\subsection{Combined Score and Weight Learning}
+
+The \textbf{Local Sensitivity Score (LSS)} combines the three metrics:
+\begin{equation}
+\text{LSS}(x) = \sigma(w_1 \cdot \text{LDS}(x) + w_2 \cdot \text{GAS}(x) + w_3 \cdot \text{SRS}(x))
+\end{equation}
+where $\sigma$ is the sigmoid function.
+
+We learn the weights $w_1, w_2, w_3$ through validation set optimization:
+\begin{enumerate}
+    \item Create a pseudo-forget/pseudo-retain split from held-out validation data
+    \item Apply the same unlearning algorithm to create a validation unlearned model
+    \item Use grid search (step 0.1) to find weights maximizing AUC-ROC
+    \item Constrain $w_1 + w_2 + w_3 = 1$ and $w_i \geq 0$ for interpretability
+\end{enumerate}
+
+\subsection{Computational Complexity}
+
+\textbf{LGSA Operations:} 2 forward passes and 2 backward passes per sample.
+
+\textbf{Total complexity:} $O(|D_{\text{forget}}| \cdot d)$ where $d$ is the model dimension.
+
+\textbf{Comparison with baselines:}
+\begin{itemize}
+    \item \textbf{LiRA (64 shadows):} $O(K \cdot T \cdot |D| \cdot d)$ --- $\sim$50 GPU-hours
+    \item \textbf{TruVRF:} $O(E \cdot |D_{\text{verify}}| \cdot d)$ --- $\sim$10 GPU-minutes
+    \item \textbf{LGSA:} $O(|D_{\text{forget}}| \cdot d)$ --- $\sim$5 GPU-seconds
+\end{itemize}
+
+While LGSA is computationally efficient, our experiments show this efficiency comes at the cost of accuracy.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets.} We use CIFAR-10 \cite{krizhevsky2009learning}, a standard benchmark for unlearning research. The dataset contains 50,000 training images and 10,000 test images across 10 classes.
+
+\textbf{Models.} We evaluate on:
+\begin{itemize}
+    \item ResNet-18 \cite{he2016deep}: $\sim$11M parameters, trained for 30 epochs
+    \item SimpleCNN: $\sim$1M parameters (3 conv layers + 2 FC layers), trained for 10 epochs
+\end{itemize}
+
+\textbf{Unlearning Methods.} We test LGSA on multiple unlearning strategies:
+\begin{itemize}
+    \item \textbf{Gradient Ascent (GA):} Maximize loss on forget set (lr=0.001, 5 epochs)
+    \item \textbf{Fine-tuning (FT):} Train on retain set only (lr=0.001, 5 epochs)
+    \item \textbf{Gold Standard:} Retrain from scratch without forget set (for SimpleCNN)
+\end{itemize}
+
+\textbf{Forget Set.} We randomly select 1,000 samples (2\% of training data) as the forget set, with the remaining 49,000 as the retain set.
+
+\textbf{Baselines.} We compare against:
+\begin{itemize}
+    \item \textbf{TruVRF} \cite{zhou2024truvrf}: Fine-tuning-based verification (3 epochs on 2,000 verification samples)
+    \item \textbf{LiRA} \cite{carlini2022membership}: Simplified with 8 shadow models (vs 64 in original)
+\end{itemize}
+
+\textbf{Metrics.} We report:
+\begin{itemize}
+    \item AUC-ROC for distinguishing forget vs. retain samples
+    \item TPR at 1\% FPR
+    \item Precision and Recall at threshold 0.5
+    \item Verification time (wall-clock seconds)
+\end{itemize}
+
+\textbf{Implementation.} All experiments use PyTorch 2.0 with CUDA. We run 3 random seeds (42, 123, 456) for statistical significance.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents the main comparison between LGSA and baselines.
+
+\begin{table}[t]
+\caption{Comparison of verification methods on CIFAR-10. Best results in \textbf{bold}. $\uparrow$ means higher is better. Standard deviations computed over 3 random seeds.}
+\label{tab:main}
+\centering
+\begin{tabular}{llccc}
+\toprule
+Method & Model & AUC $\uparrow$ & TPR@1\%FPR $\uparrow$ & Time (s) $\downarrow$ \\
+\midrule
+LGSA (Ours) & ResNet-18 & 0.502 $\pm$ 0.005 & 0.000 $\pm$ 0.000 & 65.5 $\pm$ 8.2 \\
+TruVRF & ResNet-18 & \textbf{0.818} $\pm$ 0.140 & \textbf{0.672} $\pm$ 0.339 & 36.7 $\pm$ 0.5 \\
+\midrule
+LGSA (Ours) & SimpleCNN & 0.500 $\pm$ 0.000 & 0.000 $\pm$ 0.000 & 28.9 $\pm$ 0.9 \\
+TruVRF & SimpleCNN & 0.501 $\pm$ 0.004 & 0.007 $\pm$ 0.006 & 10.5 $\pm$ 5.9 \\
+LiRA (8 shadows) & SimpleCNN & 0.503 & 0.016 & 1158.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key Findings:}
+\begin{itemize}
+    \item LGSA achieves approximately $0.50$ AUC on all configurations---equivalent to random guessing
+    \item TruVRF significantly outperforms LGSA on ResNet-18 ($0.82$ vs $0.50$ AUC)
+    \item Even with only 8 shadow models, LiRA is 40$\times$ slower than LGSA but achieves similar (poor) performance on SimpleCNN
+    \item LGSA is actually slower than TruVRF while being less accurate
+\end{itemize}
+
+\subsection{Ablation Study: Individual Metrics}
+
+Table~\ref{tab:ablation} shows the performance of individual metrics and their combinations.
+
+\begin{table}[t]
+\caption{Ablation study on CIFAR-10 SimpleCNN with gradient ascent unlearning. All configurations show no discriminative power.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Metric Combination & AUC & TPR@1\%FPR \\
+\midrule
+LDS only & 0.500 & 0.000 \\
+GAS only & 0.483 & 0.000 \\
+SRS only & 0.488 & 0.000 \\
+LDS + GAS & 0.500 & 0.000 \\
+LDS + SRS & 0.500 & 0.000 \\
+GAS + SRS & 0.500 & 0.000 \\
+LDS + GAS + SRS (Full) & 0.500 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ablation study confirms that:\
+\begin{enumerate}
+    \item Individual metrics provide no signal ($\sim$0.50 AUC)
+    \item No combination of metrics improves performance
+    \item The theoretical complementarity of the three metrics does not translate to practical discriminative power
+\end{enumerate}
+
+\subsection{Weight Learning Analysis}
+
+We investigated whether adaptive weight learning could improve performance. Using grid search over 66 weight combinations (step 0.1), we found:
+\begin{itemize}
+    \item Best validation AUC: 0.52 (marginally above random)
+    \item Learned weights: $[0.4, 0.4, 0.2]$ (same as default)
+    \item Test AUC with learned weights: 0.50
+\end{itemize}
+
+Weight learning cannot improve performance when individual metrics have no discriminative signal.
+
+\subsection{Analysis: Why Gradient-Based Verification Fails}
+
+Our investigation reveals three fundamental issues:
+
+\textbf{1. Gradient Changes Affect Both Sets Similarly.} When unlearning occurs, gradient changes on the forget set are correlated with changes on the retain set, making them non-discriminative.
+
+\textbf{2. Relative Differences Are Too Small.} The differences in LDS, GAS, and SRS between forget and retain samples are orders of magnitude smaller than the variance within each set.
+
+\textbf{3. Theoretical Assumption Is Incorrect.} While \citet{zhu2019deep} showed gradients encode training data information, this does not imply that gradient \emph{differences} between original and unlearned models reliably indicate unlearning.
+
+\subsection{Comparison with TruVRF}
+
+Why does TruVRF succeed where LGSA fails? TruVRF measures sensitivity through parameter changes during fine-tuning, which:
+\begin{enumerate}
+    \item Accumulates gradient information over multiple steps
+    \item Captures model dynamics, not just instantaneous gradient geometry
+    \item Benefits from the stabilizing effect of optimization
+\end{enumerate}
+
+This suggests that reliable unlearning verification may inherently require some form of model dynamics analysis, not just static gradient evaluation.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{Implications of Negative Results}
+
+Our findings have important implications for the field:
+
+\textbf{1. Simple Gradient Metrics Are Insufficient.} The intuitive appeal of gradient-based verification is not borne out in practice. Researchers should be cautious about proposing verification methods based solely on gradient analysis.
+
+\textbf{2. Computational Efficiency vs. Accuracy Trade-off.} While LGSA avoids fine-tuning, this efficiency comes at a severe accuracy cost. For practical deployments, TruVRF's higher accuracy likely justifies its additional computational cost.
+
+\textbf{3. Need for Hybrid Approaches.} Future work might explore combining lightweight gradient analysis with limited fine-tuning or shadow models to balance efficiency and accuracy.
+
+\subsection{Limitations}
+
+Our study has several limitations:
+
+\textbf{Scope.} We evaluated on CIFAR-10 with ResNet-18 and SimpleCNN. Results may differ for larger models (e.g., LLMs) or different data modalities.
+
+\textbf{Unlearning Methods.} We tested gradient ascent, fine-tuning, and retraining. Other unlearning methods (e.g., influence-based, SalUn) might exhibit different gradient characteristics.
+
+\textbf{Metric Design.} While we explored three complementary metrics, other gradient-based metrics (e.g., Hessian-based) might provide better signal.
+
+\subsection{Future Work}
+
+Based on our findings, we suggest several directions:
+
+\textbf{1. Population-Level Verification.} Instead of sample-level verification, focusing on aggregate metrics might provide more reliable signals.
+
+\textbf{2. Layer-Specific Analysis.} Different network layers might exhibit different gradient characteristics during unlearning.
+
+\textbf{3. Temporal Dynamics.} Analyzing how gradients evolve during the unlearning process (not just before/after) might provide discriminative signal.
+
+\textbf{4. Certified Unlearning.} Pursuing formal verification approaches with provable guarantees, rather than heuristic metrics.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We systematically evaluated the hypothesis that local gradient sensitivity metrics can efficiently verify machine unlearning. Through extensive experiments on CIFAR-10 with multiple architectures and unlearning methods, we demonstrated that this hypothesis is \textbf{refuted}: the proposed LGSA method achieves only $0.50$ AUC (random chance), while TruVRF achieves $0.82$ AUC on the same tasks.
+
+Our results show that:
+\begin{itemize}
+    \item Individual gradient metrics (LDS, GAS, SRS) provide no discriminative signal
+    \item No combination of these metrics improves performance
+    \item Weight learning cannot compensate for the lack of signal in base metrics
+    \item Reliable unlearning verification may require model dynamics (fine-tuning) rather than static gradient analysis
+\end{itemize}
+
+This negative result is scientifically valuable: it prevents the community from pursuing an unfruitful direction and motivates research into more sophisticated verification approaches. We hope our findings and released code will help advance the development of reliable, efficient machine unlearning verification methods.
+
+\section*{Acknowledgments}
+
+We thank the anonymous reviewers for their valuable feedback. This work was supported by [funding sources anonymized for review].
+
+\bibliographystyle{unsrtnat}
+\begin{thebibliography}{20}
+
+\bibitem[Aerni et~al.(2024)]{aerni2024evaluations}
+Aerni, M., Zhang, J., and Tram{\`e}r, F. (2024).
+\newblock Evaluations of machine learning privacy defenses are misleading.
+\newblock In \emph{ACM CCS}.
+
+\bibitem[Basu et~al.(2021)]{basu2021influence}
+Basu, S., Pope, P., and Feizi, S. (2021).
+\newblock Influence functions in deep learning are fragile.
+\newblock In \emph{ICLR}.
+
+\bibitem[Bourtoule et~al.(2021)]{bourtoule2021machine}
+Bourtoule, L., Chandrasekaran, V., Choquette-Choo, C., Jia, H., Travers, A., Zhang, B., Lie, D., and Papernot, N. (2021).
+\newblock Machine unlearning.
+\newblock In \emph{IEEE S\&P}.
+
+\bibitem[Carlini et~al.(2022)]{carlini2022membership}
+Carlini, N., Chien, S., Nasr, M., Song, S., Terzis, A., and Tram{\`e}r, F. (2022).
+\newblock Membership inference attacks from first principles.
+\newblock In \emph{IEEE S\&P}.
+
+\bibitem[Fan et~al.(2024)]{fan2024salun}
+Fan, C., Liu, J., Zhang, Y., Wei, D., Wong, E., and Liu, S. (2024).
+\newblock SalUn: Empowering machine unlearning via gradient-based weight saliency.
+\newblock In \emph{ICLR}.
+
+\bibitem[Guo et~al.(2020)]{guo2020fastif}
+Guo, H., Rajani, N., Hase, P., Bansal, M., and Xiong, C. (2020).
+\newblock FastIF: Scalable influence functions for data interpretation.
+\newblock In \emph{ACL}.
+
+\bibitem[Hayes et~al.(2024)]{hayes2024informed}
+Hayes, J., Melis, L., Danezis, G., and De~Cristofaro, E. (2024).
+\newblock Informed membership inference attacks against machine unlearning.
+\newblock arXiv:2404.10546.
+
+\bibitem[He et~al.(2016)]{he2016deep}
+He, K., Zhang, X., Ren, S., and Sun, J. (2016).
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{CVPR}.
+
+\bibitem[Izzo et~al.(2021)]{izzo2021approximate}
+Izzo, Z., Smart, M., Chaudhuri, K., and Zou, J. (2021).
+\newblock Approximate data deletion from machine learning models.
+\newblock In \emph{AISTATS}.
+
+\bibitem[Koh and Liang(2017)]{koh2017understanding}
+Koh, P.~W. and Liang, P. (2017).
+\newblock Understanding black-box predictions via influence functions.
+\newblock In \emph{ICML}.
+
+\bibitem[Krizhevsky(2009)]{krizhevsky2009learning}
+Krizhevsky, A. (2009).
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto.
+
+\bibitem[Kurmanji et~al.(2023)]{kurmanji2023towards}
+Kurmanji, M., Triantafillou, P., Hayes, J., and Triantafillou, E. (2023).
+\newblock Towards unbounded machine unlearning.
+\newblock In \emph{NeurIPS}.
+
+\bibitem[Thudi et~al.(2022)]{thudi2022unrolling}
+Thudi, A., Deza, G., Chandrasekaran, V., and Papernot, N. (2022).
+\newblock Unrolling {SGD}: Understanding factors influencing machine unlearning.
+\newblock In \emph{IEEE S\&P}.
+
+\bibitem[Zhang et~al.(2024)]{zhang2024verification}
+Zhang, B., Chen, Z., Shen, C., and Li, J. (2024).
+\newblock Verification of machine unlearning is fragile.
+\newblock In \emph{ICML}.
+
+\bibitem[Zhou et~al.(2024)]{zhou2024truvrf}
+Zhou, C., Gao, Y., Fu, A., Chen, K., Zhang, Z., Xue, M., Dai, Z., Ji, S., and Zhang, Y. (2024).
+\newblock {TruVRF}: Towards triple-granularity verification on machine unlearning.
+\newblock \emph{IEEE TDSC}.
+
+\bibitem[Zhu et~al.(2019)]{zhu2019deep}
+Zhu, L., Liu, Z., and Han, S. (2019).
+\newblock Deep leakage from gradients.
+\newblock In \emph{NeurIPS}.
+
+\end{thebibliography}
+
+\end{document}

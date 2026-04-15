@@ -1,0 +1,182 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup dependencies and project structure",
+    "description": "Install all required packages and create the project directory structure for experiments, results, and figures.",
+    "steps": {
+      "step1": "Install core dependencies: torch>=2.0, torchvision, timm>=0.9.12, numpy, scipy, scikit-learn, matplotlib, seaborn, pandas, tqdm, Pillow",
+      "step2": "Create directory structure: exp/ (code), exp/shared/ (utilities), exp/baselines/ (baseline implementations), exp/results/ (raw outputs), figures/ (paper figures)",
+      "step3": "Verify GPU availability with torch.cuda.is_available() and confirm A6000 with 48GB VRAM",
+      "step4": "Verify pretrained models load correctly from timm: deit_small_patch16_224, deit_base_patch16_224, vit_base_patch16_224. Confirm each model outputs attention maps via attn_drop or output_attentions. Test with a single random tensor."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare all datasets",
+    "description": "Prepare ImageNet-1K validation set as in-distribution data, plus OOD and corruption datasets. Use standard preprocessing (224x224 center crop, ImageNet normalization). We scope to 3 models (DeiT-S, DeiT-B, ViT-B/16) and 5 OOD datasets to fit the time budget.",
+    "steps": {
+      "step1": "Locate or download ImageNet-1K validation set (50,000 images). Use standard torchvision transforms: Resize(256), CenterCrop(224), ToTensor(), Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]). Split into calibration set (1,000 images, stratified random sample) and evaluation set (remaining 49,000).",
+      "step2": "Download OOD datasets - Far-OOD: (a) iNaturalist (10,000 images, from OpenOOD benchmark), (b) Textures/DTD (5,640 images), (c) OpenImage-O (17,632 images from OpenOOD). Near-OOD: (d) SSB-hard (subset of ImageNet-21K-P, ~49K images, from OpenOOD), (e) NINCO (5,879 images). Use the OpenOOD data repository or direct download links.",
+      "step3": "Download ImageNet-C (corruption benchmark, 19 corruption types x 5 severity levels) for calibration evaluation. If full download is too large, use severity levels 1, 3, 5 only for a subset of 5 corruption types (gaussian_noise, shot_noise, motion_blur, contrast, jpeg_compression) to save time.",
+      "step4": "Download ImageNet-R (30,000 rendition images, 200 ImageNet classes) for calibration under style shift.",
+      "step5": "Create PyTorch DataLoader wrappers for all datasets with batch_size=128 and num_workers=4. Verify each dataset loads correctly by checking shapes and a few sample images.",
+      "step6": "For each of the 3 random seeds (42, 123, 456), create a different calibration subset of 1,000 images from ImageNet-1K val, using stratified sampling (1 image per class). Save the index lists to exp/results/cal_indices_seed{seed}.npy for reproducibility."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement AEP feature extraction",
+    "description": "Implement the core Attention Entropy Profiling method: extract attention maps from pretrained ViTs and compute the 4 statistics (CLS entropy, average token entropy, concentration ratio, head agreement) at each layer to form the AEP vector.",
+    "steps": {
+      "step1": "Implement attention map extraction by registering forward hooks on each attention layer of the ViT. For timm models, hook into the 'attn_drop' or 'attn' modules of each transformer block to capture the raw attention weights A_{l,h} of shape (batch, heads, tokens, tokens) AFTER softmax but BEFORE dropout.",
+      "step2": "Implement the 4 attention statistics functions: (a) cls_entropy(A): entropy of A[0, :, 0, 1:] (CLS-to-patch attention), using -sum(p*log(p+eps)) with eps=1e-10; (b) avg_token_entropy(A): mean entropy over all query tokens; (c) concentration_ratio(A, k=5): fraction of attention on top-k tokens, averaged over queries; (d) head_agreement(A): mean pairwise cosine similarity of CLS attention vectors across heads at same layer.",
+      "step3": "Implement AEP profile construction: for each layer l, compute mean and std of cls_entropy across heads, mean of avg_token_entropy across heads, mean of concentration_ratio across heads, and head_agreement score. Concatenate into a vector of dimension 5*L (5*12=60 for 12-layer models).",
+      "step4": "Implement batch-level AEP extraction: given a DataLoader and model, extract AEP profiles for all images efficiently. Store as numpy array of shape (N, 5*L). Use torch.no_grad() and model.eval().",
+      "step5": "Implement in-distribution statistics computation: given AEP profiles of calibration set, compute mean vector mu and covariance matrix Sigma (with regularization: Sigma + 1e-4*I to ensure invertibility). Also compute class-conditional statistics (mu_c, Sigma_c) for the class-conditional variant.",
+      "step6": "Implement OOD scoring: Mahalanobis distance of test AEP from ID statistics. score(x) = (p(x) - mu)^T @ Sigma_inv @ (p(x) - mu). For class-conditional: score(x) = min_c Mahalanobis(p(x), mu_c, Sigma_c).",
+      "step7": "Implement input-adaptive calibration: T(x) = T0 + alpha * AEP_score(x), then apply temperature scaling with T(x) to softmax logits. Fit T0 and alpha on calibration set by grid search minimizing ECE (T0 in [0.5, 3.0] step 0.1, alpha in [0.0, 0.1] step 0.005).",
+      "step8": "Implement score fusion: fused_score(x) = beta * AEP_score(x) + (1-beta) * baseline_score(x), with beta tuned on calibration set (grid search over [0.0, 1.0] step 0.05) to maximize AUROC."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement OOD detection baselines",
+    "description": "Implement 4 OOD detection baselines covering simple to strong methods, all post-hoc and training-free. We select MSP (simplest), Energy Score (strong logit-based), ViM (strong feature-based), and KNN (strong non-parametric).",
+    "steps": {
+      "step1": "Implement MSP (Maximum Softmax Probability): score(x) = -max(softmax(logits)). Lower max softmax = more likely OOD. This is the simplest baseline.",
+      "step2": "Implement Energy Score: score(x) = -T*log(sum(exp(logits/T))) with T=1. Higher energy = more likely OOD. Use the logsumexp of logits directly.",
+      "step3": "Implement ViM (Virtual-logit Matching): (a) Extract penultimate-layer features for calibration set; (b) Compute principal subspace via PCA on ID features (retain dimensions explaining 95% variance); (c) For test input, compute the residual of its feature in the null space of ID principal subspace; (d) Score = alpha * ||residual||_2 + energy_score. Tune alpha on calibration set.",
+      "step4": "Implement KNN OOD detector: (a) Extract penultimate-layer features (normalized) for calibration set; (b) For test input, compute Euclidean distance to k-th nearest neighbor in calibration feature set (k=50); (c) Score = distance to k-th NN. Use scipy.spatial or faiss for efficient NN search.",
+      "step5": "For all baselines, extract features/logits in batch mode for all evaluation datasets and cache them as .npy files to avoid redundant forward passes. Since AEP also requires a forward pass, combine AEP extraction and baseline feature/logit extraction into a single forward pass per image."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement calibration baselines",
+    "description": "Implement calibration baselines: raw softmax (no calibration), global temperature scaling, and histogram binning.",
+    "steps": {
+      "step1": "Implement raw softmax baseline: use model logits directly with softmax, no post-hoc calibration.",
+      "step2": "Implement Temperature Scaling: fit a single scalar T on calibration set by minimizing NLL. Use scipy.optimize.minimize_scalar over T in [0.1, 10.0]. Apply calibrated temperature to all test logits.",
+      "step3": "Implement Histogram Binning: partition predicted probabilities into 15 equal-width bins on calibration set, compute empirical accuracy per bin, map test predictions to calibrated probabilities.",
+      "step4": "Implement calibration metrics: (a) ECE with 15 equal-width bins; (b) MCE (maximum calibration error across bins); (c) Brier Score = mean((predicted_prob - one_hot_label)^2). All metrics computed on top-1 predicted class."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run OOD detection evaluation",
+    "description": "Evaluate AEP and all baselines on OOD detection across 3 models x 5 OOD datasets x 3 seeds. This is the core experiment testing whether attention entropy profiles detect OOD inputs. Estimated time: ~2.5 hours (single forward pass per model extracts both AEP and baseline features).",
+    "steps": {
+      "step1": "For each model (deit_small_patch16_224, deit_base_patch16_224, vit_base_patch16_224) and each seed (42, 123, 456): load model, set calibration subset per seed, run forward pass on ImageNet-1K val (49K eval images) to extract AEP profiles, logits, and penultimate features. Cache all to disk.",
+      "step2": "For each model and each OOD dataset (iNaturalist, Textures, OpenImage-O, SSB-hard, NINCO): run forward pass to extract AEP profiles, logits, and penultimate features. Cache to disk. OOD data is the same across seeds (only calibration stats differ).",
+      "step3": "For each seed: compute ID reference statistics (mu, Sigma) from calibration AEP profiles. Compute AEP-Score (Mahalanobis) for all ID eval and OOD images.",
+      "step4": "For each seed: compute baseline scores (MSP, Energy, ViM, KNN) using cached logits/features.",
+      "step5": "For each seed: compute fusion scores by combining AEP with the best-performing baseline (determine best baseline per model). Tune beta on calibration set.",
+      "step6": "For each (model, seed, OOD dataset, method) combination: compute AUROC, AUPR-In, AUPR-Out, FPR@95%TPR. Save all results to exp/results/ood_results.json as a nested dictionary: {model: {seed: {ood_dataset: {method: {metric: value}}}}}.",
+      "step7": "Aggregate across seeds: compute mean and std of each metric. Save aggregated results to exp/results/ood_results_aggregated.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run calibration evaluation under distribution shift",
+    "description": "Evaluate AEP-based adaptive temperature vs. global temperature scaling on ImageNet-C (3 severity levels) and ImageNet-R. Estimated time: ~1.5 hours.",
+    "steps": {
+      "step1": "For each model: run forward pass on ImageNet-C (severity 1, 3, 5, for 5 corruption types: gaussian_noise, shot_noise, motion_blur, contrast, jpeg_compression) and ImageNet-R. Extract AEP profiles and logits. Cache to disk.",
+      "step2": "For each seed: fit calibration parameters on ID calibration set: (a) global temperature T_global by minimizing NLL; (b) AEP adaptive parameters T0, alpha by grid search minimizing ECE; (c) histogram binning mapping.",
+      "step3": "For each (model, seed, shifted_dataset): compute calibration metrics (ECE, MCE, Brier Score) for each method: raw softmax, temperature scaling, histogram binning, AEP-adaptive temperature.",
+      "step4": "Save results to exp/results/calibration_results.json. Aggregate across seeds (mean ± std) and save to exp/results/calibration_results_aggregated.json.",
+      "step5": "Also report classification accuracy on each shifted dataset to contextualize calibration results (a well-calibrated model with 10% accuracy is less useful than noting)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: AEP components",
+    "description": "Determine which of the 4 AEP components (CLS entropy, avg token entropy, concentration ratio, head agreement) contribute most to OOD detection. Remove each component individually and measure performance drop.",
+    "steps": {
+      "step1": "Define 5 AEP variants: (a) Full AEP (all 4 components, 5L dims), (b) No CLS entropy (remove cls entropy mean+std, 3L dims), (c) No avg token entropy (4L dims), (d) No concentration ratio (4L dims), (e) No head agreement (4L dims).",
+      "step2": "For each variant, recompute ID statistics and OOD scores on all 5 OOD datasets using the primary model (ViT-Base/16) and seed 42.",
+      "step3": "Compute AUROC for each variant x OOD dataset. Report the delta from full AEP.",
+      "step4": "Also test a 'CLS entropy only' variant (2L dims: mean + std of CLS entropy per layer) to see if this minimal signal alone is competitive.",
+      "step5": "Save results to exp/results/ablation_components.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Layer importance",
+    "description": "Determine which layers are most informative for OOD detection. Test using only early (1-4), middle (5-8), or late (9-12) layer statistics.",
+    "steps": {
+      "step1": "Define 4 layer-group variants: (a) All layers (1-12), (b) Early only (1-4), (c) Middle only (5-8), (d) Late only (9-12).",
+      "step2": "For each variant, slice the full AEP profiles to include only the relevant layers, recompute ID statistics, and compute OOD scores on all 5 OOD datasets using ViT-Base/16, seed 42.",
+      "step3": "Compute AUROC for each variant x OOD dataset. Report results to identify which layer group is most informative.",
+      "step4": "Additionally, compute per-layer discriminative power: for each individual layer l, compute the 2-sample t-test statistic (ID vs. OOD) for each of the 5 AEP features. This gives a heatmap of (layer x feature) discriminative power.",
+      "step5": "Save results to exp/results/ablation_layers.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: Calibration set size",
+    "description": "Test sensitivity of AEP to the number of calibration samples used to estimate ID statistics.",
+    "steps": {
+      "step1": "For ViT-Base/16, seed 42, vary calibration set size: 50, 100, 250, 500, 1000, 2500, 5000 images (all stratified subsets of ImageNet val).",
+      "step2": "For each size: compute ID statistics (mu, Sigma), then compute AEP-Score AUROC on all 5 OOD datasets.",
+      "step3": "Plot AUROC vs. calibration set size for each OOD dataset to show convergence behavior.",
+      "step4": "Also compute calibration ECE with adaptive temperature for each size on ImageNet-C severity 3.",
+      "step5": "Save results to exp/results/ablation_calsize.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Statistical significance and hypothesis testing",
+    "description": "Formally test whether attention entropy profiles differ between ID and OOD distributions, as stated in the hypothesis.",
+    "steps": {
+      "step1": "For ViT-Base/16: compute full AEP profiles for ID eval set (49K images) and each OOD dataset.",
+      "step2": "For each AEP dimension (60 total): run a two-sample t-test (ID vs. OOD) with Bonferroni correction for multiple comparisons. Report the number of dimensions with p < 0.01 (adjusted).",
+      "step3": "Compute multivariate Hotelling's T-squared test for the full AEP vector (ID vs. OOD) for each OOD dataset. Report test statistics and p-values.",
+      "step4": "Compute effect sizes (Cohen's d) for each AEP dimension to identify the features with largest ID/OOD separation.",
+      "step5": "Save results to exp/results/statistical_tests.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Computational overhead analysis",
+    "description": "Measure the wall-clock time overhead of AEP extraction compared to a standard forward pass.",
+    "steps": {
+      "step1": "For each model: measure forward pass time WITHOUT attention extraction (standard inference) over 1000 images, batch_size=64. Report mean and std per image.",
+      "step2": "For each model: measure forward pass time WITH AEP extraction (hooks registered) over same 1000 images, batch_size=64. Report mean and std per image.",
+      "step3": "Compute the overhead percentage: (time_with_AEP - time_without) / time_without * 100. Also measure the time for AEP statistic computation (entropy, concentration, etc.) separately.",
+      "step4": "Report memory overhead: peak GPU memory with and without attention storage.",
+      "step5": "Save results to exp/results/overhead_analysis.json."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures and tables for the paper. Save as PDF and PNG in figures/ directory.",
+    "steps": {
+      "step1": "Figure 1 (Method overview / Entropy profile visualization): Plot layerwise CLS attention entropy profiles (mean ± std across heads) for 3 example categories: ID (ImageNet), near-OOD (SSB-hard), far-OOD (iNaturalist). Show 5-10 sample profiles per category as thin lines with the mean as a thick line. Use ViT-Base/16. This visually demonstrates the core hypothesis.",
+      "step2": "Figure 2 (Main OOD detection results): Grouped bar chart showing AUROC for each method (MSP, Energy, ViM, KNN, AEP, AEP+Best) across 5 OOD datasets, averaged over 3 models. Include error bars from 3 seeds. Also create a LaTeX table with all metrics (AUROC, FPR@95) for all (model x dataset x method) combinations.",
+      "step3": "Figure 3 (Calibration results): Line plot showing ECE vs. corruption severity (1, 3, 5) for each calibration method (raw, temp scaling, histogram binning, AEP-adaptive). One subplot per model. Show that AEP-adaptive degrades less as severity increases.",
+      "step4": "Figure 4 (Ablation - component importance): Heatmap or grouped bar chart showing AUROC delta when each component is removed, across 5 OOD datasets.",
+      "step5": "Figure 5 (Ablation - layer importance): (a) Grouped bar chart of AUROC for early/mid/late/all layer groups. (b) Heatmap of per-layer discriminative power (t-statistic) for each AEP feature, one panel per OOD dataset.",
+      "step6": "Figure 6 (Calibration set size): Line plot of AUROC vs. calibration set size for each OOD dataset, showing that AEP converges with relatively few samples.",
+      "step7": "Figure 7 (Score distributions): Overlapping histograms of AEP-Score for ID vs. OOD (one panel per OOD dataset) showing separation. Also plot ROC curves comparing AEP to baselines.",
+      "step8": "Table 1 (Main OOD results): Full results table with AUROC and FPR@95 for all models x datasets x methods. Format: mean±std across seeds.",
+      "step9": "Table 2 (Calibration results): ECE, MCE, Brier Score for all models x shifted datasets x calibration methods.",
+      "step10": "Table 3 (Overhead analysis): Forward pass time and memory for each model with/without AEP.",
+      "step11": "Use matplotlib with seaborn styling. Font size 12 for labels, 10 for ticks. Save each figure as both PDF (vector) and PNG (300 DPI). Use a consistent color palette across all figures."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate success criteria and summarize findings",
+    "description": "Check each success criterion from idea.json against the experimental results and write a summary.",
+    "steps": {
+      "step1": "Check criterion 1: Does AEP-Score achieve AUROC within 2% of the best baseline on at least 2 of 5 OOD benchmarks? Compute for each model and report.",
+      "step2": "Check criterion 2: Does AEP + fusion outperform the best individual baseline (average AUROC improvement >= 0.5%)? Compute across all benchmarks.",
+      "step3": "Check criterion 3: Does AEP-adaptive calibration reduce ECE by >= 10% relative to temperature scaling on ImageNet-C severity 5? Compute for each model.",
+      "step4": "Check criterion 4: Do layerwise entropy profiles show statistically significant differences between ID and OOD (p < 0.01)? Check Hotelling's T-squared test results.",
+      "step5": "Also check refutation criteria: Is AEP-Score consistently >5% below the best baseline? Is there no improvement from fusion? Do entropy profiles not differ significantly?",
+      "step6": "Write a summary to exp/results/summary.md documenting: which criteria were met, key findings, unexpected results, limitations, and interpretation of results in context of the hypothesis.",
+      "step7": "Save all final aggregated results in a single exp/results/final_results.json containing: OOD detection results, calibration results, ablation results, statistical test results, and overhead analysis."
+    }
+  }
+]

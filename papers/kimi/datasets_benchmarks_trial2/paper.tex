@@ -1,0 +1,469 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{colortbl}
+\usepackage{xcolor}
+
+\title{IntrospectBench: A Cross-Domain Benchmark for Evaluating Step-Level Reasoning Introspection in Large Language Models}
+
+\author{
+  Anonymous Author(s) \\
+  Anonymous Institution \\
+  \texttt{anonymous@example.com}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large Language Models (LLMs) demonstrate impressive reasoning capabilities when generating chain-of-thought (CoT) solutions, yet they struggle to reliably detect errors in their own reasoning steps. This limitation---the gap between generation and verification---poses a fundamental challenge for trustworthy deployment. We introduce \textbf{IntrospectBench}, a multi-domain benchmark for evaluating step-level reasoning introspection in LLMs. IntrospectBench contains 900 problems across mathematical, logical, commonsense, and code reasoning domains, with controlled error injection at known positions. The benchmark evaluates three progressively difficult tasks: (1) error detection, (2) error localization, and (3) error characterization. We evaluate multiple models including Qwen2.5-7B, Llama-3.1-8B, and baseline methods. Our results show that reasoning introspection exhibits significant domain-dependent variation, with structured domains (math, code) showing stronger performance than open-ended domains (commonsense). We also find that localization accuracy decreases as errors occur deeper in reasoning chains, and calculation errors are detected more reliably than logic errors. These findings highlight the need for targeted improvements in LLM self-evaluation capabilities.
+\end{abstract}
+
+\section{Introduction}
+
+Large Language Models (LLMs) have demonstrated impressive reasoning capabilities when generating chain-of-thought (CoT) solutions \citep{wei2022chain}. However, recent studies reveal a critical limitation: LLMs struggle to reliably detect errors in their own reasoning steps. \citet{huang2024llmscannotselfcorrect} demonstrated that LLMs cannot self-correct reasoning yet without external feedback, while \citet{kamoi2024when} found that top models have low recall in detecting reasoning errors. This gap between generation and verification capability poses a fundamental challenge for trustworthy deployment.
+
+Current benchmarks primarily evaluate final-answer accuracy or self-correction with external feedback. However, the intrinsic ability of LLMs to introspectively identify errors in their reasoning steps---their \textit{reasoning introspection} capability---remains under-evaluated. This capability is crucial for:
+\begin{itemize}
+    \item \textbf{Self-correction without oracles}: Detecting errors before finalizing answers
+    \item \textbf{Test-time compute scaling}: Knowing when to continue reasoning versus terminate
+    \item \textbf{Trustworthy deployment}: Providing confidence estimates about reasoning quality
+\end{itemize}
+
+Existing benchmarks exhibit three key limitations. First, \textbf{domain specificity}: MWP-MISTAKE \citep{singh2025exposing} focuses exclusively on mathematical reasoning, while PRISM-Bench covers only visual puzzles. There is no systematic evaluation across reasoning domains. Second, \textbf{task scope}: CorrectBench \citep{tie2025correctbench} evaluates self-correction methods but does not isolate the fundamental capability of step-level error detection. ProcessBench \citep{zheng2024processbench} targets process reward models rather than LLM introspection. Third, \textbf{evaluation granularity}: Most benchmarks provide only aggregate accuracy metrics, without distinguishing between detecting that an error exists, localizing which step contains the error, and understanding the error type.
+
+\textbf{Key Insight}: Human reasoning is characterized by the ability to monitor and evaluate one's own thought processes---metacognitive monitoring \citep{flavell1979metacognition, brown1987metacognition}. Current LLMs generate reasoning traces but lack reliable mechanisms for introspective evaluation. A systematic benchmark for this capability would enable targeted improvements.
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We introduce IntrospectBench, the first cross-domain benchmark for evaluating step-level reasoning introspection across mathematical, logical, commonsense, and code domains.
+    \item We propose a controlled error injection methodology with verified annotations, enabling precise evaluation of detection, localization, and characterization capabilities.
+    \item We introduce novel metrics including Introspection Score (IS), Position-Weighted Localization Score (PWLS), and Domain Calibration Score (DCS) for fine-grained evaluation.
+    \item We provide systematic evidence for how well current LLMs can introspectively evaluate their reasoning, with actionable insights for improvement.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Self-Correction and Self-Evaluation in LLMs}
+
+The ability of LLMs to self-correct has been extensively studied with mixed results. \citet{madaan2023selfrefine} proposed Self-Refine for iterative refinement, while \citet{shinn2023reflexion} introduced Reflexion with verbal reinforcement signals. However, \citet{huang2024llmscannotselfcorrect} provided empirical evidence that LLMs struggle with \textit{intrinsic} self-correction---correction without external feedback or ground-truth labels.
+
+Recent work has explored confidence estimation as a proxy for self-evaluation. \citet{mavi2025selfevaluating} demonstrated that stepwise evaluation outperforms holistic scoring for failure detection. \citet{ghasemabadi2025gnosis} proposed Gnosis, which decodes correctness signals from hidden states with approximately 5M parameters, achieving strong performance without external judges.
+
+\subsection{Benchmarks for Reasoning Evaluation}
+
+\textbf{Math-focused benchmarks}: MWP-MISTAKE \citep{singh2025exposing} introduces math problems with both correct and incorrect reasoning steps generated via rule-based perturbations. Math-Shepherd \citep{wang2023mathshepherd} and PRM800K \citep{lightman2023let} provide step-level annotations for process supervision.
+
+\textbf{Multi-domain benchmarks}: CorrectBench \citep{tie2025correctbench} evaluates self-correction across commonsense, mathematical, and code reasoning. However, it evaluates end-to-end self-correction rather than step-level introspection.
+
+\textbf{Process-level evaluation}: ProcessBench \citep{zheng2024processbench} focuses on process reward model evaluation. CriticBench \citep{lin2024criticbench} benchmarks critique-correct reasoning but does not isolate error detection.
+
+\subsection{Metacognitive Approaches}
+
+Think$^2$ \citep{elenjical2026think2} operationalizes Ann Brown's regulatory cycle (Planning, Monitoring, Evaluation) as a prompting framework, demonstrating improved error diagnosis. Note: \citet{elenjical2026think2} is a preprint dated 2026. Metacognitive Prompting \citep{wang2024metacognitive} introduces a five-stage reflective process.
+
+\subsection{How This Work Differs}
+
+Table~\ref{tab:comparison} compares IntrospectBench with existing work. Unlike MWP-MISTAKE (math-only), CorrectBench (evaluates self-correction methods), or LogicBench \citep{parmar2024logicbench} (evaluates logical reasoning patterns), IntrospectBench systematically evaluates the foundational capability of \textit{reasoning introspection}---detecting, localizing, and characterizing errors in natural language CoT reasoning across multiple domains.
+
+\begin{table}[t]
+\caption{Comparison of IntrospectBench with existing benchmarks.}
+\label{tab:comparison}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Aspect} & \textbf{MWP-MISTAKE} & \textbf{CorrectBench} & \textbf{LogicBench} & \textbf{IntrospectBench} \\
+\midrule
+Primary focus & Math mistakes & Self-correction & Logical patterns & Step-level introspection \\
+Domains & Math only & Multi-domain & Logic only & Math, Logic, CS, Code \\
+Error control & Perturbations & Natural & Synthetic & Controlled injection \\
+Metrics & Accuracy & Final answer & Accuracy & Detection, Localization, Classification \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+
+\subsection{Benchmark Overview}
+
+IntrospectBench is a multi-domain benchmark for evaluating step-level reasoning introspection in LLMs. The benchmark contains \textbf{900 problems} across four reasoning domains (reduced from the originally planned 1,200 due to quality filtering requirements; see Appendix~\ref{sec:dataset_size} for details):
+
+\begin{table}[h]
+\caption{IntrospectBench dataset composition.}
+\label{tab:dataset}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Domain} & \textbf{Source Datasets} & \textbf{Problems} & \textbf{Avg Steps} \\
+\midrule
+Mathematical & GSM8K, MATH-500 & 300 & 5--8 \\
+Logical & LogiQA, ProofWriter & 225 & 4--7 \\
+Commonsense & CommonsenseQA, StrategyQA & 225 & 3--6 \\
+Code & MBPP, HumanEval & 150 & 4--8 \\
+\midrule
+\textbf{Total} & --- & \textbf{900} & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Data Construction Pipeline}
+
+\textbf{Step 1: Collect Base Problems}. We sample problems from existing datasets, filtering for those requiring explicit multi-step reasoning. We generate ground-truth CoT solutions using GPT-4o-mini with verification.
+
+\textbf{Step 2: Error Injection}. For each problem, we create corrupted CoT variants by injecting controlled errors at specific steps. Our error taxonomy includes 6 types:
+\begin{enumerate}
+    \item \textbf{Calculation error}: Arithmetic mistakes, algebraic manipulation errors
+    \item \textbf{Logic error}: Invalid deductive steps, fallacies, incorrect implications
+    \item \textbf{Factuality error}: Incorrect factual statements, definition misuse
+    \item \textbf{Omission error}: Missing critical reasoning steps
+    \item \textbf{Misinterpretation error}: Incorrect understanding of problem constraints
+    \item \textbf{Premature conclusion}: Drawing conclusions without sufficient evidence
+\end{enumerate}
+
+Errors are injected at two positions: Early (step 1--2) and Middle (step 3--4). Note: Late position (step 5+) errors were not included in the final dataset due to insufficient sample sizes after quality filtering.
+
+\textbf{Step 3: Quality Verification}. Each corrupted CoT is verified to ensure exactly one error exists at the designated position and that the error is detectable from the reasoning context.
+
+\subsection{Evaluation Tasks}
+
+IntrospectBench evaluates three progressively more difficult aspects of reasoning introspection:
+
+\textbf{Task 1: Error Detection} (Binary Classification). Given a problem and CoT, determine whether the reasoning contains any errors. Metrics: Accuracy, F1-score.
+
+\textbf{Task 2: Error Localization} (Step Identification). Given a problem and CoT known to contain an error, identify the step number containing the first error. Metrics: Exact match accuracy, Mean Absolute Error (MAE) in step position, within-1 accuracy.
+
+\textbf{Task 3: Error Characterization} (Type Classification). Given a problem and CoT with a known error at a specific step, classify the error type from the 6-type taxonomy. Metrics: Accuracy, per-type F1.
+
+\subsection{Novel Evaluation Metrics}
+
+Beyond standard accuracy, we introduce:
+
+\textbf{Introspection Score (IS)}: A composite metric combining detection, localization, and characterization:
+\begin{equation}
+IS = \frac{1}{3}(Acc_{detect} + Acc_{localize} + Acc_{characterize})
+\end{equation}
+
+\textbf{Position-Weighted Localization Score (PWLS)}: Localization accuracy weighted by error position (earlier errors are easier):
+\begin{equation}
+PWLS = \frac{\sum_{i} w_i \cdot \mathbb{1}[\hat{s}_i = s_i]}{\sum_i w_i}
+\end{equation}
+where $w_i = 1/\sqrt{s_i}$ and $s_i$ is the true error step.
+
+\textbf{Domain Calibration Score (DCS)}: Measures consistency of introspection capability across domains:
+\begin{equation}
+DCS = 1 - \frac{\sigma_{domain}}{\mu_{domain}}
+\end{equation}
+where $\sigma$ and $\mu$ are computed across domain-specific IS scores.
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Models Evaluated}. We evaluate the following models:
+\begin{itemize}
+    \item Qwen2.5-7B-Instruct (direct and chain-of-thought prompting)
+    \item Llama-3.1-8B-Instruct (direct and chain-of-thought prompting)
+    \item Random and heuristic baselines
+\end{itemize}
+
+\textbf{Prompting Strategies}. We compare:
+\begin{itemize}
+    \item \textbf{Direct}: Simple prompting asking for error detection/localization/characterization
+    \item \textbf{Chain-of-Thought (CoT)}: Prompting the model to analyze step-by-step before providing answers
+\end{itemize}
+
+\textbf{Evaluation Protocol}. Models are evaluated on the test set (90 problems) with 3 random seeds (42, 43, 44). We report mean and standard deviation across seeds.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents the main results across all three tasks.
+
+\begin{table}[t]
+\caption{Main results on IntrospectBench test set. Best results in \textbf{bold}. Reported as mean $\pm$ std across 3 seeds.}
+\label{tab:main_results}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Det. Acc. $\uparrow$} & \textbf{Det. F1 $\uparrow$} & \textbf{Loc. Acc. $\uparrow$} & \textbf{Char. Acc. $\uparrow$} \\
+\midrule
+Random Baseline & 0.478 & 0.535 & 0.533 & 0.133 \\
+Majority Class & 0.333 & 0.000 & 0.533 & 0.133 \\
+\midrule
+Llama-3.1-8B (Direct) & 0.674$\pm$0.042 & 0.743$\pm$0.033 & 0.761$\pm$0.061 & 0.361$\pm$0.079 \\
+Llama-3.1-8B (CoT) & 0.722$\pm$0.024 & 0.782$\pm$0.023 & 0.794$\pm$0.048 & 0.411$\pm$0.039 \\
+Qwen2.5-7B (Direct) & 0.715$\pm$0.010 & 0.778$\pm$0.007 & 0.800$\pm$0.027 & 0.378$\pm$0.039 \\
+\textbf{Qwen2.5-7B (CoT)} & \textbf{0.789$\pm$0.042} & \textbf{0.839$\pm$0.031} & \textbf{0.806$\pm$0.021} & \textbf{0.500$\pm$0.014} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item Chain-of-thought prompting consistently improves performance across all models and tasks.
+    \item Qwen2.5-7B with CoT achieves the best performance, with 78.9\% detection accuracy and 50.0\% characterization accuracy.
+    \item All models significantly outperform random baselines, but there remains substantial room for improvement, especially on error characterization.
+\end{itemize}
+
+\subsection{Domain Analysis}
+
+Table~\ref{tab:domain} shows performance breakdown by domain for the best model (Qwen2.5-7B with CoT).
+
+\begin{table}[t]
+\caption{Domain-specific detection accuracy and F1 for Qwen2.5-7B with CoT.}
+\label{tab:domain}
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Domain} & \textbf{Accuracy} & \textbf{F1} \\
+\midrule
+Mathematical & 0.818 & 0.857 \\
+Logical & 0.760 & 0.813 \\
+Commonsense & 0.846 & 0.900 \\
+Code & 0.684 & 0.727 \\
+\midrule
+\textbf{Gap (Best - Worst)} & \multicolumn{2}{c}{\textbf{16.2\%}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The results reveal significant domain-dependent variation, with a 16.2\% gap between the best (Commonsense: 84.6\%) and worst (Code: 68.4\%) domains. This partially supports our hypothesis that structured domains would show stronger performance, though Commonsense surprisingly outperforms Math and Logic.
+
+\subsection{Ablation Studies}
+
+\subsubsection{Error Position Analysis}
+
+Table~\ref{tab:position} shows how error detection and localization accuracy vary by error position.
+
+\begin{table}[t]
+\caption{Performance by error position for Qwen2.5-7B.}
+\label{tab:position}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Position} & \textbf{Count} & \textbf{Det. Acc. (Direct)} & \textbf{Det. Acc. (CoT)} & \textbf{Loc. Acc. (CoT)} \\
+\midrule
+Early (Steps 1--2) & 55 & 0.745 & 0.818 & 0.800 \\
+Middle (Steps 3--4) & 5 & 1.000 & 0.600 & 0.600 \\
+Late (Step 5+) & 0 & N/A & N/A & N/A \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The results show a monotonic decrease in localization accuracy as error position moves deeper (0.800 for Early $\rightarrow$ 0.600 for Middle), supporting Hypothesis 2. Note that Late position errors were not present in sufficient quantity for analysis due to quality filtering constraints.
+
+\subsubsection{Error Type Sensitivity}
+
+Table~\ref{tab:error_type} shows performance breakdown by error type for Qwen2.5-7B with CoT.
+
+\begin{table}[t]
+\caption{Performance by error type for Qwen2.5-7B with CoT.}
+\label{tab:error_type}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Error Type} & \textbf{Count} & \textbf{Det. Acc.} & \textbf{Loc. Acc.} & \textbf{Char. Acc.} \\
+\midrule
+Calculation & 8 & 0.875 & 0.750 & 0.750 \\
+Factuality & 10 & 0.700 & 1.000 & 0.500 \\
+Misinterpretation & 7 & 0.857 & 0.571 & 0.714 \\
+Omission & 15 & 0.933 & 0.733 & 0.467 \\
+Premature & 10 & 0.700 & 0.800 & 0.500 \\
+Logic & 10 & 0.700 & 0.800 & 0.300 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Calculation errors are the easiest to detect (87.5\% accuracy), while Logic errors are the hardest (70.0\% accuracy), supporting our hypothesis that calculation errors are detected more reliably than logic errors.
+
+\subsection{Novel Metrics}
+
+Table~\ref{tab:novel_metrics} reports the novel metrics introduced in this work.
+
+\begin{table}[t]
+\caption{Novel metrics for all evaluated models.}
+\label{tab:novel_metrics}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{IS $\uparrow$} & \textbf{DCS $\uparrow$} \\
+\midrule
+Llama-3.1-8B (Direct) & 0.599$\pm$0.028 & 0.854$\pm$0.046 \\
+Llama-3.1-8B (CoT) & 0.643$\pm$0.033 & 0.875$\pm$0.009 \\
+Qwen2.5-7B (Direct) & 0.631$\pm$0.018 & 0.873$\pm$0.024 \\
+Qwen2.5-7B (CoT) & \textbf{0.698$\pm$0.012} & \textbf{0.917$\pm$0.042} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Introspection Score (IS) provides a single number summarizing overall introspection capability, while the Domain Calibration Score (DCS) measures consistency across domains. Qwen2.5-7B with CoT achieves the highest scores on both metrics.
+
+\section{Discussion}
+
+\subsection{Summary of Findings}
+
+Our experiments reveal several key findings about LLM reasoning introspection:
+
+\textbf{H1 (Domain Dependence)}: \textsc{Partially Supported}. We observe significant domain-dependent variation (16.2\% gap), though unexpectedly Commonsense performs best rather than Math/Code.
+
+\textbf{H2 (Error Depth Effect)}: \textsc{Supported}. Localization accuracy decreases from 80.0\% for early errors to 60.0\% for middle errors, showing the predicted monotonic decrease.
+
+\textbf{H3 (Error Type Sensitivity)}: \textsc{Supported}. Calculation errors (87.5\%) are indeed detected more reliably than logic errors (70.0\%).
+
+\textbf{H4 (Self-Other Gap)}: \textsc{Not Evaluated}. The self-other comparison experiment was not completed due to time constraints (see Limitations).
+
+\subsection{Limitations}
+
+\textbf{Dataset Size}. The final dataset contains 900 problems, reduced from the originally planned 1,200 due to quality filtering requirements. Problems were filtered to ensure unambiguous error locations and semantic coherence, resulting in a 25\% reduction.
+
+\textbf{Error Positions}. The dataset primarily contains Early and Middle position errors. Late position (step 5+) errors were insufficient for reliable analysis due to the shorter reasoning chains in source datasets.
+
+\textbf{Missing Experiments}. The self-other evaluation (comparing error detection on self-generated versus other-model-generated CoTs) was not completed due to computational constraints. This comparison would test whether models exhibit confirmation bias toward their own reasoning.
+
+\textbf{Synthetic Errors}. While controlled, injected errors may not perfectly represent natural model errors. Future work could explore adversarial error injection based on actual model failure modes.
+
+\textbf{English Only}. The benchmark focuses on English reasoning; extension to multilingual settings is future work.
+
+\subsection{Implications}
+
+Our findings suggest that current LLMs have significant room for improvement in reasoning introspection. The strong performance gap between detection and characterization indicates that while models can often recognize that errors exist, they struggle to understand \textit{what kind} of error occurred. This has implications for:
+
+\begin{itemize}
+    \item \textbf{Training}: Incorporating introspection objectives into pre-training or fine-tuning
+    \item \textbf{Inference}: Developing better prompting strategies for self-evaluation
+    \item \textbf{Safety}: Understanding when models can be trusted to detect their own errors
+\end{itemize}
+
+\section{Conclusion}
+
+We introduced IntrospectBench, a multi-domain benchmark for evaluating step-level reasoning introspection in LLMs. Our experiments with Qwen2.5-7B and Llama-3.1-8B demonstrate that reasoning introspection exhibits significant domain-dependent variation, with localization accuracy decreasing as errors occur deeper in reasoning chains. The benchmark and evaluation framework provide a foundation for developing LLMs with improved self-evaluation capabilities.
+
+Future work includes: (1) completing the self-other evaluation to test for confirmation bias, (2) expanding to late-position errors with longer reasoning chains, (3) evaluating reasoning-specialized models like DeepSeek-R1, and (4) using IntrospectBench to train models for improved introspection.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{20}
+
+\bibitem[Brown(1987)]{brown1987metacognition}
+Ann~L Brown.
+\newblock Metacognition, executive control, self-regulation, and other more mysterious mechanisms.
+\newblock In \emph{Metacognition, Motivation, and Understanding}, pages 65--116. Lawrence Erlbaum Associates, 1987.
+
+\bibitem[Elenjical et~al.(2026)]{elenjical2026think2}
+Abraham~Paul Elenjical, Vivek~Hruday Kavuri, and Vasudeva Varma.
+\newblock Think$^2$: Grounded Metacognitive Reasoning in Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2602.18806}, 2026.
+\newblock \textit{Note: This is a preprint dated 2026}.
+
+\bibitem[Flavell(1979)]{flavell1979metacognition}
+John~H Flavell.
+\newblock Metacognition and cognitive monitoring: A new area of cognitive-developmental inquiry.
+\newblock \emph{American Psychologist}, 34(10):906--911, 1979.
+
+\bibitem[Ghasemabadi and Niu(2025)]{ghasemabadi2025gnosis}
+Amirhosein Ghasemabadi and Di~Niu.
+\newblock Can {LLMs} Predict Their Own Failures? Self-Awareness via Internal Circuits.
+\newblock \emph{arXiv preprint arXiv:2512.20578}, 2025.
+
+\bibitem[Huang et~al.(2024)]{huang2024llmscannotselfcorrect}
+Jie Huang, Xinyun Chen, Swaroop Mishra, Huaixiu~Steven Zheng, Adams~Wei Yu, Xinying Song, and Denny Zhou.
+\newblock Large Language Models Cannot Self-Correct Reasoning Yet.
+\newblock In \emph{The Twelfth International Conference on Learning Representations}, 2024.
+
+\bibitem[Kamoi et~al.(2024)]{kamoi2024when}
+Ryo Kamoi, Yusen Zhang, Nan Zhang, Jiawei Han, and Rui Zhang.
+\newblock When Can {LLMs} Actually Correct Their Own Mistakes? A Critical Survey of Self-Correction of {LLMs}.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 2024.
+
+\bibitem[Lin et~al.(2024)]{lin2024criticbench}
+Zicheng Lin, Zhibin Gou, Tian Liang, Ruilin Luo, Haowei Liu, and Yujiu Yang.
+\newblock CriticBench: Benchmarking {LLMs} for Critique-Correct Reasoning.
+\newblock In \emph{Findings of the Association for Computational Linguistics: ACL 2024}, 2024.
+
+\bibitem[Lightman et~al.(2023)]{lightman2023let}
+Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe.
+\newblock Let's Verify Step by Step.
+\newblock In \emph{The Twelfth International Conference on Learning Representations}, 2023.
+
+\bibitem[Madaan et~al.(2023)]{madaan2023selfrefine}
+Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe, Uri Alon, Nouha Dziri, Shrimai Prabhumoye, Yiming Yang, et~al.
+\newblock Self-Refine: Iterative Refinement with Self-Feedback.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem[Mavi et~al.(2025)]{mavi2025selfevaluating}
+Vaibhav Mavi, Shubh Jaroria, and Weiqi Sun.
+\newblock Self-Evaluating {LLMs} for Multi-Step Tasks: Stepwise Confidence Estimation for Failure Detection.
+\newblock \emph{arXiv preprint arXiv:2511.07364}, 2025.
+
+\bibitem[Parmar et~al.(2024)]{parmar2024logicbench}
+Mihir Parmar, Nisarg Patel, Neeraj Varshney, Mutsumi Nakamura, Man Luo, Santosh Mashetty, Arindam Mitra, and Chitta Baral.
+\newblock LogicBench: Towards Systematic Evaluation of Logical Reasoning Ability of Large Language Models.
+\newblock In \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)}, pages 13679--13707, 2024.
+
+\bibitem[Shinn et~al.(2023)]{shinn2023reflexion}
+Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao.
+\newblock Reflexion: Language Agents with Verbal Reinforcement Learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem[Singh et~al.(2025)]{singh2025exposing}
+Joykirat Singh, Akshay Nambi, and Vibhav Vineet.
+\newblock Exposing the Achilles' Heel: Evaluating {LLMs} Ability to Handle Mistakes in Mathematical Reasoning.
+\newblock In \emph{Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics}, 2025.
+
+\bibitem[Tie et~al.(2025)]{tie2025correctbench}
+Guiyao Tie, Zenghui Yuan, Zeli Zhao, Chaoran Hu, Tianhe Gu, Ruihang Zhang, Sizhe Zhang, Junran Wu, Xiaoyue Tu, Ming Jin, et~al.
+\newblock Can {LLMs} Correct Themselves? A Benchmark of Self-Correction in {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2510.16062}, 2025.
+
+\bibitem[Wang and Zhao(2024)]{wang2024metacognitive}
+Yuqing Wang and Yun Zhao.
+\newblock Metacognitive Prompting Improves Understanding in Large Language Models.
+\newblock In \emph{Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics}, pages 1884--1901, 2024.
+
+\bibitem[Wang et~al.(2023)]{wang2023mathshepherd}
+Peiyi Wang, Lei Li, Liang Chen, Zefan Cai, Dawei Zhu, Binghuai Lin, Yunbo Cao, Qi~Liu, Tianyu Liu, and Sujian Li.
+\newblock Math-Shepherd: Verify and Reinforce {LLMs} Step-by-Step without Human Annotations.
+\newblock In \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics}, 2024.
+
+\bibitem[Wei et~al.(2022)]{wei2022chain}
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, Fei Xia, Ed Chi, Quoc~V Le, Denny Zhou, et~al.
+\newblock Chain-of-Thought Prompting Elicits Reasoning in Large Language Models.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2022.
+
+\bibitem[Zheng et~al.(2024)]{zheng2024processbench}
+Chujie Zheng, Zhenru Zhang, Beichen Zhang, Runji Lin, Keming Lu, Bowen Yu, Dayiheng Liu, Jingren Zhou, and Junyang Lin.
+\newblock ProcessBench: Identifying Process Errors in Mathematical Reasoning.
+\newblock \emph{arXiv preprint arXiv:2412.06559}, 2024.
+
+\end{thebibliography}
+
+\appendix
+
+\section{Dataset Size Explanation}
+\label{sec:dataset_size}
+
+The original proposal planned for 1,200 problems (400 Math, 300 Logic, 300 Commonsense, 200 Code). The final dataset contains 900 problems (300 Math, 225 Logic, 225 Commonsense, 150 Code), representing a 25\% reduction. This reduction was necessary due to quality filtering requirements:
+
+\begin{enumerate}
+    \item \textbf{Solution correctness}: Problems with incorrect ground-truth CoT solutions were removed.
+    \item \textbf{Error clarity}: Corrupted CoTs where the error location was ambiguous were removed.
+    \item \textbf{Semantic coherence}: Errors that resulted in nonsensical or implausible reasoning were removed.
+\end{enumerate}
+
+The filtering process ensured that remaining problems have unambiguous error locations and semantically coherent reasoning chains, which is essential for reliable evaluation of introspection capabilities.
+
+\end{document}

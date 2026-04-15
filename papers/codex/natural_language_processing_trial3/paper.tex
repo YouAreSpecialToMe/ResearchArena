@@ -1,0 +1,307 @@
+\documentclass{article}
+
+\usepackage{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+
+\title{LateBind: Controlled Additive-Value Tests for Timing-Aware Shortcut Mitigation in Text Classification}
+
+\author{Anonymous Authors}
+
+\newcommand{\LateBind}{\textsc{LateBind}}
+\newcommand{\risk}{r(x)}
+\newcommand{\ent}{H}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Shortcut mitigation methods for text classification often combine several intuitions at once, which makes it difficult to tell whether a timing-aware intervention actually adds value beyond simpler invariance or reweighting baselines. We study this question through \LateBind, a compact synthesis of three ingredients already present in the literature: train-only shortcut-risk estimation, masked-input invariance, and a risk-gated entropy floor applied to auxiliary classifiers at intermediate layers. The paper's contribution is therefore diagnostic rather than algorithmic. We evaluate on an actor-correlated IMDb benchmark with validation-clean model selection, stress-test splits, paired bootstrap intervals, and a smaller CivilComments check. The main result is negative for the additive-value hypothesis: on the primary IMDb OOD split, full \LateBind{} reaches 0.8003 mean accuracy, below ERM at 0.8055 and MASKER at 0.8048, with a paired bootstrap difference of $-0.0052$ against ERM and a 95\% interval of $[-0.0105, -0.0004]$. At the same time, the full model improves the actor-conflict and actor-scrubbed stress tests relative to ERM, reaching 0.9063 and 0.9272 accuracy. On CivilComments, \LateBind{} roughly matches ERM in overall F1 (0.5921 versus 0.5927) while reducing expected calibration error from 0.0252 to 0.0094, but it does not improve worst-group F1. Taken together, the results suggest that timing-aware regularization is not additive on the primary benchmark under a controlled protocol, and that its strongest empirical effect in this setup is calibration rather than robustness.
+\end{abstract}
+
+\section{Introduction}
+
+Text classifiers often succeed by exploiting shortcuts: actor names, identity terms, or dataset-specific lexical artifacts that correlate with the label in training but fail when the correlation flips or disappears. Recent audits argue that robustness gains in NLP are frequently overstated when evaluation protocols are loose or when several interventions are bundled together without a clear additive-value test \citep{gupta-etal-2024-whispers,calderon-etal-2024-measuring}. At the same time, recent mechanistic analysis suggests that shortcut-driven decisions can emerge early inside text classifiers, motivating timing-aware interventions rather than only token-level masking or sample reweighting \citep{eshuijs-etal-2025-short-circuiting}.
+
+This paper asks a narrower question than ``can we design a new debiasing method?'': does explicitly delaying intermediate confidence add anything once a strong masking-based invariance term is already present? We study that question with \LateBind, a controlled empirical synthesis of three known ingredients: a train-only shortcut-risk score, a masked-input consistency loss in the style of MASKER \citep{moon-etal-2021-masker}, and a risk-gated predictive-entropy floor applied to auxiliary heads at intermediate layers.
+
+The central result is negative on the primary benchmark. Under validation-only selection, full \LateBind{} does not improve IMDb OOD accuracy over ERM, MASKER, or JTT. In fact, the strongest single-seed IMDb ablation removes the timing term entirely and reaches 0.8172 OOD accuracy, compared with 0.8003 for full \LateBind. This makes the paper primarily an evaluation study: the timing-aware term does not show additive value where the hypothesis most needed it to.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate shortcut mitigation here as a controlled additive-value test, not as a novelty claim about a new robustness paradigm.
+  \item We implement a compact timing-aware composite objective and evaluate it with validation-clean model selection, five IMDb test splits, and targeted ablations that isolate the timing term, masking term, and risk estimator.
+  \item We report a negative main finding on IMDb: full \LateBind{} reaches 0.8003 mean OOD accuracy, below ERM at 0.8055 and the no-late-term ablation at 0.8172, even though it improves some stress-test splits.
+  \item We show that on CivilComments the method mainly improves calibration, reducing ECE from 0.0252 to 0.0094 while leaving overall F1 effectively unchanged and slightly reducing worst-group F1.
+\end{itemize}
+
+Section~\ref{sec:related} reviews prior work, Section~\ref{sec:method} describes the implemented objective and protocol, Section~\ref{sec:experiments} reports the results, and Section~\ref{sec:discussion} discusses what the negative IMDb result implies.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Spurious correlations in text classification.}
+Several papers treat shortcut robustness as a lexical or token-level problem rather than a generic domain-shift problem. \citet{wang-culotta-2020-identifying} identify spurious lexical correlations and use predicted spurious features to improve robustness, while \citet{wang-culotta-2021-robustness} and \citet{qian-etal-2021-counterfactual} use counterfactual generation to weaken shortcut dependence. These works intervene on \emph{what} tokens the model sees or how training data are rewritten. Our setup differs in both scope and claim: it keeps the data fixed, uses masking only as a controlled comparator inside the objective, and asks whether timing-aware confidence control adds anything beyond that stronger token-level baseline.
+
+\paragraph{Masking and token-focused mitigation.}
+MASKER is the closest lightweight baseline because it regularizes predictions under keyword masking \citep{moon-etal-2021-masker}. Neighborhood-based detection methods likewise try to separate genuine and spurious cues without group labels \citep{chew-etal-2024-understanding}. We build directly on this line by making masking a component of the full objective itself. That design choice is important for positioning: unlike papers that compare a new method only to plain ERM, our additive-value question is only interesting if the timing term is tested after masking already has a chance to explain the gain.
+
+\paragraph{Entropy-based debiasing and generic group-robust training.}
+Entropy regularization is not new in NLP robustness. EAR uses attention entropy to reduce unintended bias without curated term lists \citep{attanasio-etal-2022-entropy}. JTT, by contrast, is a generic error-focused reweighting baseline that often strengthens worst-group performance without group labels \citep{pmlr-v139-liu21f}. Our study is intentionally positioned between these lines: we use predictive entropy rather than attention entropy, gate it by a train-only risk score, and test it against both masking-based invariance and a strong non-token-specific reweighting method. That positioning matters because a negative result against JTT and MASKER is scientifically different from a negative result against ERM alone.
+
+\paragraph{Evaluation skepticism and broader shortcut analyses.}
+Recent robustness audits show that apparent gains can shrink once evaluation protocols are tightened \citep{gupta-etal-2024-whispers,calderon-etal-2024-measuring}. Broader analyses of shortcut learning reinforce the need to separate benchmark-specific wins from genuine progress \citep{zhou-etal-2024-navigating}. Those critiques motivate our emphasis on validation-only selection, fixed baselines, per-seed reporting, and explicit ablations. Unlike causal shortcut approaches that argue for richer intervention structure \citep{zhou-zhu-2025-fighting} or mechanistic studies that try to localize shortcut circuits \citep{eshuijs-etal-2025-short-circuiting}, we make a deliberately narrower claim about empirical additivity under a strict protocol.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Positioning}
+
+\LateBind{} is not presented as a new debiasing paradigm. It is a compact empirical synthesis meant to test whether a timing-aware term contributes anything beyond masking consistency. The implementation uses a \texttt{roberta-base} backbone with auxiliary linear classifiers at layers 4 and 8, exactly as instantiated in the training code.
+
+\subsection{Model}
+
+Let $f_\theta$ denote the backbone encoder and let $g_L$ be the final classifier applied to the layer-$L$ representation of the first token. We also attach auxiliary classifiers $g_4$ and $g_8$ to the first-token hidden states at layers 4 and 8. For an input $x$ with label $y$, the model returns final logits $z_L$ and auxiliary logits $z_4, z_8$.
+
+The implementation also adds an auxiliary cross-entropy term over the intermediate heads:
+\begin{equation}
+\mathcal{L}_{\mathrm{aux}} = \frac{1}{2}\sum_{\ell \in \{4,8\}} \mathrm{CE}(g_\ell(x), y).
+\end{equation}
+
+\subsection{Train-only shortcut risk}
+
+The main risk score is computed from train-only information. A lexical artifact list is mined from the training split using smoothed label-conditioned log-odds, keeping the top 100 tokens per label for IMDb and the top 50 per label for CivilComments. Separately, an ERM model caches gradient-times-input token attributions and retains the top five scored tokens per example.
+
+For the default hybrid mode used by \LateBind, ERM, MASKER, JTT, and the main CivilComments run, the dataset loader computes
+\begin{align}
+\risk = \max\!\Bigg(&\frac{|\text{top-5 attribution tokens} \cap \text{lexicon}|}{\max(1,\min(5, |\text{top-5 attribution tokens}|))}, \nonumber\\
+&0.5 \cdot \min\!\left(1,\frac{|\text{example tokens} \cap \text{lexicon}|}{5}\right)\Bigg),
+\end{align}
+clipped to $[0,1]$. This differs slightly from the initial proposal: the released implementation uses the maximum of an attribution-overlap score and a downweighted lexicon-overlap score. Ablations replace this hybrid score with lexicon-only, attribution-only, or random-token variants.
+
+\subsection{Masked-input invariance}
+
+For each example, the loader constructs a masked version $x_{\mathrm{mask}}$ by replacing up to two selected tokens with the tokenizer mask token. In the default mode, the selected tokens are the first two lexicon hits among the top attributed tokens, falling back to lexicon hits from the example text when no attributed hits are available. The actor-only masking ablation instead masks only the injected actor token.
+
+Given final predictions $p_L(y \mid x)$ and $p_L(y \mid x_{\mathrm{mask}})$, the invariance term is
+\begin{equation}
+\mathcal{L}_{\mathrm{inv}} = \mathbb{E}\left[\risk \cdot \mathrm{KL}\!\left(p_L(y \mid x)\; \Vert\; p_L(y \mid x_{\mathrm{mask}})\right)\right].
+\end{equation}
+
+\subsection{Risk-gated late commitment}
+
+Let $\ent(p) = -\sum_c p_c \log p_c$ be predictive entropy. For each auxiliary head, \LateBind{} penalizes intermediate predictions whose entropy falls below a target floor $m$. The code uses $m = 0.75 \log 2 = 0.5199$.
+\begin{equation}
+\mathcal{L}_{\mathrm{late}} = \mathbb{E}\left[\risk \cdot \sum_{\ell \in \{4,8\}} \max\left(0, m - \ent(p_\ell(y \mid x))\right)\right].
+\end{equation}
+The ungated baseline keeps the same architecture but sets $\risk = 1$ for every example.
+
+\subsection{Full training objective}
+
+The final objective is
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\mathrm{ce}} + \lambda_{\mathrm{late}}\mathcal{L}_{\mathrm{late}} + \lambda_{\mathrm{inv}}\mathcal{L}_{\mathrm{inv}} + \mathcal{L}_{\mathrm{aux}},
+\end{equation}
+with $\lambda_{\mathrm{late}} = 0.08$ and $\lambda_{\mathrm{inv}} = 0.5$. All neural runs use batch size 16, gradient accumulation 2, learning rate $2\times 10^{-5}$, weight decay 0.01, warmup ratio 0.06, and at most 2 epochs. JTT uses a 1-epoch first stage and a misclassified-example weight of 5.0.
+
+\subsection{Selection protocol}
+
+IMDb checkpoints are selected by validation OOD accuracy. Any non-ERM IMDb checkpoint whose validation ID accuracy falls more than 0.01 below the corresponding ERM seed is rejected by assigning a selection score of $-1$. CivilComments uses validation worst-group F1. This protocol matters because the paper's main claim concerns additive value under validation-clean model selection, not test-tuned best cases.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets and splits.}
+The primary benchmark is an actor-correlated IMDb construction built from the Hugging Face IMDb dataset. The code creates \texttt{train\_core}, \texttt{val\_id}, and \texttt{val\_ood} from the original training split and five evaluation splits from held-out data: \texttt{test\_id}, \texttt{test\_ood}, \texttt{test\_no\_shortcut}, \texttt{test\_actor\_conflict}, and \texttt{test\_actor\_scrubbed}. Positive-associated actors are Tom Hanks, Meryl Streep, Scarlett Johansson, Leonardo DiCaprio, and Matt Damon; negative-associated actors are Steven Seagal, Jean-Claude Van Damme, Sylvester Stallone, Chuck Norris, and Dolph Lundgren. Correlated splits inject actors with 0.9 label correlation, while OOD splits flip that correlation to 0.1.
+
+The natural-setting check uses CivilComments from WILDS with stratified train and validation subsamples and the official test split. Identity indicators are used only for evaluation.
+
+The directories \texttt{exp/imdb\_smoke\_test}, \texttt{exp/imdb\_erm\_smoke\_test}, and \texttt{exp/imdb\_latebind\_smoke\_test} are excluded from all paper tables and claims. They are pilot smoke runs with \texttt{smoke\_steps}=100 that were used only to verify the repaired pipeline before launching the full experiment matrix.
+
+\paragraph{Baselines.}
+IMDb compares TF-IDF logistic regression, ERM, MASKER, JTT, and full \LateBind. The ablation suite keeps a single seed and tests no-late-term, no-invariance, ungated entropy, lexicon-only risk, attribution-only risk, random-token risk, and actor-only masking. CivilComments compares ERM, JTT, and \LateBind.
+
+\paragraph{Metrics.}
+IMDb reports accuracy on the five test splits together with OOD ECE, OOD Brier score, runtime, and peak GPU memory. For the three-seed methods we report mean $\pm$ population standard deviation computed directly from the per-seed values stored in each experiment directory. We also analyze layerwise early-commitment rate (ECR), entropy profiles, masking sensitivity, and paired bootstrap confidence intervals for key method differences. CivilComments reports overall F1, macro F1, worst-group F1, ECE, runtime, and peak memory.
+
+\subsection{Main results on IMDb}
+
+Table~\ref{tab:imdb-main} shows the central finding. On the primary metric, mean \texttt{test\_ood} accuracy, full \LateBind{} reaches 0.8003 $\pm$ 0.0073, below ERM at 0.8055 $\pm$ 0.0030 and essentially tied with MASKER at 0.8048 $\pm$ 0.0094. JTT performs worst at 0.7891 $\pm$ 0.0070. OOD calibration also does not rescue the main result: \LateBind{} has mean OOD Brier 0.3390 $\pm$ 0.0102, worse than MASKER at 0.3268 $\pm$ 0.0242 and ERM at 0.3328 $\pm$ 0.0061. The main hypothesis therefore fails on the benchmark where additive value was supposed to appear.
+
+At the same time, full \LateBind{} does improve two evaluation-only stress tests relative to ERM: 0.9063 versus 0.8925 on \texttt{test\_actor\_conflict} and 0.9272 versus 0.9147 on \texttt{test\_actor\_scrubbed}. Paired bootstrap over the shared test examples gives a mean accuracy difference of $+0.0137$ on \texttt{test\_actor\_conflict} with 95\% interval $[0.0077, 0.0193]$, and $+0.0126$ on \texttt{test\_actor\_scrubbed} with interval $[0.0069, 0.0183]$. These gains are real, but they are not enough to rescue the main additive-value claim because the predeclared selection target and primary result are both OOD accuracy under correlation shift.
+
+\begin{table*}[t]
+\caption{IMDb results. Performance statistics report mean $\pm$ population standard deviation recomputed from the per-seed values in the corresponding \texttt{exp/*/results.json} files, while runtime and peak-memory values are averaged from the per-seed \texttt{runtime.json} and \texttt{memory.json} artifacts. Single-seed ablations use seed 13. Boldface marks the best value within the multi-seed comparison block.}
+\label{tab:imdb-main}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+Method & Test ID $\uparrow$ & Test OOD $\uparrow$ & No Shortcut $\uparrow$ & Conflict $\uparrow$ & Scrubbed $\uparrow$ & OOD ECE $\downarrow$ & OOD Brier $\downarrow$ & Runtime (min) $\downarrow$ & Peak GB $\downarrow$ \\
+\midrule
+TF-IDF LR & 0.9428 & 0.6500 & 0.8792 & 0.8980 & 0.8852 & 0.1020 & 0.4377 & 0.2986 & -- \\
+ERM & 0.9616 $\pm$ 0.0018 & 0.8055 $\pm$ 0.0030 & 0.9145 $\pm$ 0.0067 & 0.8925 $\pm$ 0.0231 & 0.9147 $\pm$ 0.0081 & 0.1394 $\pm$ 0.0028 & 0.3328 $\pm$ 0.0061 & \textbf{5.8519} & \textbf{5.2324} \\
+MASKER & 0.9629 $\pm$ 0.0015 & 0.8048 $\pm$ 0.0094 & 0.9176 $\pm$ 0.0035 & \textbf{0.9073 $\pm$ 0.0108} & \textbf{0.9276 $\pm$ 0.0013} & \textbf{0.1325 $\pm$ 0.0198} & \textbf{0.3268 $\pm$ 0.0242} & 8.6911 & 7.9160 \\
+JTT & 0.9621 $\pm$ 0.0024 & 0.7891 $\pm$ 0.0070 & 0.9076 $\pm$ 0.0091 & 0.8977 $\pm$ 0.0212 & 0.9072 $\pm$ 0.0117 & 0.1464 $\pm$ 0.0022 & 0.3497 $\pm$ 0.0084 & 8.1386 & 6.8834 \\
+\LateBind{} & \textbf{0.9647 $\pm$ 0.0010} & 0.8003 $\pm$ 0.0073 & \textbf{0.9187 $\pm$ 0.0043} & 0.9063 $\pm$ 0.0125 & 0.9272 $\pm$ 0.0048 & 0.1449 $\pm$ 0.0065 & 0.3390 $\pm$ 0.0102 & 8.7446 & 7.9160 \\
+\midrule
+No late term & 0.9608 & 0.8172 & 0.9128 & 0.9084 & 0.9260 & 0.1095 & 0.2963 & 8.7953 & 7.9160 \\
+No invariance & 0.9640 & 0.8056 & 0.9236 & 0.9176 & 0.9272 & 0.1447 & 0.3390 & 5.8576 & 7.9160 \\
+Ungated entropy & 0.9632 & 0.8080 & 0.9120 & 0.9156 & 0.9260 & 0.1114 & 0.3049 & 8.7306 & 7.9160 \\
+Lexicon-only risk & 0.9624 & 0.8036 & 0.9204 & 0.9148 & 0.9292 & 0.1463 & 0.3360 & 8.7181 & 7.9160 \\
+Attribution-only risk & 0.9656 & 0.8160 & 0.9124 & 0.9000 & 0.9156 & 0.1294 & 0.3071 & 8.8001 & 7.9160 \\
+Random-token risk & 0.9648 & 0.8144 & 0.9164 & 0.8944 & 0.9168 & 0.1376 & 0.3239 & 8.8256 & 7.9160 \\
+Actor-only masking & 0.9656 & 0.8080 & 0.9152 & 0.9260 & 0.9276 & 0.1403 & 0.3272 & 8.7033 & 7.9160 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\subsection{Validation-clean selection and additivity}
+
+The validation numbers already foreshadow the negative result. Mean IMDb \texttt{val\_ood} accuracy is 0.8057 for ERM, 0.8059 for MASKER, 0.8013 for JTT, and 0.8024 for full \LateBind. The best single-seed ablation is again the no-late-term variant at 0.8152. This matters because it shows the failure is not a hidden test-only artifact: the timing term is not helping under the selection rule actually used to choose checkpoints.
+
+The ablations further isolate the issue. Removing the timing term improves OOD accuracy from 0.8003 to 0.8172, while removing the invariance term leaves OOD accuracy roughly unchanged at 0.8056. An ungated entropy floor reaches 0.8080, also above the full model. These results suggest that the masking and risk-estimation components explain most of the robust behavior seen in this implementation, whereas the risk-gated late-commitment term is not additive and may be mildly harmful on the primary split. Paired bootstrap reinforces that conclusion: the mean \texttt{test\_ood} difference is $-0.0052$ for \LateBind{} versus ERM with a 95\% interval of $[-0.0105, -0.0004]$, and $-0.0046$ versus MASKER with interval $[-0.0095, 0.0004]$.
+
+Figure~\ref{fig:ablation} summarizes this pattern visually, and Figure~\ref{fig:imdb-bars} shows that the full model's benefits are concentrated in the conflict and scrubbed stress tests rather than in the main OOD target.
+
+\subsection{Proxy validation and uncertainty}
+
+The original plan treated intermediate predictive entropy as a proxy that had to be justified quantitatively rather than by a qualitative scatter alone. The quantitative picture is mixed. On the held-out IMDb \texttt{val\_ood} split, \LateBind{} layer-8 entropy has only a weak Spearman correlation with mask-confidence drop ($\rho = 0.062$), but it attains AUROC 0.937 for predicting post-mask label flips. However, this is not unique to the timing-aware model: the ungated entropy control still reaches AUROC 0.922, which weakens any claim that the proxy is specifically capturing selective late commitment rather than generic uncertainty. The rank-based relation is similarly weak on \texttt{val\_id} ($\rho = -0.022$ at layer 8), so the figure should be read as a low-base-rate diagnostic, not as strong mechanistic evidence.
+
+Risk-conditioned masking statistics show that the train-only risk score is meaningful even when the timing interpretation is weak. On \texttt{val\_ood}, high-risk examples under \LateBind{} have mean mask-confidence drop 0.0204 versus 0.0025 for low-risk examples, and label-flip rates 0.0382 versus 0.0054. Yet ERM already exhibits a much larger high-versus-low separation (0.0988 versus 0.0121 mask drop; 0.1547 versus 0.0225 flip rate), suggesting that the composite objective compresses sensitivity rather than uncovering a new proxy signal. A residual logistic regression on the combined injected validation splits, controlling for split indicator and final confidence, reduces log loss by only 0.0026 when layer-8 entropy is added. The planned actor-presence control could not be estimated directly on these validation splits because every injected validation example contains an actor token. Overall, the proxy evidence is compatible with entropy carrying some information about masking sensitivity, but it is too weak and too non-specific to explain away the negative additive-value result.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/figure1_imdb_grouped_bars.png}
+\caption{IMDb grouped results across the five evaluation splits. Full \LateBind{} is competitive on ID and stronger on the conflict and scrubbed stress tests, but it does not improve the primary OOD split over ERM or MASKER.}
+\label{fig:imdb-bars}
+\end{figure*}
+
+\subsection{Layerwise diagnostics}
+
+The timing hypothesis predicts that risky examples should remain higher-entropy at intermediate layers under the full method without simply flattening confidence everywhere. The entropy diagnostics only weakly support that story. On IMDb \texttt{test\_ood}, full \LateBind{} has layer-8 high-risk entropy 0.1486 and low-risk entropy 0.1528, while ERM shows 0.1506 and 0.1537. That difference is too small to support a strong mechanistic interpretation. By contrast, the ungated entropy control pushes entropy up broadly, with \texttt{test\_ood} layer-8 high-risk entropy 0.2597 and low-risk entropy 0.2327.
+
+Figure~\ref{fig:entropy} therefore matters mostly as a falsification aid: the full model does not show a large, selective entropy effect on the primary IMDb OOD split, and the strongest entropy shifts come from the ungated control rather than from the risk-gated timing term itself.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/figure2_layerwise_entropy.png}
+\caption{Layerwise entropy profiles for ERM, ungated entropy, and \LateBind. The ungated control produces the strongest global entropy increase, while \LateBind{} stays closer to ERM, consistent with a limited timing effect in this implementation.}
+\label{fig:entropy}
+\end{figure*}
+
+Figure~\ref{fig:proxy} provides the proxy-validation scatter generated by the pipeline. We keep its interpretation modest: the plot is useful for inspecting how entropy and masking sensitivity co-vary on validation data, but the aggregate IMDb results do not justify a stronger claim that this proxy translates into additive robustness gains.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.82\textwidth]{figures/figure3_proxy_validation.png}
+\caption{Validation proxy analysis for the \LateBind{} run. Quantitatively, layer-8 entropy reaches AUROC 0.937 for predicting post-mask label flips on \texttt{val\_ood}, but its Spearman correlation with mask-confidence drop is only 0.062 and the ungated entropy control still reaches AUROC 0.922, so the proxy signal is real but not specific enough to support a strong timing-based robustness claim by itself.}
+\label{fig:proxy}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.74\textwidth]{figures/figure4_ablation_heatmap.png}
+\caption{IMDb ablation heatmap from the experiment pipeline. The strongest OOD cell belongs to the no-late-term variant rather than to the full model, which is the key empirical reason the additive-value hypothesis is rejected.}
+\label{fig:ablation}
+\end{figure*}
+
+\subsection{CivilComments}
+
+Table~\ref{tab:civil} shows a different pattern on CivilComments. Full \LateBind{} approximately matches ERM in overall F1 and macro F1, but it does not improve worst-group F1: ERM reaches 0.5122, whereas \LateBind{} reaches 0.5049. JTT performs substantially worse in this budgeted single-seed setting. The clearest positive result is calibration, where \LateBind{} reduces ECE from 0.0252 to 0.0094.
+
+This means the auxiliary timing term may still alter confidence behavior usefully in a natural spurious-correlation setting, but the available evidence supports a calibration interpretation more than a robustness interpretation.
+
+\begin{table}[t]
+\caption{CivilComments test results. Best values are in bold.}
+\label{tab:civil}
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Method & Overall F1 $\uparrow$ & Worst-group F1 $\uparrow$ & Macro F1 $\uparrow$ & ECE $\downarrow$ & Runtime $\downarrow$ & Peak GB $\downarrow$ \\
+\midrule
+ERM & \textbf{0.5927} & \textbf{0.5122} & \textbf{0.7659} & 0.0252 & \textbf{9.0835} & \textbf{4.8164} \\
+JTT & 0.4717 & 0.3040 & 0.7129 & 0.0242 & 10.0848 & 6.3809 \\
+\LateBind{} & 0.5921 & 0.5049 & 0.7649 & \textbf{0.0094} & 10.3078 & 6.8789 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main conclusion is straightforward: in this implementation and under this protocol, the timing-aware term is not additive on the primary IMDb benchmark. The cleanest evidence is that the no-late-term ablation outperforms the full model on both validation OOD accuracy (0.8152 versus 0.8024) and test OOD accuracy (0.8172 versus 0.8003). If the late-commitment term were genuinely contributing on top of masking consistency, this reversal should not happen.
+
+Two narrower observations still matter. First, the full model is stronger than ERM on the actor-conflict and actor-scrubbed stress tests. Second, it improves CivilComments calibration substantially. These are useful signals, but they are not enough to justify a stronger claim about shortcut robustness. The simplest interpretation is that the composite objective changes confidence behavior and masked-input stability, but that the timing component itself is not the source of primary OOD gains.
+
+The paper has several limitations. We study a single backbone and only three IMDb seeds. The natural-setting check uses one CivilComments seed and a budgeted training regime, so the negative result there is suggestive rather than definitive. We also rely on a heuristic risk score derived from a train-only lexicon and ERM attributions. Finally, the diagnostic figures can test whether entropy behaves like a plausible proxy, but they do not establish a mechanistic causal account of shortcut formation.
+
+\section{Conclusion}
+
+This paper evaluated whether risk-gated intermediate-entropy regularization adds value beyond masking-based invariance and standard baselines for shortcut mitigation in text classification. The answer from our main benchmark is no: full \LateBind{} reaches 0.8003 mean IMDb OOD accuracy, below ERM at 0.8055 and below the no-late-term ablation at 0.8172. The masking component and related controls explain more of the observed robustness than the timing term does.
+
+At the same time, the experiments show why controlled additive-value tests are worth publishing even when the answer is negative. \LateBind{} improves some stress-test splits and substantially improves CivilComments calibration, but those gains do not translate into a convincing primary-robustness win. Future work should therefore treat timing-aware regularization less as an assumed robustness intervention and more as a diagnostic confidence-control mechanism whose benefits may depend on the benchmark and objective around it.
+
+\appendix
+\section{Reproducibility Appendix}
+
+\paragraph{Data and splits.}
+The IMDb pipeline uses the Hugging Face \texttt{imdb} dataset with fixed development splits from the original training partition: \texttt{train\_core}=20{,}000, \texttt{val\_id}=2{,}500, and \texttt{val\_ood}=2{,}500. Final reporting uses five held-out evaluation splits of 2{,}500 examples each: \texttt{test\_id}, \texttt{test\_ood}, \texttt{test\_no\_shortcut}, \texttt{test\_actor\_conflict}, and \texttt{test\_actor\_scrubbed}. Injected actor pools are fixed across all splits. CivilComments uses a stratified 12{,}000-example training subset, 1{,}500-example validation subset, and the official test split for a single final evaluation.
+
+\paragraph{Selection rules and seeds.}
+IMDb checkpoint selection uses \texttt{val\_ood} accuracy with a guardrail that rejects any non-ERM checkpoint more than 0.01 below the corresponding ERM seed on \texttt{val\_id}. CivilComments uses validation worst-group F1. The primary IMDb comparisons use seeds $\{13,21,42\}$ for ERM, MASKER, JTT, and \LateBind. All IMDb ablations and all CivilComments runs use seed 13 only. Table~\ref{tab:imdb-main} recomputes every three-seed mean and standard deviation directly from the per-seed values in \texttt{exp/imdb\_*/results.json}.
+
+\begin{table*}[t]
+\caption{Per-seed IMDb accuracies for the four three-seed methods. These are the exact seed-level records behind Table~\ref{tab:imdb-main}.}
+\label{tab:imdb-seeds}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccc}
+\toprule
+Method & Seed & Val OOD $\uparrow$ & Test ID $\uparrow$ & Test OOD $\uparrow$ & No Shortcut $\uparrow$ & Conflict / Scrubbed $\uparrow$ \\
+\midrule
+ERM & 13 & 0.8108 & 0.9636 & 0.8096 & 0.9236 & 0.9196 / 0.9252 \\
+ERM & 21 & 0.7992 & 0.9592 & 0.8028 & 0.9076 & 0.8632 / 0.9056 \\
+ERM & 42 & 0.8072 & 0.9620 & 0.8040 & 0.9124 & 0.8948 / 0.9132 \\
+\midrule
+MASKER & 13 & 0.8152 & 0.9608 & 0.8172 & 0.9128 & 0.9084 / 0.9260 \\
+MASKER & 21 & 0.7936 & 0.9644 & 0.7944 & 0.9188 & 0.8936 / 0.9276 \\
+MASKER & 42 & 0.8088 & 0.9636 & 0.8028 & 0.9212 & 0.9200 / 0.9292 \\
+\midrule
+JTT & 13 & 0.7980 & 0.9632 & 0.7824 & 0.9204 & 0.9008 / 0.9236 \\
+JTT & 21 & 0.7908 & 0.9644 & 0.7860 & 0.8996 & 0.8704 / 0.8976 \\
+JTT & 42 & 0.8152 & 0.9588 & 0.7988 & 0.9028 & 0.9220 / 0.9004 \\
+\midrule
+\LateBind{} & 13 & 0.8048 & 0.9656 & 0.8100 & 0.9228 & 0.9188 / 0.9336 \\
+\LateBind{} & 21 & 0.7984 & 0.9652 & 0.7924 & 0.9204 & 0.8892 / 0.9260 \\
+\LateBind{} & 42 & 0.8040 & 0.9632 & 0.7984 & 0.9128 & 0.9108 / 0.9220 \\
+\bottomrule
+\end{tabular}
+\vspace{0.5ex}}
+\end{table*}
+
+\paragraph{Implementation and hardware.}
+All neural runs use \texttt{roberta-base}, maximum length 256 on IMDb and 220 on CivilComments, batch size 16 with gradient accumulation 2, learning rate $2\times 10^{-5}$, weight decay 0.01, warmup ratio 0.06, and at most two epochs with early stopping patience 1. The environment record in \texttt{results/environment/environment.json} reports Python 3.12.7, PyTorch 2.10.0+cu128, CUDA 12.8, 4 CPU cores, and a single NVIDIA RTX A6000 with 50.9 GB memory. Mean training runtimes are 5.85 minutes for IMDb ERM, 8.69 for MASKER, 8.14 for JTT, 8.74 for \LateBind, 9.08 for CivilComments ERM, 10.08 for CivilComments JTT, and 10.31 for CivilComments \LateBind. Mean peak reserved GPU memory is 5.23 GB for IMDb ERM, 7.92 GB for IMDb MASKER and \LateBind, 6.88 GB for IMDb JTT, 4.82 GB for CivilComments ERM, 6.38 GB for CivilComments JTT, and 6.88 GB for CivilComments \LateBind.
+
+\paragraph{Per-seed and per-example records.}
+All aggregate metrics used in the paper are stored under the relevant \texttt{exp/*/results.json} files. Per-example predictions, masked predictions, entropy values, risk scores, and masking diagnostics are stored in \texttt{exp/*/seed\_*/predictions.csv}. Runtime and memory records live in the corresponding \texttt{runtime.json} and \texttt{memory.json} files, and the software environment snapshot is stored under \texttt{results/environment/}. The paired bootstrap intervals reported in the text resample test examples 1{,}000 times and compare seed-averaged per-example correctness or Brier contributions over the shared IMDb test sets.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

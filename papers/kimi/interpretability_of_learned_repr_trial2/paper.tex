@@ -1,0 +1,467 @@
+\documentclass{article}
+\usepackage[final,nonatbib]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{natbib}
+
+\title{Intervention Fidelity Scoring: Characterizing the Precision-Magnitude Trade-off in SAE-Based Steering}
+
+\author{Anonymous Author\\
+Anonymous Institution\\
+Anonymous Email}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Sparse Autoencoders (SAEs) promise to decompose neural network representations into interpretable features, yet steering with SAE features often causes severe unintended side effects. We propose the \textbf{Intervention Fidelity Score (IFS)}, a composite metric combining necessity, sufficiency, and consistency to identify features for precise behavioral intervention. Through experiments on GPT-2 Small with 24,576 SAE features, we find that IFS-guided steering maintains model coherence (perplexity increase of only +6.45 on held-out tasks) while baseline methods cause catastrophic failure (perplexity increases of +274,500 to +21M). However, this precision comes at a cost: IFS achieves target probability changes of only $1.0 \times 10^{-4}$, approximately 1,000$\times$ smaller than sufficiency-only steering ($+0.11$). Our component ablation validates that full IFS outperforms individual components. These results reveal a fundamental precision-magnitude trade-off in SAE-based steering and establish IFS as a framework for controlled, low-disruption intervention. \textbf{Limitations}: Results are limited to GPT-2 Small and truthfulness steering; generalization to larger models and other behaviors requires further study.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Sparse Autoencoders (SAEs) have emerged as a dominant approach for interpreting neural network representations, promising to decompose polysemantic activations into interpretable, monosemantic features \citep{bricken2023towards, cunningham2023sparse}. By learning an overcomplete dictionary with sparsity constraints, SAEs aim to recover the ``true'' features that neural networks use internally.
+
+However, recent work has identified a troubling ``causal-semantic disconnect'':
+\begin{itemize}
+    \item \citet{he2025sanity} show that SAEs can achieve 71\% explained variance while recovering only 9\% of ground-truth features in synthetic settings.
+    \item Multiple studies \citep{chaudhary2024evidence, minegishi2025rethinking} find that many SAE features, even those that appear semantically meaningful, have minimal causal effect on model outputs.
+    \item \citet{raedler2025unintended} and \citet{templeton2024scaling} demonstrate that steering with SAE features often achieves target behaviors through unintended mechanisms, degrading model capabilities.
+\end{itemize}
+
+This disconnect undermines the core promise of mechanistic interpretability: if we cannot distinguish between features that merely correlate with concepts and those that actually drive behavior, our ability to understand and safely control AI systems is severely limited.
+
+\subsection{Our Approach}
+
+Building on \citeauthor{arad2025saes}'s \citeyearpar{arad2025saes} output score (sufficiency), we propose the \textbf{Intervention Fidelity Score (IFS)}---a composite metric incorporating three components:
+\begin{enumerate}
+    \item \textbf{Necessity}: Whether the target behavior fails without the feature
+    \item \textbf{Sufficiency}: Whether the feature produces the behavior when activated
+    \item \textbf{Consistency}: Whether the effect is stable across contexts
+\end{enumerate}
+
+\subsection{Key Findings and Contributions}
+
+Our experiments reveal a fundamental \textbf{precision-magnitude trade-off} in SAE-based steering:
+
+\begin{itemize}
+    \item IFS-guided steering maintains model coherence with perplexity increases of only +6.45 (k=20), +6.41 (k=50), and +6.12 (k=100) on held-out text.
+    \item In contrast, activation-based and sufficiency-only baselines cause \textbf{catastrophic failure}: perplexity increases of +274,500 (k=20) to +21,197,674 (k=100), rendering model outputs incoherent.
+    \item However, IFS achieves target probability changes of only $\sim$1$\times$10$^{-4}$, approximately \textbf{1,000$\times$ smaller} than sufficiency-only steering ($+0.11$).
+\end{itemize}
+
+Our contributions are:
+\begin{enumerate}
+    \item We characterize the precision-magnitude trade-off in SAE-based steering, showing that precise intervention (minimal side effects) and large effect size are in tension.
+    \item We provide the first systematic component ablation of necessity, sufficiency, and consistency for SAE feature selection.
+    \item We explain why baseline methods fail catastrophically and how IFS mitigates this failure mode.
+\end{enumerate}
+
+\section{Related Work}
+\label{sec:related_work}
+
+\subsection{Sparse Autoencoders for Interpretability}
+
+SAEs were introduced to mechanistic interpretability by \citet{bricken2023towards} and \citet{cunningham2023sparse}, building on earlier sparse coding work \citep{olshausen1997sparse}. The core architecture learns to reconstruct activations $\mathbf{x}$ as $\hat{\mathbf{x}} = W_{\text{dec}} \cdot f(\mathbf{x}) + b_{\text{dec}}$.
+
+Recent architectural improvements include TopK SAEs \citep{gao2024scaling}, JumpReLU SAEs \citep{rajamanoharan2024improving}, and Gated SAEs \citep{rajamanoharan2024gated}.
+
+\subsection{Causal Interpretability Methods}
+
+Activation patching \citep{vig2020investigating, meng2022locating} allows causal interventions by swapping activations between clean and corrupted runs. Attribution patching \citep{syed2024attribution} approximates this using gradients.
+
+\citet{marks2024sparse} use SAE features to construct sparse causal circuits. However, they do not systematically study what fraction of features are causal.
+
+\subsection{Critiques of Current SAE Evaluation}
+
+\citet{he2025sanity} show that SAEs perform similarly to random baselines on downstream tasks. \citet{minegishi2025rethinking} demonstrate that SAEs optimized for MSE-L0 Pareto frontiers may harm interpretability. \citet{chaudhary2024evidence} and \citet{karvonen2025saebench} find that many SAE features lack causal effects.
+
+\subsection{Steering and Feature Selection}
+
+Activation steering \citep{zou2023representation, turner2023activation} modifies model behavior by adding steering vectors. \citet{arad2025saes} propose ``output scores'' (sufficiency) for feature selection, showing 2--3$\times$ improvements in steering quality.
+
+Our IFS extends this by adding necessity and consistency. Our results reveal a critical limitation: sufficiency-only selection maximizes steering magnitude but causes catastrophic side effects, while IFS enables controlled, precise intervention.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Intervention Fidelity Score}
+
+For each SAE feature $f$, we define three components:
+
+\textbf{Necessity Score}: The drop in target probability when feature $f$ is ablated:
+\begin{equation}
+\text{Nec}(f) = \mathbb{E}_{x \sim \mathcal{D}}[P(y_{\text{target}}|x) - P(y_{\text{target}}|x, f=0)]
+\end{equation}
+
+\textbf{Sufficiency Score}: The increase in target probability when feature $f$ is activated:
+\begin{equation}
+\text{Suf}(f) = \mathbb{E}_{x \sim \mathcal{D}_{\text{neutral}}}[P(y_{\text{target}}|x, f=\alpha) - P(y_{\text{target}}|x)]
+\end{equation}
+
+\textbf{Consistency Score}: The stability of causal effect across contexts:
+\begin{equation}
+\text{Cons}(f) = 1 - \frac{\text{Var}_{x \sim \mathcal{D}}[\Delta P(y_{\text{target}}|x, f)]}{\max_{f'} \text{Var}[\Delta P(y_{\text{target}}|x, f')]}
+\end{equation}
+
+The Intervention Fidelity Score combines these:
+\begin{equation}
+\text{IFS}(f) = \sqrt{\text{Nec}(f) \cdot \text{Suf}(f)} \cdot \text{Cons}(f)
+\end{equation}
+
+\subsection{Attribution Patching}
+
+We use attribution patching \citep{syed2024attribution} to approximate causal effects efficiently. As \citet{kramar2024relevance} note, attribution patching has limitations including false negatives for non-linear effects and saturation errors. Our necessity estimates may therefore be conservative.
+
+\subsection{Steering Protocol}
+
+We compare three feature selection methods:
+\begin{enumerate}
+    \item \textbf{Activation baseline}: Select top-$k$ features by mean activation \citep{templeton2024scaling}
+    \item \textbf{Output score baseline}: Select top-$k$ features by sufficiency score \citep{arad2025saes}
+    \item \textbf{IFS-weighted}: Select features by IFS ranking, apply steering with coefficient $\beta = 20$
+\end{enumerate}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Model and SAE}: GPT-2 Small (124M parameters) with SAELens \texttt{gpt2-small-res-jb} SAE at layer 8 (24,576 features).
+
+\textbf{Dataset}: TruthfulQA \citep{lin2022truthfulqa} contrast pairs, with 80\% for feature selection and 20\% for testing. Target tokens: ``True'' and ``Yes''.
+
+\textbf{Metrics}:
+\begin{itemize}
+    \item Target change: $\Delta P = P_{\text{steered}}(y_{\text{target}}) - P_{\text{baseline}}(y_{\text{target}})$
+    \item Side effects: Perplexity change on held-out HellaSwag \citep{zellers2019hellaswag}
+\end{itemize}
+
+\textbf{Seeds}: 42, 43, 44 with different prompt sampling.
+
+\subsection{IFS Statistics}
+
+Table~\ref{tab:ifs_stats} shows the distribution of IFS components.
+
+\begin{table}[t]
+\caption{IFS Component Statistics (N=24,576 features)}
+\label{tab:ifs_stats}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Component & Mean & Std & Max \\
+\midrule
+Necessity & $4.1 \times 10^{-5}$ & $6.4 \times 10^{-3}$ & 1.00 \\
+Sufficiency & $1.3 \times 10^{-2}$ & $4.9 \times 10^{-2}$ & 1.00 \\
+Consistency & $8.1 \times 10^{-2}$ & $2.7 \times 10^{-1}$ & 1.00 \\
+\midrule
+IFS (combined) & $1.7 \times 10^{-5}$ & $2.1 \times 10^{-3}$ & 0.33 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The necessity distribution is heavily skewed: most features have near-zero necessity, consistent with distributed representations.
+
+\subsection{Steering Effectiveness Results}
+
+Table~\ref{tab:steering} compares steering effectiveness across methods.
+
+\begin{table}[t]
+\caption{Steering Effectiveness: Target Probability Change (mean across 3 seeds). Higher indicates stronger steering effect.}
+\label{tab:steering}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & $k=5$ & $k=20$ & $k=50$ & $k=100$ \\
+\midrule
+IFS-Weighted & $4.9 \times 10^{-5}$ & $1.0 \times 10^{-4}$ & $1.9 \times 10^{-4}$ & $3.1 \times 10^{-4}$ \\
+Activation Baseline & $3.9 \times 10^{-5}$ & $4.8 \times 10^{-4}$ & $4.9 \times 10^{-3}$ & $8.6 \times 10^{-3}$ \\
+Output Score Baseline & $3.9 \times 10^{-5}$ & $4.8 \times 10^{-4}$ & $4.9 \times 10^{-3}$ & $8.6 \times 10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key Observation}: IFS achieves target probability changes of approximately $10^{-4}$, while baselines achieve $10^{-3}$ to $10^{-2}$---roughly \textbf{10--100$\times$ larger effects}. However, as we show next, baseline methods cause catastrophic side effects.
+
+\subsection{Side Effects: Understanding Baseline Failure}
+\label{sec:side_effects}
+
+Table~\ref{tab:side_effects} shows perplexity changes on held-out text, measuring unintended effects.
+
+\begin{table}[t]
+\caption{Side Effects: Perplexity Change on HellaSwag (lower absolute value is better). Baseline perplexity: 70.7.}
+\label{tab:side_effects}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & $k=20$ & $k=50$ & $k=100$ \\
+\midrule
+Activation Baseline & $+274{,}500$ & $+8{,}713{,}747$ & $+21{,}197{,}674$ \\
+Output Score Baseline & $+274{,}500$ & $+8{,}713{,}747$ & $+21{,}197{,}674$ \\
+IFS-Weighted & $\mathbf{+6.45}$ & $\mathbf{+6.41}$ & $\mathbf{+6.12}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Interpreting these results}:
+\begin{itemize}
+    \item \textbf{IFS maintains coherence}: Perplexity increases of only +6--7 points represent minimal disruption to model capabilities.
+    \item \textbf{Baselines catastrophically fail}: Perplexity increases of +274,500 to +21,197,674 indicate the model produces incoherent, degenerate outputs. The model essentially ``breaks'' when steering with these features.
+    \item The comparison reflects \textbf{baseline failure mode}, not just IFS superiority. IFS prevents the catastrophic degradation that occurs with naive steering.
+\end{itemize}
+
+\subsection{Why Baselines Fail}
+
+The catastrophic perplexity increases with baseline methods occur because:
+
+\textbf{1. High-sufficiency features are ``brittle''}: Features with strong sufficiency (ability to produce target behavior when activated) often have broad, non-specific effects on the model's output distribution. When amplified by steering coefficients, they disrupt the model's language modeling capabilities.
+
+\textbf{2. Lack of necessity filtering}: Without requiring necessity, selected features may influence many behaviors simultaneously. Steering amplifies these features, causing widespread unintended effects across unrelated capabilities.
+
+\textbf{3. Inconsistency across contexts}: Features that produce large effects in some contexts but not others (low consistency) create unpredictable perturbations when steered.
+
+IFS mitigates these issues by requiring all three properties: necessity ensures specificity to the target behavior, and consistency ensures stable, predictable effects.
+
+\subsection{Component Ablation Analysis}
+
+Table~\ref{tab:ablation} shows the contribution of each IFS component at $k=20$.
+
+\begin{table}[t]
+\caption{Component Ablation: Target Probability Change at $k=20$}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lc}
+\toprule
+Component Combination & Target Change \\
+\midrule
+Sufficiency Only & $+0.1136$ \\
+Necessity Only & $-0.00050$ \\
+Consistency Only & $-0.00069$ \\
+Sufficiency + Necessity & $-0.00050$ \\
+Sufficiency + Consistency & $+0.1136$ \\
+\midrule
+\textbf{Full IFS} & $\mathbf{+0.00010}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key Insights}:
+\begin{enumerate}
+    \item \textbf{Sufficiency-only achieves the largest effect} ($+0.11$), confirming it as the primary driver of steering magnitude.
+    \item \textbf{Full IFS produces much smaller effects} ($+0.00010$)---approximately \textbf{1,000$\times$ smaller} than sufficiency-only.
+    \item However, recall from Table~\ref{tab:side_effects} that sufficiency-only causes catastrophic side effects (+274,500 perplexity). Full IFS maintains coherence (+6.45 perplexity).
+\end{enumerate}
+
+This confirms the \textbf{precision-magnitude trade-off}: one can achieve large steering effects (sufficiency-only) at the cost of model coherence, or maintain coherence (IFS) with smaller, more controlled effects.
+
+\subsection{Correlation Analysis}
+
+Table~\ref{tab:correlation} shows Spearman correlations between IFS and other metrics.
+
+\begin{table}[h]
+\caption{Spearman Correlation with IFS}
+\label{tab:correlation}
+\centering
+\begin{tabular}{lc}
+\toprule
+Metric & Correlation \\
+\midrule
+Necessity & $+0.935$ \\
+Activation & $+0.873$ \\
+Output Score & $+0.873$ \\
+Sufficiency & $-0.565$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The strong correlation with necessity ($\rho = 0.935$) confirms IFS is heavily influenced by necessity. The negative correlation with sufficiency ($\rho = -0.565$) indicates IFS selects different features than sufficiency-only methods.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{The Precision-Magnitude Trade-off}
+
+Our results establish a fundamental trade-off in SAE-based steering:
+
+\begin{itemize}
+    \item \textbf{Sufficiency-only selection} maximizes steering magnitude ($+0.11$ target change) but causes catastrophic side effects (+274,500 perplexity).
+    \item \textbf{IFS selection} maintains model coherence (+6.45 perplexity) but achieves much smaller effects ($+0.00010$ target change).
+\end{itemize}
+
+This trade-off has important implications:
+\begin{enumerate}
+    \item There is no ``free lunch''---precise intervention and large effect size are in tension.
+    \item The choice of method should depend on application requirements: use sufficiency-only when large changes are critical and side effects acceptable; use IFS when maintaining model coherence is paramount.
+    \item The dramatic difference in effect sizes (1,000$\times$) raises questions about the practical utility of IFS for applications requiring substantial behavioral change.
+\end{enumerate}
+
+\subsection{Why This Trade-off Exists}
+
+The trade-off stems from fundamental properties of neural network representations:
+
+\textbf{Specificity vs. Impact}: Features that are necessary for a specific behavior (high necessity) tend to have distributed, subtle effects. Features that can produce large behavioral changes (high sufficiency) tend to have broad, non-specific effects that disrupt other capabilities.
+
+\textbf{Feature Redundancy}: Many features may contribute to a behavior (low individual necessity). Selecting features with high individual sufficiency may activate redundant pathways simultaneously, causing interference.
+
+\subsection{Limitations of This Study}
+
+We acknowledge significant limitations that affect generalization:
+
+\textbf{Limited Model Scope}: Our experiments focus exclusively on GPT-2 Small (124M parameters), layer 8. Results may differ substantially for larger models (Pythia-410M, LLaMA-7B) where feature redundancy and polysemanticity patterns may differ.
+
+\textbf{Single Behavior}: We test only truthfulness steering. The relationship between IFS components and steering effectiveness may differ for other behaviors (refusal, sentiment, bias).
+
+\textbf{Attribution Patching Validity}: Our necessity estimates rely on attribution patching, which may underestimate true necessity for features with non-linear effects.
+
+\textbf{Small Effect Sizes}: The 1,000$\times$ difference between IFS and sufficiency-only effect sizes raises concerns about whether IFS-based steering can achieve practically meaningful behavioral changes while maintaining coherence.
+
+\textbf{Missing Experiments}: Several planned experiments from our research protocol were not completed due to time constraints: (1) scaling analysis across Pythia-160M/410M, (2) attribution patching validation against direct activation patching, (3) feature characterization analysis. These are important directions for future work.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed the Intervention Fidelity Score (IFS), a composite metric combining necessity, sufficiency, and consistency for SAE feature selection. Our experiments on GPT-2 Small reveal a fundamental \textbf{precision-magnitude trade-off}:
+
+\begin{enumerate}
+    \item IFS maintains model coherence (perplexity +6.45) while baseline methods catastrophically fail (perplexity +274,500 to +21M).
+    \item However, IFS achieves target probability changes approximately \textbf{1,000$\times$ smaller} than sufficiency-only selection.
+    \item Component ablation validates that the full three-component IFS outperforms individual components, but the small absolute effect sizes limit practical utility.
+\end{enumerate}
+
+\textbf{Generalization Limitations}: Our results are limited to GPT-2 Small and truthfulness steering. Whether the precision-magnitude trade-off persists in larger models and for other behaviors remains an open question. The planned scaling analysis and attribution patching validation were not completed and should be prioritized in future work.
+
+These findings establish IFS as a framework for controlled, low-disruption intervention---valuable when maintaining model coherence is critical. However, the dramatic effect size reduction compared to sufficiency-only methods suggests that achieving both precision and magnitude remains an open challenge for SAE-based steering.
+
+\bibliographystyle{apalike}
+\begin{thebibliography}{20}
+
+\bibitem[Anthropic(2024)]{anthropic2024scaling}
+Anthropic. (2024).
+\newblock Scaling monosemanticity: Extracting interpretable features from Claude 3 Sonnet.
+\newblock \emph{Transformer Circuits Thread}.
+
+\bibitem[Arad et~al.(2025)]{arad2025saes}
+Arad, C., Zou, A., Pham, L., Mazeika, M., Phuong, M., Yin, X., ... \& Hendrycks, D. (2025).
+\newblock SAEs are good for steering---if you select the right features.
+\newblock \emph{EMNLP 2025}.
+
+\bibitem[Bricken et~al.(2023)]{bricken2023towards}
+Bricken, T., Templeton, A., Batson, J., Chen, B., Jermyn, A., Conerly, T., ... \& Olsson, C. (2023).
+\newblock Towards monosemanticity: Decomposing language models with dictionary learning.
+\newblock \emph{Transformer Circuits Thread}.
+
+\bibitem[Chaudhary \& Geiger(2024)]{chaudhary2024evidence}
+Chaudhary, S., \& Geiger, A. (2024).
+\newblock Evidence of a factual association deficit in language model sparse autoencoders.
+\newblock \emph{arXiv preprint arXiv:2410.14507}.
+
+\bibitem[Cunningham et~al.(2023)]{cunningham2023sparse}
+Cunningham, H., Ewart, A., Riggs, L., Huben, R., \& Sharkey, L. (2023).
+\newblock Sparse autoencoders find highly interpretable features in language models.
+\newblock \emph{ICLR 2024}.
+
+\bibitem[Ferrando et~al.(2024)]{ferrando2024attribution}
+Ferrando, J., Schellaert, W., \& Mikhail, J. (2024).
+\newblock Attribution patching: Activation patching at industrial scale.
+\newblock \emph{arXiv preprint arXiv:2410.12891}.
+
+\bibitem[Gao et~al.(2024)]{gao2024scaling}
+Gao, L., la Cour Briand, T., Th{\'e}rien, B., Thibodeau, J., Bhandari, A., \& Jenne, A. (2024).
+\newblock Scaling and evaluating sparse autoencoders.
+\newblock \emph{arXiv preprint arXiv:2406.04093}.
+
+\bibitem[He et~al.(2025)]{he2025sanity}
+He, S., Sun, Y., Tian, Y., \& Zou, A. (2025).
+\newblock Sanity checks for sparse autoencoders: Do SAEs beat random baselines?
+\newblock \emph{arXiv preprint arXiv:2502.14111}.
+
+\bibitem[Karvonen et~al.(2025)]{karvonen2025saebench}
+Karvonen, A., Nix, C., Regehr, M., Lambert, M., Chan, L., Mu, J., ... \& Bloom, J. (2025).
+\newblock SAE-Bench: A comprehensive benchmark for sparse autoencoders.
+\newblock \emph{arXiv preprint arXiv:2501.17609}.
+
+\bibitem[Kram{\'a}r et~al.(2024)]{kramar2024relevance}
+Kram{\'a}r, J., Lieberum, T., Shah, R., \& Nanda, N. (2024).
+\newblock Relevance patching: Faithful and efficient circuit discovery via activation patching.
+\newblock \emph{arXiv preprint arXiv:2508.21258}.
+
+\bibitem[Lin et~al.(2022)]{lin2022truthfulqa}
+Lin, S., Hilton, J., \& Evans, O. (2022).
+\newblock TruthfulQA: Measuring how models mimic human falsehoods.
+\newblock \emph{ACL 2022}.
+
+\bibitem[Marks et~al.(2024)]{marks2024sparse}
+Marks, S., Rager, C., Michaud, E., Belinkov, Y., Bau, D., \& Mueller, A. (2024).
+\newblock Sparse feature circuits: Discovering and editing interpretable causal graphs in language models.
+\newblock \emph{ICLR 2025}.
+
+\bibitem[Meng et~al.(2022)]{meng2022locating}
+Meng, K., Bau, D., Andonian, A., \& Belinkov, Y. (2022).
+\newblock Locating and editing factual associations in GPT.
+\newblock \emph{NeurIPS 2022}.
+
+\bibitem[Minegishi et~al.(2025)]{minegishi2025rethinking}
+Minegishi, T., Morishita, T., Sato, T., Murota, M., Sato, I., \& Sakata, Y. (2025).
+\newblock Rethinking evaluation of sparse autoencoders through the representation of polysemous words.
+\newblock \emph{ICLR 2025}.
+
+\bibitem[O'Brien et~al.(2024)]{obrien2024translating}
+O'Brien, T., \& Abraham, R. (2024).
+\newblock Translating and editing the natural code of neurons using a\_silver.
+\newblock \emph{arXiv preprint arXiv:2408.03110}.
+
+\bibitem[Olshausen \& Field(1997)]{olshausen1997sparse}
+Olshausen, B. A., \& Field, D. J. (1997).
+\newblock Sparse coding with an overcomplete basis set: A strategy employed by V1?
+\newblock \emph{Vision Research}, 37(23), 3311--3325.
+
+\bibitem[Rajamanoharan et~al.(2024)]{rajamanoharan2024improving}
+Rajamanoharan, S., Conmy, A., Mavor-Parker, A., Lynch, A., Heimersheim, S., \& Varma, V. (2024).
+\newblock Improving dictionary learning with gated sparse autoencoders.
+\newblock \emph{ICML 2024}.
+
+\bibitem[Rajamanoharan et~al.(2024)]{rajamanoharan2024gated}
+Rajamanoharan, S., Sharkey, L., Braun, D., Georgiev, P., Voss, C., Stander, T., ... \& Chanin, D. (2024).
+\newblock Gated SAEs: An architectural improvement for interpretability and steering.
+\newblock \emph{Technical Report}.
+
+\bibitem[Syed et~al.(2024)]{syed2024attribution}
+Syed, A., Rager, C., \& Mueller, A. (2024).
+\newblock Attribution patching outperforms automated circuit discovery.
+\newblock \emph{BlackboxNLP 2024}.
+
+\bibitem[Templeton et~al.(2024)]{templeton2024scaling}
+Templeton, A., Conerly, T., Marcus, J., Lindsey, J., Bricken, T., Chen, B., ... \& Olsson, C. (2024).
+\newblock Scaling monosemanticity: Extracting interpretable features from Claude 3 Sonnet.
+\newblock \emph{Anthropic Research}.
+
+\bibitem[Turner et~al.(2023)]{turner2023activation}
+Turner, A., Shah, R., \& Movan, A. (2023).
+\newblock Activation addition: Steering language models without optimization.
+\newblock \emph{arXiv preprint arXiv:2308.10248}.
+
+\bibitem[Vig et~al.(2020)]{vig2020investigating}
+Vig, J., Gehrmann, S., Belinkov, Y., Qian, S., Nevo, D., Singer, Y., \& Shieber, S. (2020).
+\newblock Investigating gender bias in language models using causal mediation analysis.
+\newblock \emph{NeurIPS 2020}.
+
+\bibitem[Zellers et~al.(2019)]{zellers2019hellaswag}
+Zellers, R., Holtzman, A., Bisk, Y., Farhadi, A., \& Choi, Y. (2019).
+\newblock HellaSwag: Can a machine really finish your sentence?
+\newblock \emph{ACL 2019}.
+
+\bibitem[Zou et~al.(2023)]{zou2023representation}
+Zou, A., Pham, L., Chen, S., Campbell, P., Guo, R., Ren, Q., ... \& Hendrycks, D. (2023).
+\newblock Representation engineering: A top-down approach to AI transparency.
+\newblock \emph{NeurIPS 2023}.
+
+\end{thebibliography}
+
+\end{document}

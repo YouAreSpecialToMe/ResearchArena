@@ -1,0 +1,149 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze Runtime And Shared Defaults",
+    "description": "Create one reproducible inference stack for all methods so any observed difference is attributable to the guidance rule rather than software drift, scheduler mismatch, or hidden compute changes.",
+    "steps": {
+      "step1": "Use Python 3.10 and pin the inference stack in requirements_lock.txt: torch==2.2.*, torchvision==0.17.*, diffusers==0.27.*, transformers==4.39.*, accelerate==0.28.*, xformers==0.0.25.post1, open_clip_torch==2.24.*, lpips==0.1.4, image-reward==1.5, pandas==2.2.*, scipy==1.12.*, scikit-learn==1.4.*, matplotlib==3.8.*, seaborn==0.13.*, pillow==10.*, tqdm==4.66.*.",
+      "step2": "Cache checkpoints locally before any pilot run: runwayml/stable-diffusion-v1-5 for generation, OpenCLIP ViT-L/14 for CLIPScore, DINOv2 ViT-B/14 for feature consistency, and ImageReward-v1.0 for reward scoring. Do not introduce larger external judge models.",
+      "step3": "Use the same generation defaults for every method unless a paper-specific fidelity rule forbids it: DDIM scheduler, 30 denoising steps, guidance scale 7.5, fp16, xFormers attention, batch size 1, 512x512 output, and negative prompt disabled.",
+      "step4": "Fix random seeds to [11, 22, 33] and reuse the same initial latents across matched prompt-seed pairs for every method. Record the seed, latent hash, package versions, CUDA version, and GPU metadata in run_manifest.json.",
+      "step5": "Treat the hardware as 1 GPU and 4 CPU workers. Run all generation on the single RTX A6000 sequentially; parallelize only CPU-side work such as paraphrase bookkeeping, metric aggregation, bootstrap intervals, and plot generation.",
+      "step6": "Write generation_defaults.json before the pilot with the frozen sampler settings, guidance schedule candidates, output directory schema, and the hard wall-clock budget of 8 hours for pilot, main runs, ablations, evaluation, and visualization."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Audit Core References And Fix Artifacts",
+    "description": "Resolve the required artifact issue up front by ensuring the paper set actually used by the plan has parsed reference copies on disk and a verified bibliography table with no invented or stale entries.",
+    "steps": {
+      "step1": "Define the core-paper set for this study as exactly: High-Resolution Image Synthesis with Latent Diffusion Models, T2I-CompBench++, MetaLogic, Structured Semantic Alignment, Adaptive Auxiliary Prompt Blending, and one single-prompt guidance paper used for the strong baseline or fallback.",
+      "step2": "For each core paper, verify that references/<paper-title>/ contains parsed section files plus meta/meta_info.txt and meta/bibtex.txt. If a paper lacks parsed copies, create them before any experiment planning proceeds; do not cite papers that are not present in parsed form.",
+      "step3": "Create bibliography_audit.json with fields paper_id, title, authors, venue, year, url, parsed_copy_present, and used_in_plan. Cross-check every entry against the local parsed metadata and remove any bibliography item not tied to a real parsed paper actually used by the plan.",
+      "step4": "State the novelty position in planning notes and in the plan report as follows: ParaDG is a narrow robustness-oriented extension of AAPB-style multi-prompt blending that restricts auxiliary prompts to audited paraphrases and activates stronger blending only under paraphrase disagreement; it is not a broadly new guidance family."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build Prompt Splits And A Pre-Registered Slot Schema",
+    "description": "Construct a small but controlled benchmark focused on the exact semantic phenomena ParaDG claims to improve, using one fixed slot schema and fixed splits that prevent post hoc prompt selection.",
+    "steps": {
+      "step1": "Sample 72 prompts from T2I-CompBench++ with 24 prompts each from attribute binding, spatial relations, and numeracy. Save prompt_id, source_dataset, category, original_prompt, and slot fields in prompt_table.jsonl.",
+      "step2": "Represent every prompt with one shared slot schema: object_1, count_1, attribute_1, relation, object_2, count_2, attribute_2. Allow empty fields when not applicable, but reject prompts that cannot be expressed with at most two objects and one directed relation.",
+      "step3": "Reserve 12 prompts, balanced 4 per category, as the pilot split. Use the remaining 60 prompts as the held-out split for the main faithfulness study. Never tune thresholds, blend schedules, or fallback rules on the 60 held-out prompts.",
+      "step4": "Define the target robustness subset as the held-out prompts with at least one approved paraphrase. Pre-register a target of 24 overlap prompts, balanced as closely as possible across the three categories. If fewer than 24 qualify, use all qualifying prompts and report the realized counts."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create Controlled Paraphrases And Audit Them",
+    "description": "Generate only reproducible paraphrases that preserve the slot schema exactly, and make the paraphrase validity check an explicit artifact rather than an informal filter.",
+    "steps": {
+      "step1": "Generate at most 2 paraphrase candidates per prompt using only four rewrite templates: attribute-order swaps that preserve noun attachment, count-preserving numeral rewrites, clause-order or active-passive rewrites that preserve relation direction, and determiner or connective rewrites that do not change any slot field.",
+      "step2": "Run deterministic automatic checks on every candidate: exact preservation of populated slot values, no new objects or attributes, unchanged direction for asymmetric relations, and unchanged count values after numeral normalization. Reject a candidate immediately if any rule fails.",
+      "step3": "Apply a checklist audit to every candidate that passes automatic checks. The checklist items are object identity preserved, count preserved, attribute-to-object binding preserved, relation preserved with correct direction, and no added or removed scene content. Reject the paraphrase if any single checklist item fails.",
+      "step4": "Pre-register the held-out audit protocol before image generation: all accepted paraphrases are audited once, and a 48-pair subset is double annotated to compute Cohen's kappa for final accept or reject labels plus per-item agreement.",
+      "step5": "If pilot paraphrase coverage is below 70 percent overall or below 60 percent in any category, do not relax the audit. Instead fall back from up to 2 approved paraphrases per prompt to exactly 1 approved paraphrase per prompt wherever possible, and keep the overlap subset smaller.",
+      "step6": "Save the final artifact as prompts_with_paraphrases.jsonl with fields prompt_id, split, category, original_prompt, approved_paraphrases, rewrite_type, preserved_slots, checklist_result, audit_status, and overlap_subset_flag."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Pre-Register Fair Baselines",
+    "description": "Test ParaDG against a simple baseline, a stronger multi-prompt family baseline, and a single-prompt guidance baseline under rules that keep the comparison operational and honest.",
+    "steps": {
+      "step1": "Baseline 1, simple: vanilla Stable Diffusion v1.5 with the frozen defaults and no extra guidance beyond standard classifier-free guidance.",
+      "step2": "Baseline 2, simple multi-prompt control: static paraphrase consensus. Use the same approved paraphrase set and the same sparse guided steps as ParaDG, but replace the original-prompt prediction with a constant-weight average toward the paraphrase consensus using one fixed alpha for all guided steps and no disagreement gate.",
+      "step3": "Baseline 3, stronger multi-prompt control requested by feedback: timestep-adaptive paraphrase blending without gating. Use the same approved paraphrases and the same timestep-adaptive alpha_t schedule as ParaDG, but set the gate g_t to 1 at every guided step and apply no slot redistribution.",
+      "step4": "Baseline 4, closest prior overlap baseline: faithful AAPB reproduction on the robustness subset only. Count it as faithful only if it uses exactly two prompt conditions, preserves the original AAPB adaptive blend rule, uses global rather than slot-level blending, and runs on the same SD1.5 sampler, seed set, resolution, and denoising steps as ParaDG.",
+      "step5": "Operationalize the AAPB fallback before held-out runs: if the paper's mechanism cannot be reproduced faithfully on SD1.5 within the pilot budget, record the failure mode, code snapshot, and mismatch reason in aapb_reproduction_report.json and keep the result labeled as a documented reproduction attempt rather than replacing it with a weaker custom variant.",
+      "step6": "Baseline 5, strong single-prompt baseline: attempt Self-Coherence Guidance on SD1.5 only if it can be instantiated without changing its core mechanism. If not, use MaskDiffusion as the pre-registered fallback. Record the decision and reason in baseline_notes.json before the held-out runs."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run Pilot To Freeze Hyperparameters And Matrix Size",
+    "description": "Use a small pilot to choose only the minimal method-specific settings that must be frozen before the held-out study, and to verify that the entire matrix fits the single-GPU budget.",
+    "steps": {
+      "step1": "Run a 12-prompt, 1-seed pilot on vanilla, static paraphrase consensus, adaptive ungated paraphrase blending, ParaDG, faithful AAPB reproduction attempt, and SCG or MaskDiffusion. Measure runtime, peak memory, paraphrase coverage, and qualitative failure modes.",
+      "step2": "Tune only two ParaDG hyperparameters on the pilot: the scale constant c in the disagreement gate and the sparse guided-step alpha_t schedule. Search c in {0.5, 1.0, 1.5} and three frozen alpha_t schedules: flat 0.4, early-heavy [0.6, 0.6, 0.5, 0.5, 0.4, 0.3, 0.2, 0.2], and middle-heavy [0.2, 0.3, 0.5, 0.6, 0.6, 0.5, 0.3, 0.2].",
+      "step3": "Freeze the sparse guided steps to [2, 4, 6, 9, 12, 16, 20, 24] unless pilot runtime exceeds the target budget, in which case reduce them to [4, 8, 14, 20] for every paraphrase-based method equally.",
+      "step4": "Proceed to the full matrix only if the projected total GPU time is at most 7 hours and the overlap subset has at least 18 approved held-out prompts. Otherwise activate the reduced matrix automatically: 48 held-out prompts instead of 60, 18 overlap prompts instead of 24, and only the two highest-priority ablations."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run The Held-Out Faithfulness And Robustness Matrix",
+    "description": "Evaluate ParaDG as a narrow paraphrase-restricted extension of AAPB-style blending on a held-out prompt set sized to the single A6000 budget.",
+    "steps": {
+      "step1": "Main faithfulness study: generate images for the 60 held-out original prompts with seeds [11, 22, 33] for vanilla SD1.5, static paraphrase consensus, adaptive ungated paraphrase blending, and ParaDG. Reuse the exact same initial latents for every matched prompt-seed pair.",
+      "step2": "Robustness overlap study: for each of the 24 overlap prompts and each approved paraphrase variant, generate matched outputs for vanilla, static paraphrase consensus, adaptive ungated paraphrase blending, ParaDG, faithful AAPB reproduction attempt, and SCG or MaskDiffusion with the same seeds and latents.",
+      "step3": "Implement ParaDG exactly as pre-registered: compute paraphrase-conditioned noise predictions only at the sparse guided steps, average them into a consensus prediction, compute disagreement variance across paraphrases, scale the consensus correction by alpha_t times g_t, and redistribute the correction across token groups tied to the fixed slot schema only.",
+      "step4": "Keep the paraphrase pool size fixed at one original prompt plus up to two approved paraphrases. If only one approved paraphrase exists, use the two-prompt setting rather than synthesizing new paraphrases.",
+      "step5": "Save every image as PNG and save a sidecar JSON with prompt_id, prompt_variant_id, seed, method, sampler settings, guidance schedule, runtime_seconds, peak_gpu_memory_mb, and output_path. Aggregate the run table in generation_index.csv."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run Ablations For Each Novel Component",
+    "description": "Test whether the gain comes from disagreement gating, paraphrase restriction, slot-based redistribution, or simply from averaging multiple prompts.",
+    "steps": {
+      "step1": "Ablation A, no disagreement gate: reuse the full ParaDG setup but force g_t = 1 at every guided step. This is identical to the adaptive ungated baseline and directly tests whether disagreement gating matters.",
+      "step2": "Ablation B, no slot redistribution: keep the full disagreement gate and alpha_t schedule, but apply the gated correction globally to all text tokens rather than weighting token groups by slot disagreement.",
+      "step3": "Ablation C, no timestep adaptation: keep the disagreement gate and slot redistribution, but replace alpha_t with one constant value equal to the mean of the frozen ParaDG alpha_t schedule.",
+      "step4": "Ablation D, reduced paraphrase count: when two approved paraphrases exist, rerun ParaDG using exactly one approved paraphrase to measure sensitivity to paraphrase pool size.",
+      "step5": "Ablation E, equivalence removed on an analysis-only slice of 12 overlap prompts: replace the approved paraphrase with one deterministic non-equivalent but length-matched auxiliary prompt to test whether the effect depends on semantic equivalence rather than generic two-prompt blending. Do not use this ablation to support the main claim.",
+      "step6": "Run Ablations A through D on a fixed 18-prompt analysis subset with three seeds. If the reduced matrix is activated, keep only Ablation A and Ablation B."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Measure Faithfulness, Robustness, Cost, And Reliability",
+    "description": "Use metrics that can support or refute the claim, with explicit human checks so the robustness conclusion does not rest entirely on automatic scoring.",
+    "steps": {
+      "step1": "Primary faithfulness metrics on the held-out original-prompt set: compute T2I-CompBench++ category scores for attribute binding, spatial relations, and numeracy for vanilla, static consensus, adaptive ungated blending, and ParaDG. Report prompt-level means over seeds with 95 percent paired bootstrap confidence intervals.",
+      "step2": "Primary robustness metric on the overlap subset: compute Paraphrase Robustness Score, defined as the fraction of paraphrase-pair comparisons that receive identical slot judgments under the same seed for object presence, attribute binding, count correctness, and relation direction.",
+      "step3": "Secondary metrics for every method: CLIPScore, ImageReward, DINO cosine similarity across paraphrase variants at fixed seed, LPIPS across seeds for diversity, DINO feature dispersion across seeds, runtime per image, total GPU hours, and peak GPU memory.",
+      "step4": "Manual reliability subset: sample 72 prompt-seed-method cases stratified by category and method from the overlap subset. Two annotators answer the same slot-based checklist from the image alone, then derive a human PRS label.",
+      "step5": "Report human-human agreement and automated-human agreement with Cohen's kappa for binary checklist items and percent agreement for final PRS decisions. If automated-human agreement is weak, downgrade automated PRS to exploratory status and ground the main robustness claim in the human subset only.",
+      "step6": "Use paired permutation tests on matched prompt-seed pairs for PRS and paired bootstrap intervals for metric deltas. Keep all comparisons matched on the exact same prompt variants and seeds."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply Pre-Registered Success And Failure Rules",
+    "description": "Translate the proposal into explicit decision criteria so the study can fail cleanly and does not drift into vague post hoc interpretation.",
+    "steps": {
+      "step1": "Support the main claim only if ParaDG beats vanilla SD1.5, static paraphrase consensus, and adaptive ungated paraphrase blending on PRS, and also beats vanilla plus at least one paraphrase baseline on at least 2 of the 3 held-out faithfulness categories.",
+      "step2": "Support the AAPB-related claim only if the faithful reproduction attempt is operational. If AAPB cannot be reproduced faithfully, report the reproduction attempt separately and do not convert that result into evidence for or against superiority over AAPB.",
+      "step3": "Treat the disagreement-gating hypothesis as refuted if Ablation A or the adaptive ungated baseline matches or exceeds ParaDG on PRS and faithfulness within confidence intervals.",
+      "step4": "Treat the robustness claim as weakened if paraphrase coverage falls below target in one category, if automated scoring disagrees substantially with human annotation, or if gains are accompanied by more than a 20 percent LPIPS drop relative to vanilla without corresponding human-validated semantic gains.",
+      "step5": "Write final_decision_report.json with supported_claims, weakened_claims, failed_claims, metric tables, confidence intervals, runtime totals, and any reproduction failures."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Tables, Diagnostic Plots, And Failure Cases",
+    "description": "Create paper-ready outputs that show the narrow claim, the baseline fidelity status, the paraphrase audit, and the concrete failure modes.",
+    "steps": {
+      "step1": "Create a main results table with rows for vanilla SD1.5, static paraphrase consensus, adaptive ungated paraphrase blending, ParaDG, faithful AAPB reproduction attempt, and SCG or MaskDiffusion. Include the three T2I-CompBench++ category scores, PRS, CLIPScore, ImageReward, DINO consistency, LPIPS, latency, and peak memory.",
+      "step2": "Create a paraphrase-audit table showing proposed candidates, accepted paraphrases, rejection reasons, accepted rewrite types, and Cohen's kappa on the 48-pair double-annotated audit subset, broken out by category.",
+      "step3": "Create an ablation table on the analysis subset showing the delta from full ParaDG for Ablations A through E on PRS, each category metric, LPIPS, and runtime.",
+      "step4": "Plot category-wise bar charts for the three primary faithfulness metrics, a PRS-versus-latency scatter plot, and a PRS-versus-LPIPS scatter plot to reveal any robustness-diversity tradeoff.",
+      "step5": "Build qualitative grids for 8 representative prompts showing the original prompt, approved paraphrase, and outputs from vanilla, adaptive ungated blending, ParaDG, AAPB if available, and the single-prompt baseline. Include at least 2 negative examples where ParaDG over-regularizes or fails.",
+      "step6": "For 6 diagnostic prompts, save gate traces over denoising steps and slot-level correction magnitudes as both PNG figures and raw JSON so the disagreement mechanism can be inspected directly."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Budget The Full Study Explicitly",
+    "description": "Keep the experiment plan inside the stated hardware envelope by estimating generation counts and reusing outputs instead of silently expanding the matrix.",
+    "steps": {
+      "step1": "Assume vanilla SD1.5 at 30 DDIM steps takes about 2 to 3 seconds per image on the A6000, while static consensus and adaptive ungated blending take about 4 to 6 seconds because they run additional prompt-conditioned passes only at sparse steps, and ParaDG or AAPB take about 5 to 7 seconds per image.",
+      "step2": "Estimate the main faithfulness study cost as 60 prompts x 3 seeds x 4 methods = 720 images, or roughly 0.8 to 1.4 GPU hours depending on method mix. Reuse the original-prompt generations from these runs inside the overlap study rather than regenerating them.",
+      "step3": "Estimate the overlap-specific extra cost as only the paraphrase-variant generations plus AAPB and SCG or MaskDiffusion runs on 24 prompts x about 2 variants x 3 seeds, which keeps the added GPU time near 2.5 to 3.5 hours.",
+      "step4": "Estimate the ablation cost as 18 prompts x 3 seeds x 4 ablations, plus the 12-prompt non-equivalent analysis slice, which should stay near 1.0 to 1.5 GPU hours if sparse steps remain fixed.",
+      "step5": "Reserve at least 1 hour of wall-clock time for pilot decisions, metric aggregation, human-audit bookkeeping, and plotting. If projected runtime exceeds budget at any checkpoint, activate the reduced matrix rather than dropping seeds or changing the main hypothesis."
+    }
+  }
+]

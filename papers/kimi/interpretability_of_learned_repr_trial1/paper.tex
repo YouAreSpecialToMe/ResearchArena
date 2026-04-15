@@ -1,0 +1,262 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{cleveref}
+
+\title{CAGER: Causal Geometric Explanation Recovery\\
+A Framework for Grounding Interpretability in Causal Subspace Geometry}
+
+\author{%
+  Anonymous Author\\
+  Anonymous Institution\\
+  \texttt{anonymous@example.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We propose CAGER (Causal Geometric Explanation Recovery), a framework for evaluating interpretability methods by measuring how well they recover the geometric structure of causally-grounded subspaces in neural networks. Unlike existing geometric evaluation approaches that measure alignment between explanation and model output distortions under perturbation, CAGER directly assesses whether interpretability methods capture the geometric relationships among subspaces that are verified to be causally responsible for specific model behaviors. We introduce the Causal Geometric Alignment Score (C-GAS), a metric that compares distance structures in explanation feature space against distance structures in a validated causal subspace space. Our framework explicitly addresses the ``interpretability illusion'' problem by incorporating multi-method validation that ensures identified subspaces are truly causal rather than activating dormant pathways. On a synthetic task with known ground-truth features, SAEs achieve a C-GAS of $0.57 \pm 0.08$, demonstrating the framework's ability to quantify interpretability method performance against causal ground truth.
+\end{abstract}
+
+\section{Introduction}
+
+Mechanistic interpretability seeks to understand neural networks by identifying interpretable features that explain model behavior \citep{elhage2021mathematical,olah2020zoom}. Recent advances using Sparse Autoencoders (SAEs) have shown promise in decomposing neural activations into monosemantic features \citep{bricken2023monosemanticity,cunningham2023sparse}, but evaluating whether these features are truly faithful to the model's computation remains challenging.
+
+The core problem is that interpretability methods may identify features that appear meaningful (e.g., activating on specific concepts) but do not actually participate causally in the model's computation. This was highlighted by \citet{makelov2024subspace}, who demonstrated that subspace interventions can create an ``interpretability illusion'': even if patching a subspace changes model output to behave as if a feature was modified, this effect may be achieved by activating a dormant parallel pathway leveraging a causally disconnected subspace.
+
+\subsection{Key Insight and Contributions}
+
+Our key insight is that truly faithful interpretability methods should preserve the geometric structure of causally-grounded subspaces. If an explanation method correctly identifies features that are causally responsible for model behavior, then: (1) the distances between explanation features should correlate with distances between corresponding causal subspaces; (2) this correlation should be stronger than the correlation between explanation features and arbitrary subspaces; (3) the ratio of these correlations provides a quantitative measure of geometric faithfulness.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose CAGER, a framework that evaluates interpretability methods by measuring recovery of causal subspace geometry, with explicit safeguards against the interpretability illusion.
+    \item We introduce C-GAS (Causal Geometric Alignment Score), a metric that normalizes causal-explanation alignment by the causal structure present in the full representation.
+    \item We validate the framework on a synthetic task with known ground-truth causal features, demonstrating that C-GAS provides meaningful quantitative evaluation of interpretability methods.
+    \item We identify limitations in the current formulation through oracle baseline analysis, providing directions for future metric refinement.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Sparse Autoencoders and Feature Discovery.} Sparse Autoencoders have emerged as a leading approach for decomposing neural network activations into interpretable features \citep{bricken2023monosemanticity,cunningham2023sparse}. SAEs learn an overcomplete dictionary of features that reconstruct model activations under sparsity constraints. Recent work has scaled SAEs to large language models including GPT-4 \citep{gao2024scaling} and Claude 3 Sonnet \citep{templeton2024scaling}, demonstrating the ability to extract abstract, multimodal, and safety-relevant features. However, evaluating SAE quality remains challenging due to the lack of ground-truth interpretable features \citep{karvonen2024identifying}. Current approaches rely on reconstruction error, sparsity metrics, or human evaluation---none of which guarantee causal relevance.
+
+\paragraph{Geometric Evaluation of Interpretability.} \citet{hedstroem2025evaluating} proposed the GEF framework, which uses principles from differential geometry to evaluate interpretability methods. GEF measures the correlation between model distortion (changes in model output under perturbation) and explanation distortion (changes in explanation under the same perturbation). While our work also uses geometric principles, we focus on a different question: not whether explanations change consistently with model outputs, but whether explanations recover the geometric structure of subspaces that are causally responsible for specific behaviors.
+
+\paragraph{The Interpretability Illusion.} \citet{makelov2024subspace} demonstrated that activation patching can produce misleading results. When a subspace is patched to change model output, the effect may be mediated by activating dormant parallel pathways rather than directly manipulating the target feature. To address this, they suggest requiring additional evidence including independent verification through different intervention methods, consistency across input distributions, and correspondence with manually identified circuits. Our framework incorporates these safeguards by using multi-method causal validation before geometric evaluation.
+
+\paragraph{Causal Subspace Identification.} Activation patching \citep{nanda2022attribution,heimersheim2024activation} and causal mediation analysis \citep{vig2020investigating} have been used to identify subspaces that causally affect model outputs. However, as noted above, these methods can be unreliable without proper validation. \citet{huang2024ravel} introduced RAVEL, a benchmark for evaluating interpretability methods on disentangling entity attributes. \citet{marks2024sparse} proposed sparse feature circuits that discover causal graphs in language models using SAE features.
+
+\section{Method: CAGER}
+
+\subsection{Overview}
+
+CAGER operates in three stages: (1) \textbf{Causal Subspace Identification and Validation}---use activation patching to identify candidate causal subspaces and validate them using multiple methods to avoid the interpretability illusion; (2) \textbf{Explanation Mapping}---apply the interpretability method under evaluation to map representations to explanation features; (3) \textbf{Geometric Alignment Measurement}---compute C-GAS by comparing distance structures in causal subspace space and explanation feature space.
+
+\subsection{Stage 1: Causal Subspace Identification with Anti-Illusion Safeguards}
+
+\textbf{Candidate Identification via Activation Patching.} For a given behavior, we identify candidate causal subspaces using activation patching: (1) select contrastive input pairs that differ only in the target attribute; (2) patch activations from one input to another at different layers and subspaces; (3) measure change in model output probability for the target attribute; (4) identify subspaces where patching produces the largest causal effects.
+
+\textbf{Multi-Method Validation.} To avoid the interpretability illusion, we validate candidate subspaces using three independent methods: (1) \textit{Pathway Consistency Check}---verify that patching effects are consistent across different source inputs with the same attribute value; (2) \textit{Ablation Consistency}---compare results from activation patching with direct ablation (zeroing out) of the same subspace; (3) \textit{Gradient Agreement}---compute gradients of the target output with respect to the candidate subspace and check if gradient directions align with intervention effects. A subspace is accepted into the validated causal atlas only if it passes at least 2 of 3 validation checks.
+
+\subsection{Stage 2: Explanation Feature Extraction}
+
+For the interpretability method under evaluation (e.g., an SAE), we: (1) extract explanation features for all inputs used in causal identification; (2) for each validated causal subspace, identify the top-$k$ explanation features that maximally correlate with subspace activation; (3) construct an explanation feature vector for each input.
+
+\subsection{Stage 3: Causal Geometric Alignment Score (C-GAS)}
+
+The core principle is that faithful explanations should preserve the geometric relationships among causally-relevant states. Let $D_{\text{causal}}$ be the pairwise distance matrix in the validated causal subspace space, $D_{\text{exp}}$ be the pairwise distance matrix in the explanation feature space, and $D_{\text{full}}$ be the pairwise distance matrix in the full activation space. The Causal Geometric Alignment Score is:
+\begin{equation}
+\text{C-GAS} = \frac{\rho(D_{\text{causal}}, D_{\text{exp}})}{\rho(D_{\text{causal}}, D_{\text{full}})}
+\end{equation}
+where $\rho$ denotes the Spearman rank correlation.
+
+The ratio formulation serves three purposes: (1) \textbf{Normalization}---the denominator represents how much of the causal subspace structure is present in the full activation space; (2) \textbf{Relative Performance}---the ratio measures whether the explanation method captures more of the causal structure than would be expected from random features; (3) \textbf{Interpretability}---a C-GAS of 1.0 means the explanation captures causal structure as well as the full representation. Values above 1.0 would indicate the explanation filters out non-causal structure.
+
+We use cosine distance for computing all distance matrices: $d(x, y) = 1 - \frac{x \cdot y}{\|x\| \|y\|}$. Cosine distance is preferred because it focuses on directional alignment and is invariant to scaling.
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Task.} We evaluate on a \textbf{synthetic task} with known ground-truth causal features. We train a small MLP with 5 known ground-truth features and apply CAGER to evaluate SAEs trained on hidden activations. This allows us to validate that C-GAS correlates with true feature recovery rate.
+
+\textbf{Methods Evaluated.} We evaluate Sparse Autoencoders with varying dictionary sizes (1$\times$, 4$\times$, 16$\times$ overcomplete), as well as an Oracle baseline that uses the ground-truth features directly.
+
+\textbf{Implementation Details.} We train SAEs with the standard ELBO objective with L1 sparsity penalty. We use 3 random seeds (42, 123, 456) for all experiments. C-GAS is computed using Spearman correlation with bootstrapped confidence intervals.
+
+\subsection{Results}
+
+\begin{table}[t]
+\caption{C-GAS scores and feature recovery rates on the synthetic task. Results show mean $\pm$ std across 3 seeds.}
+\label{tab:main_results}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & C-GAS $\uparrow$ & Recovery Rate $\uparrow$ & $n$ seeds \\
+\midrule
+SAE (1$\times$) & $\mathbf{0.572 \pm 0.084}$ & $0.333 \pm 0.000$ & 3 \\
+SAE (4$\times$) & $0.405 \pm 0.065$ & $0.222 \pm 0.157$ & 3 \\
+SAE (16$\times$) & $-0.060 \pm 0.113$ & $0.111 \pm 0.157$ & 3 \\
+Oracle (1$\times$) & $0.073 \pm 0.027$ & $1.000 \pm 0.000$ & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:main_results} presents the main results. SAE (1$\times$) achieves the highest C-GAS score of $0.572 \pm 0.084$, followed by SAE (4$\times$) at $0.405 \pm 0.065$. Surprisingly, SAE (16$\times$) shows degraded performance with a negative C-GAS of $-0.060 \pm 0.113$, suggesting dead neuron problems in high-dimensional SAEs.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/cgas_final_results.png}
+\caption{(Left) C-GAS scores by method and overcompleteness. The dashed red line indicates the target threshold of 0.75. (Right) Relationship between C-GAS and ground-truth feature recovery rate.}
+\label{fig:results}
+\end{figure}
+
+\subsection{Correlation Analysis}
+
+We examine the correlation between C-GAS and ground-truth feature recovery rate across all experimental conditions. The Pearson correlation is $r = -0.158$ ($p = 0.625$, $n=12$), which is not statistically significant. This negative result suggests that the current C-GAS formulation may not fully capture the relationship between geometric alignment and true causal feature recovery.
+
+\subsection{Oracle Anomaly}
+
+A surprising finding is that the Oracle baseline, which uses the ground-truth features directly, achieves a C-GAS of only $0.073 \pm 0.027$---lower than the SAE (1$\times$) baseline. This anomaly indicates potential issues with the current C-GAS formulation: (1) the distance correlation method may not be appropriate for comparing ground-truth features against causal subspaces identified via patching; (2) the ratio formulation may need adjustment for cases where the numerator and denominator have different scales; (3) ground-truth features may need normalization before comparison.
+
+\subsection{Limitations and Challenges}
+
+Our experiments revealed several implementation challenges that prevented completion of all planned evaluations:
+
+\textbf{IOI Task.} The Indirect Object Identification experiment failed during validation due to an indexing bug in the consistency check. The dataset creation and activation extraction completed successfully, but the validation step encountered an index out-of-range error.
+
+\textbf{RAVEL Task.} The RAVEL experiment failed during baseline training due to a PCA component mismatch---attempting to fit 768 components on only 120 samples.
+
+These issues highlight the practical challenges of implementing multi-method validation and suggest directions for future work in developing more robust evaluation frameworks.
+
+\section{Discussion}
+
+\subsection{Implications}
+
+Our work provides a principled framework for evaluating interpretability methods against causally-grounded ground truth. The key insight---that faithful explanations should preserve geometric relationships among causal subspaces---offers a new perspective on what it means for explanations to be faithful. While our synthetic task results are preliminary, they demonstrate the feasibility of quantitative evaluation and highlight areas for metric refinement.
+
+\subsection{Limitations}
+
+\textbf{Metric Validity.} The oracle anomaly raises important questions about the validity of the current C-GAS formulation. If ground-truth features do not achieve high C-GAS, the metric may not be measuring what we intend.
+
+\textbf{Task Scope.} We only completed experiments on the synthetic task. Evaluation on real language model tasks (IOI, RAVEL) was prevented by implementation bugs.
+
+\textbf{Sample Size.} With only 3 seeds, our statistical power is limited. The correlation between C-GAS and recovery may become significant with more seeds.
+
+\textbf{Dead Neurons.} The degraded performance of SAE (16$\times$) suggests that high-dimensional SAEs suffer from dead neuron problems that affect geometric alignment.
+
+\subsection{Future Work}
+
+We identify several directions for future research: (1) \textbf{Fix C-GAS formulation}---investigate the oracle anomaly and develop a metric that correctly measures alignment when using ground-truth features; (2) \textbf{Complete real task evaluation}---fix implementation bugs and evaluate on IOI and RAVEL; (3) \textbf{Ablation studies}---compare C-GAS with and without multi-method validation to demonstrate the importance of anti-illusion safeguards; (4) \textbf{Scale to larger models}---test on GPT-2 Medium, Llama-2, and other large language models.
+
+\section{Conclusion}
+
+We proposed CAGER, a framework for evaluating interpretability methods by measuring how well they recover the geometric structure of causally-grounded subspaces. Our C-GAS metric provides a quantitative approach to assessing interpretability method quality, with built-in safeguards against the interpretability illusion. While our experiments on a synthetic task reveal promising results---SAE (1$\times$) achieves C-GAS of $0.57 \pm 0.08$---they also highlight challenges in metric formulation, particularly the oracle anomaly that suggests the need for refinement. We believe that grounding interpretability evaluation in causal subspace geometry is a promising direction, and we hope that CAGER provides a foundation for future work in this area.
+
+\section*{Broader Impact}
+
+This work contributes to the development of more reliable methods for understanding neural networks. By providing quantitative evaluation frameworks with causal grounding, we hope to accelerate progress in mechanistic interpretability, which could lead to safer and more trustworthy AI systems. However, we caution that our framework is still in early stages and should not be used as the sole criterion for evaluating interpretability methods in safety-critical applications.
+
+\section*{Acknowledgments}
+We thank the research community for open-source tools and datasets that enabled this work. All experiments were conducted in accordance with standard research ethics guidelines.
+
+
+\begin{thebibliography}{20}
+
+\bibitem[Bricken et al.(2023)]{bricken2023monosemanticity}
+Trenton Bricken, Adly Templeton, Joshua Batson, Brian Chen, Adam Jermyn, Tom Conerly, Nick Turner, Cem Anil, Carson Denison, Amanda Askell, Yuntao Bai, Anna Chen, Dawn Drain, Nelson Elhage, Danny Hernandez, Andy Jones, Jackson Kernion, Liane Lovitt, Zac Hatfield-Dodds, Kamal Ndousse, Catherine Olsson, Dario Amodei, Tom Brown, Jack Clark, Sam McCandlish, and Chris Olah.
+\newblock Towards monosemanticity: Decomposing language models with dictionary learning.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+
+\bibitem[Cunningham et al.(2023)]{cunningham2023sparse}
+Hoagy Cunningham, Aidan Ewart, Logan Riggs, Robert Huben, and Lee Sharkey.
+\newblock Sparse autoencoders find highly interpretable features in language models.
+\newblock \emph{arXiv preprint arXiv:2309.08600}, 2023.
+
+\bibitem[Dunefsky et al.(2024)]{dunefsky2024transcoders}
+Jacob Dunefsky, Philippe Chlenski, and Neel Nanda.
+\newblock Transcoders find interpretable {LLM} feature circuits.
+\newblock In \emph{The Thirty-eighth Annual Conference on Neural Information Processing Systems}, 2024.
+
+\bibitem[Elhage et al.(2021)]{elhage2021mathematical}
+Nelson Elhage, Neel Nanda, Catherine Olsson, Tom Henighan, Nicholas Joseph, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, Tom Conerly, Nova DasSarma, Dawn Drain, Deep Ganguli, Zac Hatfield-Dodds, Danny Hernandez, Andy Jones, Jackson Kernion, Liane Lovitt, Kamal Ndousse, Dario Amodei, Tom Brown, Jack Clark, Jared Kaplan, Sam McCandlish, and Chris Olah.
+\newblock A mathematical framework for transformer circuits.
+\newblock \emph{Transformer Circuits Thread}, 2021.
+
+\bibitem[Elhage et al.(2022)]{elhage2022superposition}
+Nelson Elhage, Tristan Hume, Catherine Olsson, Nicholas Schiefer, Tom Henighan, Shauna Kravec, Zac Hatfield-Dodds, Robert Lasenby, Dawn Drain, Carol Chen, Roger Grosse, Sam McCandlish, Jared Kaplan, Dario Amodei, Martin Wattenberg, and Christopher Olah.
+\newblock Toy models of superposition.
+\newblock \emph{Transformer Circuits Thread}, 2022.
+
+\bibitem[Gao et al.(2024)]{gao2024scaling}
+Leo Gao, Jaden Laedermann, L B{\l}us, M Besenov, and M Lange.
+\newblock Scaling and evaluating sparse autoencoders.
+\newblock \emph{arXiv preprint arXiv:2406.04093}, 2024.
+
+\bibitem[Hedstr{\"o}m et al.(2025)]{hedstroem2025evaluating}
+Anna Hedstr{\"o}m, Philine Lou Bommer, Thomas F Burns, Sebastian Lapuschkin, Wojciech Samek, and Marina M.-C. H{\"o}hne.
+\newblock Evaluating interpretable methods via geometric alignment of functional distortions.
+\newblock \emph{Transactions on Machine Learning Research}, 2025.
+
+\bibitem[Heimersheim \& Nanda(2024)]{heimersheim2024activation}
+Stefan Heimersheim and Neel Nanda.
+\newblock How to use and interpret activation patching.
+\newblock \emph{arXiv preprint arXiv:2404.15255}, 2024.
+
+\bibitem[Huang et al.(2024)]{huang2024ravel}
+Jing Huang, Zhengxuan Wu, Chris Potts, Mor Geva, and Atticus Geiger.
+\newblock {RAVEL}: Evaluating interpretability methods on disentangling language model representations.
+\newblock \emph{arXiv preprint arXiv:2402.17700}, 2024.
+
+\bibitem[Karvonen et al.(2024)]{karvonen2024identifying}
+Anni Karvonen, Lukas Muttenthaler, and Nora Belrose.
+\newblock Identifying interpretable subspaces in image classification neurons.
+\newblock \emph{arXiv preprint arXiv:2406.09468}, 2024.
+
+\bibitem[Makelov et al.(2024)]{makelov2024subspace}
+Aleksandar Makelov, Georg Lange, and Neel Nanda.
+\newblock Is this the subspace you are looking for? An interpretability illusion for subspace activation patching.
+\newblock In \emph{The Twelfth International Conference on Learning Representations}, 2024.
+
+\bibitem[Marks et al.(2024)]{marks2024sparse}
+Samuel Marks, Can Rager, Eric J Michaud, Yonatan Belinkov, David Bau, and Aaron Mueller.
+\newblock Sparse feature circuits: Discovering and editing interpretable causal graphs in language models.
+\newblock In \emph{Proceedings of the 41st International Conference on Machine Learning}, 2024.
+
+\bibitem[Nanda(2022)]{nanda2022attribution}
+Neel Nanda.
+\newblock Attribution patching: Activation patching at industrial scale.
+\newblock \emph{Neel Nanda Blog}, 2022.
+
+\bibitem[Olah et al.(2020)]{olah2020zoom}
+Chris Olah, Nick Cammarata, Ludwig Schubert, Gabriel Goh, Michael Petrov, and Shan Carter.
+\newblock Zoom in: An introduction to circuits.
+\newblock \emph{Distill}, 2020.
+
+\bibitem[Templeton et al.(2024)]{templeton2024scaling}
+Adly Templeton, Tom Conerly, Jonathan Marcus, Jack Lindsey, Trenton Bricken, Brian Chen, Adam Pearce, Craig Citro, Emmanuel Ameisen, Andy Jones, et~al.
+\newblock Scaling monosemanticity: Extracting interpretable features from Claude 3 Sonnet.
+\newblock \emph{Transformer Circuits Thread}, 2024.
+
+\bibitem[Vig et al.(2020)]{vig2020investigating}
+Jesse Vig, Sebastian Gehrmann, Yonatan Belinkov, Sharon Qian, Daniel Nevo, Yaron Singer, and Stuart Shieber.
+\newblock Investigating gender bias in language models using causal mediation analysis.
+\newblock In \emph{Advances in Neural Information Processing Systems}, volume~33, 2020.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,159 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up Python environment and dependencies",
+    "description": "Install all required Python packages for the trace-driven tiered memory simulator, data analysis, and visualization.",
+    "steps": {
+      "step1": "Create a Python virtual environment: python3 -m venv venv && source venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy matplotlib seaborn pandas",
+      "step3": "Install additional packages: pip install mmh3 (for MurmurHash in Bloom filters/signatures), tqdm (progress bars), json5 (config files)",
+      "step4": "Create the project directory structure: mkdir -p src/ configs/ results/ figures/ traces/",
+      "step5": "Verify installation by importing all packages in a test script"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic workload traces with controlled phase structure",
+    "description": "Create a trace generator that produces memory access traces with configurable phase behavior. Each trace is a sequence of (timestamp, page_address) tuples organized into phases with distinct working sets. This is our primary data source since we use trace-driven simulation.",
+    "steps": {
+      "step1": "Implement a TraceGenerator class in src/trace_generator.py with parameters: num_phases (int), pages_per_phase (int), phase_duration (int, number of accesses per phase), overlap_ratio (float, fraction of pages shared between consecutive phases), transition_matrix (optional explicit Markov chain for phase ordering), total_pages (int, total address space size), zipf_skew (float, skewness of access distribution within a phase)",
+      "step2": "Within each phase, generate accesses following a Zipfian distribution over that phase's working set pages, with configurable skew parameter (default alpha=1.0). Hot pages are the top-20% most frequently accessed pages in each phase.",
+      "step3": "Generate 3 categories of traces, each with 3 random seeds (seeds 42, 123, 456): (a) REGULAR: 5 phases, 50K accesses/phase, 20% overlap, deterministic cyclic transition (P1->P2->P3->P4->P5->P1), 1000 pages/phase, 10000 total pages; (b) SEMI-REGULAR: 5 phases, 50K accesses/phase, 20% overlap, stochastic transitions with dominant path (80% follow primary cycle, 20% random), 1000 pages/phase, 10000 total pages; (c) IRREGULAR: 8 phases, variable duration (20K-80K accesses), 30% overlap, uniform random transitions, 500 pages/phase, 8000 total pages",
+      "step4": "Generate 2 SPEC-inspired traces per seed: (a) GCC-like: 10 phases with moderate overlap (25%), phase durations drawn from log-normal distribution (mean 40K accesses, std 15K), semi-regular transitions; (b) MCF-like: 4 phases with low overlap (10%), large working sets (3000 pages/phase), regular cyclic transitions, long phases (100K accesses each)",
+      "step5": "Generate 2 server-like traces per seed: (a) WEBSERVER: 3 phases (morning/afternoon/night), highly regular diurnal cycle, 60% overlap between adjacent phases, 2000 pages/phase; (b) MAPREDUCE: 2 phases (map/reduce) in strict alternation, 5% overlap, map phase 3x longer than reduce phase, 1500 pages/phase",
+      "step6": "Save all traces as compressed numpy arrays (.npz) in traces/ directory. Each file contains: 'timestamps' array, 'page_addresses' array, 'phase_labels' array (ground truth), 'metadata' dict with generation parameters",
+      "step7": "Compute and log trace statistics: total accesses, number of phase transitions, unique pages per phase, working set sizes, inter-phase overlap matrices. Save statistics to traces/trace_stats.json"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement the tiered memory simulator core",
+    "description": "Build the trace-driven two-tier memory simulator that all policies will run on. The simulator models page placement, access latencies, and migration mechanics.",
+    "steps": {
+      "step1": "Implement TieredMemorySimulator class in src/simulator.py with configurable parameters: fast_tier_capacity (number of pages), slow_tier_latency_ns (default 300), fast_tier_latency_ns (default 100), migration_bandwidth_pages_per_interval (default 50, representing 10 GB/s with 4KB pages over 100ms interval), profiling_interval (number of accesses between profiling snapshots, default 1000)",
+      "step2": "The simulator maintains: page_location dict (page -> 'fast'|'slow'), access_counts per page per interval, migration_queue (list of pending migrations), and per-interval statistics (fast_accesses, slow_accesses, migrations_completed, migration_bytes)",
+      "step3": "At each access, record latency based on page location. At each profiling interval boundary, invoke the active migration policy's decide() method which returns a list of (promote_pages, demote_pages). Execute migrations respecting bandwidth limit.",
+      "step4": "Initial page placement: first fast_tier_capacity unique pages accessed go to fast tier, rest to slow tier (cold start). This models realistic initial conditions.",
+      "step5": "Implement a SimulatorResult class that records per-interval metrics: slow_tier_access_ratio, effective_latency, migrations_up (slow->fast), migrations_down (fast->slow), cumulative_migration_volume. Also record per-phase-transition metrics: migration_lag (intervals from transition to <10% slow-tier ratio among the new phase's hot pages), transition_penalty (extra slow-tier accesses relative to oracle during transition window).",
+      "step6": "Add an Oracle policy that has perfect future knowledge: at each interval, it knows the next interval's access pattern and places the hottest pages in fast tier. This serves as the theoretical optimum.",
+      "step7": "Validate the simulator with a simple test: single-phase workload should achieve near-zero slow-tier accesses once warmed up, and the oracle should achieve the minimum possible slow-tier ratio"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and run baseline migration policies",
+    "description": "Implement four reactive baseline policies that represent the spectrum from simple to state-of-the-art. All baselines use the same simulator infrastructure and are evaluated on the same traces.",
+    "steps": {
+      "step1": "Implement LRU-Reactive policy in src/policies/lru_reactive.py: On each access to a slow-tier page, add it to a promotion queue. At each profiling interval, promote the most-accessed slow-tier pages and demote the least-recently-used fast-tier pages, respecting migration bandwidth. This models basic NUMA balancing.",
+      "step2": "Implement TPP-Like policy in src/policies/tpp_like.py: Promotion triggered by simulated NUMA faults (first access to a slow-tier page in a new interval triggers a fault). Demotion via periodic scan of fast-tier pages, evicting those with zero accesses in the last N intervals (default N=3). Migration bandwidth split 70% promotion / 30% demotion.",
+      "step3": "Implement ARMS-Like policy in src/policies/arms_like.py: Maintains a running mean and variance of slow-tier access rate. Detects phase changes when slow-tier rate exceeds mean + 2*std (change-point detection). In stable phase: uses long profiling window (5 intervals). After detected change: switches to short window (1 interval) and increases migration bandwidth budget by 50% for 3 intervals. Promotes hottest slow-tier pages, demotes coldest fast-tier pages.",
+      "step4": "Implement ALTO-Like policy in src/policies/alto_like.py: Computes per-page amortized offcore latency (AOL) = (slow_accesses * slow_latency) / total_accesses_since_last_migration. Promotes pages with highest AOL, demotes pages with lowest AOL. Includes throttling: skips migration if the expected latency savings from promoting the best candidate is below a threshold (default: 50ns benefit required). This is the strongest reactive baseline.",
+      "step5": "Run all 4 baselines + Oracle on all 7 trace types x 3 seeds = 21 trace instances. Use fast_tier_capacity = 50% of unique pages accessed (the default configuration). Save per-run results to results/baselines/{policy}_{trace}_{seed}.json",
+      "step6": "Estimated runtime: ~5 minutes per (policy, trace, seed) combination = 5 * 5 policies * 7 traces * 3 seeds = 525 minutes. With 2 CPU cores running in parallel: ~263 minutes (~4.4 hours). This is within budget since main experiments + ablations will reuse the same infrastructure and run faster.",
+      "step7": "Note: to fit within time budget, run baseline experiments and main experiments in parallel across 2 cores where possible using Python multiprocessing"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement and run MarkovTier anticipatory migration",
+    "description": "Implement the full MarkovTier system with all three components: online phase detection, Markov transition learning, and anticipatory migration. Run on all traces and compare against baselines.",
+    "steps": {
+      "step1": "Implement PhaseDetector class in src/markovtier/phase_detector.py: Maintains a working set signature using a bit array (simulated Bloom filter) of size 1024 bits. At each profiling interval, hashes accessed page addresses into the signature. Computes Jaccard similarity between consecutive signatures. Declares a phase transition when similarity drops below threshold (default 0.5). Maps each signature to a phase ID using k-means clustering on signature vectors (k determined online, starting at 1 and splitting when a new signature is far from all existing centroids, distance threshold 0.3).",
+      "step2": "Implement MarkovModel class in src/markovtier/markov_model.py: Maintains a transition count matrix T of shape (max_phases, max_phases) with max_phases=20. Updates T[i][j] with exponential moving average (alpha=0.1) on each observed transition. Provides predict_next(current_phase) -> (predicted_phase, confidence) where confidence = max transition probability from current phase. Maintains per-phase working set profiles: for each phase, stores the set of hot pages (top-20% by access count) observed during that phase, updated with EMA.",
+      "step3": "Implement MarkovTierPolicy class in src/markovtier/policy.py: At each profiling interval: (1) Update phase detector with current interval's accesses; (2) If phase transition detected, update Markov model; (3) Query Markov model for predicted next phase and confidence; (4) If confidence > confidence_threshold (default 0.6), compute pages_to_promote = hot_pages(predicted_phase) - current_fast_pages and pages_to_demote = current_fast_pages - hot_pages(predicted_phase); (5) Add anticipatory migrations to queue with priority proportional to confidence; (6) Also perform reactive migrations for current phase (promote currently hot slow-tier pages). Anticipatory migrations use at most anticipatory_budget fraction (default 0.3) of total migration bandwidth.",
+      "step4": "Implement rollback mechanism: If a phase transition occurs and the actual next phase differs from the predicted phase, immediately reprioritize the migration queue to undo speculative migrations (demote speculatively promoted pages that aren't hot in the actual new phase).",
+      "step5": "Run MarkovTier on all 7 trace types x 3 seeds with default parameters: confidence_threshold=0.6, alpha=0.1, similarity_threshold=0.5, anticipatory_budget=0.3, fast_tier_capacity=50%. Save results to results/markovtier/{trace}_{seed}.json",
+      "step6": "For each run, additionally record MarkovTier-specific metrics: phase_detection_accuracy (fraction of transitions correctly detected), prediction_accuracy (fraction of transitions correctly predicted), misprediction_rate, anticipatory_migrations_useful (fraction that were still in fast tier when the predicted phase arrived), average_confidence_at_transition",
+      "step7": "Compare MarkovTier vs all baselines on primary metrics: (a) overall slow-tier access ratio, (b) slow-tier access ratio during transition windows (10 intervals around each phase transition), (c) migration lag (intervals to reach steady state after transition), (d) total migration volume, (e) effective average latency"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: contribution of each MarkovTier component",
+    "description": "Systematically remove each novel component to measure its individual contribution. This tests whether all three components (phase detection, Markov prediction, confidence thresholding) are necessary.",
+    "steps": {
+      "step1": "Ablation A1 - Phase Detection Only (no Markov, no anticipation): Use the phase detector to identify phases but migrate reactively. When a phase transition is detected, immediately begin aggressive migration to the new phase's working set (using historically stored hot pages for the detected phase). No prediction, no anticipation. This isolates the value of phase-aware reactive migration.",
+      "step2": "Ablation A2 - Markov Prediction without Confidence Thresholding: Full MarkovTier but with confidence_threshold=0.0 (always migrate anticipatorily whenever a prediction is available, regardless of confidence). This isolates the value of confidence-based filtering.",
+      "step3": "Ablation A3 - MarkovTier without Rollback: Full MarkovTier but disable the rollback mechanism on misprediction. Speculatively promoted pages stay in fast tier even if the prediction was wrong. This measures the importance of the rollback mechanism.",
+      "step4": "Ablation A4 - Random Anticipation: Replace Markov prediction with random phase prediction (uniform over previously seen phases). Keep all other components (phase detection, confidence threshold, rollback). This is the 'straw man' to verify that Markov modeling specifically (not just any anticipation) provides the benefit.",
+      "step5": "Run all 4 ablations on all 7 trace types x 3 seeds. Save results to results/ablations/{ablation}_{trace}_{seed}.json",
+      "step6": "Compute per-ablation delta from full MarkovTier on each metric. Report mean and std across seeds. Key comparisons: (a) Full MarkovTier vs A1 = value of anticipation; (b) Full MarkovTier vs A2 = value of confidence thresholding; (c) Full MarkovTier vs A3 = value of rollback; (d) Full MarkovTier vs A4 = value of Markov modeling specifically"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity analysis: fast-tier capacity ratio",
+    "description": "Vary the ratio of fast-tier capacity to total working set size to understand when anticipatory migration provides the most benefit. We expect the largest gains when fast tier is scarce but not negligibly small.",
+    "steps": {
+      "step1": "Run MarkovTier and all baselines on the REGULAR and GCC-like traces (representative of best and moderate cases) across fast_tier_capacity ratios: [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9] (fraction of total unique pages)",
+      "step2": "Use 3 seeds per configuration. Total runs: 6 policies * 2 traces * 7 ratios * 3 seeds = 252 runs. At ~2 min each with reduced trace length (25K accesses/phase) = ~504 min / 2 cores = ~252 min (~4.2 hours). To fit budget, use shortened traces (25K accesses/phase instead of 50K) for this sensitivity study only.",
+      "step3": "Record slow_tier_access_ratio, migration_lag, and migration_volume for each configuration",
+      "step4": "Identify the capacity ratio sweet spot where MarkovTier's advantage is maximized"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity analysis: confidence threshold and migration budget",
+    "description": "Sweep the two key MarkovTier hyperparameters to understand the tradeoff between anticipatory aggressiveness and misprediction cost.",
+    "steps": {
+      "step1": "Confidence threshold sweep: Run MarkovTier on REGULAR, SEMI-REGULAR, and IRREGULAR traces with confidence_threshold in [0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]. Use 3 seeds each. Total: 8 thresholds * 3 traces * 3 seeds = 72 runs.",
+      "step2": "Migration budget sweep: Run MarkovTier on the same 3 traces with anticipatory_budget in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0] (fraction of total bandwidth for anticipatory migrations). Use confidence_threshold=0.6 (default). 3 seeds each. Total: 7 budgets * 3 traces * 3 seeds = 63 runs.",
+      "step3": "For each configuration, record: slow_tier_access_ratio, misprediction_rate, migration_volume, migration_lag",
+      "step4": "Identify Pareto-optimal configurations balancing slow-tier ratio and migration overhead",
+      "step5": "Use shortened traces (25K accesses/phase) for this study. Estimated: 135 runs * 1 min = 135 min / 2 cores = ~68 min"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Robustness analysis: irregular and adversarial workloads",
+    "description": "Test MarkovTier on workloads specifically designed to challenge prediction, verifying that the confidence mechanism prevents harm.",
+    "steps": {
+      "step1": "Generate 3 additional adversarial traces per seed: (a) CHAOTIC: phases in random order with no repetition (each transition is novel), 8 phases; (b) DRIFTING: phases gradually morph (working set changes by 5% each interval, no discrete transitions); (c) BURSTY: long stable phases (200K accesses) interrupted by very short phases (2K accesses) that are hard to detect",
+      "step2": "Run MarkovTier and all baselines on these adversarial traces with 3 seeds",
+      "step3": "Key question: Does MarkovTier ever perform WORSE than the best reactive baseline on these adversarial workloads? If so, by how much? The confidence threshold should prevent significant degradation.",
+      "step4": "Record prediction accuracy, misprediction rate, and performance relative to ALTO-like baseline"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical evaluation and success criteria verification",
+    "description": "Aggregate all results and formally evaluate against the stated success criteria with statistical rigor.",
+    "steps": {
+      "step1": "For each (policy, trace_type) combination, compute mean and standard deviation of all metrics across 3 seeds. Compute 95% confidence intervals.",
+      "step2": "Perform paired t-tests (or Wilcoxon signed-rank tests if distributions are non-normal) comparing MarkovTier vs each baseline on the primary metric (slow_tier_access_ratio during transitions). Report p-values.",
+      "step3": "Evaluate success criterion 1: Check if MarkovTier achieves >=20% reduction in slow-tier access ratio during phase transitions vs ALTO-like baseline, across REGULAR and SEMI-REGULAR workloads",
+      "step4": "Evaluate success criterion 2: Check if total migration volume increase is <=10% relative to ALTO-like baseline",
+      "step5": "Evaluate success criterion 3: Check if phase transition prediction accuracy exceeds 70% for REGULAR and SEMI-REGULAR workloads",
+      "step6": "Evaluate success criterion 4: Verify no statistically significant degradation on IRREGULAR/adversarial workloads vs best reactive baseline",
+      "step7": "Compile a summary table of all results with statistical significance indicators. Save to results/summary_table.csv"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper-quality figures and tables",
+    "description": "Create all figures needed for the paper, following consistent styling (matplotlib with seaborn theme, font size 12, PDF output).",
+    "steps": {
+      "step1": "Figure 1 - Motivating example: Time-series plot showing slow-tier access ratio over time for a REGULAR trace, comparing MarkovTier vs ALTO-like vs LRU-Reactive. Annotate phase transition points with vertical dashed lines. This should clearly show MarkovTier's advantage during transitions. Save as figures/fig1_motivation.pdf",
+      "step2": "Figure 2 - Main comparison bar chart: Grouped bar chart of slow-tier access ratio (mean +/- std across seeds) for all 6 policies across all 7 trace types. Use hatching to distinguish policies. Save as figures/fig2_main_comparison.pdf",
+      "step3": "Figure 3 - Migration lag comparison: Bar chart of average migration lag (intervals to steady state after transition) for MarkovTier vs baselines across trace types. Save as figures/fig3_migration_lag.pdf",
+      "step4": "Figure 4 - Transition window detail: For REGULAR trace, zoomed-in time series around a single phase transition showing page placement decisions for MarkovTier (anticipatory migrations visible before transition) vs ALTO-like (reactive migrations after transition). Include annotations for migration events. Save as figures/fig4_transition_detail.pdf",
+      "step5": "Figure 5 - Ablation results: Grouped bar chart showing slow-tier access ratio for Full MarkovTier, A1 (phase-only), A2 (no confidence), A3 (no rollback), A4 (random prediction), across REGULAR, SEMI-REGULAR, IRREGULAR traces. Save as figures/fig5_ablation.pdf",
+      "step6": "Figure 6 - Fast-tier capacity sensitivity: Line plot with error bands showing slow-tier access ratio vs fast-tier capacity ratio for MarkovTier vs ALTO-like vs LRU-Reactive. Save as figures/fig6_capacity_sensitivity.pdf",
+      "step7": "Figure 7 - Confidence threshold sensitivity: Dual y-axis line plot showing slow-tier access ratio (left) and misprediction rate (right) vs confidence threshold for REGULAR, SEMI-REGULAR, and IRREGULAR traces. Save as figures/fig7_confidence_sweep.pdf",
+      "step8": "Figure 8 - Migration budget sensitivity: Line plot showing slow-tier access ratio and migration volume vs anticipatory_budget fraction. Save as figures/fig8_budget_sweep.pdf",
+      "step9": "Figure 9 - Prediction accuracy heatmap: Heatmap showing Markov model prediction accuracy (true positive rate) per trace type and seed. Save as figures/fig9_prediction_accuracy.pdf",
+      "step10": "Table 1 - Main results table: LaTeX-formatted table with all metrics for all policies and trace types. Bold best results, underline second best. Include statistical significance stars. Save as figures/table1_main_results.tex",
+      "step11": "Table 2 - Ablation results table: LaTeX-formatted table with ablation results. Save as figures/table2_ablation.tex"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Runtime estimation and feasibility verification",
+    "description": "Verify that the entire experiment plan fits within the 8-hour budget on 2 CPU cores.",
+    "steps": {
+      "step1": "Estimated breakdown: (a) Environment setup + trace generation: 15 min; (b) Simulator implementation: included in setup; (c) Baseline runs (main config): 5 policies * 7 traces * 3 seeds = 105 runs * ~3 min = 315 min / 2 cores = ~158 min; (d) MarkovTier runs: 7 traces * 3 seeds = 21 runs * ~4 min = 84 min / 2 cores = ~42 min; (e) Ablation runs: 4 ablations * 7 traces * 3 seeds = 84 runs * ~3 min = 252 min / 2 cores = ~126 min; (f) Sensitivity - capacity: 252 runs * ~1.5 min = 378 min / 2 cores = ~189 min; (g) Sensitivity - threshold/budget: 135 runs * ~1 min = 135 min / 2 cores = ~68 min; (h) Robustness: 6 policies * 3 traces * 3 seeds = 54 runs * ~2 min = 108 min / 2 cores = ~54 min; (i) Analysis + visualization: 30 min. TOTAL SEQUENTIAL: ~682 min (~11.4 hours).",
+      "step2": "To fit within 8 hours: (a) Overlap baseline and MarkovTier runs with ablation runs where possible using multiprocessing; (b) Use shortened traces for sensitivity studies (already planned); (c) Reduce sensitivity sweep granularity if needed (e.g., 5 capacity ratios instead of 7); (d) Run trace generation once, reuse across all experiments. Estimated parallel runtime with overlap: ~7 hours with margin.",
+      "step3": "Contingency plan: If running behind schedule, priority order is: (1) Main comparison (baselines + MarkovTier), (2) Ablations, (3) Robustness, (4) Capacity sensitivity, (5) Threshold/budget sensitivity. Cut from the bottom if needed."
+    }
+  }
+]

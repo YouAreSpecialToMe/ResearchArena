@@ -1,0 +1,145 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up reproducible CPU-only replay environment",
+    "description": "Prepare a strictly CPU-feasible environment for trace capture, replay, analysis, and limited live sanity checks under the stated 2-core, 128GB RAM, 8-hour budget.",
+    "steps": {
+      "step1": "Create a Python 3.11 virtual environment and install only CPU-safe dependencies: numpy, pandas, scipy, pyarrow, matplotlib, seaborn, tqdm, psutil, and sqlite-utils or the system sqlite3 CLI. Do not install PyTorch, TensorFlow, CUDA, or any GPU-oriented packages.",
+      "step2": "Pin all experiment jobs to 2 CPU cores total. Export OMP_NUM_THREADS=1, OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, and NUMEXPR_NUM_THREADS=1, and never run more than 2 replay processes concurrently.",
+      "step3": "Use the canonical seeds [11, 23, 37] for every stochastic component: synthetic trace generation, tie-breaking in cache replacement, controller initialization, and all baselines and ablations. Do not introduce any extra reporting seed so paired comparisons remain exact.",
+      "step4": "Create fixed output directories named traces/, calibration/, replay_results/, live_validation/, and figures/. Save per-run outputs as JSONL or Parquet with at least these fields: workload_family, tenant_count, cache_budget, method, seed, epoch_id, tenant_id, occupancy_private, occupancy_shared, debt, slowdown, throughput_proxy, fairness_jain, shared_regret, controller_changes, runtime_sec, and peak_rss_mb.",
+      "step5": "Run one smoke test per workload family before the full matrix. If any single replay exceeds 90 seconds wall-clock or 8GB RAM at medium budget, reduce trace length uniformly for that family before launching the full matrix so total runtime remains within budget."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic overlap and negative-control traces",
+    "description": "Construct deterministic synthetic file-page traces that isolate overlap-heavy eviction interference and one disjoint case where the new responsibility signal should reduce to baseline behavior.",
+    "steps": {
+      "step1": "Represent every reference as a tuple (logical_time, tenant_id, file_id, page_id, access_type) at 4 KiB page granularity. Use read-only file-backed traces only; this study does not model writes, dirty-page flushing, or application-level semantics.",
+      "step2": "Create OverlapShift-2T with 2 tenants and one shared file region of 24000 pages. Define a shared hot subset of 2400 pages that shifts by 1200 pages every 20000 references. Set tenant 1 shared-region reuse probability to 0.80 and tenant 2 to 0.65 so both benefit from shared residency but with asymmetric urgency.",
+      "step3": "Create ScanVsLoop-2T with 2 tenants over a shared 18000-page file. Tenant 1 performs repeated sequential scans over 14000 pages, restarting every 3500 references. Tenant 2 loops on a 1800-page hot set embedded inside the scanned region with 0.92 reuse probability to create strong overlap-heavy eviction pressure.",
+      "step4": "Create DisjointPhase-2T with 2 tenants and no shared pages. Give each tenant a private 12000-page region with phase changes every 20000 references and no overlap in file_id or page_id space. This is the required reduction-behavior negative control.",
+      "step5": "Emit 80000 references per tenant for every synthetic run. Keep the same reference count across all methods and seeds within a workload family so throughput and regret comparisons remain fair."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Capture real file-backed SQLite trace families",
+    "description": "Add an external-validity trace family derived from real file-backed accesses by replaying captured SQLite reads over a shared immutable database file.",
+    "steps": {
+      "step1": "Build a moderate SQLite database from a public TPC-H-style dataset scaled to approximately 2GB on disk so the database is large enough to create meaningful cache pressure yet small enough to trace quickly on CPU. Use one immutable database file for all tenants.",
+      "step2": "Define a fixed query bank with at least 6 templates: 3 analytical scans, 2 selective point-lookups, and 1 selective join. For each tenant stream, pre-sample a deterministic query sequence using seed-dependent ordering but identical template pools across methods.",
+      "step3": "Capture file-offset traces from sqlite3 by tracing pread64 calls with strace -yy -e trace=pread64 or an equivalent lightweight syscall tracer. Convert byte offsets to 4 KiB page IDs using floor(offset / 4096), and store the resulting reference stream together with tenant_id and query_id.",
+      "step4": "Construct SQLiteTraceMix-2T by interleaving two captured tenant streams against the same database file so approximately 35% to 55% of touched pages are shared over a recent 4096-reference window. Construct SQLiteTraceMix-3T by interleaving three streams with unequal overlap, targeting one heavy consumer, one medium consumer, and one bursty tenant.",
+      "step5": "For SQLiteTraceMix-2T and SQLiteTraceMix-3T, keep exactly 60000 traced references per tenant after preprocessing and truncation. Report the realized overlap ratio, number of unique shared pages, and the top-10 hottest shared page ranges as preparation statistics."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Calibrate miss-cost proxy and cache budgets",
+    "description": "Estimate simple miss-cost penalties and define cache-budget levels consistently across all workloads without introducing learned models or hidden tuning.",
+    "steps": {
+      "step1": "For each workload family, run isolated single-tenant calibration on the same file-backed data used for replay. Measure median cache-hit latency and median cold-miss latency over 30 repeated probes per family, then define the default family-level miss penalty as cold_miss_median minus hit_median.",
+      "step2": "Define three miss-cost settings exactly once and reuse them everywhere: FamilyConst uses the family-level penalty from step1, UnitCost sets every miss cost to 1.0, and TenantConst uses one constant miss penalty per tenant derived from isolated calibration on that tenant's trace.",
+      "step3": "Set three cache budgets for every workload family based on the active unique-page footprint in one replay window: tight = 0.35 x active_pages, medium = 0.55 x active_pages, loose = 0.75 x active_pages. Round to whole pages and keep the same budgets across all methods for that family.",
+      "step4": "Record a calibration manifest in calibration/manifest.json containing workload_family, active_pages, overlap_ratio, hit_latency_us, miss_latency_us, family_penalty, tenant_penalties, and the chosen page-cache capacities for tight, medium, and loose budgets."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement simple and strong baselines",
+    "description": "Compare ShareArb against one simple allocation baseline and two strong adjacent baselines that already capture shared/private occupancy and policy choice.",
+    "steps": {
+      "step1": "Implement PrivateOnly-Utility as the simple baseline. Charge each resident page fully to the last-touch tenant, ignore shared proportional accounting, allocate cache shares from estimated per-tenant hit utility only, and use plain LRU replacement inside each tenant's assigned share.",
+      "step2": "Implement pCache-Account as the strong accounting baseline. Track each page's recent consumer set over a sliding window W = 4096 references, charge private pages fully to one tenant, and fractionally charge shared pages equally across current consumers.",
+      "step3": "Implement pCache-Account+Policy as the strong controller baseline. Keep the same pCache-style occupancy model, but allow each tenant to choose one replacement profile from {LRU, SCAN, FREQ}, where SCAN is a two-queue scan-resistant heuristic and FREQ is an LFU-lite recency-frequency blend.",
+      "step4": "Use the same controller epoch for all baselines and the proposed method: 2000 references per tenant. Enumerate actions over a 10-quantum simplex with a minimum of 1 quantum per tenant. For 2 tenants this yields 9 feasible share allocations from (10,90) to (90,10). For 3 tenants this yields 36 feasible allocations whose quanta sum to 10.",
+      "step5": "Tune any fixed non-novel coefficients only on one held-out pilot condition generated with seed 5, then freeze them before the reported experiments. Do not retune on the main seeds [11, 23, 37]."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate ShareArb on the primary replay matrix",
+    "description": "Test the narrow claim that evictor-side responsibility improves overlap-heavy page-cache arbitration beyond occupancy-only baselines.",
+    "steps": {
+      "step1": "Implement ShareArb with a Shared Responsibility Vector r_g over each shared page g. Estimate r_g from exponentially decayed recent reuses with alpha = 0.875 over the last W = 4096 references, then normalize the consumer weights so sum_i r_g(i) = 1.",
+      "step2": "When tenant i evicts shared page g, add debt_i += sum over j != i of r_g(j) multiplied by miss_cost_j(g). Use FamilyConst as the default miss-cost setting for the main matrix and decay debt every controller epoch with half-life = 1 working-set turnover, operationalized as lambda = 0.5^(epoch_refs / active_working_set_refs).",
+      "step3": "Define controller pressure_i = occupancy_i + eta x debt_i with default eta = 0.5. At every epoch, enumerate all feasible share allocations from the 10-quantum simplex and all per-tenant policy assignments from {LRU, SCAN, FREQ}, then select the action maximizing utility minus slowdown penalty minus pressure penalty under one fixed objective used identically across methods.",
+      "step4": "Activate the reduction rule before every epoch update: if the shared-page fraction in the previous epoch is below 0.05 or the average SRV confidence is too weak, defined as mean normalized entropy above 0.95 with fewer than 2 observed reuses per shared page, set eta = 0 for the next epoch so ShareArb collapses to occupancy-only arbitration.",
+      "step5": "Run the primary matrix over 5 workload families x 3 cache budgets x 3 seeds x 4 methods = 180 replay runs. The 4 reported primary methods are PrivateOnly-Utility, pCache-Account, pCache-Account+Policy, and ShareArb. Execute at most 2 runs in parallel because there are 2 CPU cores and 0 GPUs."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel component",
+    "description": "Measure whether the observed gains come from the responsibility heuristic itself rather than from generic controller complexity or proxy choices.",
+    "steps": {
+      "step1": "Run ShareArb-NoDebt on all 4 overlap-heavy workload settings, all 3 budgets, and all 3 seeds, for 4 x 3 x 3 = 36 runs. Keep SRV tracking and the same controller, but set eta = 0 so eviction responsibility cannot affect decisions. This is the primary novelty ablation.",
+      "step2": "Run UniformSRV on all 4 overlap-heavy workload settings at medium budget with all 3 seeds, for 4 x 1 x 3 = 12 runs. Replace the decayed SRV estimator with equal weights 1 / number_of_consumers for every shared page. This isolates whether reuse-weighted consumer estimation matters.",
+      "step3": "Run ShareArb-UnitCost on all 4 overlap-heavy workload settings, all 3 budgets, and all 3 seeds, for 36 runs. This tests whether the method depends on a fragile family-specific miss-cost conversion.",
+      "step4": "Run debt-half-life sensitivity on the 3 two-tenant overlap-heavy families at medium budget with all 3 seeds, using half-life values of 0.5 turnover and 2.0 turnovers in place of the default 1.0 turnover, for 3 x 1 x 3 x 2 = 18 runs.",
+      "step5": "Run NoReduction on DisjointPhase-2T and a deliberately low-overlap variant of OverlapShift-2T at all 3 budgets and all 3 seeds, for 2 x 3 x 3 = 18 runs, keeping eta always active. This checks that the fallback-to-baseline rule prevents harm outside the intended regime.",
+      "step6": "Report the total planned ablation count as 36 + 12 + 36 + 18 + 18 = 120 replay runs. Combined with the 180 primary runs, the full replay schedule contains exactly 300 non-live replay runs."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Measure mechanism validity and oracle gap",
+    "description": "Test whether charged debt aligns with realized downstream harm and estimate how much headroom remains relative to a future-informed upper bound.",
+    "steps": {
+      "step1": "Compute shared-page regret for every run as the count of near-term reuses lost because one tenant evicted a shared page and another tenant re-referenced it within the next 2048 references. Report both raw counts and regret per 10000 references.",
+      "step2": "For ShareArb, compute debt-harm alignment once per tenant-epoch by comparing charged debt_i in epoch t with realized downstream miss cost attributed to tenant i in epoch t+1. Report Pearson correlation, Spearman correlation, and mean absolute calibration error.",
+      "step3": "Implement OracleOverlap only on OverlapShift-2T and SQLiteTraceMix-2T at medium budget with the 3 main seeds, for 2 x 1 x 3 = 6 runs. Permit the oracle to use future next-reference times for victim scoring while keeping the same share-action simplex and the same replacement-profile menu.",
+      "step4": "Interpret OracleOverlap strictly as a bounded upper reference. If ShareArb closes at least 60% of the fairness gap between pCache-Account and OracleOverlap on these 6 runs, record that the heuristic captures a meaningful fraction of the available overlap signal."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run narrow live sanity checks",
+    "description": "Use a limited live study only to test directional agreement between replay and real file-backed execution, not to claim that the full ShareArb controller has been realized in stock Linux.",
+    "steps": {
+      "step1": "Select 4 live conditions only: ScanVsLoop-2T at tight and medium budgets, and SQLiteTraceMix-2T at tight and medium budgets. Exclude 3-tenant live tests to keep runtime bounded and because the stock-Linux proxy controller is intentionally coarse.",
+      "step2": "Compare only pCache-Account-style control versus full ShareArb in live execution. Reuse seeds [11, 23, 37], but cap each live run at 40000 references per tenant to limit wall-clock time and tracing overhead.",
+      "step3": "Approximate share control with cgroup v2 memory.high and approximate policy hints with posix_fadvise(POSIX_FADV_RANDOM or POSIX_FADV_SEQUENTIAL) plus explicit cache-dropping between repeated trials when required. Use mincore plus trace-owned offset maps to sample residency and refault behavior.",
+      "step4": "Measure aggregate throughput proxy, worst-tenant slowdown, and a coarse live refault-regret metric. Pre-register that exact per-page debt attribution is not observable in the live proxy environment and will not be claimed.",
+      "step5": "Call the live check successful only if replay and live preserve method ordering in at least 3 of the 4 conditions and preserve the sign of improvement in at least 9 of the 12 seed-condition pairs."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate the hypothesis with fixed metrics and paired statistics",
+    "description": "Judge the proposal using explicit success criteria, disconfirmation criteria, and paired analyses over matched workload-seed settings.",
+    "steps": {
+      "step1": "Use these primary metrics: worst-tenant slowdown, aggregate throughput proxy, Jain fairness index, shared-page regret per 10000 references, debt-harm correlation, controller stability measured as action changes per 10000 references, replay runtime, and peak RAM usage.",
+      "step2": "For every pairwise comparison between ShareArb and pCache-Account or ShareArb-NoDebt, aggregate over matched workload-family, budget, and seed tuples. Report paired bootstrap 95% confidence intervals with 10000 resamples and Wilcoxon signed-rank p-values as secondary evidence.",
+      "step3": "Declare the main hypothesis supported only if all of the following hold simultaneously: ShareArb improves mean worst-tenant slowdown by at least 8% over pCache-Account across the 4 overlap-heavy workload settings, aggregate throughput proxy is no worse than 3% below pCache-Account on average, DisjointPhase-2T remains within 3% on both slowdown and throughput proxy, and debt-harm correlation is positive in at least 9 of the 12 overlap-heavy workload-family by budget combinations.",
+      "step4": "Declare the claim weakened if the gains disappear under both UnitCost and the alternative half-life settings, if UniformSRV matches full ShareArb everywhere, or if controller instability increases by more than 25% relative to pCache-Account+Policy.",
+      "step5": "State negative results directly. If ShareArb helps only on some overlap-heavy families or only at tight budgets, report that the heuristic is regime-specific rather than broadly dominant."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready figures and tables",
+    "description": "Generate visual outputs that directly support the narrow eviction-responsibility claim and document feasibility under the stated machine limits.",
+    "steps": {
+      "step1": "Create a main result figure with grouped bars for worst-tenant slowdown and aggregate throughput proxy across the 5 workload families at medium budget, comparing the 4 primary methods and showing 95% paired-bootstrap confidence intervals over the 3 seeds.",
+      "step2": "Create budget-sensitivity line plots for each overlap-heavy family showing pCache-Account, pCache-Account+Policy, ShareArb-NoDebt, and ShareArb across tight, medium, and loose budgets. This figure should isolate the incremental value of the debt signal beyond occupancy accounting and generic policy control.",
+      "step3": "Create an ablation summary heatmap with rows {NoDebt, UniformSRV, UnitCost, short half-life, long half-life, NoReduction} and columns {slowdown gain, throughput change, fairness change, regret change, stability change} relative to full ShareArb.",
+      "step4": "Create a mechanism-validity scatter plot of charged debt versus realized downstream harm with one point per tenant-epoch, and annotate the figure with Pearson and Spearman correlations.",
+      "step5": "Create a compact live-validation table listing the 4 live conditions, replay winner, live winner, sign agreement, and the observed effect-size range. Explicitly label this table as a sanity check rather than a deployment evaluation.",
+      "step6": "Create a runtime-accounting table showing estimated and observed wall-clock cost for trace capture, calibration, primary replay matrix, ablations, oracle runs, live checks, and plotting. Include total CPU-core-hours consumed and confirm that no GPU was used."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Pre-commit runtime and parallel execution schedule",
+    "description": "Quantify feasibility before execution and show exactly how the experiment matrix fits within the available machine budget without any GPU parallelism.",
+    "steps": {
+      "step1": "Assume 45 seconds per primary replay run after the smoke-test pass. For 180 primary runs on 2 CPU cores, expected wall-clock time is 180 x 45 / 2 = 4050 seconds, or about 67.5 minutes.",
+      "step2": "Assume 45 seconds per ablation replay run for 120 ablation runs, giving 120 x 45 / 2 = 2700 seconds, or about 45 minutes. Assume 90 seconds per OracleOverlap run for 6 runs, giving about 4.5 minutes wall-clock on 2 cores.",
+      "step3": "Budget 60 minutes for SQLite trace capture and preprocessing, 30 minutes for isolated miss-cost calibration, 120 minutes for all 12 live runs including setup and cache resets, and 45 minutes for analysis plus plotting. The resulting total expected wall-clock time is about 6.2 hours, leaving roughly 1.8 hours of slack under the 8-hour cap.",
+      "step4": "If the smoke test exceeds these estimates by more than 50%, simplify in this order before the full launch: shorten all traces proportionally, drop loose-budget UnitCost runs, then reduce live repetitions. Do not reduce the number of primary methods, do not remove pCache-Account, and do not reduce the 3 reporting seeds."
+    }
+  }
+]

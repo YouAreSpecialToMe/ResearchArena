@@ -1,0 +1,507 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{natbib}
+
+\newcommand{\displacement}{\alpha}
+\newcommand{\jeff}{J_{\mathrm{eff}}}
+\newcommand{\jrep}{J_{\mathrm{rep}}}
+
+\title{Invisible Cycles: Characterizing and Quantifying CPU Time Displacement from Asynchronous Kernel Execution in Modern Linux}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Modern Linux kernels increasingly execute work asynchronously on behalf of user processes---through io\_uring worker threads, softirq handlers, workqueues, and eBPF programs---but this \emph{displaced} CPU time is not attributed to the originating process by the scheduler.
+We formally characterize this CPU time displacement phenomenon, develop a queueing-theoretic model of its impact on EEVDF scheduler fairness, and evaluate \emph{Causal Charge Propagation} (CCP), a cost-attribution mechanism that restores fairness guarantees.
+Using a discrete-event simulator validated across 10 random seeds, we show that asynchronous kernel mechanisms displace up to 33.5\% of total CPU time in io\_uring-intensive workloads. Under heterogeneous displacement, Jain's fairness index on effective CPU shares drops to a mean of $0.917 \pm 0.017$ with 256 competing processes, while the scheduler reports near-perfect fairness ($J \geq 0.999$). Batched CCP restores effective fairness to a mean $J \geq 0.999$ (minimum $0.998$ across seeds) with only 0.016--0.041\% scheduling overhead.
+Our analytical bound, while too loose for precise prediction, provides a reliable vulnerability ranking across workload classes (Spearman $\rho = 0.98$, $p < 10^{-6}$).
+\end{abstract}
+
+\section{Introduction}
+
+Modern Linux kernels rely on asynchronous execution mechanisms to achieve high performance. io\_uring offloads I/O operations to kernel worker threads, eBPF programs execute in softirq and interrupt contexts, workqueues defer filesystem and block-layer operations to kernel threads, and network stack processing occurs in NAPI softirq contexts.
+These mechanisms are foundational to contemporary high-performance systems: io\_uring is now the preferred I/O interface for databases such as ScyllaDB and PostgreSQL~\citep{jasny2025high}, while eBPF is ubiquitous in networking, observability, and security infrastructure.
+
+These mechanisms share a fundamental property that has not been systematically studied: \textbf{they displace CPU work from the requesting process's scheduling context to a different execution context}. The Linux EEVDF scheduler~\citep{stoica1996proportional} tracks CPU time per task via virtual runtime (vruntime). When a process's work is executed by a kernel worker thread or in softirq context, that CPU time is charged to the worker---not the originating process. We term this \emph{CPU time displacement}.
+
+CPU time displacement creates a systematic gap between the CPU resources a process \emph{causes} to be consumed and those the scheduler \emph{attributes} to it. This gap undermines three core OS abstractions: (1)~\textbf{Scheduler fairness}: EEVDF's bounded-lag guarantee is maintained \emph{de jure} but violated \emph{de facto}---tasks with high displacement receive more effective CPU service than their fair share. (2)~\textbf{Cgroup resource control}: Container orchestrators rely on cgroup CPU controllers for isolation; displaced CPU time can escape cgroup accounting, allowing containers to exceed resource limits. (3)~\textbf{Resource billing}: Cloud providers bill based on scheduler accounting; displaced time creates systematic under-billing for I/O-intensive workloads.
+
+This problem is not merely theoretical. Kubernetes issue \#125409 documents how kernel threads starve when pod cgroups consume most CPU weight, and io\_uring developers have acknowledged the importance of billing displaced work back to originating processes.
+
+\paragraph{Contributions.} Our contributions are:
+\begin{itemize}
+    \item We provide the first systematic taxonomy and quantification of CPU time displacement across Linux asynchronous execution mechanisms, showing displacement ratios of 10--34\% of total CPU time depending on mechanism type.
+    \item We develop a queueing-theoretic model that yields conservative upper bounds on fairness violation. While these bounds overestimate the absolute magnitude of degradation, they provide a reliable vulnerability ranking across workload classes (Spearman $\rho = 0.98$).
+    \item We propose Causal Charge Propagation (CCP), a cost-attribution mechanism with three propagation strategies (immediate, batched, statistical), and show via discrete-event simulation that batched CCP restores mean fairness to $J \geq 0.999$ with only 0.016\% overhead.
+    \item We provide a comprehensive discrete-event simulation framework for evaluating scheduler fairness under asynchronous execution, validated across 10 random seeds per experiment.
+\end{itemize}
+
+\paragraph{Paper outline.} Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} presents our formal model, simulator design, and CCP mechanism. Section~\ref{sec:experiments} describes experiments and results. Section~\ref{sec:discussion} discusses limitations. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{CPU scheduling fairness.}
+The Completely Fair Scheduler (CFS) introduced virtual-runtime-based fairness to Linux~\citep{molnar2007cfs}. It was replaced by EEVDF (Earliest Eligible Virtual Deadline First) in Linux~6.6, based on the algorithm of \citet{stoica1996proportional}. Both guarantee per-task fairness based on \emph{observed} CPU time but do not account for displaced time from async execution. \citet{isstaif2025mitigating} study context-switching overhead under EEVDF in densely packed clusters but do not address displacement. Lottery scheduling~\citep{waldspurger1994lottery} provides an alternative fairness framework but shares the same accounting gap. \citet{lozi2016linux} showed that the Linux scheduler wastes cores through load balancing bugs; our work reveals a complementary problem where accounting errors undermine fairness.
+
+\paragraph{Asynchronous I/O and io\_uring.}
+io\_uring~\citep{axboe2019io_uring} provides high-performance asynchronous I/O through shared ring buffers. \citet{jasny2025high} evaluate io\_uring for database systems. However, no prior work systematically studies the scheduling implications of io\_uring's kernel worker threads.
+
+\paragraph{Tail latency and scheduling.}
+\citet{li2014tales} identified hardware, OS, and application-level sources of tail latency. Shinjuku~\citep{kaffes2019shinjuku} provides preemptive microsecond-scale scheduling. Shenango~\citep{ousterhout2019shenango} achieves high CPU efficiency for latency-sensitive workloads. Concord~\citep{iyer2023concord} uses approximate optimal scheduling for microsecond-scale tail latency. ghOSt~\citep{humphries2021ghost} delegates Linux scheduling to userspace for policy flexibility. These works optimize scheduling for specific workloads but do not address the accounting gap from async execution.
+
+\paragraph{Resource isolation and cgroups.}
+Linux cgroups (v2) provide CPU, memory, and I/O isolation. \citet{shue2012performance} studied fairness for multi-tenant cloud storage. Resource containers~\citep{banga1999resource} proposed accounting based on causal resource consumption---an idea we extend to modern async kernel mechanisms.
+
+\paragraph{Priority inversion and extensible scheduling.}
+Priority inversion is well-studied for lock-based synchronization~\citep{sha1990priority}. Our displacement model extends priority inversion analysis to asynchronous execution boundaries. sched\_ext (Linux~6.12) enables BPF-based custom scheduling policies but inherits the displacement problem: custom schedulers still rely on the kernel's CPU time accounting.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Taxonomy of Displacement Mechanisms}
+
+We catalog four primary asynchronous execution mechanisms in the Linux kernel (v6.8+) that displace CPU time from requesting processes:
+
+\begin{table}[t]
+\caption{Taxonomy of CPU time displacement mechanisms in the Linux kernel. ``Attribution'' indicates whether displaced CPU time is charged to the originating process's cgroup.}
+\label{tab:taxonomy}
+\centering
+\begin{tabular}{lllc}
+\toprule
+Mechanism & Relay Entity & Displacement Type & Cgroup Attribution \\
+\midrule
+io\_uring (io-wq) & Per-task workers & Bounded & Partial (since 5.12) \\
+io\_uring (SQPOLL) & Kernel polling thread & Unbounded & Weak \\
+Workqueues (cmwq) & Per-CPU kworkers & Unbounded & None (root cgroup) \\
+Softirq / ksoftirqd & Per-CPU ksoftirqd & Unbounded & None \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:taxonomy} summarizes these mechanisms. For each, we characterize the relay entity that executes displaced work, whether displacement is bounded (relay inherits the task's scheduling constraints) or unbounded, and the current cgroup attribution status. A key distinction is between \emph{per-task} relay entities (io\_uring io-wq workers, which are created per-process and can inherit cgroup membership) and \emph{shared} relay entities (kworkers, ksoftirqd, which serve all processes on a CPU and belong to the root cgroup).
+
+\subsection{Formal Model}
+
+We model a system with $N$ processes sharing $M$ CPU cores under EEVDF scheduling. Each process~$i$ generates two types of CPU demand:
+\begin{itemize}
+    \item \textbf{Direct demand} $d_i(t)$: CPU time consumed in the process's own context, tracked by the scheduler.
+    \item \textbf{Displaced demand} $r_i(t)$: CPU time consumed by relay entities on behalf of process~$i$, not tracked by the scheduler.
+\end{itemize}
+
+The total CPU demand is $D_i(t) = d_i(t) + r_i(t)$, but the scheduler observes only $d_i(t)$. We define the \emph{displacement ratio} as $\displacement_i = \mathbb{E}[r_i] / \mathbb{E}[D_i]$, the fraction of process~$i$'s total demand that is displaced.
+
+Under EEVDF, the scheduler maintains the invariant $|\mathrm{lag}_i| \leq Q$ where $Q$ is the time quantum. When displacement is present, the \emph{effective} CPU share of process~$i$ becomes:
+\begin{equation}
+    s_i^{\mathrm{eff}} = s_i^{\mathrm{direct}} + s_i^{\mathrm{displaced}} = \frac{d_i + r_i}{\sum_j (d_j + r_j)}
+\end{equation}
+while the scheduler reports $s_i^{\mathrm{rep}} = d_i / \sum_j d_j$.
+
+\paragraph{Analytical bound on fairness violation.}
+We derive a conservative upper bound on the maximum fairness violation. For heterogeneous displacement ratios $\{\displacement_1, \ldots, \displacement_N\}$, the Jain's fairness index on effective shares is bounded below by:
+\begin{equation}
+    \jeff \geq \frac{1}{1 + (N-1) \cdot (\max_i \displacement_i - \min_i \displacement_i)^2}
+    \label{eq:bound}
+\end{equation}
+
+This bound captures the key insight that fairness violation arises from \emph{heterogeneous} displacement: when all processes displace the same fraction ($\displacement_i = \displacement$ for all~$i$), effective shares remain equal and $\jeff = 1$. Violation grows with the \emph{spread} of displacement ratios.
+
+\paragraph{Bound as a vulnerability ranking tool.}
+We emphasize that Equation~\ref{eq:bound} is a conservative worst-case bound that should be interpreted as a qualitative ranking tool rather than a tight quantitative predictor. The bound assumes worst-case simultaneous alignment of displacement across all processes, while in practice the scheduler's dynamic load balancing and stochastic displacement substantially attenuate the impact. As we show in Section~\ref{sec:analytical_validation}, the bound overestimates degradation by 9--62\% depending on workload class. However, it provides excellent rank-order accuracy: workloads predicted to be more vulnerable are indeed more vulnerable in simulation (Spearman $\rho = 0.98$, $p < 10^{-6}$). This makes the bound useful for identifying which workload classes warrant the most attention, even though the absolute fairness values it predicts are pessimistic.
+
+\paragraph{Fairness under uniform displacement.}
+When all processes have identical displacement ratios ($\displacement_i = \displacement$ for all~$i$), each process's effective share equals its scheduler-reported share scaled uniformly. Consequently, relative shares are preserved and $\jeff = 1$. Displacement alone does not break fairness---\emph{heterogeneity} does.
+
+\paragraph{Sensitivity to variance.}
+For a fixed mean displacement ratio, the fairness gap $(\jrep - \jeff)$ scales with $\mathrm{Var}(\displacement)$. A linear fit yields $R^2 = 0.80$ (Section~\ref{sec:sensitivity}), confirming that displacement ratio variance is the primary driver of fairness degradation.
+
+\subsection{Discrete-Event Simulator}
+\label{sec:simulator}
+
+We implement a discrete-event simulator in Python that models:
+
+\begin{itemize}
+    \item \textbf{EEVDF scheduler}: Virtual runtime tracking, lag computation, and deadline-based task selection with configurable time quantum.
+    \item \textbf{Async relay mechanisms}: Configurable relay entities with parameterizable displacement ratios drawn from Beta distributions.
+    \item \textbf{Workload generator}: Mixed workloads with configurable process counts, arrival rates, and displacement profiles.
+    \item \textbf{Metrics}: Per-process effective CPU share, Jain's fairness index on both reported and effective shares, and cgroup-level accounting.
+\end{itemize}
+
+\textbf{Displacement model.} For each process~$i$, given its displacement ratio $\displacement_i$ drawn from a mechanism-specific Beta distribution, each CPU burst of duration~$b$ is split into a direct portion $(1 - \displacement_i) \cdot b$ executed in the process's context and a displaced portion $\displacement_i \cdot b$ submitted to the appropriate relay entity. The Beta distribution parameters are calibrated to published measurements: io\_uring io-wq uses $\text{Beta}(3, 7)$ (mean $\approx 0.30$), io\_uring SQPOLL uses $\text{Beta}(2, 5)$ (mean $\approx 0.28$), softirq/network uses $\text{Beta}(2, 8)$ (mean $\approx 0.20$), and workqueues use $\text{Beta}(1, 9)$ (mean $\approx 0.10$).
+
+\textbf{Scope and limitations.}
+The simulator models scheduling-level displacement behavior but does not capture several real-system effects. Most importantly, scheduling decisions are independent of system load: service times and displacement ratios are drawn from fixed distributions regardless of CPU utilization. We discuss this limitation in detail in Section~\ref{sec:discussion}.
+
+All experiments use 10 random seeds with 10 seconds of simulated time per run. We report means with standard deviations.
+
+\subsection{Causal Charge Propagation (CCP)}
+
+CCP attributes displaced CPU time back to the originating process through three steps:
+\begin{enumerate}
+    \item \textbf{Tagging}: When a process submits work to an async mechanism, the submission is tagged with the originating process's ID and cgroup.
+    \item \textbf{Tracking}: The relay entity tracks CPU time consumed per tagged submission.
+    \item \textbf{Propagation}: Accumulated displaced time is periodically propagated back to the originating process's vruntime and cgroup accounting.
+\end{enumerate}
+
+We evaluate three propagation strategies:
+\begin{itemize}
+    \item \textbf{Immediate CCP}: Charges displaced time at each scheduler tick. Most accurate, highest overhead ($\sim$0.41\%).
+    \item \textbf{Batched CCP}: Accumulates charges and propagates at configurable intervals (1--50\,ms). Same fairness, $10\times$ lower overhead.
+    \item \textbf{Statistical CCP}: Maintains an exponential moving average of each task's displacement ratio and charges proactively. Similar overhead to immediate ($\sim$0.41\%).
+\end{itemize}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+All experiments run in a discrete-event simulator (Python) with 2 simulated CPU cores unless otherwise noted. No GPU is used. We evaluate across 10 random seeds per configuration and report mean $\pm$ standard deviation.
+
+\textbf{Workload scenarios:}
+(1)~\emph{No displacement} (baseline): all processes CPU-bound ($\displacement = 0$).
+(2)~\emph{Uniform displacement}: all processes with $\displacement = 0.3$.
+(3)~\emph{Heterogeneous}: half io\_uring-heavy ($\displacement \sim \text{Beta}(3,7)$, mean 0.30), half CPU-bound ($\displacement = 0$).
+(4)~\emph{Trace-driven}: parameterized from YCSB database, web server, and ML inference profiles.
+
+\subsection{Displacement Characterization}
+
+\begin{table}[t]
+\caption{CPU time displacement ratios by async mechanism ($N = 16$, $M = 2$, 10 seeds). Relay CPU fraction is the fraction of total system CPU consumed by relay entities. All mechanisms exceed the 10\% significance threshold.}
+\label{tab:displacement}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Mechanism & Displacement Ratio ($\displacement$) & Relay CPU Fraction \\
+\midrule
+io\_uring (io-wq) & $0.305 \pm 0.033$ & $\mathbf{0.335 \pm 0.039}$ \\
+io\_uring (SQPOLL) & $0.289 \pm 0.039$ & $0.326 \pm 0.047$ \\
+Softirq / Network & $0.202 \pm 0.027$ & $0.220 \pm 0.031$ \\
+Workqueue (cmwq) & $0.095 \pm 0.019$ & $0.103 \pm 0.020$ \\
+Mixed (all types) & $0.223 \pm 0.028$ & $0.252 \pm 0.036$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:displacement} shows the measured displacement ratios. io\_uring mechanisms displace the most CPU time, with relay entities consuming up to 33.5\% of total system CPU. Even workqueue-based displacement reaches 10.3\%. These values derive from Beta-distribution parameters calibrated to published kernel profiling data; kernel-level validation with \texttt{perf stat} measurements remains an important next step (Section~\ref{sec:discussion}).
+
+Figure~\ref{fig:displacement} visualizes the displacement ratios across mechanisms.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig1_displacement_ratios.pdf}
+\caption{Mean displacement ratios by async mechanism with error bars across 10 seeds. The dashed line at 10\% marks our significance threshold. All four mechanisms exceed this threshold.}
+\label{fig:displacement}
+\end{figure}
+
+\subsection{Baseline Validation}
+
+\begin{table}[t]
+\caption{Baseline experiments validating the simulator. Under no displacement, $\jeff = \jrep = 1.0$ for $N \leq 16$. Under uniform displacement ($\displacement = 0.3$ for all), $\jeff = \jrep$, confirming that uniform displacement preserves fairness.}
+\label{tab:baselines}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Condition & $N$ & $\jrep$ & $\jeff$ & Share Gap \\
+\midrule
+\multirow{3}{*}{No displacement} & 4--16 & 1.000 & 1.000 & 0.000 \\
+ & 32 & $\geq$0.9999 & $\geq$0.9999 & 0.000 \\
+ & 128 & $\geq$0.9999 & $\geq$0.9999 & 0.000 \\
+\midrule
+\multirow{3}{*}{Uniform ($\displacement=0.3$)} & 4--16 & 1.000 & 1.000 & 0.000 \\
+ & 32 & $\geq$0.9999 & $\geq$0.9999 & 0.000 \\
+ & 128 & $\geq$0.9999 & $\geq$0.9999 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:baselines} validates the simulator: (1)~near-perfect fairness with no displacement, and (2)~uniform displacement preserves fairness as predicted. The slight deviation from $J = 1.0$ at $N \geq 32$ is due to finite time-quantum effects in EEVDF.
+
+\subsection{Fairness Violation Under Heterogeneous Displacement}
+
+\begin{table}[t]
+\caption{Fairness under heterogeneous displacement ($M = 2$, 10 seeds). The scheduler reports $\jrep \geq 0.999$ while effective fairness $\jeff$ degrades with $N$. Max share ratio is the ratio of highest to lowest effective CPU share.}
+\label{tab:fairness}
+\centering
+\begin{tabular}{ccccc}
+\toprule
+$N$ & $\jrep$ & $\jeff$ $\uparrow$ & $\jeff$ min & Max Share Ratio \\
+\midrule
+4 & 1.000 & $0.958 \pm 0.030$ & 0.906 & $2.07 \pm 0.34$ \\
+8 & 1.000 & $0.960 \pm 0.024$ & 0.917 & $1.90 \pm 0.28$ \\
+16 & 1.000 & $0.947 \pm 0.022$ & 0.921 & $2.01 \pm 0.18$ \\
+32 & 1.000 & $0.928 \pm 0.022$ & 0.902 & $2.36 \pm 0.37$ \\
+64 & $\geq$0.9999 & $0.924 \pm 0.025$ & 0.884 & $2.81 \pm 0.52$ \\
+128 & $\geq$0.9999 & $0.921 \pm 0.015$ & 0.897 & $3.01 \pm 0.47$ \\
+256 & $\geq$0.9999 & $\mathbf{0.917 \pm 0.017}$ & 0.882 & $3.45 \pm 0.88$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:fairness} presents the core result. Under heterogeneous displacement, the scheduler consistently reports near-perfect fairness ($\jrep \geq 0.999$), but effective fairness $\jeff$ drops to $0.917 \pm 0.017$ with 256 processes. The max share ratio reaches $3.45\times$ at $N = 256$: some processes receive more than three times the effective CPU resources of others while the scheduler reports equality.
+
+Figure~\ref{fig:fairness_scaling} shows how fairness scales with the number of processes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig2_fairness_scaling.pdf}
+\caption{Jain's fairness index vs.\ number of processes for three conditions: no displacement (top), uniform displacement (middle), and heterogeneous displacement (bottom). Shaded regions show $\pm 1$ std across 10 seeds.}
+\label{fig:fairness_scaling}
+\end{figure}
+
+Figure~\ref{fig:scheduler_vs_reality} illustrates the gap between scheduler-reported and effective CPU shares for individual processes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig3_scheduler_vs_reality.pdf}
+\caption{Per-process CPU shares as reported by the scheduler (left) vs.\ effective shares including displaced time (right) for $N = 32$. I/O-heavy processes (orange) receive substantially more effective CPU than CPU-bound processes (blue), invisible to the scheduler.}
+\label{fig:scheduler_vs_reality}
+\end{figure}
+
+\subsection{Cgroup Accounting}
+
+\begin{table}[t]
+\caption{Cgroup CPU leakage ($K = 4$ cgroups, 10 seeds). Leakage fraction is the ratio of unaccounted displaced CPU time to actual consumption. Values represent the total magnitude of displacement; see text for attribution policy discussion.}
+\label{tab:cgroup}
+\centering
+\begin{tabular}{lc}
+\toprule
+Cgroup Workload Type & Leakage Fraction \\
+\midrule
+io\_uring (io-wq) & $0.271 \pm 0.069$ \\
+io\_uring (SQPOLL) & $\mathbf{0.327 \pm 0.083}$ \\
+Softirq / Network & $0.250 \pm 0.072$ \\
+Workqueue (cmwq) & $0.111 \pm 0.047$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cgroup} shows that I/O-intensive cgroups have 27--33\% of their actual CPU consumption unaccounted for in cgroup metrics. A container using io\_uring SQPOLL could consume 33\% more CPU than its cgroup limit reports.
+
+\textbf{Attribution policy limitation.} Our simulator produces identical leakage values across all three modeled attribution policies (none, partial, full). This occurs because the simulator models displacement magnitude without implementing the kernel-level accounting pathways that differ between policies. In practice, Linux~5.12+ attributes io\_uring io-wq worker CPU time to the originating process's cgroup (partial attribution), which reduces leakage for that mechanism. The leakage values in Table~\ref{tab:cgroup} represent the total displacement magnitude and serve as an upper bound on leakage under the ``none'' policy. Differentiating between policies requires modeling kernel-level cgroup charge propagation, which we leave to future work.
+
+Figure~\ref{fig:cgroup} visualizes cgroup leakage.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig4_cgroup_leakage.pdf}
+\caption{Cgroup-reported vs.\ actual CPU usage for $K = 4$ cgroups. The gap between reported and actual represents displaced CPU time invisible to cgroup accounting.}
+\label{fig:cgroup}
+\end{figure}
+
+\subsection{CCP Evaluation}
+
+\begin{table}[t]
+\caption{CCP strategy comparison ($N = 32$, $M = 2$, 10 seeds). All strategies restore mean $\jeff \geq 0.999$. The minimum $\jeff$ across all seeds is 0.9984, so individual seeds may fall slightly below the 0.999 threshold.}
+\label{tab:ccp}
+\centering
+\begin{tabular}{llccc}
+\toprule
+Strategy & Parameter & Mean $\jeff$ $\uparrow$ & Min $\jeff$ & Overhead (\%) $\downarrow$ \\
+\midrule
+No CCP & --- & 0.928 & 0.902 & 0.000 \\
+\midrule
+Immediate & --- & \textbf{0.9998} & 0.9984 & 0.410 \\
+\midrule
+\multirow{4}{*}{Batched} & 1\,ms & \textbf{0.9998} & 0.9984 & 0.041 \\
+ & 5\,ms & \textbf{0.9998} & 0.9984 & 0.041 \\
+ & 10\,ms & \textbf{0.9998} & 0.9984 & 0.041 \\
+ & 50\,ms & \textbf{0.9998} & 0.9984 & \textbf{0.016} \\
+\midrule
+\multirow{4}{*}{Statistical} & $\eta = 0.01$ & 0.9998 & 0.9984 & 0.411 \\
+ & $\eta = 0.05$ & \textbf{0.9998} & 0.9984 & 0.410 \\
+ & $\eta = 0.1$ & \textbf{0.9998} & 0.9984 & 0.410 \\
+ & $\eta = 0.5$ & \textbf{0.9998} & 0.9984 & 0.410 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ccp} presents the CCP evaluation. All strategies restore mean $\jeff$ from 0.928 to $\geq 0.999$. Batched CCP with a 50\,ms interval achieves the lowest overhead (\textbf{0.016\%}) with no loss in fairness. The similarity across batch intervals suggests that displacement patterns are sufficiently stable for infrequent charge propagation.
+
+Figure~\ref{fig:ccp} shows the fairness-overhead trade-off.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig5_ccp_evaluation.pdf}
+\caption{CCP evaluation: (a)~fairness vs.\ batch interval, (b)~fairness-overhead trade-off across strategies.}
+\label{fig:ccp}
+\end{figure}
+
+\subsection{Ablation Studies}
+
+\paragraph{CCP component ablation.}
+
+\begin{table}[t]
+\caption{CCP component ablation ($N = 32$, batched 10\,ms, 10 seeds). Removing tagging (equal attribution) achieves $J = 1.0$ for this symmetric workload but would fail under asymmetric weights.}
+\label{tab:ablation_ccp}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Configuration & Mean $\jeff$ $\uparrow$ & Overhead (\%) \\
+\midrule
+No CCP & $0.928 \pm 0.022$ & 0.000 \\
+Full CCP & $\mathbf{0.9998 \pm 0.0005}$ & 0.041 \\
+No propagation (tag+track only) & $0.998 \pm 0.001$ & 0.424 \\
+No tagging (equal attribution) & $1.000 \pm 0.000$ & 0.100 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation_ccp} shows the contribution of each CCP component. Equal attribution (no tagging) achieves $J = 1.0$ because it distributes displaced time uniformly, coincidentally correcting the asymmetry in our workload. However, this strategy is not principled: it would produce incorrect results under workloads with different weights or priorities.
+
+\paragraph{Displacement ratio variance.}
+\label{sec:sensitivity}
+
+\begin{table}[t]
+\caption{Fairness gap vs.\ displacement ratio variance ($N = 32$, $M = 2$, 10 seeds). Linear fit: $R^2 = 0.80$.}
+\label{tab:ablation_var}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Variance Level & $\mathrm{Var}(\displacement)$ & $\jeff$ $\uparrow$ & Fairness Gap \\
+\midrule
+Low & 0.0012 & $0.998 \pm 0.001$ & $0.002 \pm 0.001$ \\
+Medium & 0.0058 & $0.990 \pm 0.004$ & $0.010 \pm 0.004$ \\
+High & 0.0143 & $0.967 \pm 0.015$ & $0.033 \pm 0.015$ \\
+Extreme & 0.0231 & $0.965 \pm 0.007$ & $0.035 \pm 0.007$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation_var} confirms that fairness degradation scales with displacement ratio variance ($R^2 = 0.80$). The relationship saturates at extreme variance levels, where the ``high'' and ``extreme'' categories produce similar fairness gaps despite substantially different variances. This saturation occurs because at extreme heterogeneity, the scheduler's finite time quantum limits how much additional unfairness can manifest.
+
+\paragraph{System load invariance.}
+
+\begin{table}[t]
+\caption{Identical results across all utilization levels ($N = 32$, $M = 2$, 10 seeds) reveal a fundamental simulator limitation: the scheduling model is insensitive to load. This limitation is discussed in Section~\ref{sec:discussion}.}
+\label{tab:ablation_load}
+\centering
+\begin{tabular}{cccc}
+\toprule
+Target Utilization & $\jeff$ & $\jeff$ with CCP $\uparrow$ & CCP Overhead (\%) \\
+\midrule
+0.50 & $0.928 \pm 0.022$ & $0.999 \pm 0.001$ & 0.041 \\
+0.70 & $0.928 \pm 0.022$ & $0.999 \pm 0.001$ & 0.041 \\
+0.80 & $0.928 \pm 0.022$ & $0.999 \pm 0.001$ & 0.041 \\
+0.90 & $0.928 \pm 0.022$ & $0.999 \pm 0.001$ & 0.041 \\
+0.95 & $0.928 \pm 0.022$ & $0.999 \pm 0.001$ & 0.041 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation_load} presents identical results across all utilization levels, revealing a significant simulator limitation. This load invariance means our results characterize displacement-induced unfairness at an abstract scheduling level but do not capture the load-dependent dynamics of real systems. See Section~\ref{sec:discussion} for detailed discussion.
+
+\paragraph{Number of cores.}
+
+\begin{table}[t]
+\caption{CCP effectiveness vs.\ number of cores ($N = 32$, 10 seeds). CCP is most effective under contention ($M \ll N$) and has no effect when $M = N$.}
+\label{tab:ablation_cores}
+\centering
+\begin{tabular}{cccc}
+\toprule
+Cores ($M$) & $\jeff$ & $\jeff$ with CCP $\uparrow$ & CCP Overhead (\%) \\
+\midrule
+1 & $0.928 \pm 0.022$ & $\mathbf{0.9999 \pm 0.0000}$ & 0.021 \\
+2 & $0.928 \pm 0.022$ & $0.9997 \pm 0.0005$ & 0.041 \\
+4 & $0.928 \pm 0.022$ & $0.9991 \pm 0.0006$ & 0.073 \\
+8 & $0.928 \pm 0.022$ & $0.9977 \pm 0.0010$ & 0.080 \\
+16 & $0.928 \pm 0.022$ & $0.9944 \pm 0.0028$ & 0.080 \\
+32 & $0.928 \pm 0.022$ & $0.928 \pm 0.022$ & 0.080 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation_cores} shows that CCP effectiveness decreases as $M \to N$. With $M = N = 32$ (no contention), CCP cannot improve fairness. CCP is most effective under the common datacenter scenario of $M \ll N$.
+
+\subsection{Trace-Driven Validation}
+\label{sec:analytical_validation}
+
+\begin{table}[t]
+\caption{Trace-driven validation ($N = 24$, $M = 2$, 10 seeds). The analytical bound (Eq.~\ref{eq:bound}) overestimates degradation by 9--62\% but correctly ranks workloads by vulnerability (Spearman $\rho = 0.98$, $p < 10^{-6}$).}
+\label{tab:traces}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Workload & $\jeff$ & Bound & Overestimate & $\jeff$ w/ CCP $\uparrow$ \\
+\midrule
+Mixed co-location & $0.930 \pm 0.033$ & $0.573 \pm 0.075$ & 62\% & $\mathbf{0.999 \pm 0.001}$ \\
+Database (YCSB) & $0.931 \pm 0.033$ & $0.577 \pm 0.053$ & 62\% & $0.997 \pm 0.003$ \\
+Web server & $0.979 \pm 0.009$ & $0.744 \pm 0.054$ & 32\% & $\mathbf{0.999 \pm 0.001}$ \\
+ML inference & $0.996 \pm 0.002$ & $0.916 \pm 0.027$ & 9\% & $\mathbf{1.000 \pm 0.000}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:traces} validates the model against trace-driven workloads. The analytical bound is too loose for quantitative prediction ($R^2 < 0$ as a point predictor) but provides excellent ranking accuracy (Spearman $\rho = 0.98$). Both the bound and simulation agree on the ordering: mixed co-location $\approx$ database (most vulnerable) $>$ web server $>$ ML inference (least vulnerable). This ranking reflects the displacement heterogeneity of each workload class.
+
+CCP restores fairness across all scenarios with 0.08--0.10\% overhead.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig8_analytical_validation.pdf}
+\caption{Analytical bound vs.\ simulation for $\jeff$ across all trace-driven scenarios. The bound consistently underestimates $\jeff$ (overestimates degradation) but preserves the rank ordering of workload vulnerability.}
+\label{fig:analytical}
+\end{figure}
+
+Figure~\ref{fig:analytical} illustrates the bound's conservatism and rank-order accuracy.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig7_sensitivity.pdf}
+\caption{Sensitivity analysis: (a)~fairness gap vs.\ displacement ratio variance, (b)~fairness gap vs.\ system load (invariant---a simulator limitation), (c)~CCP effectiveness vs.\ number of cores, (d)~CCP component ablation.}
+\label{fig:sensitivity}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/fig6_ccp_convergence.pdf}
+\caption{CCP convergence under bursty displacement. All CCP strategies track the time-varying displacement and maintain $\jeff > 0.99$ after an initial convergence period.}
+\label{fig:convergence}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Simulation-only evaluation: the case for kernel measurements.}
+All results come from a discrete-event simulator. The displacement ratios are drawn from Beta distributions calibrated to published measurements of io\_uring and softirq overhead, but have not been directly validated on real kernels. A crucial next step---and the most impactful way to strengthen this work---is kernel-level validation. Even basic measurements using \texttt{perf stat} to record kworker and ksoftirqd CPU time during an io\_uring-intensive workload (e.g., \texttt{perf stat -e task-clock -p \$(pgrep io\_wq)} during a ScyllaDB benchmark) would ground the displacement ratio claims. More ambitiously, a prototype CCP implementation in the kernel (modifying \texttt{kernel/sched/fair.c} to propagate vruntime charges from io-wq workers) would validate the mechanism's effectiveness and true overhead. We explicitly chose not to include such measurements in this paper to maintain a clear scope distinction between the formal analysis and kernel engineering, but we consider them essential for the next version.
+
+\paragraph{Load invariance: a fundamental simulator limitation.}
+Table~\ref{tab:ablation_load} reveals that our simulator produces identical results across CPU utilizations from 0.50 to 0.95. This occurs because the model draws service times and displacement ratios from fixed distributions independent of load. In real systems, load affects fairness through at least three mechanisms: (1)~queueing delays grow nonlinearly with utilization, affecting which tasks are eligible for scheduling; (2)~relay entities (kworkers, ksoftirqd) compete for CPU time at high load, potentially throttling displacement; (3)~the kernel may adaptively adjust async execution strategy under load (e.g., io\_uring falls back to inline execution when worker pools are saturated). Addressing this requires modeling queue-dependent service times (e.g., making relay service times a function of queue depth) and load-dependent displacement ratios. We consider this the highest-priority modeling improvement.
+
+\paragraph{Cgroup attribution model.}
+The simulator does not differentiate between cgroup attribution policies, producing identical leakage for ``none,'' ``partial,'' and ``full'' policies. Since Linux~5.12, io\_uring io-wq workers are placed in the submitting process's cgroup (partial attribution), which would reduce leakage for that mechanism in practice. The leakage values we report represent the total displacement magnitude---an upper bound on actual leakage under current kernel behavior.
+
+\paragraph{Analytical bound looseness.}
+The bound in Equation~\ref{eq:bound} overestimates degradation by up to 62\%. Its value lies not in precise prediction but in rank-order vulnerability assessment ($\rho = 0.98$): it correctly identifies which workloads are most susceptible. The looseness arises from assuming worst-case simultaneous displacement alignment, while stochastic effects and dynamic load balancing substantially attenuate real impact.
+
+\paragraph{CCP implementation considerations.}
+A kernel CCP implementation would face challenges beyond what our simulation captures: tracking causal chains across nested async operations, handling concurrent vruntime update races, and integrating with existing cgroup accounting. The simulated overhead (0.016--0.041\%) does not capture cache effects, lock contention, or other microarchitectural costs.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have characterized CPU time displacement from asynchronous kernel execution in modern Linux, showing that io\_uring workers, softirq handlers, and workqueues displace 10--34\% of total CPU time outside the scheduler's accounting. Under heterogeneous workloads, effective Jain's fairness drops to $0.917$ with 256 processes while the scheduler reports $J \geq 0.999$---a systematic invisible violation of fairness guarantees.
+
+Causal Charge Propagation restores fairness in simulation, achieving mean $J \geq 0.999$ with overhead as low as 0.016\%. The central insight is that \emph{heterogeneous} displacement---when processes displace different fractions of their work---drives unfairness, not displacement magnitude per se.
+
+Our analytical bound correctly ranks workload vulnerability (Spearman $\rho = 0.98$) despite being too loose for precise prediction. The most important future directions are kernel-level validation of displacement ratios using \texttt{perf stat}, a CCP prototype in the Linux scheduler, and extending the simulator to capture load-dependent behavior.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\end{document}

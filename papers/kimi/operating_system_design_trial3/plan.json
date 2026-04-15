@@ -1,0 +1,328 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required Python packages for statistical analysis, rule extraction, and benchmarking. Set up virtual environment and verify all dependencies.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Create and activate Python virtual environment: python3 -m venv .venv && source .venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy pandas scikit-learn scikit-learn-intelex wurlitzer",
+      "step3": "Install rule extraction: pip install wittgenstein ripper sklearn-rules",
+      "step4": "Install benchmarking tools: pip install psutil memory_profiler",
+      "step5": "Install visualization: pip install matplotlib seaborn",
+      "step6": "Verify installation by importing all packages: python -c 'import numpy, scipy, pandas, sklearn, wittgenstein, psutil, matplotlib'",
+      "step7": "Set random seed for reproducibility: export KAPHE_SEED=42"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Configure Kernel Simulation Framework",
+    "description": "Set up the simulation framework that models kernel subsystem behavior and workload interactions. This avoids the need for actual kernel modifications while still providing valid performance characteristics.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "Create directory structure: mkdir -p experiments/{data,models,results,figures}",
+      "step2": "Implement kernel configuration space definition with 12 tunable parameters across memory (vm.swappiness, vm.dirty_ratio, vm.dirty_background_ratio, vm.vfs_cache_pressure), I/O (scheduler_type, nr_requests, read_ahead_kb), and scheduling (sched_latency_ns, sched_min_granularity_ns, sched_migration_cost_ns)",
+      "step3": "Define configuration constraints: swappiness ∈ [0,100], dirty_ratio ∈ [1,50], dirty_background_ratio ∈ [1,20], vfs_cache_pressure ∈ [1,1000], scheduler_type ∈ {none, mq-deadline, bfq}, nr_requests ∈ [32,1024], read_ahead_kb ∈ [0,2048], sched_latency_ns ∈ [1000000,10000000], sched_min_granularity_ns ∈ [100000,1000000], sched_migration_cost_ns ∈ [100000,500000]",
+      "step4": "Implement workload-to-performance simulator based on published kernel behavior models from Matias et al. (2015) and Lawall et al. (2024)",
+      "step5": "Validate simulator output against known kernel tuning guidelines (e.g., low swappiness for databases, bfq for desktop workloads)"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Synthetic Workload Signatures",
+    "description": "Create a diverse set of synthetic workload signatures representing different application types. Each signature captures workload characteristics that correlate with kernel configuration sensitivity.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "Define workload feature space with 8 dimensions: alloc_rate (allocations/sec/thread), working_set_MB, thread_count, thread_churn_per_sec, io_read_MBps, io_write_MBps, io_sequentiality_ratio, syscall_rate_per_sec",
+      "step2": "Generate 240 training workloads (60 per category): In-Memory DB (high alloc_rate, small working_set), Analytics (medium alloc_rate, large working_set, high io_sequentiality), Web Services (medium alloc_rate, connection churn), Build/Compile (fork-heavy, bursty I/O)",
+      "step3": "Generate 48 test workloads (12 per category) using different random seeds (seeds: 123, 456, 789)",
+      "step4": "Generate 16 real validation workloads (4 per category) for actual kernel testing",
+      "step5": "Save workload signatures to experiments/data/workloads_train.csv, experiments/data/workloads_test.csv, experiments/data/workloads_real.csv",
+      "step6": "Compute and log workload statistics: mean, std, min, max for each feature per category"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Collect Profiling Data via Simulation",
+    "description": "Run all workloads under different kernel configurations to build the training dataset. This simulates the profiling phase where eBPF would collect metrics.",
+    "estimated_time_minutes": 50,
+    "steps": {
+      "step1": "Define 20 configuration combinations spanning the configuration space: 5 memory configs × 2 I/O scheduler types × 2 scheduling configs",
+      "step2": "For each of 240 training workloads, simulate execution under all 20 configurations",
+      "step3": "Record performance metrics: throughput (ops/sec), latency_p50 (ms), latency_p99 (ms)",
+      "step4": "Calculate normalized performance score: score = throughput / (1 + latency_p50/1000)",
+      "step5": "Identify optimal configuration per workload (oracle)",
+      "step6": "Save profiling dataset to experiments/data/profiling_results.csv with columns: workload_id, category, workload_features..., config_id, config_params..., throughput, latency_p50, latency_p99, score, is_optimal",
+      "step7": "Compute ground truth sensitivity: which workload features correlate with configuration sensitivity using Pearson correlation"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: Default Kernel Configuration",
+    "description": "Evaluate performance using default Linux kernel configurations as the simplest baseline. This represents what most systems use without tuning.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Define default configuration: swappiness=60, dirty_ratio=20, dirty_background_ratio=10, vfs_cache_pressure=100, scheduler_type=mq-deadline, nr_requests=128, read_ahead_kb=128, sched_latency_ns=6000000, sched_min_granularity_ns=400000, sched_migration_cost_ns=250000",
+      "step2": "Run all 288 workloads (240 train + 48 test) under default config using simulator",
+      "step3": "Calculate performance metrics: normalized_score = score_default / score_oracle",
+      "step4": "Record results: experiments/results/baseline_default.csv",
+      "step5": "Compute aggregate statistics: mean normalized score, % of workloads within 10% of optimal"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: Expert Heuristics",
+    "description": "Implement expert-derived rules from Linux tuning guides (Red Hat Performance Tuning Guide, Ubuntu Kernel Tuning documentation). These represent current best practices.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Extract rules from Red Hat Enterprise Linux Performance Tuning Guide and Ubuntu Kernel Tuning documentation:",
+      "step2": "Rule 1 (Database): IF alloc_rate > 500 AND working_set < 1000 THEN swappiness=10, dirty_ratio=5, scheduler_type=none",
+      "step3": "Rule 2 (Analytics): IF working_set > 10000 AND io_sequentiality_ratio > 0.8 THEN swappiness=10, read_ahead_kb=1024, vfs_cache_pressure=50",
+      "step4": "Rule 3 (Web Server): IF syscall_rate_per_sec > 10000 THEN scheduler_type=mq-deadline, sched_latency_ns=3000000",
+      "step5": "Rule 4 (Build): IF thread_churn_per_sec > 100 THEN dirty_background_ratio=5, sched_min_granularity_ns=200000",
+      "step6": "Apply rules to all 288 workloads, using default config if no rule matches",
+      "step7": "Record results: experiments/results/baseline_expert.csv",
+      "step8": "Compute coverage: % of workloads matching at least one expert rule"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: MLKAPS-Style Decision Tree",
+    "description": "Implement a decision tree classifier trained on the same profiling data, representing the MLKAPS approach but applied to OS kernel tuning. This is our strong baseline.",
+    "estimated_time_minutes": 30,
+    "steps": {
+      "step1": "Prepare training data: features = workload features, labels = optimal configuration ID (1-20)",
+      "step2": "Train DecisionTreeClassifier from sklearn with hyperparameters: max_depth=10, min_samples_leaf=5, random_state=42",
+      "step3": "Train GradientBoostingClassifier as ensemble alternative: n_estimators=50, max_depth=5, random_state=42",
+      "step4": "Evaluate on test set (48 workloads): predict configuration, simulate performance",
+      "step5": "Compute accuracy: % of correct optimal predictions",
+      "step6": "Compute performance: normalized_score vs oracle",
+      "step7": "Extract interpretability metrics: tree depth, number of nodes, number of leaves",
+      "step8": "Export decision tree rules using sklearn.tree.export_text for comparison",
+      "step9": "Record results: experiments/results/baseline_mlkaps_dt.csv, baseline_mlkaps_gbdt.csv"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "KAPHE Phase 1: Statistical Characterization",
+    "description": "Implement the characterization phase of KAPHE using statistical analysis to identify which workload features predict configuration sensitivity.",
+    "estimated_time_minutes": 35,
+    "steps": {
+      "step1": "For each configuration parameter, compute effect size (Cohen's d) between top-5 and bottom-5 performing workloads",
+      "step2": "Compute Pearson correlation between each workload feature and performance improvement over default",
+      "step3": "Perform ANOVA for categorical configs (scheduler_type) vs performance",
+      "step4": "Compute two-way ANOVA for interaction effects between memory and I/O configurations",
+      "step5": "Generate sensitivity matrix: rows = workload features, cols = config parameters, values = correlation strength",
+      "step6": "Identify significant relationships (p < 0.05, |correlation| > 0.3)",
+      "step7": "Select top-k most predictive features for each configuration parameter",
+      "step8": "Save sensitivity matrix: experiments/results/kaphe_sensitivity_matrix.csv",
+      "step9": "Generate heatmap visualization of sensitivity matrix"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "KAPHE Phase 2: Rule Extraction with RIPPER",
+    "description": "Apply the RIPPER rule induction algorithm to extract interpretable IF-THEN rules mapping workload characteristics to optimal configurations.",
+    "estimated_time_minutes": 30,
+    "steps": {
+      "step1": "Preprocess data: binarize optimal config labels (one-vs-rest for each of 20 configs)",
+      "step2": "Apply RIPPER (wurlitzer/wittgenstein library) with parameters: max_rules=30, max_rule_conds=5, max_total_conds=150, k=2 (optimization runs)",
+      "step3": "Extract rules for each configuration: IF feature_conditions THEN recommend_config",
+      "step4": "Compute rule quality metrics:",
+      "step5": "  - Confidence: precision on training data (#correct / #triggered)",
+      "step6": "  - Coverage: % of training workloads triggering each rule",
+      "step7": "  - Expected improvement: mean performance gain when rule fires",
+      "step8": "  - Rule length: number of conditions per rule",
+      "step9": "Filter rules: keep only those with confidence >= 0.7 and coverage >= 0.05",
+      "step10": "Save extracted rules: experiments/results/kaphe_rules.json",
+      "step11": "Generate human-readable rule report: experiments/results/kaphe_rules.txt"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "KAPHE Phase 3: Recommendation Engine Evaluation",
+    "description": "Evaluate KAPHE's recommendation engine on held-out test workloads using the extracted rules.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "For each of 48 test workloads:",
+      "step2": "  a. Match workload features against extracted rules (order by confidence, break ties by coverage)",
+      "step3": "  b. If multiple rules match, select highest confidence; if no rules match, use default config",
+      "step4": "  c. Simulate performance with recommended configuration",
+      "step5": "Compute metrics:",
+      "step6": "  - Recommendation accuracy: % of workloads within 5% of oracle performance",
+      "step7": "  - Near-optimal rate: % within 10% of oracle",
+      "step8": "  - Average normalized performance: mean(score_recommended / score_oracle)",
+      "step9": "  - Rule coverage on test set: % of workloads matching at least one rule",
+      "step10": "  - Lookup time: measure rule matching latency (should be <1ms)",
+      "step11": "Save predictions: experiments/results/kaphe_predictions.csv",
+      "step12": "Run with 3 random seeds (42, 123, 456) for rule extraction, report mean and std"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Without Statistical Characterization",
+    "description": "Ablation study to measure the impact of the characterization phase. Train RIPPER directly on all features without feature selection.",
+    "estimated_time_minutes": 25,
+    "steps": {
+      "step1": "Run RIPPER on full 8-dimensional feature space without pre-selection",
+      "step2": "Compare against KAPHE with feature selection",
+      "step3": "Measure: rule count, average rule length, accuracy, coverage",
+      "step4": "Hypothesis: Without characterization, rules will be more complex (more conditions) with lower interpretability",
+      "step5": "Record results: experiments/results/ablation_no_characterization.csv"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Without Rule Induction (Direct Mapping)",
+    "description": "Ablation study using nearest-neighbor matching instead of rule induction. Maps workloads to nearest training example and uses its optimal config.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "Implement k-NN baseline: k=5, features normalized",
+      "step2": "For test workload, find 5 nearest neighbors in training set",
+      "step3": "Use majority vote of their optimal configurations",
+      "step4": "Measure accuracy and performance vs. KAPHE rules",
+      "step5": "Hypothesis: k-NN will have competitive accuracy but zero interpretability (no rules to inspect)",
+      "step6": "Record results: experiments/results/ablation_knn.csv"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Effect of Training Set Size",
+    "description": "Study how KAPHE performance scales with amount of profiling data.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "Subsample training data: [30, 60, 120, 240] workloads (reduced points for time)",
+      "step2": "For each size, extract rules and evaluate on full test set (48 workloads)",
+      "step3": "Measure: rule count, accuracy, coverage as function of training size",
+      "step4": "Plot learning curve: accuracy vs. training set size",
+      "step5": "Record results: experiments/results/ablation_scaling.csv"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Interpretability Analysis: Quantitative Metrics",
+    "description": "Compute established interpretability metrics for KAPHE rules and compare against MLKAPS decision tree baseline.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "For KAPHE rules, compute:",
+      "step2": "  - Rule complexity: total_rules + avg_conditions_per_rule",
+      "step3": "  - Rule coverage: % of test cases covered by extracted rules",
+      "step4": "  - Fidelity: agreement between rule recommendations and oracle on test set (%)",
+      "step5": "  - Average rule length: mean number of conditions",
+      "step6": "  - Maximum rule length: longest rule in conditions",
+      "step7": "For MLKAPS decision tree, compute:",
+      "step8": "  - Tree complexity: number of nodes + tree depth",
+      "step9": "  - Number of decision paths (equivalent to rules)",
+      "step10": "  - Average path length from root to leaf",
+      "step11": "Compare metrics side-by-side",
+      "step12": "Record: experiments/results/interpretability_metrics.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Real Kernel Validation Experiment",
+    "description": "Validate simulation results on actual Linux kernel with sysctl-tunable parameters. Limited to 2 representative workloads for feasibility within time budget.",
+    "estimated_time_minutes": 45,
+    "steps": {
+      "step1": "Select 2 validation workloads: Redis (in-mem DB) and Nginx (web server)",
+      "step2": "For each workload, define concrete benchmark:",
+      "step3": "  - Redis: redis-benchmark -t set,get -n 100000 -c 50 (30s duration)",
+      "step4": "  - Nginx: wrk -t4 -c100 -d30s http://localhost/",
+      "step5": "Run workload under default configuration, record baseline performance",
+      "step6": "Apply KAPHE-recommended configuration based on workload profiling:",
+      "step7": "  - Profile workload for 20 seconds using /proc/stat, /proc/meminfo, iostat",
+      "step8": "  - Match profile against extracted rules",
+      "step9": "  - Apply recommended sysctl settings",
+      "step10": "Run workload under recommended configuration",
+      "step11": "Measure: actual performance improvement, validate prediction accuracy",
+      "step12": "Compare against simulation prediction for same workload signature",
+      "step13": "Record: experiments/results/real_validation.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Overhead Measurement",
+    "description": "Measure the runtime overhead of KAPHE profiling and recommendation phases.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Profiling overhead: simulate eBPF collection cost (known to be <2% from Craun et al., 2024)",
+      "step2": "Recommendation latency: time rule matching for 1000 random workloads",
+      "step3": "Compute: mean, p50, p99 lookup time",
+      "step4": "Target: profiling overhead <3%, recommendation latency <1ms",
+      "step5": "Record: experiments/results/overhead_metrics.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to validate that KAPHE improvements are significant and not due to chance.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Paired t-test: KAPHE vs Default (null hypothesis: no difference)",
+      "step2": "Paired t-test: KAPHE vs Expert Heuristics",
+      "step3": "Paired t-test: KAPHE vs MLKAPS Decision Tree",
+      "step4": "Report p-values for all tests",
+      "step5": "Effect size: Cohen's d for KAPHE vs each baseline",
+      "step6": "Wilcoxon signed-rank test (non-parametric alternative)",
+      "step7": "Record: experiments/results/statistical_tests.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Cross-Workload Generalization Test",
+    "description": "Test whether rules extracted from one workload category generalize to others.",
+    "estimated_time_minutes": 20,
+    "steps": {
+      "step1": "Train KAPHE rules on single category only (e.g., In-Memory DB)",
+      "step2": "Test on all 4 categories",
+      "step3": "Measure accuracy within category vs. across categories",
+      "step4": "Repeat for each category as training set",
+      "step5": "Compute generalization matrix: rows = training category, cols = test category",
+      "step6": "Hypothesis: Within-category accuracy > 70%, cross-category lower but still reasonable",
+      "step7": "Record: experiments/results/generalization_matrix.csv"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the research paper.",
+    "estimated_time_minutes": 25,
+    "steps": {
+      "step1": "Figure 1: Overview diagram - workflow of KAPHE three phases",
+      "step2": "Figure 2: Sensitivity heatmap - correlation between workload features and config parameters",
+      "step3": "Figure 3: Performance comparison bar chart - KAPHE vs baselines with error bars",
+      "step4": "Figure 4: Rule examples - showcase extracted rules with confidence/coverage",
+      "step5": "Figure 5: Ablation study results",
+      "step6": "Figure 6: Interpretability comparison - radar chart KAPHE vs MLKAPS",
+      "step7": "Save all figures to experiments/figures/ in PDF and PNG formats"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Results Tables",
+    "description": "Create LaTeX-formatted tables for the paper.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Table 1: Main results - performance metrics for all methods",
+      "step2": "Table 2: Interpretability metrics comparison",
+      "step3": "Table 3: Extracted rules summary (top 10 rules)",
+      "step4": "Table 4: Ablation study results",
+      "step5": "Table 5: Statistical significance test results",
+      "step6": "Save tables as .tex files in experiments/figures/"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Summary and Success Criteria Check",
+    "description": "Evaluate all success criteria and determine if the research succeeded.",
+    "estimated_time_minutes": 10,
+    "steps": {
+      "step1": "Check Technical Criterion: KAPHE shows statistically significant improvement over default (p < 0.05)?",
+      "step2": "Check Generalization Criterion: Within 20% degradation when generalizing across categories?",
+      "step3": "Check Practicality Criterion: Profiling overhead < 3% and recommendation latency < 1ms?",
+      "step4": "Check Interpretability Criterion: Avg rule length ≤ 5, total rules ≤ 30, fidelity ≥ 80%?",
+      "step5": "Generate summary report: experiments/results/success_criteria_check.md",
+      "step6": "If criteria met, research succeeds; else document failure conditions encountered"
+    }
+  }
+]

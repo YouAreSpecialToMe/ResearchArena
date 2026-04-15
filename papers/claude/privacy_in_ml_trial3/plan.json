@@ -1,0 +1,163 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages: PyTorch, Opacus (DP-SGD), torchvision, and analysis libraries. Verify CUDA/GPU availability.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision opacus scikit-learn matplotlib seaborn pandas numpy scipy tqdm",
+      "step2": "Verify GPU availability: run a short script that prints torch.cuda.is_available(), torch.cuda.get_device_name(0), and torch.cuda.get_device_properties(0).total_mem",
+      "step3": "Verify Opacus compatibility: instantiate a simple model with opacus.PrivacyEngine and run 1 step of DP-SGD on dummy data to confirm no errors",
+      "step4": "Create output directory structure: results/{cifar10,utkface,celeba}/{baseline,dp_only,comp_only,dp_comp,fairprune_dp}/ and figures/"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and preprocess all datasets",
+    "description": "Prepare three datasets with subgroup annotations: (1) CIFAR-10 with synthetic class imbalance to simulate minority/majority groups, (2) UTKFace with ethnicity-based subgroups, (3) CelebA subset (20K images) with gender-based subgroups. All datasets get train/val/test splits with subgroup labels preserved.",
+    "steps": {
+      "step1_cifar10": "Download CIFAR-10 via torchvision.datasets.CIFAR10. Create imbalanced version: designate classes {2,3,5,7} as 'minority' classes, subsample them to 10% of original size. This gives ~5K minority vs ~30K majority training images. Record per-class counts. Apply standard normalization (mean=[0.4914,0.4822,0.4465], std=[0.2023,0.1994,0.2010]). Split: 80% train, 10% val, 10% test, stratified by class. Save class-to-group mapping (minority vs majority) for fairness metrics.",
+      "step2_utkface": "Download UTKFace dataset from the official source (or use a torchvision-compatible mirror). Parse filenames for age, gender, ethnicity labels. Task: gender classification (binary). Protected attribute: ethnicity (White, Black, Asian, Indian, Others). Apply resize to 64x64, normalize with ImageNet stats. Split: 70% train, 15% val, 15% test, stratified by ethnicity. Record per-ethnicity counts. Note: smallest ethnicity group will be the 'minority' for analysis.",
+      "step3_celeba": "Download CelebA via torchvision.datasets.CelebA. Use a random 20K-image subset (stratified by target and protected attribute). Task: 'Smiling' attribute prediction (binary). Protected attribute: 'Male' (binary). Apply center crop to 178x178, resize to 64x64, normalize with ImageNet stats. Split: 70% train, 15% val, 15% test. Record per-subgroup counts.",
+      "step4_dataloaders": "Create a unified DataLoader factory function that takes dataset name, split (train/val/test), batch_size, and returns a DataLoader with subgroup labels accessible. For DP-SGD training, use Poisson sampling (via Opacus's UniformWithReplacementSampler or by setting batch_size appropriately). Standard batch_size=256 for non-DP, lot_size=256 for DP.",
+      "step5_stats": "For each dataset, compute and save to results/{dataset}/data_stats.json: total samples, per-subgroup counts, class balance ratio, majority-to-minority ratio. This serves as a reference for interpreting results."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Define model architectures",
+    "description": "Define the neural network architectures used across all experiments. Primary: ResNet-18 (adapted for 64x64 inputs). Secondary: a small CNN for faster CIFAR-10 experiments if needed. All models must be Opacus-compatible (no BatchNorm — use GroupNorm instead).",
+    "steps": {
+      "step1_resnet18": "Implement an Opacus-compatible ResNet-18: replace all BatchNorm2d layers with GroupNorm (num_groups=32 or the largest divisor of channels <= 32). Modify the first conv layer to accept 64x64 inputs (kernel_size=3, stride=1, padding=1 instead of 7x7 stride 2). Adjust final fc layer for the number of classes per dataset (10 for CIFAR-10, 2 for UTKFace and CelebA). Use opacus.validators.ModuleValidator.fix(model) as a fallback to ensure full compatibility.",
+      "step2_mobilenetv2": "Implement an Opacus-compatible MobileNetV2 variant: use torchvision.models.mobilenet_v2, replace BatchNorm with GroupNorm, adjust input/output dimensions. This is the secondary architecture — used only for a subset of experiments (CIFAR-10 at epsilon=4, sparsity=70%) to test architecture generalization.",
+      "step3_model_factory": "Create a get_model(arch_name, num_classes, pretrained=False) factory function that returns the appropriate Opacus-compatible model. Models should be initialized with the same random seed for fair comparison."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Standard training without DP or compression",
+    "description": "Train models on all three datasets without differential privacy or compression. These serve as the reference baseline (variant B) for computing all fairness degradation metrics and the compounding ratio.",
+    "steps": {
+      "step1_training_config": "Hyperparameters for standard training: optimizer=SGD, lr=0.01, momentum=0.9, weight_decay=1e-4, scheduler=CosineAnnealingLR. Epochs: 30 for CIFAR-10, 25 for UTKFace, 25 for CelebA. Loss: CrossEntropyLoss. Train with 3 random seeds: [42, 123, 456].",
+      "step2_train_loop": "Implement a training function train_model(model, train_loader, val_loader, config, seed) that: (a) sets random seed (torch, numpy, random, CUDA deterministic), (b) trains with early stopping on val loss (patience=5), (c) logs per-epoch: train_loss, val_loss, val_acc, per-subgroup val_acc, (d) saves best model checkpoint to results/{dataset}/baseline/model_seed{seed}.pt, (e) saves training log to results/{dataset}/baseline/log_seed{seed}.json.",
+      "step3_evaluate": "Evaluate each trained model on the test set. Compute and save to results/{dataset}/baseline/metrics_seed{seed}.json: overall_accuracy, per_subgroup_accuracy (dict mapping subgroup_name -> accuracy), worst_group_accuracy, best_group_accuracy, accuracy_gap (best - worst), equalized_odds_difference, demographic_parity_difference. Also save per-sample predictions for later MIA analysis.",
+      "step4_runtime_estimate": "Expected runtime: CIFAR-10 ~5 min/seed, UTKFace ~3 min/seed, CelebA ~8 min/seed. Total: ~48 min for 3 datasets × 3 seeds. All run sequentially on 1 GPU."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "DP-SGD training at varying privacy budgets",
+    "description": "Train models with DP-SGD at epsilon={1, 4, 8} (variant D). These measure the fairness cost of differential privacy alone, without compression. This is the most time-consuming step.",
+    "steps": {
+      "step1_dp_training_config": "DP-SGD configuration: use Opacus PrivacyEngine. Privacy budgets epsilon={1, 4, 8}. Delta=1/N where N=training set size. Max gradient norm (clipping): C=1.0 (we use a single fixed clipping norm based on common practice; the proposal mentioned tuning but we fix it for time constraints). Noise multiplier: computed by Opacus given target epsilon, delta, epochs, and sample rate. Optimizer: SGD, lr=0.5 (higher LR needed to compensate for noise), momentum=0 (Opacus does not support momentum with DP). Epochs: 30 for CIFAR-10, 25 for UTKFace, 25 for CelebA. Batch size: 256 (logical batch for Poisson sampling). Seeds: [42, 123, 456].",
+      "step2_dp_train_loop": "Implement train_dp_model(model, train_loader, val_loader, dp_config, seed) that: (a) wraps model/optimizer/dataloader with Opacus PrivacyEngine, (b) trains for fixed epochs (no early stopping — privacy budget must be fully used), (c) logs per-epoch: train_loss, val_loss, val_acc, per-subgroup val_acc, epsilon_spent, (d) verifies final epsilon matches target (within 10% tolerance), (e) saves model to results/{dataset}/dp_only/model_eps{epsilon}_seed{seed}.pt and log to corresponding JSON.",
+      "step3_evaluate": "Evaluate each DP-trained model identically to baseline (same metrics). Save to results/{dataset}/dp_only/metrics_eps{epsilon}_seed{seed}.json. Compute Delta_D = baseline_worst_group_acc - dp_worst_group_acc for each (epsilon, seed).",
+      "step4_clipping_analysis": "During training, log per-subgroup average gradient norms before clipping for the first, middle, and last epoch. Save to results/{dataset}/dp_only/grad_norms_eps{epsilon}_seed{seed}.json. This data feeds the mechanistic analysis later.",
+      "step5_runtime_estimate": "Expected runtime per DP training run: CIFAR-10 ~20 min, UTKFace ~10 min, CelebA ~20 min. Total: 3 datasets × 3 epsilon × 3 seeds = 27 runs. Sequential time: ~7.5 hours. OPTIMIZATION: run all 3 datasets at the same epsilon+seed concurrently if memory allows (unlikely with 1 GPU). Instead, prioritize: run CIFAR-10 and UTKFace fully (~2.7 hours), then CelebA for epsilon={4} only with 3 seeds (~1 hour). Total DP training: ~3.7 hours."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compression of standard (non-DP) models",
+    "description": "Apply unstructured magnitude pruning at sparsity={50%, 70%, 90%} to the standard-trained baseline models (variant C). This measures the fairness cost of compression alone.",
+    "steps": {
+      "step1_pruning_implementation": "Implement magnitude_prune(model, sparsity, structured=False) using torch.nn.utils.prune. For unstructured pruning: apply L1Unstructured globally across all Linear and Conv2d layers (global pruning, not per-layer). For structured pruning (secondary): apply LnStructured on Conv2d layers only. After pruning, make pruning permanent with prune.remove().",
+      "step2_prune_baselines": "For each baseline model (3 datasets × 3 seeds), create pruned copies at sparsity={50%, 70%, 90%}. No fine-tuning first — evaluate immediately to measure raw compression impact. Save pruned models to results/{dataset}/comp_only/model_sp{sparsity}_seed{seed}.pt.",
+      "step3_finetune_pruned": "Fine-tune each pruned model for 5 epochs with the same standard training config (no DP). This is the realistic deployment scenario. Save fine-tuned models to results/{dataset}/comp_only/model_sp{sparsity}_ft_seed{seed}.pt.",
+      "step4_evaluate": "Evaluate both pruned (no fine-tune) and pruned+fine-tuned models. Save metrics to results/{dataset}/comp_only/metrics_sp{sparsity}[_ft]_seed{seed}.json. Compute Delta_C = baseline_worst_group_acc - comp_worst_group_acc for each (sparsity, seed). Report both with and without fine-tuning.",
+      "step5_runtime_estimate": "Pruning is instant. Fine-tuning: ~2 min per model. Total: 3 datasets × 3 seeds × 3 sparsities × 2 min = ~54 min. But can batch efficiently."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "DP-SGD + compression and compounding ratio measurement",
+    "description": "Apply the same pruning to DP-trained models (variant DC) and compute the compounding ratio CR = Delta_DC / (Delta_D + Delta_C). This is the central experiment testing the primary hypothesis.",
+    "steps": {
+      "step1_prune_dp_models": "For each DP-trained model (from the DP-only step), apply unstructured magnitude pruning at sparsity={50%, 70%, 90%}. Create both no-fine-tune and fine-tuned (5 epochs with DP-SGD, using remaining privacy budget or a separate small budget epsilon_ft=1.0) variants. Save to results/{dataset}/dp_comp/model_eps{epsilon}_sp{sparsity}[_ft]_seed{seed}.pt.",
+      "step2_dp_finetune_config": "For fine-tuning DP models after pruning: use DP-SGD with a small additional privacy budget epsilon_ft=1.0. This represents the realistic scenario where the total privacy budget includes fine-tuning. Track the total epsilon (training + fine-tuning) via Opacus's accountant.",
+      "step3_evaluate": "Evaluate all DP+compressed models. Save to results/{dataset}/dp_comp/metrics_eps{epsilon}_sp{sparsity}[_ft]_seed{seed}.json. Compute Delta_DC for each configuration.",
+      "step4_compounding_ratio": "Compute CR = Delta_DC / (Delta_D + Delta_C) for every (dataset, epsilon, sparsity, seed) combination. Save to results/compounding_ratios.json. Structure: {dataset: {epsilon: {sparsity: {seed: CR_value, mean: ..., std: ...}}}}. A CR > 1.0 indicates super-additive degradation (our hypothesis). Flag any CR > 1.2 as strong evidence.",
+      "step5_statistical_test": "For each (dataset, epsilon, sparsity) triple, run a one-sided t-test across seeds testing H0: CR <= 1.0 vs H1: CR > 1.0. Report p-values. Also compute 95% confidence intervals for CR. Save to results/compounding_ratio_stats.json.",
+      "step6_runtime_estimate": "Pruning: instant. DP fine-tuning: ~5-10 min per model. Evaluation: ~1 min per model. Configurations: ~27 models (3 eps × 3 sparsity × 3 seeds) for CIFAR-10 and UTKFace, ~9 for CelebA. Total: ~2 hours."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "FairPrune-DP: fairness-aware pruning for DP models",
+    "description": "Implement and evaluate the proposed FairPrune-DP method that uses worst-group Fisher information as the pruning criterion instead of magnitude. Compare against standard magnitude pruning and other baselines on DP-trained models.",
+    "steps": {
+      "step1_fisher_importance": "Implement compute_subgroup_fisher(model, data_loader, subgroup_labels) that computes per-weight, per-subgroup Fisher information: s_i^g = E[(dL/dw_i)^2 | group=g]. Use a calibration set of 1000 samples from the validation set, stratified by subgroup. For each subgroup g, compute the squared gradient of the loss w.r.t. each weight, averaged over samples from that subgroup. Return a dict mapping subgroup -> tensor of per-weight importance scores.",
+      "step2_fairprune_criterion": "Implement fairprune_importance(subgroup_fisher_dict) that computes s_i^fair = min_g(s_i^g) for each weight i. This is the worst-group importance: a weight is only 'unimportant' if it is unimportant for ALL subgroups.",
+      "step3_fairprune_dp": "Implement fairprune_dp(model, sparsity, val_loader, subgroup_labels) that: (a) computes per-subgroup Fisher via step1, (b) computes fair importance via step2, (c) prunes weights with smallest s_i^fair values to achieve target sparsity, (d) optionally fine-tunes with DP-SGD (same config as main experiment).",
+      "step4_apply_fairprune": "Apply FairPrune-DP to all DP-trained models at sparsity={50%, 70%, 90%}. Also apply to standard (non-DP) baseline models as an ablation (FairPrune without DP). Save models and metrics following the same naming convention: results/{dataset}/fairprune_dp/metrics_eps{epsilon}_sp{sparsity}[_ft]_seed{seed}.json.",
+      "step5_baselines_comparison": "Also implement and run Fisher pruning (global Fisher, not per-subgroup) as a baseline: s_i = E[(dL/dw_i)^2] over the full calibration set regardless of subgroup. This tests whether the improvement comes from Fisher-based pruning in general or specifically from the worst-group criterion.",
+      "step6_evaluate_all": "For FairPrune-DP vs magnitude pruning vs Fisher pruning on DP models, compute: (a) overall accuracy, (b) worst-group accuracy, (c) accuracy gap, (d) equalized odds difference, (e) fairness gap reduction = (gap_magnitude - gap_fairprune) / gap_magnitude. Target: >= 20% fairness gap reduction at comparable overall accuracy (within 2% of magnitude pruning).",
+      "step7_runtime_estimate": "Fisher computation: ~2-3 min per model (1000-sample calibration set). Total: ~45 min for all models. Pruning and evaluation: ~30 min. Total: ~1.25 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Mechanistic analysis: why DP and compression compound",
+    "description": "Investigate the mechanistic explanation for super-additive degradation: (1) DP-trained models have systematically lower weight magnitudes for minority-relevant features, (2) magnitude pruning disproportionately removes those features, (3) gradient clipping statistics differ by subgroup.",
+    "steps": {
+      "step1_weight_magnitude_analysis": "For each model (baseline and DP at each epsilon), compute per-weight 'subgroup relevance': for each weight w_i, compute the subgroup-specific Fisher information s_i^g (reuse from FairPrune step). Classify weights as 'minority-relevant' if their max Fisher for any minority subgroup exceeds the median, and 'majority-relevant' otherwise. Compare the magnitude distribution of minority-relevant vs majority-relevant weights in standard vs DP models. Hypothesis: in DP models, minority-relevant weights have systematically lower magnitudes.",
+      "step2_pruning_overlap": "For each (model_type, sparsity) pair, identify the set of pruned weights under magnitude pruning. Compute the overlap ratio: what fraction of pruned weights are minority-relevant? Compare this ratio between standard and DP models. Hypothesis: DP models have higher overlap (more minority-relevant weights are pruned). Save overlap ratios to results/{dataset}/analysis/pruning_overlap.json.",
+      "step3_gradient_norm_analysis": "Using the per-subgroup gradient norms logged during DP training (from step4 of DP training), analyze: (a) mean gradient norm by subgroup across training, (b) fraction of gradients clipped by subgroup, (c) effective learning rate by subgroup (post-clip gradient norm / pre-clip norm). Hypothesis: minority subgroups have higher pre-clip norms and thus more clipping, reducing their effective learning rate.",
+      "step4_feature_importance_shift": "Compare per-subgroup Fisher importance rankings between standard and DP models. For each subgroup, compute the Kendall tau correlation between Fisher rankings in standard vs DP models. Hypothesis: minority-subgroup rankings shift more (lower correlation), indicating DP training more severely disrupts minority feature learning.",
+      "step5_save_results": "Save all mechanistic analysis results to results/{dataset}/analysis/mechanistic_analysis.json with subsections for weight_magnitudes, pruning_overlap, gradient_norms, and feature_importance_shift."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies",
+    "description": "Systematic ablations to isolate the contribution of each component: (1) FairPrune-DP components (worst-group vs mean-group Fisher), (2) clipping norm sensitivity, (3) structured vs unstructured pruning, (4) effect of fine-tuning after pruning.",
+    "steps": {
+      "step1_fairprune_ablation_criterion": "Compare three pruning criteria on DP models (epsilon=4, sparsity=70%, CIFAR-10 and UTKFace, 3 seeds): (a) magnitude pruning (baseline), (b) global Fisher pruning, (c) mean-subgroup Fisher: s_i = mean_g(s_i^g), (d) worst-subgroup Fisher (FairPrune-DP): s_i = min_g(s_i^g). This isolates whether the improvement comes from Fisher-based pruning, subgroup-awareness, or specifically the worst-group criterion. Save to results/{dataset}/ablation/criterion_comparison.json.",
+      "step2_clipping_norm_sensitivity": "Train DP-SGD models on CIFAR-10 (epsilon=4, 3 seeds) with clipping norms C={0.5, 1.0, 2.0}. Apply magnitude pruning at 70% sparsity. Measure how clipping norm affects the compounding ratio. Save to results/cifar10/ablation/clipping_norm_sensitivity.json.",
+      "step3_structured_vs_unstructured": "Apply structured (filter-level) pruning at sparsity={50%, 70%} to DP models (epsilon=4, CIFAR-10, 3 seeds). Compare compounding ratios and fairness gaps with unstructured pruning at the same effective sparsity. Save to results/cifar10/ablation/structured_vs_unstructured.json.",
+      "step4_finetuning_effect": "Compare models with and without fine-tuning after pruning for both magnitude and FairPrune-DP. Quantify how much fine-tuning recovers fairness (or doesn't). This uses data already collected in main experiments — just compile the comparison. Save to results/{dataset}/ablation/finetuning_effect.json.",
+      "step5_runtime_estimate": "Ablation step1: reuses existing models, ~20 min for Fisher computation. Step2: 6 additional DP training runs × 20 min = 2 hours (can be reduced by using fewer seeds or only CIFAR-10). Step3: pruning is instant, reuses existing models. Step4: compilation only. Total ablation: ~1 hour (step2 models can be trained in parallel with main experiments by sequencing intelligently)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Membership inference attack analysis (simplified)",
+    "description": "Measure whether compression amplifies disparate privacy vulnerability across subgroups, especially in DP-trained models. Use a simple loss-based MIA (not the full LiRA protocol, which is too expensive) to stay within time budget.",
+    "steps": {
+      "step1_mia_implementation": "Implement a loss-based membership inference attack: for each sample, compute the model's loss. Members (training data) tend to have lower loss than non-members. Use the validation set as non-member data. Threshold selection: use a held-out calibration set (50% of val) to find the optimal threshold, then evaluate on the remaining 50% of val + a random subset of training data (same size).",
+      "step2_per_subgroup_mia": "Compute MIA balanced accuracy (average of TPR and TNR) per subgroup for: (a) baseline models, (b) DP-only models (epsilon=4), (c) standard + pruned models (sparsity=70%), (d) DP + pruned models (epsilon=4, sparsity=70%), (e) FairPrune-DP models (epsilon=4, sparsity=70%). Do this on CIFAR-10 and UTKFace with 3 seeds.",
+      "step3_mia_disparity": "Compute MIA disparity = max_subgroup_MIA_acc - min_subgroup_MIA_acc for each model variant. Test whether disparity increases from DP-only to DP+compression, and whether FairPrune-DP reduces this disparity.",
+      "step4_save_results": "Save per-subgroup MIA results to results/{dataset}/mia/mia_results.json. Include balanced accuracy, TPR, FPR per subgroup, and the disparity metric.",
+      "step5_runtime_estimate": "MIA evaluation is fast (just computing loss on datasets): ~5 min per model. Total: ~20 models × 5 min = ~1.5 hours. This can overlap with other analysis."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and test success criteria",
+    "description": "Compile all results, compute summary statistics, and formally test each success criterion from the proposal.",
+    "steps": {
+      "step1_aggregate": "Create a master results table: for each (dataset, architecture, epsilon, sparsity, method, seed), collect: overall_acc, worst_group_acc, accuracy_gap, equalized_odds_diff, MIA_disparity. Save as results/master_results.csv.",
+      "step2_compounding_ratio_summary": "Compute mean and std of CR across seeds for each (dataset, epsilon, sparsity). Create a summary table. Test success criterion 1: CR > 1.2 consistently across at least 2 datasets and multiple (epsilon, sparsity) configurations. Report the fraction of configurations meeting this threshold.",
+      "step3_fairprune_effectiveness": "For each (dataset, epsilon, sparsity), compute the fairness gap reduction of FairPrune-DP vs magnitude pruning: reduction = (gap_magnitude - gap_fairprune) / gap_magnitude. Test success criterion 3: reduction >= 20% at comparable compression ratio (overall accuracy within 2%).",
+      "step4_mechanistic_evidence": "Summarize mechanistic analysis: (a) are minority-relevant weight magnitudes systematically lower in DP models? (b) do >60% of additionally-pruned weights (DP vs non-DP) correspond to minority-relevant features? Test success criterion 2.",
+      "step5_mia_disparity_test": "Test success criterion 4: does MIA success rate disparity across subgroups increase after compression, more so for DP-trained models? Use paired t-test across seeds.",
+      "step6_overall_verdict": "Produce results/success_criteria_evaluation.json summarizing pass/fail/partial for each of the 5 success criteria, with supporting statistics and p-values."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all figures needed for the research paper: compounding ratio heatmaps, fairness-compression Pareto frontiers, mechanistic analysis plots, and comparison tables.",
+    "steps": {
+      "step1_compounding_heatmap": "Create a heatmap (epsilon on y-axis, sparsity on x-axis) showing mean CR values. One heatmap per dataset. Annotate cells with CR values and significance stars (*p<0.05, **p<0.01). Color scale: green (CR<1) to red (CR>>1). Save as figures/compounding_ratio_heatmap_{dataset}.pdf.",
+      "step2_fairness_compression_pareto": "Plot accuracy gap (y-axis) vs sparsity (x-axis) for each method: magnitude pruning, Fisher pruning, FairPrune-DP. Separate panels for each (dataset, epsilon). Include error bars (std across seeds). Save as figures/pareto_frontier_{dataset}.pdf.",
+      "step3_subgroup_accuracy_bars": "Grouped bar chart showing per-subgroup accuracy for each model variant (baseline, DP-only, comp-only, DP+comp, FairPrune-DP) at a representative setting (epsilon=4, sparsity=70%). One chart per dataset. Save as figures/subgroup_accuracy_{dataset}.pdf.",
+      "step4_weight_distribution_plot": "Violin plots or histograms comparing weight magnitude distributions of minority-relevant vs majority-relevant features in standard vs DP models. Save as figures/weight_distributions_{dataset}.pdf.",
+      "step5_gradient_norm_plot": "Line plot of per-subgroup gradient norms across training epochs for DP-SGD, showing differential clipping. Include clipping threshold as a horizontal line. Save as figures/gradient_norms_{dataset}.pdf.",
+      "step6_pruning_overlap_plot": "Bar chart showing the fraction of pruned weights that are minority-relevant, comparing standard vs DP models at each sparsity level. Save as figures/pruning_overlap_{dataset}.pdf.",
+      "step7_mia_disparity_plot": "Grouped bar chart of per-subgroup MIA balanced accuracy for each model variant. Save as figures/mia_disparity_{dataset}.pdf.",
+      "step8_ablation_plots": "Bar chart comparing ablation variants (magnitude, global Fisher, mean Fisher, worst-group Fisher) on worst-group accuracy and accuracy gap. Save as figures/ablation_criterion_{dataset}.pdf. Line plot of CR vs clipping norm. Save as figures/ablation_clipping_norm.pdf.",
+      "step9_summary_table": "Generate LaTeX tables: (a) main results table with all metrics across datasets/methods, (b) compounding ratio table, (c) ablation results table. Save as figures/table_main_results.tex, figures/table_compounding.tex, figures/table_ablation.tex.",
+      "step10_figure_style": "All figures: use matplotlib with seaborn style ('whitegrid'), font size 12, figure size appropriate for two-column paper (3.5 inches wide for single column, 7 inches for full width). Use colorblind-friendly palettes (seaborn 'colorblind' or 'Set2'). Save both PDF and PNG (300 dpi) versions."
+    }
+  }
+]

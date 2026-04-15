@@ -1,0 +1,398 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2025.sty}{
+  \usepackage[final]{neurips_2025}
+}{
+  \IfFileExists{neurips_2024.sty}{
+    \usepackage[final]{neurips_2024}
+  }{
+    \usepackage[margin=1in]{geometry}
+    \usepackage{natbib}
+  }
+}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xspace}
+
+\title{ShareArb: Evictor-Side Responsibility for Shared Linux Page-Cache Arbitration}
+
+\author{
+Anonymous Authors \\
+Institution Withheld for Review
+}
+
+\newcommand{\sharearb}{\textsc{ShareArb}\xspace}
+\newcommand{\pcache}{\textsc{pCache-Account}\xspace}
+\newcommand{\pcachepol}{\textsc{pCache-Account+Policy}\xspace}
+\newcommand{\privateonly}{\textsc{PrivateOnly-Utility}\xspace}
+\newcommand{\srv}{\textsc{SRV}\xspace}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Linux page-cache control for multi-tenant file-backed workloads is difficult when tenants overlap on the same pages: proportional occupancy accounting says who currently uses memory, but not who caused downstream harm when a shared page was evicted. We study a narrow response to that gap, \sharearb, a replay-side controller that augments a \pcache-style private/shared accounting baseline with evictor-side responsibility debt. For each shared page, \sharearb tracks a lightweight shared-responsibility vector over recent consumers and charges debt to the tenant whose miss evicts a page that other tenants are likely to reuse soon. The executed artifact reports 180 primary replay runs, 120 ablation runs, 6 oracle runs, 24 auxiliary replay perturbation runs, and 5 smoke probes under a shortened replay-only regime. Across 36 matched overlap-heavy workload-budget-seed tuples, \sharearb improves paired worst-tenant slowdown relative to \pcache by $-1.08$ (95\% bootstrap CI $[-2.06,-0.23]$) and fairness by $+0.0065$ (95\% CI $[0.00009,0.0141]$). The clearest gain appears on SQLiteTraceMix-2T at medium budget, where worst-tenant slowdown falls from 17.82 to 4.59 and throughput proxy rises from 0.01737 to 0.08264. The evidence remains mixed: shared regret is inconclusive in the paired comparison against \pcache, \textsc{ShareArb-NoDebt} is competitive or better in the targeted ablations, the pre-registered support criterion is not met, and the planned live proxy study was infeasible. The artifact therefore supports \sharearb as a promising replay-side scaffold for responsibility-aware arbitration, not as decisive validation that eviction debt itself is the winning mechanism.
+\end{abstract}
+
+\section{Introduction}
+
+Linux page-cache research no longer lacks mechanism. FetchBPF, PageFlex, and cache\_ext show that Linux paging and file-cache policy are now programmable enough to host specialized policies \citep{cao2024fetchbpf,yelam2025pageflex,zussman2025cacheext}. Likewise, broad claims about tenant-aware accounting are already occupied: \textit{pCache} separates private and shared page-cache accounting for containers \citep{wang2024pcache}, while Per-VM Page Cache Partitioning studies utility-driven share control with tenant-level policy choice \citep{sharma2016pervm}.
+
+The narrower unresolved problem is eviction responsibility under shared residency. When multiple tenants reuse the same file-backed page, occupancy accounting can say who currently consumes cache space, but it cannot attribute who caused harm when a fault by tenant $i$ displaced a shared page that tenant $j$ was about to reuse. Under proportional charging, a tenant can evict a page that is only fractionally charged to it, yet most of the refault cost is paid by another tenant.
+
+This paper studies whether a deliberately small responsibility signal helps. \sharearb starts from a \pcache-style private/shared baseline and adds one new quantity: decayed debt charged to the tenant whose miss evicts a shared page with predicted near-term reuse by others. The goal is not to propose a new kernel mechanism or a new occupancy theory, but to test whether a replay-side responsibility signal changes arbitration quality on overlap-heavy file-backed workloads.
+
+The empirical outcome is directionally positive but not fully confirmatory. Across the 36 matched overlap-heavy workload-budget-seed tuples used for the main paired comparison, \sharearb improves worst-tenant slowdown relative to \pcache by $-1.08$ (95\% bootstrap CI $[-2.06,-0.23]$, Wilcoxon $p=0.077$), improves throughput proxy by $+0.00875$ (95\% CI $[0.00375,0.01459]$, $p=0.059$), and improves fairness by $+0.00652$ (95\% CI $[0.00009,0.01410]$, $p=0.0073$). But the debt mechanism itself is not cleanly validated: against \textsc{ShareArb-NoDebt}, the paired slowdown delta is $+0.91$ (95\% CI $[0.14,1.89]$, $p=0.214$), while the fairness and throughput intervals both span zero. The artifact's own top-level claim assessment therefore marks the pre-registered support criterion as unsupported.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.5em]
+  \item We formulate a narrow shared-page arbitration question around \emph{evictor-side responsibility}: whether charging predicted cross-tenant harm at eviction time adds useful signal beyond proportional private/shared occupancy accounting.
+  \item We instantiate that question in \sharearb, a conservative replay-side controller that combines proportional occupancy, a shared-responsibility vector, decayed eviction debt, and a coarse share-plus-policy action space.
+  \item We report a replay-first artifact with 180 primary runs, 120 ablations, 6 oracle runs, 24 auxiliary replay perturbation runs, and 5 smoke probes, showing strong gains in some overlap-heavy regimes but only mixed evidence that debt itself is the decisive mechanism.
+\end{itemize}
+
+Section~\ref{sec:related} reviews adjacent work. Section~\ref{sec:method} describes the arbitration model and controller. Section~\ref{sec:experiments} presents the replay setup, main results, ablations, and auxiliary checks. Section~\ref{sec:discussion} discusses limitations and claim boundaries. Appendix~\ref{sec:appendix-repro} maps artifact files to the paper.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Shared and weighted page-cache accounting.}
+\citet{wang2024pcache} show that Linux container accounting should distinguish private from shared page-cache occupancy and proportionally charge shared pages. \sharearb assumes that style of accounting as a baseline rather than competing with it. Weight-aware page-cache control pursues fairness through occupancy and residency proportionality \citep{park2020justitia}, but does not explicitly assign downstream eviction harm to the evictor.
+
+\paragraph{Tenant-aware page-cache control.}
+Per-VM Page Cache Partitioning combines utility estimation with per-VM page-cache control \citep{sharma2016pervm}. P2Cache similarly exposes application-directed file-cache control \citep{lee2023p2cache}. These systems show that online share and policy control are not novel by themselves. Here the controller is intentionally small and serves only as a harness for testing the added responsibility signal.
+
+\paragraph{Programmable Linux paging mechanisms.}
+FetchBPF, PageFlex, and cache\_ext make Linux paging policy programmable through eBPF or user-space delegation \citep{cao2024fetchbpf,yelam2025pageflex,zussman2025cacheext}. They matter here because they remove ``the kernel cannot express this'' as the primary objection. They do not define the specific objective studied here: charging the tenant that triggered a harmful shared-page eviction.
+
+\paragraph{Isolation, cache QoS, and shared cached objects.}
+Shared-Page Management identifies cross-domain interference from shared-page displacement and proposes conservation-style protection for real-time reservations \citep{kim2012sharedpage}. ROBUS studies fair allocation when one cached object benefits many tenants at once \citep{kunjir2017robus}. Hardware-cache partitioning work likewise shows that the optimized signal matters as much as the replacement rule \citep{qureshi2006ucp,kim2004faircache}. Together these papers broaden the positioning: the core issue is not Linux page-cache programmability alone, but how to define a fairness or utility signal when one cached object can benefit several principals at once. Unlike those systems, \sharearb focuses on online file-page eviction in Linux-style replay, where responsibility is inferred from recent reuse and charged at eviction time.
+
+\paragraph{Trace-based cache analysis.}
+Miniature Simulations, SHARDS, and CounterStacks establish the credibility of compact trace replay and miss-ratio estimation for storage and cache studies \citep{waldspurger2017miniaturesim,waldspurger2015shards,tian2015counterstacks}. Our artifact follows that methodology: the evidence is replay-first, and the paper does not claim a kernel realization.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem setup}
+
+We model a set of tenants $\mathcal{T}$ issuing references to file-backed pages. Time is partitioned into control epochs of 2{,}000 references per tenant. Each resident page $g$ maintains a recent-consumer set $C_g$ over a 4{,}096-reference window. Pages with $|C_g|=1$ are private; pages with $|C_g|>1$ are shared.
+
+The controller chooses two things at each epoch:
+\begin{enumerate}[leftmargin=1.5em]
+  \item a coarse cache-share allocation on a 10-quantum simplex with at least one quantum per tenant; and
+  \item one replacement profile per tenant from $\{\mathrm{LRU}, \mathrm{SCAN}, \mathrm{FREQ}\}$.
+\end{enumerate}
+
+The question is whether the controller should react only to occupancy, or also to the harm a tenant imposes on others when it evicts a shared page.
+
+\subsection{Baseline private and shared occupancy}
+
+\sharearb keeps a conservative \pcache-style baseline. For a resident page $g$ and tenant $i$,
+\[
+\mathrm{occ}_g(i) =
+\begin{cases}
+1 & \text{if } |C_g|=1 \text{ and } i \in C_g, \\
+\frac{1}{|C_g|} & \text{if } |C_g|>1 \text{ and } i \in C_g, \\
+0 & \text{otherwise.}
+\end{cases}
+\]
+Tenant occupancy is then $\mathrm{occ}_i = \sum_g \mathrm{occ}_g(i)$. This baseline answers ``who uses cache space now?'' but not ``who caused the next miss?''
+
+\subsection{Shared-responsibility vector}
+
+For each shared page $g$, \sharearb tracks a shared-responsibility vector
+\[
+r_g(i) = \frac{\mathrm{reuse}_g(i)}{\sum_{j \in C_g} \mathrm{reuse}_g(j)},
+\]
+where $\mathrm{reuse}_g(i)$ is a decayed reuse counter with $\alpha=0.875$ computed over recent references. The vector sums to one and degenerates to a single entry for private pages. Intuitively, $r_g(i)$ estimates which tenants are most likely to benefit if $g$ remains resident.
+
+\subsection{Evictor-side responsibility debt}
+
+When tenant $i$ faults and the chosen victim is a shared page $g$, \sharearb charges the evictor for predicted cross-tenant harm:
+\[
+\Delta \mathrm{debt}_i(g) = \sum_{j \neq i} r_g(j)\,\mathrm{cost}_j(g).
+\]
+The main matrix uses a family-constant miss-cost proxy, where $\mathrm{cost}_j(g)$ is the calibrated miss-gap for the workload family. Debt decays once per control epoch:
+\[
+\mathrm{debt}_i(t+1) = \lambda\,\mathrm{debt}_i(t) + \mathrm{new\_harm}_i(t),
+\]
+with default half-life equal to one working-set turnover.
+
+This separates three signals that occupancy-only schemes conflate:
+\begin{itemize}[leftmargin=1.5em]
+  \item occupancy: who currently holds cache space;
+  \item benefit: who is likely to reuse the page soon; and
+  \item responsibility: who triggered the eviction that destroyed that benefit.
+\end{itemize}
+
+\subsection{Controller}
+
+Each tenant receives a pressure score
+\[
+\mathrm{pressure}_i = \max(0, \mathrm{occ}_i - \mathrm{share}_i) + \eta \,\mathrm{debt}_i,
+\]
+with default $\eta=0.5$ when debt is enabled. The controller enumerates all legal share allocations and policy assignments and scores them with the same fixed objective for every method. The objective combines estimated utility, pressure, allocation variance, slowdown penalty, and a small policy-specific bonus for scan- or frequency-friendly phases. The controller is intentionally small; the paper is not about advanced optimization.
+
+\paragraph{Reduction rule.}
+Before each epoch update, \sharearb disables debt by setting $\eta=0$ if the previous epoch's shared-page fraction is below 0.05 or if \srv confidence is too weak (mean normalized entropy above 0.95 with fewer than two observed reuses per shared page). This makes the method falsifiable: when overlap disappears, it should collapse toward occupancy-only arbitration.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Artifact scope and executed protocol.}
+The artifact is a CPU-only replay engine and controller simulator, not a kernel implementation. The original plan called for 300 non-live replay runs (180 primary plus 120 ablations), 6 oracle runs, and 12 live runs. Execution diverged in two material ways. First, the smoke probes triggered the runtime fallback: synthetic traces were shortened from the planned 80{,}000 to 20{,}000 references per tenant, and the SQLite traces from 60{,}000 to 15{,}000. Second, the live step was skipped because writable cgroup v2 \texttt{memory.high} controls plus reliable cache-reset and residency-sampling hooks were unavailable in the unprivileged environment. The executed artifact therefore reports 180 primary runs, 120 ablations, 6 oracle runs, 24 auxiliary replay perturbation runs, and 5 smoke probes, with claims explicitly scoped to replay-only evidence.
+
+\paragraph{Workloads and budgets.}
+The primary matrix contains five workload families: OverlapShift-2T, ScanVsLoop-2T, SQLiteTraceMix-2T, SQLiteTraceMix-3T, and DisjointPhase-2T. In the executed seed-11 traces, realized overlap ratios are 0.186, 0.263, 0.406, 0.517, and 0.000, respectively. Medium-budget capacities from \texttt{calibration/manifest.json} are 1{,}497, 1{,}422, 98, 175, and 1{,}756 pages for those families. The corresponding family-constant miss penalties are 194.011, 173.8335, 171.792, 168.936, and 173.545~$\mu$s.
+
+\paragraph{Methods.}
+We compare \privateonly, \pcache, \pcachepol, and \sharearb in the primary matrix. Ablations use \textsc{ShareArb-NoDebt}, \textsc{ShareArb-UnitCost}, \textsc{UniformSRV}, \textsc{ShareArb-HalfLife0.5}, \textsc{ShareArb-HalfLife2.0}, and \textsc{NoReduction}. OracleOverlap is evaluated on OverlapShift-2T and SQLiteTraceMix-2T at medium budget.
+
+\paragraph{Metrics.}
+The primary metric is worst-tenant slowdown. For tenant $i$, slowdown is average replay latency divided by the isolated average latency from the calibration manifest; run-level slowdown is $\max_i \mathrm{slowdown}_i$. Aggregate throughput proxy is total references divided by total replay latency. Jain fairness is computed over inverse slowdowns. Shared regret counts a lost near-term reuse when one tenant evicts a shared page and another tenant rereferences it within the next 2{,}048 references; the reported normalized value is \texttt{shared\_regret\_raw} $\times 10{,}000 / |\mathrm{trace}|$. Controller stability is reported as action changes per 10{,}000 references.
+
+\paragraph{Runtime envelope.}
+Summing emitted per-run runtimes gives 10{,}136.29~s (2.82~h) for the 180 primary runs, 6{,}533.35~s (1.81~h) for the 120 ablations, 282.49~s (0.08~h) for the 6 oracle runs, 1{,}055.03~s (0.29~h) for the 24 auxiliary replay checks, and 255.64~s (0.07~h) for the 5 smoke probes. Figure~\ref{fig:runtime} visualizes only the primary, ablation, and oracle stages because that is what \texttt{exp/shared/analysis.py} renders; those three stages sum to 16{,}952.13~s (4.71~h). Adding the auxiliary replay checks brings the reported replay total to 18{,}007.16~s (5.00~h). Peak resident memory over all reported runs is 82.51~MB.
+
+\subsection{Main results}
+
+The main comparison against \pcache is positive but should be described conservatively. Across the 36 matched overlap-heavy workload-budget-seed tuples, \sharearb improves paired worst-tenant slowdown by $-1.08$ with a 95\% bootstrap CI of $[-2.06,-0.23]$ and paired throughput proxy by $+0.00875$ with CI $[0.00375,0.01459]$. Fairness also improves by $+0.00652$ with CI $[0.00009,0.01410]$ and Wilcoxon $p=0.0073$. Shared regret remains inconclusive at $-0.64$ with CI $[-4.38,3.24]$ and $p=0.424$. With only three seeds per condition, we therefore interpret the slowdown, throughput, and fairness gains as directional replay evidence, not as a broad deployment-level confirmation.
+
+The clearest success case is SQLiteTraceMix-2T. At medium budget, \sharearb reduces worst-tenant slowdown from 17.82 under \pcache to 4.59, increases throughput proxy from 0.01737 to 0.08264, and lowers shared regret from 21.17 to 6.58 per 10{,}000 references. OverlapShift-2T shows a smaller slowdown and throughput gain at medium budget, but not a regret gain. ScanVsLoop-2T is mixed: \sharearb improves throughput and regret at medium budget, but its worst-tenant slowdown is slightly worse than \pcache (3.44 versus 3.25). SQLiteTraceMix-3T improves fairness at medium budget (0.847 to 0.935) but does not improve slowdown or throughput.
+
+The disjoint control is directionally benign in several cells but does \emph{not} satisfy the pre-registered reduction criterion. At medium budget, \pcache yields worst-tenant slowdown 2.13 and throughput proxy 0.00598, while \sharearb yields 2.07 and 0.00703. However, the artifact-level hypothesis check in \texttt{results.json} reports a disjoint slowdown delta of 1.97\% but a disjoint throughput delta of 24.68\%, exceeding the 3\% tolerance. The top-level hypothesis is therefore marked unsupported even though the disjoint runs are not worse in the ordinary sense.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/main_results.png}
+  \caption{Medium-budget main results from the primary replay matrix. Each bar is the mean over $n=3$ seeds for one workload family and method. Error bars are the upper bootstrap 95\% half-width produced by \texttt{exp/shared/analysis.py}. The strongest gain for \sharearb appears on SQLiteTraceMix-2T, while the disjoint control remains close on slowdown but not equivalent under the pre-registered throughput criterion.}
+  \label{fig:main-results}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Exact medium-budget results from the primary replay matrix. Values are means over the three reporting seeds. Best slowdown and regret are in \textbf{bold}; best throughput is in \textbf{bold}. Lower is better for slowdown and regret, higher is better for throughput.}
+\label{tab:main-medium}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccc}
+\toprule
+Family & Method & Worst slowdown $\downarrow$ & Throughput proxy $\uparrow$ & Shared regret / 10k $\downarrow$ \\
+\midrule
+OverlapShift-2T & \privateonly & 1.822 & \textbf{0.00734} & 59.75 \\
+OverlapShift-2T & \pcache & 1.799 & 0.00673 & \textbf{37.06} \\
+OverlapShift-2T & \pcachepol & 1.818 & 0.00693 & 45.82 \\
+OverlapShift-2T & \sharearb & \textbf{1.641} & 0.00728 & 61.25 \\
+\midrule
+ScanVsLoop-2T & \privateonly & 3.388 & 0.00911 & 102.25 \\
+ScanVsLoop-2T & \pcache & 3.247 & 0.00912 & 61.29 \\
+ScanVsLoop-2T & \pcachepol & \textbf{3.240} & 0.00915 & 62.65 \\
+ScanVsLoop-2T & \sharearb & 3.444 & \textbf{0.00936} & \textbf{54.81} \\
+\midrule
+SQLiteTraceMix-2T & \privateonly & 14.11 & 0.02286 & 24.92 \\
+SQLiteTraceMix-2T & \pcache & 17.82 & 0.01737 & 21.17 \\
+SQLiteTraceMix-2T & \pcachepol & 17.81 & 0.01743 & 21.83 \\
+SQLiteTraceMix-2T & \sharearb & \textbf{4.59} & \textbf{0.08264} & \textbf{6.58} \\
+\midrule
+SQLiteTraceMix-3T & \privateonly & 15.80 & 0.01661 & \textbf{2.17} \\
+SQLiteTraceMix-3T & \pcache & 15.31 & 0.02008 & 5.00 \\
+SQLiteTraceMix-3T & \pcachepol & \textbf{15.29} & \textbf{0.02010} & 5.00 \\
+SQLiteTraceMix-3T & \sharearb & 15.77 & 0.01754 & 7.56 \\
+\midrule
+DisjointPhase-2T & \privateonly & 2.134 & 0.00598 & 50.74 \\
+DisjointPhase-2T & \pcache & 2.134 & 0.00598 & 50.74 \\
+DisjointPhase-2T & \pcachepol & 2.132 & 0.00598 & 50.19 \\
+DisjointPhase-2T & \sharearb & \textbf{2.069} & \textbf{0.00703} & \textbf{43.75} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Budget sensitivity and mechanism behavior}
+
+Figure~\ref{fig:budget} shows that the gains are regime-specific rather than uniform. SQLiteTraceMix-2T remains the clearest success case at medium and loose budgets. OverlapShift-2T improves in slowdown at all budgets but worsens regret at medium and loose budget. ScanVsLoop-2T improves throughput and some regret values but not worst-tenant slowdown at medium budget. SQLiteTraceMix-3T remains inconsistent, especially on slowdown.
+
+Figure~\ref{fig:mechanism} examines whether charged debt tracks realized downstream harm. Across all \sharearb tenant-epoch rows emitted by the artifact ($n=1{,}024$), the global correlation is positive (Pearson 0.445, Spearman 0.433). That trend is not strong enough to validate the mechanism on its own. The claim assessment records only 7 positive family-budget pairs out of the 12 overlap-heavy combinations considered in the planned threshold, which is why the overall hypothesis is marked unsupported in \texttt{results.json}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/budget_sensitivity.png}
+  \caption{Budget sensitivity from the primary replay matrix. Each line shows mean worst-tenant slowdown over $n=3$ seeds for one family-method pair at tight, medium, and loose budgets. Benefits of \sharearb are concentrated in SQLiteTraceMix-2T rather than spread uniformly across all overlap-heavy families.}
+  \label{fig:budget}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/mechanism_scatter.png}
+  \caption{Charged debt versus realized downstream harm, one point per tenant-epoch for all \sharearb epoch rows produced by the artifact ($n=1{,}024$). The overall trend is positive, but the spread remains wide, so this figure supports only a weak alignment claim.}
+  \label{fig:mechanism}
+\end{figure}
+
+\subsection{Ablations}
+
+The ablation study is the main reason we stop short of a stronger claim. Against \textsc{ShareArb-NoDebt}, the paired slowdown delta for full \sharearb is $+0.91$ with a 95\% bootstrap CI of $[0.14,1.89]$; the throughput delta is $+0.00065$ with CI $[-0.00041,0.00209]$; the fairness delta is $-0.00241$ with CI $[-0.00818,0.00247]$; and the regret delta is $+2.24$ with CI $[-1.80,6.36]$. In other words, the matched evidence does not show a clear benefit from enabling debt, and the slowdown comparison points in the opposite direction.
+
+Table~\ref{tab:ablation} summarizes medium-budget overlap-heavy means. Full \sharearb averages 6.36 worst-tenant slowdown, while \textsc{ShareArb-NoDebt} averages 6.10. \textsc{UniformSRV} closely matches the slowdown level and slightly exceeds throughput, but with substantially worse fairness. \textsc{ShareArb-UnitCost} is unstable, driven largely by the poor SQLiteTraceMix-2T medium-budget outcome.
+
+\begin{table}[t]
+\caption{Ablation means on overlap-heavy families at medium budget. Values are means over the four overlap-heavy families and three seeds ($n=12$ matched tuples per method, except UniformSRV which is only defined at medium budget). These values isolate the incremental role of debt and reuse weighting while keeping the controller scaffold fixed.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Slowdown $\downarrow$ & Throughput $\uparrow$ & Jain $\uparrow$ & Regret $\downarrow$ \\
+\midrule
+\sharearb & 6.36 & 0.02920 & 0.9724 & 32.55 \\
+\textsc{ShareArb-NoDebt} & \textbf{6.10} & 0.02805 & \textbf{0.9827} & \textbf{29.23} \\
+\textsc{ShareArb-UnitCost} & 10.84 & 0.01272 & 0.9836 & 29.85 \\
+\textsc{UniformSRV} & 6.32 & \textbf{0.02996} & 0.9375 & 30.34 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/ablation_heatmap.png}
+  \caption{Ablation summary heatmap produced from matched run pairs against full \sharearb. Rows correspond to NoDebt ($n=36$ tuples), UniformSRV ($n=12$), UnitCost ($n=36$), short half-life ($n=18$), long half-life ($n=18$), and NoReduction ($n=18$). Negative slowdown and regret are better; positive throughput and fairness are better.}
+  \label{fig:ablation}
+\end{figure}
+
+\subsection{Oracle and auxiliary replay validation}
+
+OracleOverlap is intentionally limited to two medium-budget families and should be read only as an upper reference. Across its six runs, mean worst-tenant slowdown is 9.85, mean throughput proxy is 0.01268, and mean shared regret is 24.46 per 10{,}000 references. It is therefore useful as a bounded reference point, not as a uniform upper envelope for every reported metric.
+
+The auxiliary perturbation check compares \pcache and \sharearb on raw and burst-perturbed captured SQLite streams. \sharearb wins 9 of the 12 replay conditions on worst-tenant slowdown. We report these only as replay-side robustness checks. They do not replace the skipped live validation step and are not used as evidence for deployment readiness.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/live_validation_table.png}
+  \caption{Auxiliary replay-side perturbation check rendered from the \texttt{external\_validity} rows in \texttt{results.json}. The table covers 12 raw and burst-perturbed SQLite conditions from \texttt{exp/external\_validation/}; \sharearb wins 9 of 12 on worst-tenant slowdown. Despite the filename, this figure is \emph{not} a live-validation result and does not substitute for the skipped live step.}
+  \label{fig:external-validation}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/runtime_accounting.png}
+  \caption{Runtime accounting figure emitted by \texttt{exp/shared/analysis.py}. The figure tabulates only the primary replay, ablation, and oracle stages, which sum to 16{,}952.13~s (4.71~h) of serial CPU time. The separate auxiliary replay perturbation checks reported in text add 1{,}055.03~s, bringing the replay total to 18{,}007.16~s (5.00~h).}
+  \label{fig:runtime}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main conclusion is narrower than the original hypothesis. \sharearb is useful in some overlap-heavy replay regimes, especially SQLiteTraceMix-2T, but the artifact does not justify a broader claim that evictor-side debt is independently responsible for the improvement. It also does not satisfy the full pre-registered support criterion because the positive debt-alignment count misses threshold and the disjoint throughput tolerance check fails.
+
+Three limitations dominate.
+
+\paragraph{Debt is not cleanly validated.}
+The no-debt ablation is competitive and sometimes better. The paired slowdown comparison against \textsc{ShareArb-NoDebt} is unfavorable to full \sharearb, and the fairness, throughput, and regret intervals all span zero.
+
+\paragraph{Replay-only scope.}
+The planned live proxy study was skipped because the required cgroup and residency-observation controls were unavailable in the unprivileged environment. The paper therefore makes only replay-scoped claims. The 24 auxiliary SQLite perturbation runs are helpful robustness checks, but they are still replay.
+
+\paragraph{Shortened horizons and regime dependence.}
+The reported synthetic runs use 20{,}000 references per tenant and the SQLite traces use 15{,}000. The evidence therefore concerns bounded replay horizons rather than long steady-state executions. It also remains regime-specific: the strongest benefits appear in a two-tenant trace-derived overlap case, while SQLiteTraceMix-3T does not improve worst-tenant slowdown at medium budget.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper asked a narrow question: does page-cache arbitration improve if the system charges tenants not only for occupancy, but also for the harm they cause when evicting shared pages? \sharearb implements that idea with a shared-responsibility vector, decayed eviction debt, and a conservative share-plus-policy controller layered over \pcache-style occupancy accounting.
+
+The answer is partial. Relative to \pcache on the 36 matched overlap-heavy workload-budget-seed tuples, \sharearb improves paired worst-tenant slowdown by $-1.08$ and fairness by $+0.00652$, with the clearest workload-level gain on SQLiteTraceMix-2T at medium budget. At the same time, shared regret is inconclusive in the paired comparison against \pcache, the debt mechanism is not isolated cleanly by the ablations, the disjoint throughput tolerance check is not met, and the study is limited to shortened replay traces because the live proxy was infeasible.
+
+The practical implication is that responsibility-aware replay arbitration is promising, but the decisive ingredient may be better causal attribution of eviction harm rather than debt accumulation alone. Future work should test that hypothesis in a kernel-backed implementation with longer traces, richer overlap structure, and live observability of refault attribution.
+
+\bibliographystyle{plainnat}
+\bibliography{paper_refs}
+
+\appendix
+
+\section{Reproducibility Appendix}
+\label{sec:appendix-repro}
+
+\subsection{Directory-to-paper mapping}
+
+\begin{table}[h]
+\caption{Artifact-to-paper mapping.}
+\label{tab:artifact-map}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Artifact path & Role in paper \\
+\midrule
+\texttt{exp/primary/} & Main replay matrix in Section~\ref{sec:experiments} \\
+\texttt{exp/ablations/} & Ablations in Section~\ref{sec:experiments} \\
+\texttt{exp/oracle/} & OracleOverlap reference in Section~\ref{sec:experiments} \\
+\texttt{exp/external\_validation/} & Auxiliary replay perturbation check \\
+\texttt{exp/live\_validation/} & Skipped live-proxy step; claims scoped away \\
+\texttt{exp/smoke/} & Runtime-gating artifact for shortened traces \\
+\texttt{traces/} & Synthetic and SQLite-derived replay inputs \\
+\texttt{calibration/manifest.json} & Budgets, miss costs, isolated baselines \\
+\texttt{figures/} & Generated figures included in the paper \\
+\texttt{results.json} & Aggregated statistics and claim assessment \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fixed seeds, lengths, and metric formulas}
+
+All reported stochastic components use seeds \{11, 23, 37\}; the held-out pilot seed is 5 and is not reported. The executed replay regime uses 20{,}000 synthetic references per tenant and 15{,}000 SQLite references per tenant. On seed 11, this yields event counts of 40{,}000 for OverlapShift-2T, ScanVsLoop-2T, and DisjointPhase-2T, 30{,}000 for SQLiteTraceMix-2T, and 45{,}000 for SQLiteTraceMix-3T.
+
+The exact metric formulas are implemented in \texttt{exp/shared/replay.py}:
+\begin{itemize}[leftmargin=1.5em]
+  \item worst-tenant slowdown: $\max_i \left(\overline{\mathrm{latency}}_i / \overline{\mathrm{latency}}^{\mathrm{isolated}}_i\right)$;
+  \item aggregate throughput proxy: total references divided by total replay latency;
+  \item Jain fairness: Jain's index over inverse slowdowns;
+  \item shared regret per 10{,}000 references: \texttt{shared\_regret\_raw} $\times 10{,}000 / |\mathrm{trace}|$;
+  \item controller changes per 10{,}000 references: action-change count $\times 10{,}000 / |\mathrm{trace}|$;
+  \item debt-harm alignment: correlation between charged debt in epoch $t$ and realized downstream harm in epoch $t+1$ over tenant-epoch pairs.
+\end{itemize}
+
+\subsection{Figure and table provenance}
+
+Running \texttt{python3 -m exp.analysis.run} regenerates \texttt{results.json} and the figure files in \texttt{figures/}. The plotting logic is defined in \texttt{exp/shared/analysis.py}. Specifically:
+\begin{itemize}[leftmargin=1.5em]
+  \item Figure~\ref{fig:main-results} uses medium-budget rows from the primary results and plots seed means with bootstrap error bars.
+  \item Figure~\ref{fig:budget} plots mean worst-tenant slowdown versus budget for the selected methods.
+  \item Figure~\ref{fig:ablation} merges each ablation against \sharearb on matched workload-budget-seed tuples and plots mean deltas.
+  \item Figure~\ref{fig:mechanism} scatters \texttt{debt} versus \texttt{realized\_harm\_next} from all \sharearb \texttt{epoch\_metrics.jsonl} rows.
+  \item Figure~\ref{fig:external-validation} renders the auxiliary replay perturbation table from \texttt{results.json}.
+  \item Figure~\ref{fig:runtime} is generated from summed \texttt{runtime\_sec} values for the primary, ablation, and oracle stages only.
+\end{itemize}
+
+Table~\ref{tab:main-medium} was transcribed from the medium-budget aggregates in \texttt{results.json}. Table~\ref{tab:ablation} uses medium-budget overlap-heavy means computed from the same aggregated results.
+
+\subsection{Smoke and skipped live-validation artifacts}
+
+\begin{table}[h]
+\caption{Concise accounting of smoke and live-validation artifacts excluded from the main empirical narrative.}
+\label{tab:excluded-artifacts}
+\centering
+\small
+\scriptsize
+\begin{tabular}{p{0.20\linewidth}p{0.16\linewidth}p{0.56\linewidth}}
+\toprule
+Artifact & Status & Reason for exclusion from main results \\
+\midrule
+\texttt{exp/smoke/} & 5 runs executed & Used only to trigger the runtime fallback that shortened traces from 80{,}000 to 20{,}000 synthetic references per tenant and from 60{,}000 to 15{,}000 SQLite references per tenant. \\
+\texttt{FULL\_LENGTH\_PROBE.md} & partial probe only & Records infeasible full-length medium-budget runtimes, including 553.56~s for PrivateOnly-Utility and 544.33~s for \pcache on OverlapShift-2T seed 11. \\
+\texttt{exp/live\_validation/} & skipped & Writable cgroup \texttt{memory.high} controls, cache resets, and residency sampling hooks were unavailable without elevated privileges. \\
+\texttt{external\_validation} & auxiliary replay check & Retained as a perturbation check on captured SQLite streams and reported separately; it is not a substitute for the skipped live step. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

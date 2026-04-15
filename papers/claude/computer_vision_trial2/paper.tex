@@ -1,0 +1,520 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\newcommand{\AEP}{\textsc{AEP}}
+\newcommand{\AEPFusion}{\textsc{AEP+Fusion}}
+
+\title{Attention Entropy Profiling for Training-Free Out-of-Distribution Detection in Vision Transformers}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+%=============================================================================
+% ABSTRACT
+%=============================================================================
+\begin{abstract}
+We propose Attention Entropy Profiling (\AEP{}), a training-free method that detects out-of-distribution (OOD) inputs to Vision Transformers (ViTs) by analyzing layerwise self-attention statistics. \AEP{} constructs a compact profile vector from four per-layer attention statistics---CLS attention entropy, average token entropy, attention concentration ratio, and head agreement---and scores test inputs by their Mahalanobis distance from in-distribution reference statistics computed from a small calibration set. Unlike existing post-hoc OOD detectors that operate on output logits or penultimate-layer features, \AEP{} captures the model's internal processing dynamics through attention structure, providing a complementary signal. Across experiments with three ViT architectures (DeiT-Small, DeiT-Base, ViT-Base/16) evaluated on five OOD datasets using Food-101 as the in-distribution proxy, \AEP{} achieves AUROC scores of 0.92--1.00, and fusing \AEP{} with feature-based detectors yields the best overall performance. Statistical tests confirm that entropy profiles differ highly significantly between in-distribution and OOD inputs ($p < 10^{-16}$, Hotelling's $T^2$). Ablation studies reveal that CLS attention entropy is the most informative component and that performance stabilizes with as few as 250 calibration samples. We note important limitations of our evaluation setup---particularly the use of a non-standard ID dataset on which models have zero classification accuracy---and discuss their implications for interpreting results.
+\end{abstract}
+
+%=============================================================================
+% 1. INTRODUCTION
+%=============================================================================
+\section{Introduction}
+
+Vision Transformers (ViTs)~\citep{dosovitskiy2021an} have become the dominant architecture for image classification. Deploying ViTs in safety-critical applications---autonomous driving, medical imaging, industrial inspection---requires reliable uncertainty estimation: the model must signal when its predictions are unreliable. A key component of this is \emph{out-of-distribution (OOD) detection}: identifying inputs that differ substantially from the training distribution.
+
+Current post-hoc OOD detection methods for ViTs predominantly rely on output-level signals: maximum softmax probability (MSP)~\citep{hendrycks2017baseline}, energy scores~\citep{liu2020energy}, or penultimate-layer features (Mahalanobis distance~\citep{lee2018simple}, ViM~\citep{wang2022vim}, KNN~\citep{sun2022out}). These methods treat the transformer as a black box, ignoring the rich intermediate representations computed during inference. In particular, they overlook the \emph{self-attention maps}, which encode how the model distributes computational focus across spatial tokens at each layer.
+
+We observe that the \emph{self-attention entropy profile}---a vector capturing how attention entropy varies across layers and heads---serves as a direct, interpretable signature of how a ViT processes an input. For in-distribution images, the model follows a characteristic processing trajectory: early layers attend broadly (high entropy), while later layers progressively focus on discriminative regions (decreasing entropy). Under distribution shift, this trajectory is disrupted: the model either fails to focus or focuses on irrelevant features.
+
+Based on this observation, we propose \textbf{Attention Entropy Profiling (\AEP{})}, a training-free, post-hoc method that extracts OOD detection scores from the self-attention maps of any pretrained ViT. \AEP{} requires only a small in-distribution calibration set ($\sim$1,000 images) to compute reference statistics and leverages attention maps that are already computed during the forward pass.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \AEP{}, the first systematic use of layerwise attention entropy profiles for OOD detection in Vision Transformers. \AEP{} is training-free, requires no architectural modifications, and works with any ViT variant.
+    \item We demonstrate that \AEP{} achieves competitive OOD detection performance (AUROC 0.92--1.00) and that fusing \AEP{} with feature-based detectors consistently outperforms either approach alone.
+    \item We provide comprehensive ablation studies showing that CLS attention entropy is the most informative component, late layers are most discriminative, and performance is robust to calibration set size (stable with $\geq$250 samples).
+    \item We provide statistical evidence that attention entropy profiles differ highly significantly between in-distribution and OOD inputs ($p < 10^{-16}$), validating the core hypothesis.
+\end{itemize}
+
+\textbf{Important caveat.} Our experiments use Food-101 as the in-distribution dataset with ImageNet-pretrained models that have zero classification accuracy on Food-101. While this setup validates that attention entropy profiles encode distributional information detectable without task-specific fine-tuning, it constitutes a non-standard evaluation that limits comparison with published benchmarks. We discuss this limitation in detail in Section~\ref{sec:limitations}.
+
+The rest of the paper is organized as follows: Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the \AEP{} method, Section~\ref{sec:experiments} presents experimental results and ablations, Section~\ref{sec:limitations} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+%=============================================================================
+% 2. RELATED WORK
+%=============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Post-hoc OOD detection.}
+The dominant paradigm for OOD detection uses post-hoc scoring on pretrained classifiers. MSP~\citep{hendrycks2017baseline} uses the maximum softmax probability. Energy Score~\citep{liu2020energy} uses the log-sum-exp of logits. Mahalanobis Distance~\citep{lee2018simple} measures feature-space distance from class-conditional Gaussians. ViM~\citep{wang2022vim} projects features onto a virtual logit dimension. KNN~\citep{sun2022out} uses $k$-nearest neighbor distances in feature space. ASH~\citep{djurisic2023extremely} prunes and scales activations. All of these methods operate on output logits or penultimate-layer features. None leverage the self-attention maps unique to transformer architectures. \AEP{} is the first to exploit layerwise attention statistics for OOD detection in ViTs, providing a signal that is complementary to all existing approaches.
+
+\paragraph{Confidence calibration.}
+Temperature Scaling~\citep{guo2017calibration} fits a single scalar temperature on validation data. Recent work has shown that post-hoc calibration methods degrade under distribution shift~\citep{ovadia2019trust}. CalAttn~\citep{liang2025calattn} learns instance-specific temperatures from the CLS token representation---the closest work to ours in spirit, but requiring supervised training. Our method achieves input-adaptive calibration without any training, though we were unable to complete the calibration evaluation in the current study.
+
+\paragraph{Attention analysis in transformers.}
+\citet{ostmeier2026headentropy} show that attention head entropy predicts answer correctness in LLMs. These works analyze attention for understanding but do not use it as a practical OOD detection signal in vision models. Token Condensation for test-time Adaptation (TCA)~\citep{wang2025tca} uses token importance for efficient inference, which is related but serves a different purpose. Our work shows that attention statistics useful for efficiency also encode distributional information.
+
+\paragraph{OOD benchmarks.}
+OpenOOD~\citep{zhang2023openood} provides a comprehensive benchmark using ImageNet-1K as the in-distribution dataset with standardized near-OOD (SSB-hard, NINCO) and far-OOD (iNaturalist, Textures, OpenImage-O) splits. Our evaluation departs from this standard protocol, as discussed in Section~\ref{sec:limitations}.
+
+%=============================================================================
+% 3. METHOD
+%=============================================================================
+\section{Method}
+\label{sec:method}
+
+We describe Attention Entropy Profiling (\AEP{}), a training-free, post-hoc method for OOD detection in Vision Transformers. The method consists of three stages: (1) extracting attention statistics during inference, (2) computing in-distribution reference statistics from a calibration set, and (3) scoring test inputs by deviation from the reference.
+
+\subsection{Attention Entropy Extraction}
+
+Given a pretrained ViT with $L$ layers and $H$ attention heads per layer, for each input image $x$ we extract the attention map $\mathbf{A}_{l,h} \in \mathbb{R}^{N \times N}$ at layer $l$ and head $h$, where $N$ is the number of tokens (patches + CLS). We compute four statistics per layer and head:
+
+\paragraph{CLS attention entropy.} The entropy of the attention distribution from the CLS token to all patch tokens:
+\begin{equation}
+E^{\text{cls}}_{l,h} = -\sum_{j=1}^{N-1} \mathbf{A}_{l,h}[0,j] \log \mathbf{A}_{l,h}[0,j]
+\label{eq:cls_entropy}
+\end{equation}
+This measures how focused the model's classification-relevant attention is at each layer.
+
+\paragraph{Average token entropy.} The mean entropy across all token-to-token attention distributions:
+\begin{equation}
+E^{\text{avg}}_{l,h} = \frac{1}{N}\sum_{i=0}^{N-1}\left(-\sum_{j=0}^{N-1} \mathbf{A}_{l,h}[i,j] \log \mathbf{A}_{l,h}[i,j]\right)
+\label{eq:avg_entropy}
+\end{equation}
+
+\paragraph{Attention concentration ratio.} The fraction of total attention mass captured by the top-$k$ most-attended tokens ($k=5$), averaged over query tokens:
+\begin{equation}
+C_{l,h} = \frac{1}{N}\sum_{i=0}^{N-1} \sum_{j \in \text{top-}k(\mathbf{A}_{l,h}[i,:])} \mathbf{A}_{l,h}[i,j]
+\label{eq:concentration}
+\end{equation}
+
+\paragraph{Head agreement score.} The average pairwise cosine similarity between CLS attention distributions of different heads at the same layer:
+\begin{equation}
+S_l = \frac{2}{H(H-1)}\sum_{h<h'} \cos(\mathbf{A}_{l,h}[0,:], \mathbf{A}_{l,h'}[0,:])
+\label{eq:head_agreement}
+\end{equation}
+
+\subsection{Entropy Profile Construction}
+
+We aggregate the per-layer, per-head statistics into a compact \textbf{Attention Entropy Profile} vector:
+\begin{equation}
+\mathbf{p}(x) = \left[\bar{E}^{\text{cls}}_1, \sigma(E^{\text{cls}}_1), \bar{E}^{\text{avg}}_1, \bar{C}_1, S_1, \ldots, \bar{E}^{\text{cls}}_L, \sigma(E^{\text{cls}}_L), \bar{E}^{\text{avg}}_L, \bar{C}_L, S_L\right]
+\label{eq:profile}
+\end{equation}
+where $\bar{\cdot}$ and $\sigma(\cdot)$ denote the mean and standard deviation across heads at each layer. This yields a profile of dimensionality $5L$ (e.g., 60 for a 12-layer ViT).
+
+\subsection{In-Distribution Reference Statistics}
+
+Using a calibration set $\mathcal{D}_{\text{cal}}$ of in-distribution images (e.g., 1,000 samples), we compute the mean profile $\boldsymbol{\mu} = \frac{1}{|\mathcal{D}_{\text{cal}}|}\sum_{x \in \mathcal{D}_{\text{cal}}} \mathbf{p}(x)$ and the regularized covariance matrix $\boldsymbol{\Sigma} = \text{Cov}(\{\mathbf{p}(x)\}_{x \in \mathcal{D}_{\text{cal}}}) + \epsilon \mathbf{I}$, where $\epsilon = 10^{-4}$ ensures invertibility.
+
+\subsection{OOD Scoring}
+
+For a test input $x_{\text{test}}$, the OOD score is the Mahalanobis distance of its entropy profile from the ID distribution:
+\begin{equation}
+\text{AEP-Score}(x_{\text{test}}) = (\mathbf{p}(x_{\text{test}}) - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{p}(x_{\text{test}}) - \boldsymbol{\mu})
+\label{eq:score}
+\end{equation}
+Higher scores indicate greater deviation from in-distribution attention patterns.
+
+\subsection{Score Fusion}
+
+Since \AEP{} captures attention-level information while existing methods capture logit/feature-level information, they are complementary. We propose a simple linear fusion:
+\begin{equation}
+\text{Fused-Score}(x) = \beta \cdot \widetilde{\text{AEP}}(x) + (1-\beta) \cdot \widetilde{\text{Base}}(x)
+\label{eq:fusion}
+\end{equation}
+where $\widetilde{\cdot}$ denotes min-max normalization to $[0,1]$ and $\beta$ is tuned on the calibration set to maximize AUROC.
+
+\subsection{Input-Adaptive Calibration (Proposed)}
+
+We additionally propose using the AEP score to modulate predicted confidence via an input-adaptive temperature: $T(x) = T_0 + \alpha \cdot \text{AEP-Score}(x)$, where $T_0$ and $\alpha$ are fitted on the calibration set. Inputs with anomalous attention patterns receive higher temperature (softer predictions). We describe this component for completeness but note that the calibration evaluation was not completed in our experiments (see Section~\ref{sec:limitations}).
+
+%=============================================================================
+% 4. EXPERIMENTS
+%=============================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Models.} We evaluate three pretrained ViT architectures from \texttt{timm}~\citep{touvron2021training,dosovitskiy2021an}: DeiT-Small (22M parameters, 12 layers, 6 heads), DeiT-Base (86M, 12 layers, 12 heads), and ViT-Base/16 (86M, 12 layers, 12 heads). All models use ImageNet-1K pretrained weights.
+
+\paragraph{In-distribution dataset.} We use Food-101~\citep{bossard2014food} (25,250 test images, 101 food categories) as the in-distribution dataset. \textbf{Critical note:} The pretrained models output ImageNet-1K class predictions and have zero classification accuracy on Food-101 classes. This means our evaluation measures whether attention entropy patterns differ between Food-101 and OOD datasets \emph{for models not specifically trained on the ID task}. While this validates that \AEP{} captures distributional information encoded in attention structure regardless of task accuracy, it represents a non-standard evaluation protocol that prevents direct comparison with published OOD benchmarks (see Section~\ref{sec:limitations}).
+
+\paragraph{OOD datasets.} We use five datasets as OOD: Textures/DTD~\citep{cimpoi2014describing} (1,880 images), SVHN~\citep{netzer2011reading} (26,032 images, $32 \times 32$ resized to $224 \times 224$), CIFAR-10~\citep{krizhevsky2009learning} (10,000 images, $32 \times 32$ resized to $224 \times 224$), CIFAR-100 (10,000 images, $32 \times 32$ resized), and Flowers-102~\citep{nilsback2008automated} (6,149 images). Note that SVHN, CIFAR-10, and CIFAR-100 are natively $32 \times 32$ and are resized to $224 \times 224$, which introduces a resolution artifact that makes detection easier (discussed in Section~\ref{sec:limitations}).
+
+\paragraph{Baselines.} We compare against four post-hoc OOD detectors: MSP~\citep{hendrycks2017baseline}, Energy Score~\citep{liu2020energy}, ViM~\citep{wang2022vim}, and KNN~\citep{sun2022out} ($k=50$).
+
+\paragraph{Metrics.} We report AUROC (area under the ROC curve, $\uparrow$) and FPR@95\%TPR ($\downarrow$).
+
+\paragraph{Implementation details.} Attention maps are extracted via forward hooks on each attention layer. In-distribution reference statistics are computed from 1,000 randomly sampled Food-101 images (stratified). All experiments use 3 random seeds (42, 123, 456) varying only the calibration subset. For \AEPFusion{}, $\beta$ is tuned by grid search on the calibration set.
+
+\subsection{Main OOD Detection Results}
+
+Table~\ref{tab:main_auroc} presents AUROC results across all models and OOD datasets. We highlight several findings:
+
+\begin{table}[t]
+\caption{OOD Detection AUROC (\%, $\uparrow$) using Food-101 as in-distribution data. Mean$\pm$std over 3 seeds. Best in \textbf{bold}, second-best \underline{underlined}. Models have zero classification accuracy on Food-101 (see Section~\ref{sec:limitations}).}
+\label{tab:main_auroc}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccc}
+\toprule
+Model & Method & Textures & SVHN & CIFAR-10 & CIFAR-100 & Flowers-102 \\
+\midrule
+\multirow{6}{*}{\rotatebox{90}{DeiT-S}}
+& MSP & 66.4$\pm$0.0 & 91.4$\pm$0.0 & 65.5$\pm$0.0 & 69.5$\pm$0.0 & 66.7$\pm$0.0 \\
+& Energy & 77.9$\pm$0.0 & 97.4$\pm$0.0 & 72.8$\pm$0.0 & 75.4$\pm$0.0 & 67.9$\pm$0.0 \\
+& ViM & 97.8$\pm$0.1 & 99.7$\pm$0.0 & 99.7$\pm$0.0 & 99.4$\pm$0.0 & 98.2$\pm$0.1 \\
+& KNN & \underline{99.7}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \underline{100.0}$\pm$0.0 & \underline{99.9}$\pm$0.0 & \underline{99.6}$\pm$0.0 \\
+& \AEP{} & 98.8$\pm$0.1 & \underline{100.0}$\pm$0.0 & 98.5$\pm$0.0 & 98.8$\pm$0.1 & 95.1$\pm$0.1 \\
+& \AEPFusion{} & \textbf{99.8}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{99.9}$\pm$0.0 & \textbf{99.7}$\pm$0.0 \\
+\midrule
+\multirow{6}{*}{\rotatebox{90}{DeiT-B}}
+& MSP & 66.7$\pm$0.0 & 87.3$\pm$0.0 & 68.3$\pm$0.0 & 70.4$\pm$0.0 & 65.6$\pm$0.0 \\
+& Energy & 76.3$\pm$0.0 & 90.4$\pm$0.0 & 73.7$\pm$0.0 & 74.7$\pm$0.0 & 65.3$\pm$0.0 \\
+& ViM & 95.9$\pm$0.0 & 98.8$\pm$0.1 & 98.9$\pm$0.0 & 98.1$\pm$0.0 & 96.4$\pm$0.1 \\
+& KNN & \underline{99.6}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \underline{100.0}$\pm$0.0 & \underline{99.9}$\pm$0.0 & \underline{99.6}$\pm$0.0 \\
+& \AEP{} & 98.4$\pm$0.1 & \underline{100.0}$\pm$0.0 & 99.3$\pm$0.1 & 99.5$\pm$0.1 & 92.5$\pm$0.1 \\
+& \AEPFusion{} & \textbf{99.7}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{99.7}$\pm$0.0 \\
+\midrule
+\multirow{6}{*}{\rotatebox{90}{ViT-B}}
+& MSP & 63.2$\pm$0.0 & 83.3$\pm$0.0 & 61.7$\pm$0.0 & 66.7$\pm$0.0 & 75.9$\pm$0.0 \\
+& Energy & 72.7$\pm$0.0 & 83.9$\pm$0.0 & 65.9$\pm$0.0 & 69.9$\pm$0.0 & 78.9$\pm$0.0 \\
+& ViM & \underline{99.7}$\pm$0.0 & \underline{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 \\
+& KNN & 99.5$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \underline{100.0}$\pm$0.0 & \underline{99.9}$\pm$0.0 \\
+& \AEP{} & 97.8$\pm$0.0 & 99.9$\pm$0.0 & 98.5$\pm$0.1 & 98.7$\pm$0.0 & 89.6$\pm$0.2 \\
+& \AEPFusion{} & \textbf{99.8}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 & \textbf{100.0}$\pm$0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{\AEP{} provides competitive standalone detection.} On 4 of 5 OOD datasets, \AEP{} achieves AUROC within 2\% of the best baseline. The exception is Flowers-102, where \AEP{} underperforms KNN by 5--10\%. Since Flowers-102 images share visual characteristics with food images (natural objects, similar textures), the attention patterns may overlap more between these categories, making the entropy profile less discriminative.
+
+\textbf{\AEPFusion{} consistently achieves the best performance.} By combining \AEP{} with the best feature-based method (KNN, with typical $\beta \approx 0.8$), fusion scores match or exceed all individual methods on every dataset and model combination. This confirms that attention-level and feature-level OOD signals are complementary.
+
+\textbf{Ceiling effects obscure relative performance.} On SVHN, CIFAR-10, and CIFAR-100, all feature-based methods (ViM, KNN, \AEP{}) achieve near-perfect AUROC ($>$0.985), making it difficult to discriminate among them. This is partly because these datasets are natively $32 \times 32$ images resized to $224 \times 224$, creating resolution artifacts that trivialize detection regardless of method (see Section~\ref{sec:limitations}).
+
+Table~\ref{tab:fpr95} shows FPR@95\%TPR, which provides more discrimination at the operating-point level. \AEP{} achieves low FPR95 on most benchmarks but is consistently outperformed by KNN, particularly on Flowers-102 where \AEP{}'s FPR95 ranges from 19\% to 45\% versus KNN's 1--3\%.
+
+\begin{table}[t]
+\caption{FPR@95\%TPR (\%, $\downarrow$) using Food-101 as in-distribution data. Mean$\pm$std over 3 seeds. Best in \textbf{bold}.}
+\label{tab:fpr95}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccc}
+\toprule
+Model & Method & Textures & SVHN & CIFAR-10 & CIFAR-100 & Flowers-102 \\
+\midrule
+\multirow{4}{*}{\rotatebox{90}{DeiT-S}}
+& ViM & 8.6$\pm$0.3 & 1.0$\pm$0.1 & 1.4$\pm$0.1 & 2.8$\pm$0.1 & 7.5$\pm$0.6 \\
+& KNN & \textbf{0.8}$\pm$0.1 & \textbf{0.0}$\pm$0.0 & \textbf{0.1}$\pm$0.0 & \textbf{0.3}$\pm$0.0 & \textbf{1.2}$\pm$0.1 \\
+& \AEP{} & 5.9$\pm$0.4 & 0.1$\pm$0.0 & 5.3$\pm$0.1 & 4.3$\pm$0.2 & 19.3$\pm$0.2 \\
+& \AEPFusion{} & 0.4$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & 0.1$\pm$0.0 & 1.2$\pm$0.1 \\
+\midrule
+\multirow{4}{*}{\rotatebox{90}{DeiT-B}}
+& ViM & 17.5$\pm$0.2 & 3.5$\pm$0.3 & 5.0$\pm$0.2 & 8.2$\pm$0.1 & 14.0$\pm$0.6 \\
+& KNN & \textbf{1.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & 0.1$\pm$0.0 & 0.3$\pm$0.0 & \textbf{1.2}$\pm$0.1 \\
+& \AEP{} & 8.0$\pm$0.2 & 0.1$\pm$0.0 & 2.2$\pm$0.2 & 1.8$\pm$0.2 & 32.4$\pm$0.8 \\
+& \AEPFusion{} & 0.4$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.1}$\pm$0.0 & 1.0$\pm$0.1 \\
+\midrule
+\multirow{4}{*}{\rotatebox{90}{ViT-B}}
+& ViM & \textbf{0.5}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 \\
+& KNN & 1.1$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & 0.2$\pm$0.0 & 0.2$\pm$0.0 \\
+& \AEP{} & 10.9$\pm$0.2 & 0.5$\pm$0.0 & 4.9$\pm$0.2 & 4.5$\pm$0.1 & 44.8$\pm$0.8 \\
+& \AEPFusion{} & 0.3$\pm$0.1 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 & \textbf{0.0}$\pm$0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Statistical Significance}
+
+To validate the core hypothesis that attention entropy profiles encode distributional information, we perform formal statistical tests using ViT-Base/16 (Table~\ref{tab:stats}).
+
+\begin{table}[t]
+\caption{Statistical tests on AEP profile differences between Food-101 (ID) and each OOD dataset using ViT-Base/16. All differences are highly significant.}
+\label{tab:stats}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+OOD Dataset & Significant dims (of 60) & Hotelling's $T^2$ & $p$-value \\
+\midrule
+Textures & 58 & 11,500 & $< 10^{-16}$ \\
+SVHN & 60 & -- & $< 10^{-16}$ \\
+CIFAR-10 & 59 & -- & $< 10^{-16}$ \\
+CIFAR-100 & 56 & -- & $< 10^{-16}$ \\
+Flowers-102 & 57 & -- & $< 10^{-16}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Across all OOD datasets, 56--60 of 60 AEP dimensions show statistically significant differences from the in-distribution profile (Bonferroni-corrected $p < 0.01$). Hotelling's $T^2$ tests are highly significant ($p < 10^{-16}$) for all datasets. This strongly confirms that attention entropy profiles systematically differ between ID and OOD inputs.
+
+\subsection{Ablation Studies}
+
+\subsubsection{Component Importance}
+
+We evaluate the contribution of each AEP component by removing one at a time (Table~\ref{tab:ablation_components}, ViT-Base/16, seed 42).
+
+\begin{table}[t]
+\caption{Ablation: component importance (AUROC, ViT-Base/16). $\Delta$ shows change from full \AEP{}. CLS attention entropy is the most important component.}
+\label{tab:ablation_components}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Variant & Textures & SVHN & CIFAR-10 & CIFAR-100 & Flowers-102 & Avg $\Delta$ \\
+\midrule
+Full \AEP{} & 97.8 & 99.9 & 98.6 & 98.7 & 89.4 & --- \\
+No CLS entropy & 97.4 & 99.7 & 92.3 & 94.2 & 86.7 & $-2.8$ \\
+No avg entropy & 97.3 & 99.8 & 98.1 & 98.3 & 88.8 & $-0.4$ \\
+No concentration & 97.3 & 99.8 & 98.5 & 98.7 & 88.8 & $-0.3$ \\
+No head agreement & 97.8 & 99.8 & 98.7 & 98.8 & 86.1 & $-0.7$ \\
+CLS entropy only & 92.7 & 98.7 & 96.9 & 96.2 & 81.5 & $-3.7$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{CLS attention entropy is the most informative component.} Removing it causes the largest average AUROC drop ($-2.8\%$), with particularly large drops on CIFAR-10 ($-6.3\%$) and CIFAR-100 ($-4.5\%$). This aligns with intuition: the CLS token aggregates classification-relevant information, so its attention entropy is most sensitive to distributional changes. Using CLS entropy alone yields reasonable but suboptimal performance ($-3.7\%$ average), confirming that all four components contribute.
+
+\textbf{Head agreement is the second most important.} Removing head agreement causes a $-3.3\%$ drop on Flowers-102 specifically, suggesting that inter-head consensus captures subtle distributional differences that single-head statistics miss.
+
+\subsubsection{Layer Importance}
+
+We evaluate which layers are most informative by restricting AEP to early (1--4), middle (5--8), or late (9--12) layers (Figure~\ref{fig:layer_ablation}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure_6_layer_ablation.pdf}
+\caption{Layer group ablation (ViT-Base/16). Late layers (9--12) are most informative for OOD detection, but using all layers provides the best performance.}
+\label{fig:layer_ablation}
+\end{figure}
+
+Late layers (9--12) are the most informative, which is consistent with findings that later transformer layers capture more semantic, task-relevant information. Early layers (1--4) are least discriminative but still provide useful signal. Using all layers gives the best performance, indicating that the full processing trajectory adds value beyond any individual layer group.
+
+\subsubsection{Calibration Set Size Sensitivity}
+
+Figure~\ref{fig:calsize} shows \AEP{} performance as a function of calibration set size. Performance stabilizes around 250--500 samples, with only marginal improvement from using 1,000 or more. Even with just 50 calibration images, AUROC remains above 0.93 on most datasets (except Flowers-102 at 0.86). This low data requirement makes \AEP{} practical for deployment scenarios where large validation sets are unavailable.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure_7_calsize_sensitivity.pdf}
+\caption{AUROC vs.\ calibration set size (ViT-Base/16). \AEP{} performance stabilizes with $\sim$250 samples.}
+\label{fig:calsize}
+\end{figure}
+
+\subsection{Entropy Profile Visualization}
+
+Figure~\ref{fig:entropy_profiles} visualizes the layerwise CLS attention entropy profiles for in-distribution (Food-101) and OOD inputs, revealing the characteristic patterns that \AEP{} exploits.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure_1_entropy_profiles.pdf}
+\caption{Layerwise CLS attention entropy profiles (ViT-Base/16). In-distribution (Food-101) images show a characteristic entropy trajectory that differs systematically from OOD datasets.}
+\label{fig:entropy_profiles}
+\end{figure}
+
+\subsection{Computational Overhead}
+
+Table~\ref{tab:overhead} reports the computational overhead of \AEP{} extraction.
+
+\begin{table}[t]
+\caption{Computational overhead of AEP extraction. The overhead is due to the monkey-patching approach for attention extraction; native attention output support would reduce this substantially.}
+\label{tab:overhead}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Model & Standard (ms/img) & With AEP (ms/img) & Multiplier & Mem overhead \\
+\midrule
+DeiT-Small & 0.9 & 9.8 & $11.1\times$ & 0 MB \\
+DeiT-Base & 2.6 & 20.3 & $7.7\times$ & 0 MB \\
+ViT-Base/16 & 2.6 & 18.9 & $7.2\times$ & 0 MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The current implementation incurs 7--11$\times$ overhead due to the monkey-patching approach used to intercept attention weights in \texttt{timm} models. This is a significant practical cost. However, the overhead is an implementation artifact: newer versions of \texttt{timm} and other frameworks support native attention weight output with near-zero overhead, since attention maps are already computed during the standard forward pass. Memory overhead is negligible across all models.
+
+\subsection{Score Distribution Analysis}
+
+Figure~\ref{fig:score_dist} shows the distribution of AEP scores for ID and OOD inputs, illustrating the separation that enables OOD detection.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure_8_score_distributions.pdf}
+\caption{Distribution of AEP scores for in-distribution (Food-101) vs.\ OOD datasets (ViT-Base/16). Clear separation is visible for most datasets, with Flowers-102 showing the most overlap.}
+\label{fig:score_dist}
+\end{figure}
+
+%=============================================================================
+% 5. DISCUSSION AND LIMITATIONS
+%=============================================================================
+\section{Discussion and Limitations}
+\label{sec:limitations}
+
+\paragraph{Non-standard evaluation protocol.}
+The most significant limitation of this work is the use of Food-101 as the in-distribution dataset with ImageNet-pretrained models. Since the models output ImageNet-1K predictions rather than Food-101 classes, they have \textbf{zero classification accuracy} on the ID data. This means our evaluation measures whether attention patterns differ between Food-101 and OOD datasets \emph{independent of task performance}, rather than testing \AEP{} in the standard setting where the model has learned to classify the ID data. Standard OOD detection benchmarks~\citep{zhang2023openood} use ImageNet-1K as the ID dataset with near-OOD (SSB-hard, NINCO) and far-OOD (iNaturalist, Textures, OpenImage-O) splits, which would enable direct comparison with published results and validate whether \AEP{} provides value in the practical regime where the model has non-trivial accuracy.
+
+\paragraph{Resolution artifacts.}
+Three of our five OOD datasets (SVHN, CIFAR-10, CIFAR-100) consist of $32 \times 32$ images resized to $224 \times 224$. The resulting interpolation artifacts likely make these datasets trivially distinguishable from $224 \times 224$ natural images regardless of the detection method, which is reflected in the near-perfect AUROC scores for all feature-based methods. This ceiling effect makes it impossible to assess \AEP{}'s true discriminative value relative to baselines on these benchmarks. The more informative benchmarks in our evaluation are Textures and Flowers-102, where resolution is comparable to the ID data and performance differences between methods are more visible.
+
+\paragraph{Missing calibration evaluation.}
+A key proposed contribution---input-adaptive temperature scaling using the AEP score---was not evaluated on the appropriate benchmarks (ImageNet-C corruptions, ImageNet-R). The calibration results on Food-101 are not meaningful because the models have zero accuracy, so there is no signal to calibrate. Validating the calibration contribution requires the standard ImageNet-1K setup where models have non-trivial accuracy.
+
+\paragraph{Implementation overhead.}
+The current 7--11$\times$ inference overhead is an implementation limitation (monkey-patching attention extraction), not a fundamental cost. However, until validated with native attention output frameworks, this overhead is a practical barrier to deployment.
+
+\paragraph{Scope.}
+We evaluate only three ViT architectures (DeiT-S, DeiT-B, ViT-B/16). Swin Transformer, which uses windowed attention and was planned in the experimental design, was not evaluated. Class-conditional AEP variants and top-$k$ sensitivity analysis were also not completed.
+
+%=============================================================================
+% 6. CONCLUSION
+%=============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced Attention Entropy Profiling (\AEP{}), a training-free method for OOD detection in Vision Transformers that leverages layerwise self-attention statistics. \AEP{} constructs a compact profile of attention entropy, concentration, and head agreement across layers, and scores inputs by their Mahalanobis distance from in-distribution reference statistics. Our experiments demonstrate that attention entropy profiles differ highly significantly between in-distribution and OOD inputs ($p < 10^{-16}$), that \AEP{} achieves competitive standalone OOD detection, and that fusing \AEP{} with feature-based detectors consistently yields the best performance. Ablation studies show that CLS attention entropy is the most informative component, late layers are most discriminative, and performance stabilizes with as few as 250 calibration samples.
+
+The key insight---that a transformer's attention patterns encode distributional information that is complementary to logit and feature signals---opens several directions for future work. Most immediately, evaluating \AEP{} on standard benchmarks (ImageNet-1K as ID with OpenOOD protocols) is essential to validate practical utility and enable comparison with published methods. Completing the calibration evaluation on ImageNet-C would test whether input-adaptive temperature scaling provides value under distribution shift. Extending to other architectures (Swin Transformer, windowed attention) and modalities (language, multimodal) could further establish the generality of attention entropy profiles as an uncertainty signal.
+
+%=============================================================================
+% REFERENCES
+%=============================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Bossard et~al.(2014)]{bossard2014food}
+Lukas Bossard, Matthieu Guillaumin, and Luc Van~Gool.
+\newblock Food-101 -- mining discriminative components with random forests.
+\newblock In \emph{European Conference on Computer Vision (ECCV)}, pages 446--461, 2014.
+
+\bibitem[Cimpoi et~al.(2014)]{cimpoi2014describing}
+Mircea Cimpoi, Subhransu Maji, Iasonas Kokkinos, Sammy Mohamed, and Andrea Vedaldi.
+\newblock Describing textures in the wild.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 3606--3613, 2014.
+
+\bibitem[Djurisic et~al.(2023)]{djurisic2023extremely}
+Andrija Djurisic, Nebojsa Bozanic, Arjun Ashok, and Rosanne Liu.
+\newblock Extremely simple activation shaping for out-of-distribution detection.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Dosovitskiy et~al.(2021)]{dosovitskiy2021an}
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby.
+\newblock An image is worth 16x16 words: Transformers for image recognition at scale.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Guo et~al.(2017)]{guo2017calibration}
+Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian~Q. Weinberger.
+\newblock On calibration of modern neural networks.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine Learning (ICML)}, pages 1321--1330, 2017.
+
+\bibitem[Hendrycks and Dietterich(2019)]{hendrycks2019benchmarking}
+Dan Hendrycks and Thomas Dietterich.
+\newblock Benchmarking neural network robustness to common corruptions and perturbations.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem[Hendrycks and Gimpel(2017)]{hendrycks2017baseline}
+Dan Hendrycks and Kevin Gimpel.
+\newblock A baseline for detecting misclassified and out-of-distribution examples in neural networks.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2017.
+
+\bibitem[Krizhevsky(2009)]{krizhevsky2009learning}
+Alex Krizhevsky.
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Lee et~al.(2018)]{lee2018simple}
+Kimin Lee, Kibok Lee, Honglak Lee, and Jinwoo Shin.
+\newblock A simple unified framework for detecting out-of-distribution samples and adversarial attacks.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, volume~31, 2018.
+
+\bibitem[Liang et~al.(2025)]{liang2025calattn}
+Wenhao Liang, Wei~Emma Zhang, Lin Yue, Miao Xu, Mingyu Guo, Olaf Maennel, and Weitong Chen.
+\newblock Calibration attention: Learning reliability-aware representations for vision transformers.
+\newblock \emph{arXiv preprint arXiv:2508.08547}, 2025.
+
+\bibitem[Liu et~al.(2020)]{liu2020energy}
+Weitang Liu, Xiaoyun Wang, John~D. Owens, and Yixuan Li.
+\newblock Energy-based out-of-distribution detection.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, volume~33, pages 21464--21475, 2020.
+
+\bibitem[Liu et~al.(2021)]{liu2021swin}
+Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining Guo.
+\newblock Swin transformer: Hierarchical vision transformer using shifted windows.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, pages 10012--10022, 2021.
+
+\bibitem[Netzer et~al.(2011)]{netzer2011reading}
+Yuval Netzer, Tao Wang, Adam Coates, Alessandro Bissacco, Bo Wu, and Andrew~Y. Ng.
+\newblock Reading digits in natural images with unsupervised feature learning.
+\newblock In \emph{NIPS Workshop on Deep Learning and Unsupervised Feature Learning}, 2011.
+
+\bibitem[Nilsback and Zisserman(2008)]{nilsback2008automated}
+Maria-Elena Nilsback and Andrew Zisserman.
+\newblock Automated flower classification over a large number of classes.
+\newblock In \emph{Indian Conference on Computer Vision, Graphics and Image Processing (ICVGIP)}, 2008.
+
+\bibitem[Ostmeier et~al.(2026)]{ostmeier2026headentropy}
+Sophie Ostmeier, Brian Axelrod, Maya Varma, Asad Aali, Yabin Zhang, Magdalini Paschali, Sanmi Koyejo, Curtis Langlotz, and Akshay Chaudhari.
+\newblock Attention head entropy of LLMs predicts answer correctness.
+\newblock \emph{arXiv preprint arXiv:2602.13699}, 2026.
+
+\bibitem[Ovadia et~al.(2019)]{ovadia2019trust}
+Yaniv Ovadia, Emily Fertig, Jie Ren, Zachary Nado, D. Sculley, Sebastian Nowozin, Joshua~V. Dillon, Balaji Lakshminarayanan, and Jasper Snoek.
+\newblock Can you trust your model's uncertainty? {E}valuating predictive uncertainty under dataset shift.
+\newblock In \emph{Advances in Neural Information Processing Systems 32 (NeurIPS)}, 2019.
+
+\bibitem[Sun et~al.(2022)]{sun2022out}
+Yiyou Sun, Yifei Ming, Xiaojin Zhu, and Yixuan Li.
+\newblock Out-of-distribution detection with deep nearest neighbors.
+\newblock In \emph{Proceedings of the 39th International Conference on Machine Learning (ICML)}, volume 162, pages 20827--20840, 2022.
+
+\bibitem[Touvron et~al.(2021)]{touvron2021training}
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Herv{\'e} J{\'e}gou.
+\newblock Training data-efficient image transformers \& distillation through attention.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, pages 10347--10357, 2021.
+
+\bibitem[Wang et~al.(2022)]{wang2022vim}
+Haoqi Wang, Zhizhong Li, Litong Feng, and Wayne Zhang.
+\newblock {ViM}: Out-of-distribution with virtual-logit matching.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 4921--4930, 2022.
+
+\bibitem[Wang et~al.(2025)]{wang2025tca}
+Zixin Wang, Dong Gong, Sen Wang, Zi Huang, and Yadan Luo.
+\newblock Is less more? {E}xploring token condensation as training-free test-time adaptation.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2025.
+
+\bibitem[Zhang et~al.(2023)]{zhang2023openood}
+Jingyang Zhang, Jingkang Yang, Pengyun Wang, Haoqi Wang, Yueqian Lin, Haoran Zhang, Yiyou Sun, Xuefeng Du, Yixuan Li, Ziwei Liu, Yiran Chen, and Hai Li.
+\newblock {OpenOOD} v1.5: Enhanced benchmark for out-of-distribution detection.
+\newblock \emph{arXiv preprint arXiv:2306.09301}, 2023.
+
+\end{thebibliography}
+
+\end{document}

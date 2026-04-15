@@ -1,0 +1,156 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify LLVM toolchain",
+    "description": "Set up the experimental environment with LLVM 18.1.3 (already installed), Python analysis libraries, and verify that opt works correctly with the New Pass Manager. Create the project directory structure for experiments, results, and figures.",
+    "steps": {
+      "step1": "Verify LLVM 18.1.3 is functional: run `opt --version`, `clang --version`, and `opt --print-passes` to confirm availability of all needed passes.",
+      "step2": "Install Python analysis/visualization libraries: `pip install numpy pandas matplotlib seaborn scipy networkx` for data analysis, statistical tests, and graph visualization.",
+      "step3": "Create directory structure: `mkdir -p experiments/{benchmarks,results,figures,scripts}` for organizing all experimental artifacts.",
+      "step4": "Create a helper script `experiments/scripts/run_pass.sh` that takes an IR file and a pass name, applies the pass using `opt --passes=<pass>`, and outputs the transformed IR. Include timeout protection (30s per invocation) to handle passes that may hang.",
+      "step5": "Create a helper script `experiments/scripts/count_instructions.py` that reads an LLVM IR file and counts total instructions, basic blocks, and functions using `opt --passes=print<instcount>` or by parsing the IR text directly.",
+      "step6": "Create a helper script `experiments/scripts/ir_hash.py` that computes a structural hash of an LLVM IR file (ignoring names/metadata) using `opt --passes=print<structural-hash>` to enable fast equality comparison.",
+      "step7": "Test the helper scripts on a trivial C program compiled to IR to verify end-to-end pipeline works."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare benchmark suite and compile to LLVM IR",
+    "description": "Download PolyBench/C 4.2.1 benchmark suite and create additional small-to-medium C benchmark programs covering diverse optimization patterns. Compile all benchmarks to unoptimized LLVM IR (-O0 -emit-llvm) as the common starting representation for all experiments.",
+    "steps": {
+      "step1": "Download PolyBench/C 4.2.1 from its official SourceForge repository: `wget https://sourceforge.net/projects/polybench/files/polybench-c-4.2.1.tar.gz` and extract it. PolyBench contains 30 kernels across 6 categories (linear-algebra, datamining, stencils, medley).",
+      "step2": "Write 15-20 additional C benchmark programs covering patterns not well-represented in PolyBench: recursive algorithms (fibonacci, quicksort, mergesort), string processing (pattern matching, parsing), control-flow-heavy code (state machines, interpreters), arithmetic-heavy code (matrix operations, polynomial evaluation), and struct-heavy code (linked lists, tree traversal). Each should be 50-200 lines of C.",
+      "step3": "Compile all benchmarks to LLVM IR at -O0 using: `clang -O0 -Xclang -disable-O0-optnone -emit-llvm -S -o <name>.ll <name>.c`. The `-disable-O0-optnone` flag is critical to prevent clang from marking functions as optnone, which would block opt passes.",
+      "step4": "Validate all IR files: run `opt --passes=verify <name>.ll -S -o /dev/null` on each to confirm they are valid LLVM IR.",
+      "step5": "Record baseline statistics for each benchmark: instruction count, basic block count, function count, and file size. Save as `experiments/results/baseline_stats.csv`.",
+      "step6": "Enumerate the target pass list: select ~45 transform passes from function-level and module-level passes that are commonly used in -O1/-O2/-O3 pipelines. Exclude analysis-only passes, debug passes, and sanitizer passes. Save the list to `experiments/pass_list.txt`. Key passes to include: adce, aggressive-instcombine, bdce, callsite-splitting, constmerge, correlated-propagation, dce, deadargelim, dse, early-cse, float2int, globalopt, gvn, indvars, instcombine, jump-threading, lcssa, licm, loop-deletion, loop-idiom, loop-reduce, loop-rotate, loop-simplify, loop-sink, loop-unroll, loop-vectorize, mem2reg, memcpyopt, mergereturn, newgvn, reassociate, sccp, simplifycfg, sink, slp-vectorizer, sroa, tailcallelim, loop-fusion, loop-distribute, constraint-elimination, div-rem-pairs, gvn-hoist, gvn-sink, instsimplify, nary-reassociate."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 1: Idempotency characterization of individual passes",
+    "description": "For each of the ~45 selected passes, determine whether applying it once vs. twice produces the same IR, across all benchmarks. This tests whether passes are mathematical projections (P^2 = P). We measure both structural idempotency (exact IR match) and weak idempotency (same instruction count). This is the foundational measurement of the pass algebra.",
+    "steps": {
+      "step1": "Create script `experiments/scripts/run_idempotency.py` that for each (pass, benchmark) pair: (a) applies the pass once to get IR_1, (b) applies the pass again to IR_1 to get IR_2, (c) computes structural hash of IR_1 and IR_2, (d) counts instructions in IR_1 and IR_2, (e) records whether they match structurally and/or by instruction count.",
+      "step2": "Run the idempotency experiment across all ~45 passes and all ~50 benchmarks. This is ~2,250 pass applications (each requiring 2 opt invocations = ~4,500 total). With ~0.5s per invocation, estimate ~40 minutes. Parallelize across 2 CPU cores using Python multiprocessing.",
+      "step3": "Save raw results to `experiments/results/idempotency_raw.csv` with columns: pass_name, benchmark, ir1_hash, ir2_hash, ir1_instcount, ir2_instcount, structurally_identical, instcount_identical.",
+      "step4": "Compute summary statistics: (a) per-pass idempotency rate (fraction of benchmarks where pass is idempotent), (b) classify passes as strongly idempotent (100% structural match), weakly idempotent (100% instcount match but not structural), or non-idempotent, (c) identify program-dependent passes (idempotent on some benchmarks but not others). Save to `experiments/results/idempotency_summary.csv`.",
+      "step5": "Use 3 random seeds by shuffling benchmark order and re-running on a subset of 10 benchmarks to verify results are deterministic (passes should be deterministic, but this validates our methodology). Seeds: 42, 123, 456."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Pairwise commutativity analysis",
+    "description": "For all unique pairs of the ~45 passes (~990 pairs), determine whether applying them in order (A then B) vs. (B then A) produces the same IR. This builds the commutativity graph -- a key algebraic structure revealing which pass orderings are constrained and which are free. Run on a representative subset of 25 benchmarks to keep runtime manageable.",
+    "steps": {
+      "step1": "Create script `experiments/scripts/run_commutativity.py` that for each (pass_i, pass_j, benchmark) triple: (a) applies pass_i then pass_j to get IR_ij, (b) applies pass_j then pass_i to get IR_ji, (c) compares structural hashes and instruction counts. Uses multiprocessing with 2 workers.",
+      "step2": "Select 25 representative benchmarks: 15 from PolyBench (covering all 6 categories) and 10 from custom benchmarks (covering all pattern types). Save selection to `experiments/benchmark_subset_25.txt`.",
+      "step3": "Run the commutativity experiment: ~990 pairs x 25 benchmarks = ~24,750 comparisons, each requiring 2 opt invocations per ordering = ~99,000 total opt calls. At ~0.3s per call (many passes are fast), estimate ~8 hours. OPTIMIZATION: First run a fast pre-filter -- if both passes individually produce no change on a benchmark, they trivially commute on that benchmark. Skip those pairs. This should reduce effective pairs by ~40%, bringing runtime to ~5 hours.",
+      "step4": "Save raw results to `experiments/results/commutativity_raw.csv` with columns: pass_i, pass_j, benchmark, ir_ij_hash, ir_ji_hash, ir_ij_instcount, ir_ji_instcount, structurally_commutative, instcount_commutative.",
+      "step5": "Compute the commutativity matrix: a 45x45 matrix where entry (i,j) = fraction of benchmarks where passes i and j commute. Save as `experiments/results/commutativity_matrix.csv`.",
+      "step6": "Build a commutativity graph using NetworkX: nodes = passes, edges connect commutative pairs (threshold: commute on >80% of benchmarks). Compute graph properties: clustering coefficient, connected components, degree distribution. Save graph to `experiments/results/commutativity_graph.json`.",
+      "step7": "RUNTIME FALLBACK: If the pre-filtered experiment still exceeds 5 hours after the first 2 hours, reduce to 15 benchmarks and/or reduce to 30 most important passes (~435 pairs)."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Pairwise interference quantification",
+    "description": "Measure whether pass pairs exhibit constructive interference (synergy), destructive interference, or independence. For each pair, compute I(A,B) = delta_AB - (delta_A + delta_B) where delta represents instruction count reduction. This reveals which passes enable or undo each other. Run on 20 representative benchmarks.",
+    "steps": {
+      "step1": "Create script `experiments/scripts/run_interference.py` that for each (pass_i, pass_j, benchmark): (a) measures baseline instruction count of unoptimized IR, (b) measures instcount after pass_i alone (delta_i = baseline - after_i), (c) measures instcount after pass_j alone (delta_j = baseline - after_j), (d) measures instcount after pass_i then pass_j (delta_ij = baseline - after_ij), (e) computes interference I = delta_ij - (delta_i + delta_j). Positive I = constructive (synergy), negative I = destructive.",
+      "step2": "Select 20 representative benchmarks for interference analysis (subset of the 25 used for commutativity). Save to `experiments/benchmark_subset_20.txt`.",
+      "step3": "Run the interference experiment: ~990 pairs x 20 benchmarks. Note: we can reuse individual pass results (delta_i) across pairs, so we need ~45 x 20 = 900 single-pass runs + ~990 x 20 = 19,800 pair runs = ~20,700 opt invocations. Estimate ~2 hours with parallelism.",
+      "step4": "Save raw results to `experiments/results/interference_raw.csv` with columns: pass_i, pass_j, benchmark, baseline_instcount, after_i_instcount, after_j_instcount, after_ij_instcount, delta_i, delta_j, delta_ij, interference.",
+      "step5": "Compute the interference matrix: a 45x45 matrix where entry (i,j) = mean interference score across benchmarks, normalized by baseline instruction count. Save as `experiments/results/interference_matrix.csv`.",
+      "step6": "Identify the top-10 most synergistic and top-10 most destructive pass pairs. Compute the fraction of pairs with significant interference (|I| > 5% of baseline instcount). Save analysis to `experiments/results/interference_summary.csv`."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 4: Convergence analysis of iterative pipeline application",
+    "description": "Apply the standard -O2 optimization pipeline iteratively up to 20 times to each benchmark and track the instruction count trajectory. Characterize convergence behavior: how many iterations to reach a fixed point, whether oscillation occurs, and the magnitude of changes across iterations. This tests whether the optimization pipeline is a contractive operator.",
+    "steps": {
+      "step1": "Create script `experiments/scripts/run_convergence.py` that for each benchmark: (a) starts from unoptimized IR, (b) applies `opt -O2` once to get IR_1, (c) applies `opt -O2` to IR_1 to get IR_2, (d) repeats up to 20 iterations, (e) records instruction count and structural hash after each iteration, (f) detects fixed point (hash unchanged for 2 consecutive iterations) or oscillation (hash cycles).",
+      "step2": "Run convergence analysis on all ~50 benchmarks: ~50 x 20 = 1,000 opt invocations (with early stopping at fixed point). -O2 runs are slower (~2-5s each for larger benchmarks), so estimate ~1-2 hours.",
+      "step3": "Save results to `experiments/results/convergence_raw.csv` with columns: benchmark, iteration, instcount, ir_hash, converged (bool), oscillating (bool).",
+      "step4": "Compute convergence statistics: (a) distribution of iterations-to-fixpoint, (b) fraction of benchmarks that converge within 2, 5, 10, 20 iterations, (c) fraction exhibiting oscillation, (d) for oscillating benchmarks: cycle length and amplitude (instcount difference between cycle states). Save to `experiments/results/convergence_summary.csv`.",
+      "step5": "Run the same analysis with -O3 and -Oz to compare convergence properties across optimization levels. Save separately as convergence_O3_raw.csv and convergence_Oz_raw.csv."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 5: Minimal cycle detection in pass subsets",
+    "description": "For small subsets of passes known to interact (2-4 passes), apply them cyclically and detect IR state cycles. This identifies the minimal sets of passes responsible for oscillation and characterizes the 'flip-flop' behavior documented anecdotally in compiler literature.",
+    "steps": {
+      "step1": "Create script `experiments/scripts/run_cycle_detection.py` that takes a list of passes and a benchmark, applies them in cyclic order (P1, P2, ..., Pk, P1, P2, ...) for up to 50 iterations, records the IR hash at each step, and detects cycles (repeated hash patterns).",
+      "step2": "Define candidate pass subsets to test, focusing on known interacting passes: (a) {simplifycfg, jump-threading} -- known to flip-flop, (b) {simplifycfg, loop-rotate, loop-simplify} -- canonicalization interactions, (c) {instcombine, reassociate} -- algebraic simplification interactions, (d) {mem2reg, sroa} -- memory promotion interactions, (e) {gvn, dce} -- value numbering and dead code, (f) {licm, loop-simplify, indvars} -- loop canonicalization, (g) {sccp, dce, simplifycfg} -- constant propagation chain, (h) all 2-pass combinations from the top-10 non-commutative pairs found in Experiment 2.",
+      "step3": "Run cycle detection on all candidate subsets across 20 benchmarks. Estimate: ~15 subsets x 20 benchmarks x 50 iterations = ~15,000 opt invocations, ~45 minutes.",
+      "step4": "Save results to `experiments/results/cycle_detection_raw.csv` with columns: pass_subset, benchmark, iteration, ir_hash, instcount, cycle_detected (bool), cycle_length.",
+      "step5": "Identify minimal cycling sequences: for each detected cycle, try removing passes one at a time to find the minimal subset that still cycles. Record findings in `experiments/results/minimal_cycles.csv`."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Establish optimization baselines for pass ordering comparison",
+    "description": "Measure the instruction count achieved by standard LLVM optimization levels (-O1, -O2, -O3, -Oz) and two algorithmic baselines (random pass ordering, greedy ordering) on all benchmarks. These serve as comparison points for the algebra-guided ordering in Experiment 6.",
+    "steps": {
+      "step1": "Apply -O1, -O2, -O3, and -Oz to all ~50 benchmarks using `opt -O1`, `opt -O2`, etc. Record instruction count for each. Save to `experiments/results/baseline_opt_levels.csv`.",
+      "step2": "Implement random pass ordering baseline in `experiments/scripts/random_ordering.py`: randomly sample 30 passes from the pass list (with replacement allowed), apply them sequentially, record final instruction count. Run with 3 seeds (42, 123, 456) on all benchmarks. Save to `experiments/results/baseline_random.csv`.",
+      "step3": "Implement greedy ordering baseline in `experiments/scripts/greedy_ordering.py`: starting from unoptimized IR, at each step try all ~45 passes and select the one with the greatest instruction count reduction. Repeat until no pass reduces instruction count further (or 30 passes applied). Run on all benchmarks. Save to `experiments/results/baseline_greedy.csv`. Note: greedy is expensive (~45 x 30 x 50 = 67,500 opt calls for worst case), so cap at 15 greedy steps and use the 20-benchmark subset.",
+      "step4": "Compile baseline comparison table: for each benchmark, record instruction count under each method. Compute geometric mean reduction ratio relative to -O0 baseline across benchmarks. Save to `experiments/results/baseline_comparison.csv`."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 6: Algebra-guided pass ordering",
+    "description": "Use the algebraic properties discovered in Experiments 1-5 to construct a pass ordering heuristic. The heuristic uses synergy chaining (place constructively interfering passes adjacent), anti-interference separation (keep destructive pairs apart), and idempotency pruning (remove redundant consecutive applications). Compare against all baselines.",
+    "steps": {
+      "step1": "Create `experiments/scripts/algebra_ordering.py` implementing the algebra-guided heuristic: (a) Start with the pool of all ~45 passes. (b) Prune: remove passes that are idempotent AND produce no instruction count reduction on average (useless passes). (c) Build a synergy graph from the interference matrix (edges weighted by positive interference). (d) Use a greedy chain-building algorithm: start from the pass with highest average benefit, repeatedly append the pass with highest synergy to the current chain tail, skip passes with strong negative interference to recent chain members. (e) Cap sequence length at 30 passes.",
+      "step2": "Run the algebra-guided ordering on all ~50 benchmarks with 3 seeds (42, 123, 456) for the randomized tiebreaking in the heuristic. Save results to `experiments/results/algebra_ordering.csv`.",
+      "step3": "Compare instruction count reduction against all baselines: -O1, -O2, -O3, -Oz, random ordering, greedy ordering. Compute: (a) geometric mean instruction count ratio relative to -O0, (b) number of wins/ties/losses against each baseline per benchmark, (c) average number of passes used vs. baselines.",
+      "step4": "Save full comparison to `experiments/results/ordering_comparison.csv`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: contribution of each algebraic component",
+    "description": "Ablate each component of the algebra-guided ordering to measure its individual contribution: (1) ordering without synergy chaining, (2) ordering without anti-interference, (3) ordering without idempotency pruning, (4) using only the top-K most synergistic pairs. This validates that each algebraic property contributes meaningfully.",
+    "steps": {
+      "step1": "Create ablation variants of the algebra-guided ordering: (a) NO_SYNERGY: random ordering of the pruned pass set (removes synergy chaining), (b) NO_ANTI_INTERFERENCE: synergy chain but don't separate destructive pairs, (c) NO_PRUNING: include all passes without idempotency-based pruning, (d) TOP_K_ONLY: use only the top-10 most synergistic passes in order.",
+      "step2": "Run all 4 ablation variants on the 20-benchmark subset with 3 seeds (42, 123, 456). Save results to `experiments/results/ablation_raw.csv`.",
+      "step3": "Compute ablation impact: for each variant, measure the instruction count increase (degradation) relative to the full algebra-guided method. Report mean and std across benchmarks and seeds.",
+      "step4": "Save ablation summary to `experiments/results/ablation_summary.csv` with columns: variant, mean_instcount_ratio_vs_full, std, num_passes_used."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical analysis and success criteria verification",
+    "description": "Perform rigorous statistical analysis of all experimental results to validate (or refute) each hypothesis and success criterion. Use appropriate statistical tests and report confidence intervals.",
+    "steps": {
+      "step1": "Idempotency criterion: compute the fraction of passes that are strongly or weakly idempotent. Test H0: idempotency rate <= 60% using a one-sided binomial test. Report 95% confidence interval for the idempotency rate.",
+      "step2": "Commutativity criterion: compute the fraction of pass pairs that are non-commutative (order matters on >50% of benchmarks). Test H0: non-commutativity rate <= 30%.",
+      "step3": "Interference criterion: compute the fraction of pass pairs with significant interference (|I| > 5% of baseline). Test H0: significant-interference rate <= 10%.",
+      "step4": "Convergence criterion: report the fraction of benchmarks exhibiting oscillation under iterative -O2 application. Document the evidence for or against convergence.",
+      "step5": "Ordering criterion: for algebra-guided vs. -O2, compute the paired Wilcoxon signed-rank test on instruction count ratios across benchmarks. Report p-value and effect size (Cohen's d). Determine if algebra-guided is within 5% of -O2 or improves upon it.",
+      "step6": "Cluster analysis: use hierarchical clustering on the interference matrix to identify pass clusters. Compare cluster membership to semantic pass categories (loop opts, scalar opts, memory opts, control-flow opts). Compute adjusted Rand index to measure alignment.",
+      "step7": "Save all statistical results to `experiments/results/statistical_analysis.json` with test names, statistics, p-values, confidence intervals, and pass/fail for each success criterion."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate figures and tables for the paper",
+    "description": "Create publication-quality figures summarizing all key findings. Target 6-8 figures for the paper covering each major experiment.",
+    "steps": {
+      "step1": "Figure 1 (Idempotency): Bar chart showing per-pass idempotency rate (fraction of benchmarks where idempotent), sorted by rate, colored by pass category. Save as `experiments/figures/fig1_idempotency.pdf`.",
+      "step2": "Figure 2 (Commutativity heatmap): 45x45 heatmap of the commutativity matrix with passes grouped by category (loop, scalar, memory, CFG). Annotate key non-commutative pairs. Save as `experiments/figures/fig2_commutativity_heatmap.pdf`.",
+      "step3": "Figure 3 (Commutativity graph): Network visualization of the commutativity graph, with node colors by pass category and edge thickness by commutativity strength. Highlight dense commutative clusters and bridge passes. Save as `experiments/figures/fig3_commutativity_graph.pdf`.",
+      "step4": "Figure 4 (Interference heatmap): 45x45 heatmap of the interference matrix with diverging colormap (red=destructive, blue=constructive). Annotate the top synergistic and destructive pairs. Save as `experiments/figures/fig4_interference_heatmap.pdf`.",
+      "step5": "Figure 5 (Convergence curves): Line plots showing instruction count vs. iteration number for representative benchmarks: one that converges quickly, one that converges slowly, one that oscillates. Include -O2, -O3, -Oz on same plot. Save as `experiments/figures/fig5_convergence.pdf`.",
+      "step6": "Figure 6 (Cycle detection): State-transition diagrams for detected minimal cycles, showing IR hash states as nodes and pass applications as edges. Show 2-3 most interesting cycles. Save as `experiments/figures/fig6_cycles.pdf`.",
+      "step7": "Figure 7 (Ordering comparison): Grouped bar chart comparing instruction count reduction (geometric mean across benchmarks) for all methods: -O1, -O2, -O3, -Oz, random, greedy, algebra-guided. Include error bars for methods with multiple seeds. Save as `experiments/figures/fig7_ordering_comparison.pdf`.",
+      "step8": "Figure 8 (Ablation): Bar chart showing the instruction count degradation when each algebraic component is removed. Save as `experiments/figures/fig8_ablation.pdf`.",
+      "step9": "Table 1: Summary statistics table with key numbers for each experiment (idempotency rate, commutativity rate, interference rate, convergence stats, ordering results). Format as LaTeX table. Save as `experiments/figures/table1_summary.tex`.",
+      "step10": "Table 2: Top-10 synergistic and top-10 destructive pass pairs with their interference scores. Format as LaTeX table. Save as `experiments/figures/table2_top_pairs.tex`."
+    }
+  }
+]

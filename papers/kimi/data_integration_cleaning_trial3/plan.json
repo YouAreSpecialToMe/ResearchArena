@@ -1,0 +1,324 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated environment and install all required packages for CleanBP implementation and baseline comparisons. No GPU-dependent packages needed.",
+    "steps": {
+      "step1": "Create Python virtual environment: python3 -m venv .venv",
+      "step2": "Activate environment: source .venv/bin/activate",
+      "step3": "Install core dependencies: pip install numpy pandas scipy scikit-learn networkx",
+      "step4": "Install evaluation tools: pip install matplotlib seaborn tabulate",
+      "step5": "Install HoloClean-compatible packages: pip install torch --index-url https://download.pytorch.org/whl/cpu (CPU-only version)",
+      "step6": "Verify installation: python -c 'import numpy, pandas, networkx, sklearn; print(\"All packages installed\")'",
+      "expected_time": "5 minutes",
+      "output": ".venv directory with all dependencies"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Hospital Dataset",
+    "description": "Download the standard Hospital benchmark dataset (100K records with FD violations), preprocess, and create ground truth for evaluation. Hospital is the primary benchmark for data cleaning research.",
+    "steps": {
+      "step1": "Create data directory: mkdir -p data/hospital",
+      "step2": "Download Hospital dataset from HoloClean GitHub repository: wget https://raw.githubusercontent.com/HoloClean/holoclean/master/testdata/hospital.csv",
+      "step3": "Download clean ground truth version for evaluation",
+      "step4": "Define FD constraints for Hospital: ZIP -> City, ZIP -> State, ProviderNumber -> HospitalName, ProviderNumber -> Address, etc.",
+      "step5": "Preprocess: handle missing values, normalize strings, encode categorical variables",
+      "step6": "Inject controlled errors at 5%, 10%, 15% rates for robustness testing",
+      "step7": "Split into train/test with fixed random seed (42)",
+      "step8": "Compute dataset statistics: #tuples, #violations, violation rate, domain sizes",
+      "expected_time": "10 minutes",
+      "output": "data/hospital/{train,test,clean}.csv with statistics report"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Adult Census Dataset",
+    "description": "Prepare Adult Census dataset as a secondary benchmark with different characteristics (different FDs, larger domains).",
+    "steps": {
+      "step1": "Download Adult Census from UCI ML Repository: wget https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data",
+      "step2": "Download adult.names for schema information",
+      "step3": "Define FDs: education -> education-num, relationship -> sex, workclass -> occupation (approximate)",
+      "step4": "Preprocess: handle missing values (marked as '?'), normalize",
+      "step5": "Create dirty version by randomly corrupting 10% of cells in violation-creating patterns",
+      "step6": "Generate statistics report",
+      "expected_time": "10 minutes",
+      "output": "data/adult/{train,test,clean}.csv with statistics"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Synthetic Scalability Datasets",
+    "description": "Create synthetic datasets of varying sizes to test scalability claims (linear in violations, not tuples).",
+    "steps": {
+      "step1": "Create Python script generate_synthetic.py with parameters: n_tuples, n_violations, n_attributes",
+      "step2": "Generate datasets: 10K, 50K, 100K, 500K, 1M tuples with controlled violation rates (1%, 5%, 10%)",
+      "step3": "Each dataset has 5-10 attributes with simple FDs (A->B, C->D, etc.)",
+      "step4": "Verify FD violation counts match expected values",
+      "step5": "Store in data/synthetic/ directory",
+      "expected_time": "15 minutes",
+      "output": "data/synthetic/syn_{size}_{violation_rate}.csv for each configuration"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Simple Baseline: Minimum Repair (Kolahi & Lakshmanan 2009)",
+    "description": "Implement the deterministic minimum repair algorithm as a simple baseline. This provides a lower bound on quality but is fast.",
+    "steps": {
+      "step1": "Implement FD violation detection using hash-based partitioning",
+      "step2": "Implement greedy minimum repair: iteratively fix violations with minimum cost (attribute change)",
+      "step3": "Support different cost models: uniform cost, frequency-based cost",
+      "step4": "Run on Hospital dataset, record precision, recall, F1, runtime",
+      "step5": "No random seeds needed (deterministic algorithm)",
+      "expected_time": "5 minutes",
+      "output": "results/baseline_minimum_repair_{dataset}.json with metrics"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline: Dense Factor Graph with Standard BP",
+    "description": "Implement belief propagation on a dense factor graph without sparsification. This tests whether our sparsification is actually necessary.",
+    "steps": {
+      "step1": "Implement dense factor graph construction: O(n^2) factors for FDs (all tuple pairs with same LHS)",
+      "step2": "Implement standard loopy belief propagation (sum-product algorithm)",
+      "step3": "Use uniform message scheduling (no constraint-aware prioritization)",
+      "step4": "Set max iterations=100, convergence threshold=1e-6",
+      "step5": "Run on Hospital dataset (subset if too slow), record: F1, runtime, iterations, memory",
+      "step6": "Run with 3 random seeds: 42, 123, 456 (initialization affects BP)",
+      "expected_time": "30 minutes (may be slow due to dense graph)",
+      "output": "results/baseline_dense_bp_{dataset}_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline: ERACER-Style Relational Dependency Networks",
+    "description": "Re-implement BP with relational dependency networks (RDNs) as used in ERACER. Compare against CleanBP's factor graph approach.",
+    "steps": {
+      "step1": "Implement RDN structure: directed graphical model with dependency edges",
+      "step2": "Implement shrinkage estimation for parameter tying across related tuples",
+      "step3": "Use similar message passing but on directed structure",
+      "step4": "Run on Hospital dataset with 3 random seeds",
+      "step5": "Record: F1, runtime, convergence behavior",
+      "expected_time": "20 minutes",
+      "output": "results/baseline_eracer_{dataset}_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement CleanBP: Violation-Driven Sparsification",
+    "description": "Implement the core CleanBP system with violation-driven factor graph sparsification.",
+    "steps": {
+      "step1": "Implement FD Violation Detector using hash-based partitioning O(n)",
+      "step2": "Implement sparse factor graph builder: only create factors for violating tuple pairs",
+      "step3": "Implement loopy belief propagation with message passing",
+      "step4": "Implement marginal extraction and MAP repair computation",
+      "step5": "Set hyperparameters: max_iterations=50, convergence_threshold=1e-6, damping=0.5",
+      "step6": "Run on Hospital dataset with seeds 42, 123, 456",
+      "step7": "Record: precision, recall, F1, inference_time, iterations_to_converge, memory_usage, n_factors_created",
+      "expected_time": "15 minutes",
+      "output": "results/cleanbp_full_{dataset}_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run CleanBP on Adult Census Dataset",
+    "description": "Test generalization to different dataset with different FDs and characteristics.",
+    "steps": {
+      "step1": "Run CleanBP on Adult dataset with same hyperparameters as Hospital",
+      "step2": "Use seeds 42, 123, 456",
+      "step3": "Record all metrics: F1, precision, recall, time, memory, iterations",
+      "step4": "Compare performance characteristics vs Hospital dataset",
+      "expected_time": "10 minutes",
+      "output": "results/cleanbp_full_adult_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Impact of Violation-Driven Sparsification",
+    "description": "Test the impact of sparsification by comparing against partial implementations.",
+    "steps": {
+      "step1": "Variant A (Dense): All tuple pairs with same LHS create factors (baseline from Exp 6)",
+      "step2": "Variant B (Violation-Only): Only violating pairs create factors, but no attribute separation",
+      "step3": "Variant C (Full CleanBP): Violation-driven + attribute separation",
+      "step4": "Run all variants on Hospital dataset with seed=42",
+      "step5": "Compare: F1 score, runtime, memory, number of factors",
+      "step6": "Compute speedup factor: time_dense / time_sparse",
+      "step7": "Verify graph size claim: plot factors vs violations (should be linear)",
+      "expected_time": "20 minutes",
+      "output": "results/ablation_sparsification_{variant}.json and plots/ablation_sparsification.png"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Impact of Attribute-Separated Factors",
+    "description": "Test the impact of decomposing multi-attribute FDs into single-attribute factors.",
+    "steps": {
+      "step1": "Variant A (Joint Factors): Multi-attribute FDs create joint factors over all RHS attributes",
+      "step2": "Variant B (Separated Factors): Each RHS attribute gets its own factor (CleanBP approach)",
+      "step3": "Run both on Hospital dataset with seeds 42, 123, 456",
+      "step4": "Compare: F1 score (should be within 5%), runtime, convergence iterations",
+      "step5": "Measure approximation quality: how close are marginals to joint factor version",
+      "expected_time": "15 minutes",
+      "output": "results/ablation_attribute_sep_{variant}_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Impact of Constraint-Aware Message Scheduling",
+    "description": "Test whether prioritized message scheduling improves convergence speed.",
+    "steps": {
+      "step1": "Variant A (Uniform Scheduling): Standard round-robin message passing",
+      "step2": "Variant B (Violation-Priority): Prioritize messages along violation chains (CleanBP)",
+      "step3": "Run both on Hospital dataset with seeds 42, 123, 456",
+      "step4": "Compare: iterations to convergence, total runtime, final F1",
+      "step5": "Plot convergence curves: marginal change vs iteration",
+      "expected_time": "15 minutes",
+      "output": "results/ablation_scheduling_{variant}_seed{seed}.json and plots/convergence_curves.png"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Scalability Experiment: Synthetic Datasets",
+    "description": "Test scalability claims on synthetic datasets of varying sizes.",
+    "steps": {
+      "step1": "Run CleanBP on synthetic datasets: 10K, 50K, 100K, 500K, 1M tuples",
+      "step2": "For each size, test violation rates: 1%, 5%, 10%",
+      "step3": "Record: inference time, memory usage, number of factors",
+      "step4": "Fit scaling curves: time vs n_tuples, time vs n_violations",
+      "step5": "Verify linear scaling with violations (not quadratic with tuples)",
+      "step6": "Use seed=42 for all runs",
+      "expected_time": "60 minutes (largest datasets may take time)",
+      "output": "results/scalability_{size}_{rate}.json and plots/scalability_curves.png"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Uncertainty Calibration Analysis",
+    "description": "Evaluate quality of uncertainty estimates from CleanBP marginals.",
+    "steps": {
+      "step1": "Compute Expected Calibration Error (ECE) for CleanBP marginals",
+      "step2": "Bin predictions by confidence (10 bins)",
+      "step3": "For each bin, compare average confidence vs accuracy",
+      "step4": "Compute Brier score (proper scoring rule)",
+      "step5": "Compare against baseline: uncertainty from uniform distribution",
+      "step6": "Plot calibration curve: predicted vs observed accuracy",
+      "step7": "Run on Hospital dataset with seeds 42, 123, 456",
+      "expected_time": "10 minutes",
+      "output": "results/calibration_{dataset}_seed{seed}.json and plots/calibration_curve.png"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to verify results are significant.",
+    "steps": {
+      "step1": "Collect F1 scores across 3 seeds for CleanBP and each baseline",
+      "step2": "Perform paired t-test between CleanBP and each baseline",
+      "step3": "Report p-values and effect sizes (Cohen's d)",
+      "step4": "Use significance threshold alpha=0.05",
+      "step5": "Create summary table: mean ± std for each method, with significance markers",
+      "expected_time": "5 minutes",
+      "output": "results/statistical_tests.json with significance results"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Check if all success criteria from the proposal are met.",
+    "steps": {
+      "step1": "Criterion 1: Inference time < 10 minutes on Hospital? Check results/cleanbp_full_hospital_*.json",
+      "step2": "Criterion 2: F1 within 10% of HoloClean? Compare results (HoloClean F1 ~0.85 expected)",
+      "step3": "Criterion 3: ECE < 0.15? Check results/calibration_hospital_*.json",
+      "step4": "Criterion 4: Better than ERACER-style BP? Compare F1 scores",
+      "step5": "Criterion 5: Linear scaling with violations? Check scalability curves",
+      "step6": "Generate pass/fail report for each criterion",
+      "expected_time": "5 minutes",
+      "output": "results/success_criteria_verification.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Main Results Figure",
+    "description": "Create bar chart comparing F1 scores and runtimes across all methods.",
+    "steps": {
+      "step1": "Load results from all experiments",
+      "step2": "Create grouped bar chart: F1 score by method (CleanBP, Dense BP, ERACER, Minimum Repair)",
+      "step3": "Create grouped bar chart: Runtime by method (log scale)",
+      "step4": "Add error bars showing std across 3 seeds",
+      "step5": "Add annotations for statistical significance",
+      "step6": "Save as high-resolution PNG (300 DPI) and PDF for paper",
+      "expected_time": "10 minutes",
+      "output": "plots/main_results_f1.png, plots/main_results_runtime.png"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Ablation Study Figures",
+    "description": "Visualize the impact of each CleanBP component.",
+    "steps": {
+      "step1": "Create ablation bar chart: F1 vs variant (Dense, Violation-only, Full)",
+      "step2": "Create speedup chart: Runtime vs variant",
+      "step3": "Create factors count chart: Number of factors vs variant",
+      "step4": "Convergence curves: marginal delta vs iteration for scheduling ablation",
+      "step5": "Save all as high-resolution figures",
+      "expected_time": "10 minutes",
+      "output": "plots/ablation_*.png files"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Scalability Figure",
+    "description": "Visualize scalability claims with proper curves.",
+    "steps": {
+      "step1": "Plot inference time vs number of tuples (linear scale)",
+      "step2": "Plot inference time vs number of violations (should be linear)",
+      "step3": "Plot number of factors vs violations (verify linear relationship)",
+      "step4": "Add trend lines with R² values",
+      "step5": "Highlight the difference between O(n²) and O(m) where m=violations",
+      "expected_time": "10 minutes",
+      "output": "plots/scalability_time_vs_tuples.png, plots/scalability_time_vs_violations.png"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Calibration Figure",
+    "description": "Visualize uncertainty calibration quality.",
+    "steps": {
+      "step1": "Plot calibration curve: predicted confidence vs observed accuracy",
+      "step2": "Add diagonal line (perfect calibration)",
+      "step3": "Show ECE value in legend",
+      "step4": "Create reliability diagram with bin histograms",
+      "step5": "Save high-resolution figure",
+      "expected_time": "5 minutes",
+      "output": "plots/calibration_curve.png, plots/reliability_diagram.png"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Tables",
+    "description": "Create LaTeX-ready tables for paper.",
+    "steps": {
+      "step1": "Create main results table: Method | F1 | Precision | Recall | Time (s) | Memory (MB)",
+      "step2": "Create ablation table: Component | F1 | Time | Speedup",
+      "step3": "Create scalability table: Dataset Size | Violations | Time | Factors",
+      "step4": "Export as LaTeX tables and CSV for easy editing",
+      "expected_time": "10 minutes",
+      "output": "tables/main_results.tex, tables/ablation.tex, tables/scalability.tex"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Results Aggregation and Report",
+    "description": "Aggregate all results into a comprehensive report.",
+    "steps": {
+      "step1": "Load all JSON result files",
+      "step2": "Compute aggregate statistics: mean, std, min, max across seeds",
+      "step3": "Identify best and worst performing configurations",
+      "step4": "Summarize key findings: speedup achieved, accuracy maintained, etc.",
+      "step5": "Generate final_report.json with all metrics and conclusions",
+      "step6": "Print executive summary to console",
+      "expected_time": "5 minutes",
+      "output": "results/final_report.json and console summary"
+    }
+  }
+]

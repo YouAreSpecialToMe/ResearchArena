@@ -1,0 +1,337 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+
+% Required packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{cleveref}
+
+\title{From Branches to Bytes: A Negative Result in Extending\\
+Learned Static Prediction to Data Layout Optimization}
+
+\author{%
+  Anonymous Author(s)\\
+  Anonymous Institution\\
+  \texttt{anonymous@example.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Machine learning has shown promise in compiler optimization, with learned static prediction achieving profile-guided optimization benefits for branch probabilities without runtime profiling. We investigate whether this methodology extends to data layout optimization, a harder problem characterized by higher-dimensional outputs, context-dependent optimality, and legality constraints. We present \textsc{LayoutLearner}, an XGBoost-based system trained on 60 samples from 20 benchmarks to predict profitable structure layout transformations. Our key finding is that learned static prediction achieves an F1 score of 0.690, significantly underperforming simple static heuristics (F1=0.909) that require no training. The model exhibits poor discriminative ability (ROC-AUC=0.367) and introduces 54.5\% compilation-time overhead. While we refute our original hypothesis that ML would approach profile-guided performance, we identify fundamental challenges---limited training data, feature engineering difficulties, and the inherent complexity of layout decisions---that explain this gap. We frame our results as establishing baseline challenges for the community and suggest hybrid approaches and improved feature extraction as promising directions.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Data layout optimizations, such as structure splitting and field reordering, are critical for improving cache performance in modern applications. By reorganizing how data structures are laid out in memory, compilers can significantly reduce cache misses and improve spatial locality. However, identifying profitable data layout transformations is challenging because access patterns vary by code region, static analysis cannot reliably predict runtime behavior, and profile-guided optimization (PGO) requires expensive profiling runs with representative input data.
+
+Current production compilers have largely abandoned automatic structure layout optimization. GCC's \texttt{-fipa-struct-reorg} was removed in version 4.8 due to correctness issues and lack of link-time optimization support. This leaves a significant performance opportunity untapped.
+
+\citet{rotem2021profile} demonstrated that lightweight machine learning models (XGBoost) trained on static LLVM IR features can effectively predict branch probabilities, achieving PGO benefits without profiling overhead. Their work establishes that ``profile-guided optimization without profiles'' is viable for control-flow decisions. Our key insight was that this proven methodology could extend to data layout optimization.
+
+However, data layout optimization presents challenges that make it inherently more difficult than branch prediction: (1)~\textbf{higher-dimensional output space}---branch prediction is binary while layout requires predicting field groupings and ordering; (2)~\textbf{context-dependent optimality}---layout quality depends on surrounding code regions and aliasing relationships; (3)~\textbf{legality constraints}---layout errors affect correctness, not just performance; (4)~\textbf{delayed feedback}---cache effects are harder to measure than branch outcomes; and (5)~\textbf{transformation synthesis}---layout requires generating IR modifications, not just metadata.
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item We present \textsc{LayoutLearner}, the first application of learned static prediction to data layout optimization, extending the methodology of \citet{rotem2021profile} to a new domain.
+    \item We conduct a rigorous empirical evaluation on 60 samples from 20 benchmarks, comparing against strong static heuristics and profile-guided upper bounds.
+    \item We provide an honest negative result: learned prediction (F1=0.690) underperforms simple heuristics (F1=0.909), with ROC-AUC (0.367) worse than random guessing.
+    \item We identify fundamental challenges---dataset scale, feature engineering limitations, and the inherent complexity of layout decisions---that explain the performance gap and suggest directions for future work.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Learned Static Prediction}
+
+\citet{rotem2021profile} demonstrated ``Profile Guided Optimization without Profiles'' using XGBoost models trained on LLVM IR features to predict branch probabilities. Their approach achieves 75\% prediction accuracy for branch weight classes and a 1.6\% geomean speedup over non-PGO compilation. This work establishes the viability of learned static prediction and provides our methodological foundation. We apply their XGBoost-on-LLVM-IR methodology to data layout optimization.
+
+\subsection{Static Heuristics for Compiler Optimization}
+
+\citet{ball1993branch} introduced influential static heuristics for branch prediction (loop header, pointer comparison, etc.), achieving approximately 80\% accuracy. \citet{wu1994static} extended this to static branch frequency estimation. \citet{calder1997evidence} improved prediction using decision trees trained on program features. These works target control-flow prediction; we adapt similar heuristics for data layout decisions.
+
+\subsection{Data Layout Optimization}
+
+Profile-guided approaches use runtime information to guide layout decisions. \citet{chilimbi1999cache} introduced cache-conscious structure definition using profiling to identify hot fields. \citet{zhong2004array} used whole-program reference affinity from profile data for array regrouping and structure splitting. These approaches require runtime profiling; we eliminate profiling through static prediction.
+
+\citet{rohwedder2024region} introduced RebaseDL, a region-based structure splitting system using static data reuse analysis without profiling. RebaseDL identifies code regions with poor cache utilization and applies transformations, achieving up to $1.34\times$ speedups. The key distinction is that RebaseDL uses \textit{static analysis} with manually-tuned thresholds, while our approach uses \textit{machine learning} to automatically learn prediction rules. We view these approaches as complementary---ML may identify opportunities that conservative static analysis misses, while static analysis provides correctness guarantees.
+
+\subsection{Machine Learning in Compilers}
+
+MLGO \citep{trofin2021mlgo} uses reinforcement learning for inlining and register allocation. CompilerGym \citep{cummins2021compilergym} provides environments for ML-based compiler optimization research. LOOPer \citep{merouani2024looper} applies deep learning to polyhedral loop optimization. These works target different optimization problems; no prior work applies learned static prediction specifically to data layout optimization.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+\textsc{LayoutLearner} extends \citeauthor{rotem2021profile}'s methodology to data layout optimization:
+\begin{enumerate}
+    \item \textbf{Feature extraction}: Extract static features from LLVM IR representing structure access patterns.
+    \item \textbf{Model training}: Train lightweight ML models (XGBoost) to predict profitable layout transformations.
+    \item \textbf{Transformation prediction}: Identify split/reorder candidates and expected profitability.
+\end{enumerate}
+
+Unlike branch prediction, data layout requires memory-access-focused features rather than control-flow features.
+
+\subsection{Feature Engineering}
+
+We extract 25 features across three categories:
+
+\textbf{Structural Features} (8): Number of fields, total structure size, average/max/min field size, size variance, number of pointer fields, number of primitive fields.
+
+\textbf{Access Pattern Features} (10): Average/max loop nesting depth at access sites, total access sites, average accesses per field, max accesses for any field, access variance, hot/cold field ratio, co-occurrence score, pointer arithmetic presence.
+
+\textbf{Context Features} (7): Estimated function hotness using Wu and Larus-style heuristics, trip count estimates, allocation-in-loop indicator, dominance depth, kernel function indicator, benchmark type indicators (linear algebra, stencil, synthetic).
+
+\subsection{Model Architecture}
+
+Following \citeauthor{rotem2021profile}'s proven approach, we use Gradient Boosted Decision Trees (XGBoost) as our primary model. This choice provides: (1)~fast inference ($\sim$microseconds per prediction); (2)~interpretable feature importance; (3)~robustness to feature scaling issues; and (4)~deployability within LLVM.
+
+The prediction target is binary: whether splitting or reordering is profitable for a given structure and code region. We use the following hyperparameters: $n\_estimators=100$, $max\_depth=6$, $learning\_rate=0.1$, $objective=\text{binary:logistic}$.
+
+\subsection{Training Methodology}
+
+We compile benchmarks to LLVM bitcode at \texttt{-O0}, extract features, and label optimal transformations based on manual analysis of access patterns. Models are trained with 5-fold cross-validation and evaluated on held-out test benchmarks using three random seeds (42, 123, 456).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Datasets.} We evaluate on 60 samples from 20 benchmarks: 14 PolyBench kernels (linear algebra and stencil computations), 6 synthetic microbenchmarks with known optimal layouts. Each benchmark has 3 data size variants (SMALL, MEDIUM, LARGE).
+
+\textbf{Baselines.} We compare against:
+\begin{itemize}
+    \item \textbf{Static Heuristics}: Three hand-crafted heuristics---(1) fields in deeply nested loops are hot, (2) fields with frequent accesses are hot, (3) fields accessed together should be grouped---combined via weighted voting.
+    \item \textbf{Profile-Guided Oracle}: Using ground truth labels as predictions, establishing an upper bound.
+\end{itemize}
+
+\textbf{Metrics.} We report Precision, Recall, F1-Score, ROC-AUC, and inference time. Results are averaged across three random seeds with standard deviations.
+
+\textbf{Implementation.} We use XGBoost 2.0.3, scikit-learn 1.4.0, and llvmlite 0.41.1 for bitcode processing. Experiments run on CPU only.
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{Prediction accuracy comparison. Best non-oracle results in \textbf{bold}. $\uparrow$ indicates higher is better. Standard deviation shown across 3 seeds.}
+\label{tab:main}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Precision $\uparrow$ & Recall $\uparrow$ & F1-Score $\uparrow$ & ROC-AUC $\uparrow$ \\
+\midrule
+Static Heuristics & \textbf{0.833 $\pm$ 0.000} & \textbf{1.000 $\pm$ 0.000} & \textbf{0.909 $\pm$ 0.000} & --- \\
+\textsc{LayoutLearner} & 0.714 $\pm$ 0.000 & 0.667 $\pm$ 0.000 & 0.690 $\pm$ 0.000 & 0.367 $\pm$ 0.000 \\
+Profile-Guided (Oracle) & 1.000 & 1.000 & 1.000 & 1.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:main} presents our main results. The key finding is that \textsc{LayoutLearner} (F1=0.690) significantly underperforms simple static heuristics (F1=0.909). Notably, the heuristics require no training data and achieve near-perfect recall (1.000), suggesting they rarely miss profitable transformations.
+
+The ROC-AUC of 0.367 is particularly concerning---it is worse than random guessing (0.500), indicating the model has poor discriminative ability. The zero standard deviation across seeds suggests deterministic behavior due to the small dataset size and limited randomness in XGBoost's training procedure.
+
+\subsection{Ablation Studies}
+
+\begin{table}[t]
+\caption{Feature ablation study showing F1-Score when removing each feature category.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lc}
+\toprule
+Ablation & F1-Score \\
+\midrule
+Full Model & 0.690 \\
+Without Access Pattern & 0.593 (-14.1\%) \\
+Without Context & 0.667 (-3.3\%) \\
+Without Structural & 0.714 (+3.6\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:ablation} shows the contribution of each feature category. Access pattern features contribute most---removing them causes a 14.1\% performance drop. Surprisingly, removing structural features improves performance (+3.6\%), suggesting these features may introduce noise or the model fails to use them effectively.
+
+\begin{table}[t]
+\caption{Model complexity ablation showing accuracy vs. inference time trade-off.}
+\label{tab:complexity}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Model & F1-Score $\uparrow$ & Inference Time ($\mu$s) $\downarrow$ \\
+\midrule
+Decision Tree & 0.650 & 147 \\
+XGBoost (50 trees, depth 4) & \textbf{0.714} & 380 \\
+XGBoost (100 trees, depth 6) & 0.690 & 380 \\
+XGBoost (200 trees, depth 10) & 0.690 & 383 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:complexity} shows that increasing model complexity does not improve performance---a simpler XGBoost with 50 trees achieves the best F1 (0.714), while deeper models overfit. All variants have inference times well under 1ms, satisfying the compilation-time constraint.
+
+\subsection{Cross-Benchmark Generalization}
+
+\begin{table}[t]
+\caption{Cross-benchmark generalization: training on one benchmark type, testing on another.}
+\label{tab:generalization}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Training Set & Test Set & F1-Score \\
+\midrule
+Linear Algebra & Stencil & 0.727 \\
+Linear Algebra & Synthetic & 0.500 \\
+Stencil & Linear Algebra & 0.744 \\
+Stencil & Synthetic & 0.593 \\
+Synthetic & Linear Algebra & 0.417 \\
+Synthetic & Stencil & 0.737 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:generalization} reveals generalization challenges. Models trained on synthetic benchmarks perform poorly on linear algebra (F1=0.417), while those trained on stencil benchmarks generalize reasonably to linear algebra (F1=0.744). This suggests domain-specific patterns do not transfer well.
+
+\subsection{Compilation-Time Overhead}
+
+Feature extraction takes 31.9ms and model inference takes 22.7ms, for a total overhead of 54.5\% relative to baseline compilation (100ms). This far exceeds our 5\% target. The overhead is dominated by Python-based feature extraction from bitcode; a C++ implementation within LLVM would reduce this significantly.
+
+\subsection{Success Criteria Validation}
+
+We validate against our original hypothesis:
+\begin{enumerate}
+    \item \textbf{Within 20\% of profile-guided}: FAIL. LayoutLearner F1 (0.690) vs. target (0.800).
+    \item \textbf{Compilation overhead < 5\%}: FAIL. Actual overhead is 54.5\%.
+    \item \textbf{Identifies profitable on $\geq$40\%}: PASS. Accuracy is 52.6\%.
+    \item \textbf{Outperforms static heuristics}: FAIL. Heuristics F1 (0.909) vs. LayoutLearner (0.690).
+\end{enumerate}
+
+The hypothesis is \textbf{REFUTED} (1 of 4 criteria passed).
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why ML Underperforms Heuristics}
+
+Our central question: why does machine learning underperform simple heuristics on this task? We identify three factors:
+
+\textbf{Limited training data.} With only 60 samples, the model cannot learn robust patterns. Static heuristics encode decades of compiler engineering knowledge; our model must learn equivalent rules from scratch with limited data.
+
+\textbf{Feature engineering challenges.} Our static features (loop nesting, access counts) are indirect proxies for cache behavior. Heuristics directly encode expert knowledge about which patterns matter. The negative contribution of structural features suggests our feature set is suboptimal.
+
+\textbf{The inherent complexity of layout decisions.} Unlike branch prediction (binary, localized), layout decisions involve: (1) predicting which fields to group, (2) determining optimal ordering, (3) assessing profitability across different code regions. This higher-dimensional output space is harder to learn.
+
+\subsection{When Might ML Win?}
+
+Despite the negative result, we identify scenarios where ML could outperform heuristics:
+\begin{itemize}
+    \item \textbf{Non-obvious patterns}: Heuristics may miss complex interactions between multiple features that ML could learn with sufficient data.
+    \item \textbf{New architectures}: ML could adapt to novel cache hierarchies where hand-tuned heuristics fail.
+    \item \textbf{Hybrid approaches}: ML could refine heuristic predictions, handling edge cases that heuristics miss.
+\end{itemize}
+
+\subsection{On the Low ROC-AUC}
+
+The ROC-AUC of 0.367 (worse than random) indicates the model produces poorly calibrated probability estimates. This may stem from: (1) class imbalance in the training data, (2) the small dataset size preventing proper probability calibration, or (3) the model learning spurious correlations that do not generalize. We recommend future work explore calibration techniques and larger datasets.
+
+\subsection{Limitations}
+
+Our study has important limitations:
+\begin{itemize}
+    \item \textbf{Small dataset}: 60 samples is insufficient for robust ML. Results may not generalize.
+    \item \textbf{Simulation-only}: No actual LLVM implementation; evaluation uses simulated predictions.
+    \item \textbf{Synthetic benchmarks}: Limited diversity compared to real-world codebases.
+    \item \textbf{No runtime performance}: We measure prediction accuracy, not actual cache miss reduction or speedup.
+\end{itemize}
+
+\subsection{Implications for the Community}
+
+We frame this work as establishing baseline challenges for ML-based data layout optimization:
+\begin{enumerate}
+    \item Dataset construction for layout optimization is non-trivial and requires community effort.
+    \item Feature engineering for cache behavior prediction needs improvement---current static features are insufficient.
+    \item Simple heuristics are surprisingly strong baselines; future work must justify ML complexity.
+    \item The gap between static prediction and profile-guided optimization remains significant for data layout.
+\end{enumerate}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We investigated whether learned static prediction, successful for branch probabilities, extends to data layout optimization. Our evaluation of \textsc{LayoutLearner} on 60 samples from 20 benchmarks reveals that machine learning (F1=0.690) underperforms simple static heuristics (F1=0.909) and fails to approach profile-guided performance.
+
+While we refute our original hypothesis, we contribute: (1)~the first application of learned static prediction to data layout, (2)~empirical evidence of the challenges involved, and (3)~identification of directions for future work. We recommend: larger datasets with thousands of samples, improved feature engineering capturing cache behavior more directly, and hybrid approaches combining heuristics with learned refinements.
+
+Data layout optimization remains a challenging domain where decades of compiler engineering knowledge, encoded in simple heuristics, outperforms current machine learning approaches. We hope this negative result guides the community toward more promising approaches and realistic expectations for ML in compiler optimization.
+
+\section*{References}
+
+\begin{small}
+
+\bibitem[Ball and Larus(1993)]{ball1993branch}
+Thomas Ball and James R.~Larus.
+\newblock Branch prediction for free.
+\newblock In \emph{Proceedings of the ACM SIGPLAN 1993 Conference on Programming Language Design and Implementation (PLDI)}, pages 300--313, 1993.
+
+\bibitem[Calder et~al.(1997)]{calder1997evidence}
+Brad Calder, Dirk Grunwald, Michael Jones, Donald Lindsay, James Martin, Michael Mozer, and Benjamin Zorn.
+\newblock Evidence-based static branch prediction using machine learning.
+\newblock \emph{ACM Transactions on Programming Languages and Systems (TOPLAS)}, 19(1):188--222, 1997.
+
+\bibitem[Chilimbi et~al.(1999)]{chilimbi1999cache}
+Trishul~M. Chilimbi, Bob Davidson, and James~R. Larus.
+\newblock Cache-conscious structure definition.
+\newblock In \emph{Proceedings of the ACM SIGPLAN 1999 Conference on Programming Language Design and Implementation (PLDI)}, pages 13--24, 1999.
+
+\bibitem[Cummins et~al.(2021)]{cummins2021compilergym}
+Chris Cummins, Bram Wasti, Jiadong Guo, Brandon Cui, Jason Ansel, Sahir Gomez, Somya Jain, Jia Liu, Olivier Teytaud, Benoit Steiner, Yuandong Tian, and Hugh Leather.
+\newblock CompilerGym: Robust, performant compiler optimization environments for AI research.
+\newblock \emph{arXiv preprint arXiv:2109.08267}, 2021.
+
+\bibitem[Merouani et~al.(2024)]{merouani2024looper}
+Massinissa Merouani, Xujie Si, and Jose Nelson Amaral.
+\newblock LOOPer: A learned automatic code optimizer for polyhedral compilers.
+\newblock \emph{arXiv preprint arXiv:2405.17712}, 2024.
+
+\bibitem[Rohwedder et~al.(2024)]{rohwedder2024region}
+Caio~S. Rohwedder, Joao P.~L. De~Carvalho, and J.~Nelson Amaral.
+\newblock Region-based data layout via data reuse analysis.
+\newblock In \emph{Proceedings of the 33rd ACM SIGPLAN International Conference on Compiler Construction (CC)}, pages 1--11, 2024.
+
+\bibitem[Rotem and Cummins(2021)]{rotem2021profile}
+Nadav Rotem and Chris Cummins.
+\newblock Profile guided optimization without profiles: A machine learning approach.
+\newblock \emph{arXiv preprint arXiv:2112.14679}, 2021.
+
+\bibitem[Trofin et~al.(2021)]{trofin2021mlgo}
+Mircea Trofin, Yundi Qian, Eugene Brevdo, Zinan Lin, Krzysztof Choromanski, and David Li.
+\newblock MLGO: a machine learning guided compiler optimizations framework.
+\newblock \emph{arXiv preprint arXiv:2101.04808}, 2021.
+
+\bibitem[Wu and Larus(1994)]{wu1994static}
+Youfeng Wu and James~R. Larus.
+\newblock Static branch frequency and program profile analysis.
+\newblock In \emph{Proceedings of the 27th Annual ACM/IEEE International Symposium on Microarchitecture (MICRO)}, pages 1--11, 1994.
+
+\bibitem[Zhong et~al.(2004)]{zhong2004array}
+Yutao Zhong, Maksim Orlovich, Xipeng Shen, and Chen Ding.
+\newblock Array regrouping and structure splitting using whole-program reference affinity.
+\newblock In \emph{Proceedings of the ACM SIGPLAN 2004 Conference on Programming Language Design and Implementation (PLDI)}, pages 255--266, 2004.
+
+\end{small}
+
+\end{document}

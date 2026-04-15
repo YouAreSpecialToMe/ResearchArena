@@ -1,0 +1,160 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and download pretrained models",
+    "description": "Set up the Python environment with all required packages and download pretrained DiT-XL/2 and SiT-XL/2 checkpoints. These are publicly available from Facebook Research. Also download the ImageNet 256x256 ADM reference statistics for FID computation.",
+    "steps": {
+      "step1": "Activate the existing .venv and install core packages: torch (>=2.1, with CUDA 11.8+), torchvision, timm, diffusers, accelerate, scipy, numpy, matplotlib, seaborn, pandas, tqdm, clean-fid (for FID computation), torch-fidelity (backup FID/IS), Pillow.",
+      "step2": "Clone the official DiT repository (github.com/facebookresearch/DiT) into exp/DiT/ for model architecture code. Clone SiT repository (github.com/willisma/SiT) into exp/SiT/ for SiT architecture.",
+      "step3": "Download pretrained DiT-XL/2-256 checkpoint (~2.7GB): from https://dl.fbaipublicfiles.com/DiT/models/DiT-XL-2-256x256.pt. Save to exp/checkpoints/DiT-XL-2-256x256.pt",
+      "step4": "Download pretrained SiT-XL/2-256 checkpoint from the SiT model zoo. Save to exp/checkpoints/SiT-XL-2-256x256.pt",
+      "step5": "Download the ImageNet 256x256 reference statistics for FID computation. Use clean-fid to download: fid.make_custom_stats('imagenet256_reference', ...) or download precomputed stats from ADM (https://openaipublic.blob.core.windows.net/diffusion/jul-2021/ref_batches/imagenet/256/VIRTUAL_imagenet256_labeled.npz).",
+      "step6": "Download the pretrained ImageNet VAE (Stable Diffusion VAE) for latent-space diffusion decoding. DiT uses the same VAE as Stable Diffusion: stabilityai/sd-vae-ft-ema from HuggingFace.",
+      "step7": "Verify GPU availability with torch.cuda.is_available() and confirm A6000 (48GB). Run a quick smoke test: load DiT-XL/2, generate 4 images with standard CFG at 10 steps to confirm everything works. Estimated time: ~20 minutes total."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare ImageNet reference statistics and class labels",
+    "description": "Prepare the reference distribution statistics needed for FID/IS computation, and set up class label sampling for conditional generation. We do NOT need the raw ImageNet training data since we are only doing inference with pretrained models.",
+    "steps": {
+      "step1": "Load the ADM ImageNet 256x256 reference statistics (mu, sigma for FID). These are precomputed Inception features over the full ImageNet validation set. Store in exp/data/reference_stats/.",
+      "step2": "Create a class label sampler that uniformly samples from all 1000 ImageNet classes. For FID-10K evaluation, generate 10 images per class (10 * 1000 = 10,000 images). This ensures class-balanced generation matching the reference distribution.",
+      "step3": "Define 3 random seeds for reproducibility: seeds = [0, 1, 2]. All experiments will use these same seeds. Each seed determines: (a) the initial noise z_T for generation, (b) the class label order. Pre-generate and save the noise tensors and label sequences for each seed to ensure exact reproducibility across methods.",
+      "step4": "Verify: generate a small batch (64 images) with each seed and confirm deterministic outputs. Estimated time: ~10 minutes."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Standard CFG baseline (2-pass) on DiT-XL/2",
+    "description": "Generate images using standard Classifier-Free Guidance with the pretrained DiT-XL/2 model. This is the gold standard that CSG aims to approximate. We test 3 guidance scales to cover the practical range. This baseline measures both quality (FID, IS) and throughput (images/sec).",
+    "steps": {
+      "step1": "Implement the standard CFG sampling loop for DiT-XL/2: at each ODE step, run two forward passes (conditional with class label c, unconditional with null class), combine as v_guided = v_uncond + w * (v_cond - v_uncond). Use Euler ODE solver with 50 steps (t from 1.0 to 0.0 linearly spaced).",
+      "step2": "Generate 10,000 images at each guidance scale w in {1.5, 4.0, 7.5} for each of 3 seeds. Use batch size 64. Decode latents through the VAE decoder. Save generated images as individual PNGs in exp/results/cfg_w{w}_seed{s}/images/.",
+      "step3": "Measure wall-clock generation time per batch (excluding I/O). Record: total_time, num_images, throughput (images/sec), peak GPU memory. Save timing results to exp/results/cfg_w{w}_seed{s}/timing.json.",
+      "step4": "Compute FID-10K against the ImageNet 256x256 reference statistics using clean-fid. Compute Inception Score using torch-fidelity. Save metrics to exp/results/cfg_w{w}_seed{s}/metrics.json with fields: {fid, is_mean, is_std, precision, recall}.",
+      "step5": "Estimated runtime per config: ~13 min (10K images / batch 64 = 156 batches, ~5s per batch with 2 forward passes at 50 steps). Total: 3 scales * 3 seeds * 13 min = ~117 min ≈ 2 hours."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "No-guidance baseline (single conditional pass)",
+    "description": "Generate images with a single conditional forward pass (guidance weight w=1.0, equivalent to no CFG). This is the lower bound on quality and upper bound on speed - it shows how much guidance matters.",
+    "steps": {
+      "step1": "Generate 10,000 images with w=1.0 (no guidance, single conditional pass) for each of 3 seeds. Use the same noise and labels as the CFG baseline. Batch size 64, 50 Euler steps.",
+      "step2": "Record timing and compute FID/IS. Save to exp/results/no_guidance_seed{s}/metrics.json and timing.json.",
+      "step3": "Estimated runtime: 3 seeds * 6.5 min = ~20 min."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Embedding-space interpolation baseline",
+    "description": "Instead of interpolating AdaLN parameters per-layer (our CSG method), interpolate the conditioning embedding BEFORE the AdaLN MLPs. This tests whether per-layer parameter interpolation is necessary, or if embedding-level interpolation suffices. This is a simple but meaningful baseline that isolates the contribution of per-layer vs. global interpolation.",
+    "steps": {
+      "step1": "Implement embedding-space guidance (ESG): compute cond_embed = embed(c) + t_emb and uncond_embed = embed(null) + t_emb. Interpolate: guided_embed = uncond_embed + w * (cond_embed - uncond_embed). Pass guided_embed through each layer's AdaLN MLP to get the parameters, then run a single forward pass.",
+      "step2": "Generate 10,000 images at w in {1.5, 4.0, 7.5} for each of 3 seeds. Same noise/labels as other experiments.",
+      "step3": "Compute FID/IS and timing. Save to exp/results/esg_w{w}_seed{s}/.",
+      "step4": "Estimated runtime: 3 scales * 3 seeds * 6.5 min = ~59 min ≈ 1 hour."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CSG: Conditioning-Space Guidance (our method) on DiT-XL/2",
+    "description": "The core experiment: implement and evaluate CSG which interpolates AdaLN parameters (scale, shift, gate) per-layer and runs a single forward pass. Compare quality and speed against standard CFG at multiple guidance scales.",
+    "steps": {
+      "step1": "Implement CSG sampling: (a) For each DiT block l=1..28, compute AdaLN params for both conditional and unconditional inputs via the block's adaLN_modulation MLP (this is a small SiLU + Linear network, negligible cost). (b) Extrapolate: gamma_g = gamma_0 + w*(gamma_c - gamma_0) for all scale/shift/gate params. (c) Run a SINGLE forward pass through the transformer using the guided AdaLN params. Modify the DiT forward() to accept pre-computed AdaLN parameters instead of computing them from the conditioning embedding.",
+      "step2": "Generate 10,000 images at guidance scales w in {1.5, 4.0, 7.5} for each of 3 seeds. Use EXACTLY the same noise tensors and class labels as the CFG baseline. Batch size 64 (can increase to 128 since only 1 forward pass). 50 Euler steps.",
+      "step3": "Record wall-clock timing per batch. Compute throughput and speedup ratio vs. standard CFG. Save to exp/results/csg_w{w}_seed{s}/timing.json.",
+      "step4": "Compute FID-10K and IS. Save to exp/results/csg_w{w}_seed{s}/metrics.json.",
+      "step5": "Compute per-sample MSE between CSG output images and standard CFG output images (using the same noise/labels). This measures how closely CSG approximates CFG at the pixel level. Save to exp/results/csg_w{w}_seed{s}/approximation_error.json.",
+      "step6": "Estimated runtime: 3 scales * 3 seeds * 6.5 min = ~59 min ≈ 1 hour."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Linearity analysis: measuring approximation quality across timesteps and layers",
+    "description": "Analyze WHERE and WHEN the linearity assumption holds. At each timestep and layer, measure how well CSG's single-pass output approximates standard CFG's two-pass output. This provides insight into the theoretical foundation of CSG.",
+    "steps": {
+      "step1": "Select a fixed batch of 256 images (from seed 0, first 256 labels). For each denoising step t in {1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05, 0.01}, and for guidance scale w=4.0: run both standard CFG and CSG, recording intermediate layer outputs.",
+      "step2": "At each layer l and timestep t, compute: (a) relative_error_l_t = ||output_CSG_l - output_CFG_l|| / ||output_CFG_l||, (b) cosine_similarity_l_t = cos(output_CSG_l, output_CFG_l). Record both for the final model output and for each intermediate block output.",
+      "step3": "Compute the same analysis for different guidance scales w in {1.5, 2.0, 3.0, 4.0, 5.0, 7.5} at a fixed set of timesteps {0.8, 0.4, 0.1}. This shows how linearity degrades with stronger guidance.",
+      "step4": "Save all results to exp/results/linearity_analysis/. Create arrays: error_by_layer_timestep[L, T], cosine_by_layer_timestep[L, T], error_by_scale[W, T].",
+      "step5": "Estimated runtime: ~20 min (small batch, no FID computation needed)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "CSG-PL: Per-layer guidance weight ablation",
+    "description": "Test whether layer-specific guidance weights improve quality over uniform guidance. CSG uniquely enables this since it operates at the AdaLN parameter level per layer. Test 4 schedules that represent different hypotheses about where guidance is most needed.",
+    "steps": {
+      "step1": "Define 4 per-layer guidance schedules for DiT-XL/2 (28 blocks). All schedules have the same MEAN guidance weight w_mean=4.0 to ensure fair comparison: (a) 'uniform': w_l = 4.0 for all l (same as standard CSG). (b) 'decreasing': w_l linearly decreasing from 6.0 to 2.0 across layers (hypothesis: early layers need more guidance for global structure). (c) 'increasing': w_l linearly increasing from 2.0 to 6.0 (hypothesis: later layers need more guidance for detail). (d) 'bell': w_l follows a bell curve centered at layer 14, ranging from 2.0 at edges to 6.0 at center (hypothesis: middle layers are most important).",
+      "step2": "Generate 10,000 images with each schedule for 3 seeds. Same noise/labels. Save to exp/results/csg_pl_{schedule}_seed{s}/.",
+      "step3": "Compute FID/IS for each schedule. Compare against uniform CSG and standard CFG.",
+      "step4": "Estimated runtime: 4 schedules * 3 seeds * 6.5 min = ~78 min ≈ 1.3 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "CSG-H: Hybrid CSG with selective full CFG at critical timesteps",
+    "description": "Test the hybrid approach that uses full 2-pass CFG at a fraction of timesteps and CSG at the rest. This explores the quality-speed tradeoff and whether a small number of full CFG steps can recover quality lost by pure CSG.",
+    "steps": {
+      "step1": "Define hybrid ratios: use full CFG at {10%, 20%, 30%} of the 50 timesteps (i.e., 5, 10, 15 steps with full CFG). Select the full-CFG steps as the middle timesteps (where guidance matters most, based on Kynkaanniemi et al. 2024). For 50 steps total: 10% = steps 20-24, 20% = steps 15-24, 30% = steps 12-26 (approximately the middle 10-60% of the denoising process).",
+      "step2": "Generate 10,000 images at w=4.0 with each hybrid ratio, for 3 seeds. Save to exp/results/csg_h_{ratio}_seed{s}/.",
+      "step3": "Record timing for each ratio. Compute speedup vs. full CFG: speedup = T_cfg / T_hybrid. Expected: 10% hybrid ≈ 1.82x, 20% ≈ 1.67x, 30% ≈ 1.54x speedup.",
+      "step4": "Compute FID/IS. Save metrics. Compare quality vs. speed tradeoff curve.",
+      "step5": "Estimated runtime: 3 ratios * 3 seeds * ~8 min avg = ~72 min ≈ 1.2 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "ODE steps ablation: CSG quality vs. number of sampling steps",
+    "description": "Test how CSG quality scales with the number of ODE steps. This ablation determines if CSG works better with more or fewer steps, and whether it interacts differently with step count compared to standard CFG.",
+    "steps": {
+      "step1": "Generate 10,000 images with both standard CFG and CSG at w=4.0, using step counts {25, 50, 100} and seed 0 only (to save time). Save to exp/results/steps_ablation_{method}_steps{n}_seed0/.",
+      "step2": "Compute FID/IS and timing for each configuration. Record the quality gap (FID_CSG - FID_CFG) at each step count.",
+      "step3": "Estimated runtime: 6 configs (2 methods * 3 step counts) * ~10 min avg = ~60 min ≈ 1 hour."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CSG on SiT-XL/2 (flow matching model)",
+    "description": "Replicate the core CSG experiment on SiT-XL/2, which uses flow matching instead of diffusion. This tests generalization across model families that share the AdaLN architecture. SiT is important because flow matching is the dominant paradigm in recent models (Stable Diffusion 3, FLUX).",
+    "steps": {
+      "step1": "Adapt the CSG implementation for SiT-XL/2. The AdaLN structure is the same as DiT, so the CSG modification should transfer directly. SiT uses a different ODE solver (flow matching with linear interpolation), so adapt the sampling loop accordingly.",
+      "step2": "Generate 10,000 images with standard CFG and CSG at w=4.0 for 3 seeds each. Use 50 steps with the Euler ODE solver. Same noise/labels.",
+      "step3": "Compute FID/IS and timing. Save to exp/results/sit_{method}_w4.0_seed{s}/.",
+      "step4": "Compare CFG-CSG quality gap on SiT vs. DiT. Hypothesis: the gap should be similar since both use identical AdaLN structures.",
+      "step5": "Estimated runtime: 6 configs * ~7 min = ~42 min."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and compute summary statistics",
+    "description": "Collect all experimental results, compute mean and standard deviation across seeds, perform statistical significance tests, and evaluate against the pre-defined success criteria.",
+    "steps": {
+      "step1": "Load all metrics.json and timing.json files from exp/results/. Aggregate across 3 seeds: compute mean and std for FID, IS, throughput, speedup.",
+      "step2": "Evaluate success criteria: (a) CSG FID within 10% of CFG at w=4.0? (b) CSG throughput >= 1.7x CFG? (c) CSG-H (20%) within 5% FID of CFG? (d) Any per-layer schedule beats uniform?",
+      "step3": "Evaluate refutation criteria: (a) CSG FID >25% worse than CFG at w<3? (b) Linearity error >50% at any layer/timestep? (c) No per-layer schedule improvement?",
+      "step4": "Compute paired t-test (or Wilcoxon signed-rank if n=3 is too small) between CSG and CFG FID across seeds. Report p-values.",
+      "step5": "Save aggregated results to exp/results/summary.json and results.json (top-level). Include all method comparisons, speedups, and statistical tests.",
+      "step6": "Estimated runtime: ~5 min (CPU only, no generation)."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures and tables for all experimental results. These should be suitable for a NeurIPS-format paper.",
+    "steps": {
+      "step1": "Figure 1 - Main comparison bar chart: FID (y-axis) for each method (No Guidance, ESG, CSG, CSG-H-20%, CFG) at guidance scales {1.5, 4.0, 7.5}. Include error bars (std across 3 seeds). Save as figures/figure1_main_comparison.pdf and .png.",
+      "step2": "Figure 2 - Speedup vs. quality Pareto plot: x-axis = throughput (images/sec), y-axis = FID. Plot all methods including CSG-H variants. Annotate each point with method name. Shows the Pareto frontier of the quality-speed tradeoff. Save as figures/figure2_pareto.pdf.",
+      "step3": "Figure 3 - Linearity analysis heatmap: 2D heatmap with layers (y-axis) vs. timesteps (x-axis), colored by relative approximation error. Second panel: error vs. guidance scale at selected timesteps. Save as figures/figure3_linearity.pdf.",
+      "step4": "Figure 4 - Per-layer guidance ablation: Bar chart comparing FID for each per-layer schedule (uniform, decreasing, increasing, bell). Include error bars. Save as figures/figure4_perlayer.pdf.",
+      "step5": "Figure 5 - Qualitative comparison: Side-by-side grid of generated images from CFG vs. CSG vs. CSG-PL-best for 8 diverse ImageNet classes (e.g., goldfish, church, volcano, pizza, golden retriever, sports car, monarch butterfly, espresso). Same noise seed for fair visual comparison. Save as figures/figure5_qualitative.pdf.",
+      "step6": "Table 1 - Main results table (LaTeX): columns = Method, Guidance Scale, FID-10K, IS, Throughput, Speedup. Rows: No Guidance, ESG, CSG, CSG-H-10%, CSG-H-20%, CSG-H-30%, CSG-PL-best, Standard CFG. Bold best single-pass method. Save as figures/table1_main_results.tex and .csv.",
+      "step7": "Table 2 - SiT vs. DiT comparison table: Same columns as Table 1 but comparing DiT and SiT at w=4.0 with CFG vs. CSG. Save as figures/table2_sit_comparison.tex.",
+      "step8": "Table 3 - Steps ablation table: FID and speedup at 25/50/100 steps for CFG vs. CSG. Save as figures/table3_steps_ablation.tex.",
+      "step9": "Use matplotlib with seaborn style. Font size 12 for labels, 10 for ticks. Colors: blue for CFG, orange for CSG, green for CSG-H, red for CSG-PL, gray for baselines. Save all figures at 300 DPI.",
+      "step10": "Estimated runtime: ~15 min (CPU only, matplotlib rendering)."
+    }
+  }
+]

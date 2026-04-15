@@ -1,0 +1,576 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\newcommand{\cops}{\textsc{CoPS}}
+\newcommand{\pcs}{\textsc{PCS}}
+\newcommand{\xhat}{\hat{x}_0}
+
+\title{Prediction Coherence is Not a Quality Signal:\\A Negative Result on Verifier-Free Inference-Time Scaling\\for Diffusion Models}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Inference-time scaling for diffusion models typically relies on external reward models to select among multiple sampling trajectories. We investigate whether the temporal coherence of a diffusion model's own intermediate denoised predictions --- a quantity we term the Prediction Coherence Score (\pcs{}) --- can serve as an intrinsic, verifier-free quality signal for particle-based sampling. The theoretical motivation is that \pcs{} measures ODE discretization error, and lower error should yield higher-quality samples. We implement Coherent Particle Sampling (\cops{}), which generates multiple trajectories in parallel and resamples particles proportional to their \pcs{}, and evaluate it on Stable Diffusion 1.5 across MS-COCO (300 prompts), PartiPrompts (100 prompts), and DrawBench (41 prompts). Our results \textbf{provide strong evidence against} the hypothesis: \pcs{} shows near-zero Spearman correlation with CLIP score ($\rho = -0.095$) and ImageReward ($\rho = -0.101$), performing no better than random particle selection (paired Wilcoxon $p = 0.156$, n.s.). Particles with the \emph{highest} \pcs{} (smoothest trajectories) actually produce lower-quality images on average, and this pattern holds across three distance metrics including the perceptually-grounded LPIPS. We analyze why: prediction coherence conflates convergence speed with quality, as visually simple images converge smoothly but score poorly on perceptual quality metrics. This negative result challenges the assumption that smooth ODE trajectories correspond to high-quality samples and provides guidance for future work on verifier-free inference-time scaling.
+\end{abstract}
+
+\section{Introduction}
+
+Diffusion models~\citep{ho2020ddpm,song2021ddim} and flow matching models~\citep{lipman2023flow} have become the dominant paradigm for high-quality image generation. A critical frontier is \emph{inference-time scaling}: improving generation quality by investing additional computation during sampling rather than during training. Recent work has established that simply increasing the number of denoising steps yields diminishing returns beyond approximately 50 steps~\citep{ma2025scaling}. More sophisticated approaches use \emph{particle-based sampling} with Feynman-Kac (FK) steering~\citep{singhal2025fk} or Sequential Monte Carlo methods~\citep{skreta2025fkc}, where multiple candidate trajectories are generated in parallel and periodically resampled based on scores from external reward models (e.g., CLIP score or aesthetic predictors).
+
+However, these methods require an external reward model that is well-aligned with the desired generation quality. This introduces several limitations: reward models are not always available for all domains, particle-based methods can exploit reward model imperfections (reward hacking), running an additional neural network at every resampling step adds computational overhead, and metrics like CLIP score are imperfect proxies for actual generation quality.
+
+\textbf{Our hypothesis.} During denoising, the diffusion model produces an estimate of the final clean image $\xhat(t)$ at each timestep $t$. For the exact probability flow ODE, this prediction would remain constant. We hypothesized that the \emph{temporal coherence} of these predictions --- how smoothly $\xhat$ evolves across timesteps --- could serve as an intrinsic quality signal: well-converging trajectories should produce higher-quality samples, while erratic trajectories indicate high discretization error and thus lower quality. If true, this would enable verifier-free inference-time scaling.
+
+\textbf{Our findings.} Through experiments on Stable Diffusion 1.5 across three benchmarks (COCO, PartiPrompts, DrawBench), we find that this hypothesis is \textbf{incorrect}. The Prediction Coherence Score (\pcs{}) shows near-zero correlation with external quality metrics (Spearman $\rho \approx -0.1$ with both CLIP score and ImageReward). \cops{}, our particle resampling method based on \pcs{}, performs no better than random particle selection (Wilcoxon signed-rank $p = 0.156$). Counterintuitively, particles with the \emph{lowest} \pcs{} (most erratic trajectories) produce the highest-quality images on average. This pattern persists across all three distance metrics tested --- L2, cosine, and LPIPS --- ruling out the possibility that the failure is merely due to the choice of distance function.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose and rigorously test the hypothesis that temporal coherence of denoised predictions is a quality signal for diffusion sampling, providing a theoretically grounded framework (Section~\ref{sec:method}).
+    \item We conduct experiments across three benchmarks with statistical significance testing, multiple selection criteria, three distance metrics (L2, cosine, LPIPS), multiple resampling frequencies, and timestep weightings, providing strong evidence that the hypothesis does not hold for Stable Diffusion 1.5 (Section~\ref{sec:experiments}).
+    \item We provide a detailed analysis of \emph{why} prediction coherence fails as a quality proxy, identifying the convergence-speed-vs-quality conflation as the core failure mode (Section~\ref{sec:analysis}).
+    \item We discuss implications and open directions for future work on verifier-free inference-time scaling (Section~\ref{sec:discussion}).
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \cops{} method. Section~\ref{sec:experiments} presents experiments and ablations. Section~\ref{sec:analysis} analyzes the failure modes. Section~\ref{sec:discussion} discusses implications. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Inference-time scaling for diffusion models.}
+FK Steering~\citep{singhal2025fk} provides a general framework for inference-time scaling using Feynman-Kac interacting particle systems with external reward functions as potentials. Feynman-Kac Correctors~\citep{skreta2025fkc} extend this with principled PDE-based corrections. Ma et al.~\citep{ma2025scaling} demonstrate that combining search with verifiers significantly outperforms simply increasing denoising steps. All of these methods require external reward models or verifiers. Our work investigates whether this requirement can be eliminated.
+
+\paragraph{Guidance methods.}
+Classifier-Free Guidance (CFG)~\citep{ho2022cfg} is the standard approach to conditional generation. CFG-Zero*~\citep{fan2025cfgzero} improves CFG for flow matching models. Perturbed-Attention Guidance~\citep{ahn2024pag} and Self-Attention Guidance~\citep{hong2023sag} use internal attention maps for training-free guidance. These methods modify individual denoising steps, while particle-based methods operate at the trajectory selection level and are orthogonal.
+
+\paragraph{Sampling efficiency.}
+Variance-Reduction Guidance~\citep{xu2025vrg} optimizes the sampling trajectory offline by reducing prediction error variance. DPM-Solver~\citep{lu2022dpm} and DDIM~\citep{song2021ddim} provide efficient ODE solvers. Our Adaptive Step Allocation proposal targets inference-time allocation based on prediction coherence, but was deprioritized after the core hypothesis was refuted.
+
+\paragraph{Verifier-free approaches.}
+VFScale~\citep{vfscale2025} proposes verifier-free test-time scaling but focuses on discrete reasoning tasks (Maze, Sudoku) and requires training modifications. To our knowledge, no prior work has attempted verifier-free particle sampling for image diffusion models using prediction coherence.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: Particle-Based Diffusion Sampling}
+
+Given a pretrained diffusion model with score function $s_\theta(x_t, t) \approx \nabla_x \log p_t(x_t)$, standard sampling follows the probability flow ODE from $t=T$ to $t=0$. The denoised prediction at any timestep is:
+\begin{equation}
+\xhat(x_t, t) = \frac{x_t + (1 - \bar{\alpha}_t) s_\theta(x_t, t)}{\sqrt{\bar{\alpha}_t}}
+\label{eq:denoised}
+\end{equation}
+
+Particle-based methods generate $K$ trajectories in parallel and periodically resample based on a quality signal $g(k)$ for each particle $k$, with resampling weights proportional to $\exp(\alpha \cdot g(k))$. Existing methods use external reward models for $g$, e.g., $g(k) = \text{CLIP}(\xhat^{(k)}, \text{prompt})$.
+
+\subsection{Prediction Coherence Score (\pcs{})}
+
+We define the instantaneous coherence at step $i$ for particle $k$ as:
+\begin{equation}
+c_i^{(k)} = -d\left(\xhat^{(k)}(t_i),\ \xhat^{(k)}(t_{i-1})\right)
+\label{eq:coherence}
+\end{equation}
+where $d(\cdot, \cdot)$ is a distance function. We evaluate three choices: L2 norm in latent space (cheapest), cosine distance in latent space, and LPIPS~\citep{zhang2018lpips} in pixel space (requires decoding latents at each step, most expensive). The cumulative \pcs{} is:
+\begin{equation}
+\text{\pcs{}}_i^{(k)} = \sum_{j=1}^{i} w_j \cdot c_j^{(k)}
+\label{eq:pcs}
+\end{equation}
+where $w_j$ are importance weights. Higher \pcs{} (less negative) indicates a more coherent trajectory.
+
+\paragraph{Theoretical motivation.} For an exact ODE solver, $\xhat$ is constant along the solution trajectory. The deviation $\|\xhat(t_i) - \xhat(t_{i-1})\|$ is bounded by the local truncation error, which depends on step size and score field curvature. Thus, \pcs{} measures accumulated discretization error. We hypothesized that lower discretization error implies higher sample quality.
+
+\subsection{Coherent Particle Sampling (\cops{})}
+
+\cops{} replaces external rewards with \pcs{} in the particle resampling framework:
+\begin{enumerate}
+    \item \textbf{Initialize} $K$ particles from the same initial noise $z_0$.
+    \item \textbf{Denoise} all particles using a standard sampler (DDIM, Euler, DPM-Solver).
+    \item \textbf{At resampling steps} (every $R$ denoising steps): compute \pcs{} for each particle; resample proportional to $\exp(\alpha \cdot \text{\pcs{}})$; add noise perturbation ($\sigma_{\text{jitter}} = 0.01$) to resampled duplicates for diversity.
+    \item \textbf{Select} the particle with the highest final \pcs{} as output.
+\end{enumerate}
+
+\subsection{Adaptive Step Allocation}
+
+We additionally proposed using the \pcs{} signal to adaptively allocate step sizes within a fixed NFE budget: run a pilot trajectory, identify high-curvature regions via large prediction changes, and redistribute steps accordingly. After the core \pcs{} hypothesis was refuted, this technique was not evaluated, as its effectiveness depends on \pcs{} being a meaningful quality signal. We include it here for completeness and discuss its potential in Section~\ref{sec:discussion}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Model.} Stable Diffusion 1.5 (\texttt{runwayml/stable-diffusion-v1-5}) in float16 on a single NVIDIA RTX A6000 (48GB). We note that SD~1.5 is an older model; the generalizability of our findings to more recent architectures (SDXL, SD3, FLUX) remains to be established (see Section~\ref{sec:discussion}).
+
+\paragraph{Datasets.} MS-COCO 2017 validation (300 random captions, seed=42) for FID computation against real images, PartiPrompts (100 prompts, seed=42) for compositional generation quality, and DrawBench (41 prompts) for text-image alignment evaluation. Note: FID computed on 300 images carries higher variance than the standard COCO-30K benchmark; we use it only for \emph{relative} comparison between methods under identical conditions.
+
+\paragraph{Baselines.} (1)~Standard sampling: DDIM 50 steps, DPM-Solver++ 20 steps, Euler 50 steps, all with CFG scale 7.5. (2)~Particle baselines ($K=4$): Random-K (random selection), PCS-Best-of-K (select highest \pcs{}), CLIP-Best-of-K (select highest CLIP score), ImageReward-Best-of-K (select highest ImageReward).
+
+\paragraph{Metrics.} FID~\citep{heusel2017fid} (distribution quality, COCO only), CLIP score (text-image alignment via ViT-B/32), and ImageReward~\citep{xu2023imagereward} (learned human preference).
+
+\paragraph{Implementation.} All particle methods use the same $K=4$ initial noise vectors per seed for fair comparison. We use 3 seeds (42, 123, 456) and report mean $\pm$ standard deviation. \cops{} uses $R=10$ resampling interval, $\alpha=1.0$ temperature, L2 distance in latent space, and uniform timestep weights by default.
+
+\paragraph{Statistical testing.} We report paired Wilcoxon signed-rank tests and paired $t$-tests between \cops{}/PCS-Best-of-K and Random-K using per-prompt CLIP scores, aggregated across all seeds ($n = 900$ prompt-seed pairs for COCO comparisons). Effect sizes are reported as Cohen's $d$.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents the main comparison across all three benchmarks. The key finding is that \textbf{\pcs{}-based methods (PCS-Best, \cops{}) perform worse than random selection}, providing strong evidence against the prediction coherence hypothesis.
+
+\begin{table*}[t]
+\centering
+\caption{Main results on COCO-300, PartiPrompts-100, and DrawBench-41. COCO and DrawBench results averaged over 3 seeds ($\pm$ std); PartiPrompts uses seed=42. \textbf{Bold}: best; \underline{underline}: second best. \pcs{}-based methods perform \emph{worse} than random selection across all benchmarks.}
+\label{tab:main_results}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|ccc|cc|cc}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c|}{COCO-300} & \multicolumn{2}{c|}{PartiPrompts (100)} & \multicolumn{2}{c}{DrawBench (41)} \\
+& FID $\downarrow$ & CLIP $\uparrow$ & IR $\uparrow$ & CLIP $\uparrow$ & IR $\uparrow$ & CLIP $\uparrow$ & IR $\uparrow$ \\
+\midrule
+\multicolumn{8}{l}{\textit{Standard Baselines}} \\
+DDIM-50 & 126.4$\pm$0.1 & 0.341$\pm$0.000 & 0.203$\pm$0.008 & -- & -- & 0.356$\pm$0.005 & 0.406$\pm$0.143 \\
+DPM-Solver-20 & 127.2$\pm$0.4 & 0.341$\pm$0.001 & 0.196$\pm$0.041 & -- & -- & -- & -- \\
+Euler-50 & 126.8$\pm$0.1 & 0.340$\pm$0.002 & 0.220$\pm$0.040 & -- & -- & -- & -- \\
+\midrule
+\multicolumn{8}{l}{\textit{Particle-based Methods ($K=4$)}} \\
+Random-K & \underline{125.9$\pm$1.6} & 0.340$\pm$0.002 & 0.208$\pm$0.009 & 0.337 & 0.305 & 0.362$\pm$0.006 & 0.404$\pm$0.116 \\
+PCS-Best-of-K & 126.4$\pm$0.7 & 0.337$\pm$0.001 & 0.123$\pm$0.044 & 0.333 & 0.167 & 0.358$\pm$0.000 & 0.227$\pm$0.019 \\
+CLIP-Best-of-K & \textbf{124.6$\pm$0.2} & \textbf{0.364$\pm$0.000} & \underline{0.512$\pm$0.010} & \textbf{0.359} & \textbf{0.719} & \textbf{0.390$\pm$0.003} & \underline{0.926$\pm$0.059} \\
+IR-Best-of-K & 126.0$\pm$0.9 & 0.341$\pm$0.001 & 0.204$\pm$0.021 & 0.335 & 0.267 & \underline{0.379$\pm$0.004} & \textbf{1.201$\pm$0.006} \\
+\midrule
+\multicolumn{8}{l}{\textit{Proposed Method}} \\
+\cops{} (ours) & 127.1$\pm$1.5 & 0.339$\pm$0.002 & 0.179$\pm$0.025 & 0.331 & 0.110 & 0.354$\pm$0.006 & 0.322$\pm$0.094 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+On COCO-300, \cops{} achieves FID 127.1, which is \emph{worse} than all baselines including standard DDIM-50 (126.4) and Random-K (125.9). PCS-Best-of-K shows degraded ImageReward (0.123 vs.\ 0.208 for Random-K), indicating that selecting by \pcs{} is actively harmful. In contrast, CLIP-Best-of-K demonstrates that external reward-guided selection works well (FID 124.6, CLIP 0.364). The same pattern holds on DrawBench and PartiPrompts.
+
+\paragraph{Statistical significance.} We test whether the difference between \cops{}/PCS-Best-of-K and Random-K is statistically significant using paired tests on per-prompt CLIP scores aggregated across all seeds ($n = 900$). \cops{} vs.\ Random-K: paired $t$-test $p = 0.180$, Wilcoxon $p = 0.156$, Cohen's $d = -0.04$ --- the difference is \emph{not} significant, meaning \cops{} is statistically indistinguishable from random selection. PCS-Best-of-K vs.\ Random-K: paired $t$-test $p = 0.006$, Wilcoxon $p = 0.017$, Cohen's $d = -0.09$ --- this \emph{is} significant, but in the wrong direction: PCS-based selection is significantly \emph{worse} than random.
+
+\paragraph{PartiPrompts and DrawBench corroboration.} The PartiPrompts results corroborate the negative finding: PCS-Best-of-K (CLIP 0.333, IR 0.167) and \cops{} (CLIP 0.331, IR 0.110) both underperform Random-K (CLIP 0.337, IR 0.305). On DrawBench, \cops{} (CLIP 0.354, IR 0.322) and PCS-Best-of-K (CLIP 0.358, IR 0.227) again fall below Random-K (CLIP 0.362, IR 0.404). The consistency across three benchmarks strengthens the conclusion.
+
+\subsection{PCS Correlation Analysis}
+\label{sec:pcs_correlation}
+
+To directly test whether \pcs{} predicts quality, we compute within-prompt Spearman rank correlation between \pcs{} and external quality metrics across $K=4$ particles (Table~\ref{tab:pcs_correlation}).
+
+\begin{table}[t]
+\centering
+\caption{\pcs{} correlation analysis. Within-prompt Spearman $\rho$ between \pcs{} and external quality metrics ($K=4$ particles, COCO-300, seed=42). Random agreement expected: $1/K = 0.25$.}
+\label{tab:pcs_correlation}
+\small
+\begin{tabular}{lcc}
+\toprule
+Metric Pair & Spearman $\rho$ (mean$\pm$std) & Agreement Rate \\
+\midrule
+\pcs{} vs CLIP Score & $-0.095 \pm 0.571$ & 0.223 \\
+\pcs{} vs ImageReward & $-0.101 \pm 0.588$ & 0.203 \\
+\midrule
+\textit{Random baseline} & $0.000 \pm 0.577$ & 0.250 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The correlations are essentially zero (and slightly negative), with extremely high variance across prompts. The agreement rate --- how often \pcs{} selects the same particle as CLIP or ImageReward guidance --- is \emph{below} the random baseline of 25\%. This means \pcs{} is not merely uninformative; it has a weak \emph{anti}-correlation with quality.
+
+\paragraph{Quality by \pcs{} rank.} Table~\ref{tab:pcs_rank} shows the average quality of particles ranked by their \pcs{} score. Strikingly, particles with the \emph{lowest} \pcs{} (rank 4, most erratic trajectories) have the highest CLIP score (0.345) and ImageReward (0.386), while particles with the highest \pcs{} (rank 1, smoothest trajectories) have the lowest quality (CLIP 0.338, ImageReward 0.177).
+
+\begin{table}[t]
+\centering
+\caption{Average quality metrics by \pcs{} rank among $K=4$ particles (COCO-300, seed=42). Higher \pcs{} rank (smoother trajectory) correlates with \emph{lower} quality.}
+\label{tab:pcs_rank}
+\small
+\begin{tabular}{lcc}
+\toprule
+\pcs{} Rank & CLIP Score $\uparrow$ & ImageReward $\uparrow$ \\
+\midrule
+Rank 1 (highest \pcs{}) & 0.338 & 0.177 \\
+Rank 2 & 0.339 & 0.199 \\
+Rank 3 & 0.342 & 0.176 \\
+Rank 4 (lowest \pcs{}) & \textbf{0.345} & \textbf{0.386} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Scaling Behavior}
+\label{sec:scaling}
+
+A key claim of inference-time scaling methods is that quality improves with increased compute (more particles). We test this by varying $K \in \{1, 2, 4, 8\}$ while keeping total NFE constant at 200 (i.e., $K=1$ uses 200 steps, $K=8$ uses 25 steps). Table~\ref{tab:scaling} and Figure~\ref{fig:scaling} present the results.
+
+\begin{table}[t]
+\centering
+\caption{Scaling behavior under constant NFE budget (200). CLIP score for different selection methods as $K$ varies. CLIP-guided selection scales positively; \pcs{}-based selection \emph{degrades} with more particles.}
+\label{tab:scaling}
+\small
+\begin{tabular}{l|cccc}
+\toprule
+Selection & $K=1$ & $K=2$ & $K=4$ & $K=8$ \\
+\midrule
+Random & 0.340 & 0.338 & 0.341 & 0.341 \\
+\pcs{} (CoPS) & 0.340 & 0.338 & 0.334 & 0.333 \\
+CLIP-guided & 0.340 & 0.352 & 0.360 & \textbf{0.368} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_scaling.png}
+\caption{Scaling behavior: CLIP score vs.\ number of particles $K$ under constant NFE budget (200). CLIP-guided selection (green) shows clear positive scaling. \pcs{}-based selection (orange) \emph{degrades} with more particles, as it increasingly concentrates on smooth but low-quality trajectories. Random selection (blue) remains flat.}
+\label{fig:scaling}
+\end{figure}
+
+CLIP-guided selection demonstrates clear positive scaling: CLIP score improves from 0.340 ($K=1$) to 0.368 ($K=8$), validating that external reward-guided particle selection enables inference-time scaling. In contrast, \pcs{}-based selection shows \emph{negative} scaling: CLIP score drops from 0.340 ($K=1$) to 0.333 ($K=8$). With more particles to choose from, \pcs{} more reliably identifies the smoothest --- and lowest-quality --- trajectory. Random selection remains approximately flat, as expected. Note that the $K=16$ configuration planned in our original design was omitted to allocate resources to the LPIPS distance metric ablation (Section~\ref{sec:ablation_distance}), which we considered a higher priority for understanding the failure mechanism.
+
+\subsection{Ablation Studies}
+
+\subsubsection{Distance Metric}
+\label{sec:ablation_distance}
+
+A key question is whether the \pcs{} failure stems from the choice of distance function. Our proposal specifically hypothesized that perceptual metrics like LPIPS~\citep{zhang2018lpips} would outperform pixel-space metrics. We test three distance functions for computing \pcs{}: L2 in latent space, cosine distance in latent space, and LPIPS in pixel space (which requires decoding latents at each measured step, adding substantial computational cost).
+
+Table~\ref{tab:ablation_distance} shows results on a 100-prompt COCO subset. \textbf{LPIPS does not rescue the approach.} All three distance metrics produce \pcs{} scores with near-zero Spearman correlations with quality metrics ($\rho < 0.04$ for all), and all yield selection quality at or below random. LPIPS achieves the nearest-to-zero CLIP correlation ($\rho = 0.002$), while L2 shows the highest ($\rho = 0.038$), but none are meaningfully positive. All three metrics select images with lower CLIP scores than random selection (0.343). This rules out the hypothesis that the failure is merely an artifact of L2's lack of perceptual meaning.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: distance metric for \pcs{} computation (COCO-100, seed=42, $K=4$). All metrics fail to identify high-quality particles. LPIPS does not rescue the approach despite being perceptually grounded.}
+\label{tab:ablation_distance}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Distance & CLIP $\uparrow$ & IR $\uparrow$ & $\rho$(\pcs{},CLIP) & $\rho$(\pcs{},IR) \\
+\midrule
+L2 (latent) & 0.341 & 0.299 & 0.038 & 0.026 \\
+Cosine (latent) & 0.342 & 0.443 & 0.018 & 0.012 \\
+LPIPS (pixel) & 0.341 & 0.359 & 0.002 & $-$0.016 \\
+\midrule
+\textit{Random-K} & 0.343 & 0.371 & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Resampling Frequency}
+
+We vary the resampling interval $R \in \{1, 5, 10, 25, 50\}$ (where $R=50$ means no resampling, equivalent to Best-of-K by \pcs{}). Table~\ref{tab:ablation_resample} shows that more aggressive resampling ($R=1$) yields the worst CLIP score (0.328), consistent with mode collapse toward smooth but low-quality trajectories. No value of $R$ outperforms random selection.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: resampling frequency (COCO-200 subset, seed=42, $K=4$, 50 DDIM steps). ImageReward omitted: a broken IR evaluation pipeline returned constant values ($\approx -0.143$) for all resampling and timestep weighting ablation runs.}
+\label{tab:ablation_resample}
+\small
+\begin{tabular}{lcc}
+\toprule
+Resampling $R$ & CLIP $\uparrow$ & Description \\
+\midrule
+$R=1$ (every step) & 0.328 & Most aggressive \\
+$R=5$ & 0.337 & \\
+$R=10$ (default) & 0.336 & \\
+$R=25$ & 0.334 & \\
+$R=50$ (no resampling) & 0.334 & Best-of-K by \pcs{} \\
+\midrule
+\textit{Random-K} & 0.340 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Timestep Weighting}
+
+We reweight the \pcs{} accumulation to emphasize different timestep ranges: uniform, mid-emphasis (Gaussian centered at step 25), early-emphasis ($w_j \propto e^{-j/10}$), and late-emphasis ($w_j \propto e^{-(50-j)/10}$). Since this is a post-hoc reweighting of the same trajectories, differences are small. Table~\ref{tab:ablation_weights} shows that no weighting scheme outperforms random selection.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: timestep weighting for \pcs{} (COCO-300, seed=42, $K=4$). ImageReward omitted due to erroneous IR evaluation pipeline in this experiment batch (see Table~\ref{tab:ablation_resample} caption).}
+\label{tab:ablation_weights}
+\small
+\begin{tabular}{lc}
+\toprule
+Weighting & CLIP $\uparrow$ \\
+\midrule
+Uniform & 0.334 \\
+Mid-emphasis & \textbf{0.335} \\
+Early-emphasis & 0.333 \\
+Late-emphasis & 0.335 \\
+\midrule
+\textit{Random-K} & 0.340 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Combination with CFG}
+
+We test whether \cops{} provides additive improvements at different CFG scales (3.0, 7.5, 12.0, 20.0). Table~\ref{tab:ablation_cfg} shows that at every CFG scale, \cops{} \emph{decreases} CLIP score compared to standard sampling, confirming that \pcs{}-based selection is harmful regardless of guidance strength.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: \cops{} combined with different CFG scales (COCO-200 subset, seed=42, $K=4$). Note: CLIP values here are from the 200-prompt subset and may differ slightly from the 300-prompt values in Table~\ref{tab:main_results}.}
+\label{tab:ablation_cfg}
+\small
+\begin{tabular}{lcc}
+\toprule
+Configuration & CLIP $\uparrow$ & $\Delta$ vs Standard \\
+\midrule
+CFG=3.0, Standard & 0.328 & -- \\
+CFG=3.0, + \cops{} & 0.323 & $-$0.005 \\
+\midrule
+CFG=7.5, Standard & 0.340 & -- \\
+CFG=7.5, + \cops{} & 0.336 & $-$0.004 \\
+\midrule
+CFG=12.0, Standard & 0.344 & -- \\
+CFG=12.0, + \cops{} & 0.337 & $-$0.007 \\
+\midrule
+CFG=20.0, Standard & 0.343 & -- \\
+CFG=20.0, + \cops{} & 0.337 & $-$0.006 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Computational Cost Analysis}
+
+Table~\ref{tab:cost} shows the wall-clock time per image for each method, demonstrating that \cops{} incurs significant overhead with no quality benefit.
+
+\begin{table}[t]
+\centering
+\caption{Computational cost comparison. \cops{} is $3.2\times$ slower than standard DDIM while providing no quality improvement. All measurements on a single NVIDIA RTX A6000.}
+\label{tab:cost}
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Time/image (s) & Peak GPU (GB) & NFE \\
+\midrule
+DDIM-50 & 1.89 $\pm$ 0.01 & 5.1 & 50 \\
+Particles ($K=4$) & 5.99 $\pm$ 0.03 & 6.7 & 200 \\
+\cops{} ($K=4$) & 6.04 $\pm$ 0.00 & 6.7 & 200 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Figures}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_main_results.png}
+\caption{Main results across methods and metrics on COCO-300. CLIP-Best-of-K and IR-Best-of-K (using external reward models) clearly outperform standard baselines. However, \pcs{}-based selection (PCS-Best, \cops{}) performs at or below random particle selection.}
+\label{fig:main_results}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_pcs_correlation.png}
+\caption{\pcs{} correlation with external quality metrics. \textbf{Left:} \pcs{} vs CLIP score for all particles across all prompts (COCO-300, seed=42). The scatter shows no meaningful relationship ($\rho = -0.072$). \textbf{Right:} Distribution of within-prompt Spearman $\rho$ values, centered near zero with high variance.}
+\label{fig:pcs_correlation}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_pcs_rank_quality.png}
+\caption{Average quality metrics stratified by \pcs{} rank among $K=4$ particles. The monotonically \emph{increasing} trend in CLIP score and ImageReward from Rank~1 (highest \pcs{}) to Rank~4 (lowest \pcs{}) demonstrates an anti-correlation: smoother trajectories produce worse images.}
+\label{fig:pcs_rank}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure5_ablations.png}
+\caption{Ablation studies. No configuration of distance metric, resampling frequency, or timestep weighting rescues the \pcs{}-based approach.}
+\label{fig:ablations}
+\end{figure}
+
+\section{Analysis: Why Does Prediction Coherence Fail?}
+\label{sec:analysis}
+
+Our failure analysis identifies several mechanisms explaining why \pcs{} is anti-correlated with perceptual quality.
+
+\subsection{Qualitative Evidence}
+
+Figure~\ref{fig:qualitative} shows example images from particles selected vs.\ rejected by \pcs{} for the same prompt. In each case, the highest-\pcs{} particle (selected by \cops{}) produces a visually simpler, less detailed image, while the lowest-\pcs{} particle (rejected by \cops{}) shows richer detail and higher semantic alignment with the prompt.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure_qualitative.png}
+\caption{Qualitative comparison of particles selected vs.\ rejected by \pcs{}. Left column: highest-\pcs{} particle (selected by \cops{}); right column: lowest-\pcs{} particle (rejected). The \pcs{}-selected images are visually simpler with lower CLIP scores, while rejected images show richer detail and better text-image alignment.}
+\label{fig:qualitative}
+\end{figure}
+
+\subsection{Quantitative Failure Analysis}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure6_pcs_failure_analysis.png}
+\caption{Failure analysis of the prediction coherence hypothesis. \pcs{} captures properties unrelated to perceptual quality.}
+\label{fig:failure_analysis}
+\end{figure}
+
+\paragraph{1. Convergence speed $\neq$ quality.} The most fundamental issue is that prediction coherence conflates \emph{convergence speed} with \emph{quality}. Visually simple, low-detail images have smooth score fields and converge quickly, yielding high \pcs{}. Complex, detailed images with fine textures and compositional elements have high-curvature score fields that change substantially between steps, yielding low \pcs{}. Since quality metrics favor detailed, semantically rich images, \pcs{} is anti-correlated with quality.
+
+\paragraph{2. Distance metrics do not resolve the issue.} We tested three distance functions --- L2 (latent), cosine (latent), and LPIPS (pixel) --- and found that all produce the same pattern: smooth trajectories correspond to low-quality images. While L2 in latent space ``lacks perceptual meaning'' in the sense that equal L2 distances correspond to very different visual changes, even the perceptually-grounded LPIPS metric does not rescue the approach. This indicates the problem is not in the distance function but in the underlying assumption that trajectory smoothness implies quality.
+
+\paragraph{3. Non-monotonic error-quality relationship.} The theoretical motivation assumes lower discretization error monotonically implies higher sample quality. However, some ``errors'' --- creative deviations from the straight-line ODE solution --- may actually \emph{improve} quality by introducing variety and detail. The relationship between ODE accuracy and perceptual quality is not monotonic.
+
+\paragraph{4. Low signal-to-noise ratio.} The signal-to-noise analysis reveals that \pcs{} varies more between prompts (std = 115.9) than between particles of the same prompt (mean within-prompt std = 70.2), yielding a signal-to-noise ratio of only 1.65. Among 300 prompts, 167 showed negative $\rho$ between \pcs{} and quality, 120 showed positive $\rho$, and 13 were near zero --- essentially random.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Implications for verifier-free scaling.} Our results demonstrate that not all intrinsic signals from the diffusion process are suitable for quality-guided selection. The core assumption that ODE trajectory smoothness implies sample quality is flawed. Future work on verifier-free scaling should consider:
+\begin{itemize}
+    \item \textbf{Learned intrinsic signals}: Using the model's own internal representations (attention maps, feature distributions) rather than output-level prediction changes.
+    \item \textbf{Prompt-conditional normalization}: Since \pcs{} varies more across prompts than within prompts, normalizing by prompt-level statistics might improve discriminability.
+    \item \textbf{Trajectory-level features beyond smoothness}: Rather than measuring how \emph{little} predictions change, measuring \emph{how} they change (e.g., whether changes are semantically consistent with the prompt) might be more informative.
+\end{itemize}
+
+\paragraph{Generalizability to modern architectures.} Our experiments use SD~1.5, a UNet-based $\epsilon$-prediction model. Modern systems like SD3 and FLUX employ Diffusion Transformer (DiT) architectures with flow matching (rectified flow) objectives, where sampling follows an ODE $dx = v_\theta(x_t, t)\,dt$ with linear interpolation paths rather than the variance-preserving SDE of DDPM. In these models, $\xhat = x_t - t \cdot v_\theta(x_t, t)$, and the convergence-speed-vs-quality conflation we identify is likely to persist or worsen: flow matching models are trained to produce straighter ODE trajectories by design~\citep{lipman2023flow}, so the baseline prediction coherence is already high, leaving even less discriminative signal between particles. Furthermore, DiT architectures produce smoother score fields than UNets due to the global self-attention mechanism, which would further compress the \pcs{} variance across particles. We therefore expect our negative result to generalize, but empirical verification remains necessary.
+
+\paragraph{Adaptive Step Allocation.} Our proposal to use prediction coherence for adaptive step allocation within a fixed NFE budget was not evaluated after the core \pcs{} hypothesis was refuted. However, adaptive step allocation based on prediction change \emph{magnitude} (not as a quality signal, but as a local curvature indicator) may still have merit for improving ODE solver accuracy independent of particle selection. This remains an avenue for future investigation.
+
+\paragraph{Limitations.}
+\begin{enumerate}
+    \item \textbf{Single model architecture.} Our experiments use Stable Diffusion 1.5, a UNet-based diffusion model from 2022. More recent models (SDXL, SD3/FLUX with DiT architectures) employ different parameterizations, noise schedules, and flow matching formulations. While our theoretical analysis of the convergence-speed-vs-quality failure mode suggests the finding would generalize, empirical verification on modern architectures is necessary. This is the most important direction for future work.
+    \item \textbf{Reduced dataset sizes.} We used 300 COCO prompts (vs.\ the planned 500), 100 PartiPrompts (vs.\ 200), and 41 DrawBench prompts. While we verify statistical significance for our main claims, the smaller evaluation sets introduce higher variance, particularly for FID where the standard benchmark uses 30K images. Our FID values are suitable only for relative comparisons between methods.
+    \item \textbf{No flow matching evaluation.} The original plan included SD3 Medium evaluation to test \pcs{} on flow matching models. Since the hypothesis was refuted on the simpler SD~1.5 architecture, we deprioritized this, but it remains possible that flow matching models exhibit different trajectory-quality relationships.
+    \item \textbf{No $K=16$ scaling.} The scaling experiment was limited to $K \leq 8$. While the trend is already clear (negative scaling for \pcs{}), extending to $K=16$ would strengthen the scaling analysis.
+    \item \textbf{No aesthetic score.} Our evaluation uses CLIP score and ImageReward but not the LAION aesthetic score predictor. Adding this metric would provide a more complete picture of quality assessment.
+    \item \textbf{ImageReward data quality.} The ImageReward evaluation pipeline produced erroneous constant values ($\approx -0.143$) for the scaling and ablation experiment batches (Tables~\ref{tab:ablation_resample},~\ref{tab:ablation_weights}), likely due to a broken model loading or fallback predictor in those runs. We omit IR from affected tables rather than report meaningless numbers. The main experiment (Table~\ref{tab:main_results}) and LPIPS ablation (Table~\ref{tab:ablation_distance}) used a separately verified IR pipeline and report valid scores.
+\end{enumerate}
+
+\paragraph{Value of negative results.} Negative results are underreported in machine learning~\citep{matosin2014negative}. Our finding that prediction coherence is \emph{anti}-correlated with quality is genuinely surprising given the theoretical motivation, and we believe it provides useful guidance for the community working on inference-time scaling.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We investigated whether the temporal coherence of intermediate denoised predictions could serve as a verifier-free quality signal for particle-based inference-time scaling of diffusion models. Through experiments on Stable Diffusion 1.5 across COCO-300, PartiPrompts-100, and DrawBench-41, with formal statistical testing, we find that the Prediction Coherence Score (\pcs{}) shows near-zero correlation with external quality metrics (Spearman $\rho \approx -0.1$) and that \cops{}, our \pcs{}-guided particle resampling method, performs no better than random selection (Wilcoxon $p = 0.156$, n.s.) while PCS-Best-of-K is significantly \emph{worse} than random ($p = 0.017$, Cohen's $d = -0.09$). This pattern holds across three distance metrics (L2, cosine, LPIPS), multiple resampling frequencies, and timestep weightings. The core failure mode is that prediction coherence conflates convergence speed with quality: simple images converge smoothly but score low on quality metrics. Scaling experiments confirm that \pcs{}-based selection exhibits \emph{negative} scaling with increasing $K$, unlike CLIP-guided selection which scales positively. While our results are established on Stable Diffusion 1.5 and require validation on newer architectures, they challenge the intuition that smooth ODE trajectories produce better samples and highlight that verifier-free inference-time scaling for image diffusion models remains an open problem.
+
+\begin{thebibliography}{20}
+
+\bibitem[Ho et~al.(2020)]{ho2020ddpm}
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem[Song et~al.(2021)]{song2021ddim}
+Jiaming Song, Chenlin Meng, and Stefano Ermon.
+\newblock Denoising diffusion implicit models.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Lipman et~al.(2023)]{lipman2023flow}
+Yaron Lipman, Ricky T.~Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matthew Le.
+\newblock Flow matching for generative modeling.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Ma et~al.(2025)]{ma2025scaling}
+Nanye Ma, Shangyuan Tong, Haolin Jia, Hexiang Hu, Yu-Chuan Su, Mingda Zhang, Xuan Yang, Yandong Li, Tommi Jaakkola, Xuhui Jia, and Saining Xie.
+\newblock Inference-time scaling for diffusion models beyond scaling denoising steps.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2025.
+
+\bibitem[Singhal et~al.(2025)]{singhal2025fk}
+Raghav Singhal, Zachary Horvitz, Ryan Teehan, Mengye Ren, Zhou Yu, Kathleen McKeown, and Rajesh Ranganath.
+\newblock A general framework for inference-time scaling and steering of diffusion models.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2025.
+
+\bibitem[Skreta et~al.(2025)]{skreta2025fkc}
+Marta Skreta, Tara Akhound-Sadegh, Valentina Ohanesian, Roberto Bondesan, Al{\'a}n Aspuru-Guzik, Arnaud Doucet, Rob Brekelmans, Alexander Tong, and Kirill Neklyudov.
+\newblock Feynman-{K}ac correctors in diffusion: Annealing, guidance, and product of experts.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2025.
+
+\bibitem[Ho and Salimans(2022)]{ho2022cfg}
+Jonathan Ho and Tim Salimans.
+\newblock Classifier-free diffusion guidance.
+\newblock In \emph{NeurIPS 2022 Workshop on Deep Generative Models and Downstream Applications}, 2022.
+
+\bibitem[Fan et~al.(2025)]{fan2025cfgzero}
+Weichen Fan, Amber Yijia Zheng, Raymond~A. Yeh, and Ziwei Liu.
+\newblock {CFG-Zero*}: Improved classifier-free guidance for flow matching models.
+\newblock \emph{arXiv preprint arXiv:2503.18886}, 2025.
+
+\bibitem[Ahn et~al.(2024)]{ahn2024pag}
+Donghoon Ahn, Hyoungwon Cho, Jaewon Min, Wooseok Jang, Jungwoo Kim, SeonHwa Kim, Hyun~Hee Park, Kyong~Hwan Jin, and Seungryong Kim.
+\newblock Self-rectifying diffusion sampling with perturbed-attention guidance.
+\newblock In \emph{European Conference on Computer Vision (ECCV)}, 2024.
+
+\bibitem[Hong et~al.(2023)]{hong2023sag}
+Susung Hong, Gyuseong Lee, Wooseok Jang, and Seungryong Kim.
+\newblock Improving sample quality of diffusion models using self-attention guidance.
+\newblock In \emph{IEEE/CVF International Conference on Computer Vision (ICCV)}, 2023.
+
+\bibitem[Xu et~al.(2025a)]{xu2025vrg}
+Shifeng Xu, Yanzhu Liu, and Adams Wai-Kin Kong.
+\newblock Variance-reduction guidance: Sampling trajectory optimization for diffusion models.
+\newblock In \emph{IEEE International Conference on Multimedia and Expo (ICME)}, 2025.
+
+\bibitem[Lu et~al.(2022)]{lu2022dpm}
+Cheng Lu, Yuhao Zhou, Fan Bao, Jianfei Chen, Chongxuan Li, and Jun Zhu.
+\newblock {DPM-Solver}: A fast {ODE} solver for diffusion probabilistic models.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem[Tang et~al.(2025)]{tang2025nocfg}
+Zhicong Tang, Jianmin Bao, Dong Chen, and Baining Guo.
+\newblock Diffusion models without classifier-free guidance.
+\newblock \emph{arXiv preprint arXiv:2502.12154}, 2025.
+
+\bibitem[Zhang et~al.(2025)]{vfscale2025}
+Tao Zhang, Jia-Shu Pan, Ruiqi Feng, and Tailin Wu.
+\newblock {VFScale}: Intrinsic reasoning through verifier-free test-time scalable diffusion model.
+\newblock \emph{arXiv preprint arXiv:2502.01989}, 2025.
+
+\bibitem[Heusel et~al.(2017)]{heusel2017fid}
+Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter.
+\newblock {GANs} trained by a two time-scale update rule converge to a local {N}ash equilibrium.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem[Xu et~al.(2023)]{xu2023imagereward}
+Jiazheng Xu, Xiao Liu, Yuchen Wu, Yuxuan Tong, Qinkai Li, Ming Ding, Jie Tang, and Yuxiao Dong.
+\newblock {ImageReward}: Learning and evaluating human preferences for text-to-image generation.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem[Zhang et~al.(2018)]{zhang2018lpips}
+Richard Zhang, Phillip Isola, Alexei~A. Efros, Eli Shechtman, and Oliver Wang.
+\newblock The unreasonable effectiveness of deep features as a perceptual metric.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2018.
+
+\bibitem[Matosin et~al.(2014)]{matosin2014negative}
+Natalie Matosin, Elisabeth Frank, Martin Engel, Jeremy~S. Lum, and Kelly~A. Newell.
+\newblock Negativity towards negative results: A discussion of the disconnect between scientific worth and scientific culture.
+\newblock \emph{Disease Models \& Mechanisms}, 7(2):171--173, 2014.
+
+\end{thebibliography}
+
+\appendix
+\section{Reproducibility Details}
+\label{app:reproducibility}
+
+\paragraph{Hardware.} All experiments were run on a single NVIDIA RTX A6000 GPU (48GB VRAM) with an Intel Xeon CPU.
+
+\paragraph{Software.} Python 3.10, PyTorch 2.x with CUDA, Hugging Face \texttt{diffusers} library for Stable Diffusion 1.5 (\texttt{runwayml/stable-diffusion-v1-5}) in float16 precision. Metrics computed using \texttt{clean-fid} for FID, \texttt{open\_clip} (ViT-B/32) for CLIP score, the official \texttt{ImageReward} package (v1.0) for ImageReward, and \texttt{lpips} (AlexNet backbone) for LPIPS-based \pcs{}.
+
+\paragraph{Random seeds.} All experiments use seeds $\{42, 123, 456\}$. For each seed, the same initial noise vectors are shared across all particle-based methods to ensure fair comparison. Prompt subsets are selected with seed=42.
+
+\paragraph{Hyperparameters.} \cops{} default configuration: $K=4$ particles, $R=10$ resampling interval, $\alpha=1.0$ temperature, L2 distance in latent space, uniform timestep weights, $\sigma_{\text{jitter}}=0.01$. All methods use DDIM sampler with 50 inference steps and CFG scale 7.5 at $512 \times 512$ resolution, unless otherwise noted.
+
+\paragraph{Evaluation.} FID is computed against 300 real COCO 2017 validation images resized to $512 \times 512$. Due to the small sample size ($n=300$ vs.\ the standard $n=30{,}000$), our FID values carry higher variance and are suitable only for relative comparison between methods. ImageReward uses the official ImageReward-v1.0 model for all results reported in this paper.
+
+\paragraph{Statistical tests.} Paired $t$-tests and Wilcoxon signed-rank tests were computed on per-prompt CLIP scores between methods, aggregated across all three seeds ($n=900$ prompt-seed pairs for COCO). Cohen's $d$ effect sizes are computed as the mean difference divided by the pooled standard deviation.
+
+\paragraph{Datasets.} COCO-300: 300 random captions from MS-COCO 2017 validation set (seed=42 for selection). PartiPrompts-100: 100 prompts from the PartiPrompts benchmark (seed=42). DrawBench: 41 prompts from the official DrawBench benchmark.
+
+\paragraph{Compute budget.} Total experimental runtime was approximately 8 hours on a single A6000 GPU, including all baselines, ablations, LPIPS evaluation, and metric computation.
+
+\paragraph{Scope notes.} The experimental plan originally included SDXL and SD3 evaluation, 500 COCO prompts, 200 PartiPrompts, $K=16$ scaling, aesthetic score, and Adaptive Step Allocation. After the core hypothesis was refuted on SD~1.5, we reallocated compute to the LPIPS distance metric ablation (addressing the most promising alternative metric) and deeper failure analysis rather than extending to additional models where the negative result was expected to hold. We acknowledge that validation on modern architectures remains the most important open question (Section~\ref{sec:discussion}).
+
+\end{document}

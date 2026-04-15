@@ -1,0 +1,328 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{siunitx}
+\usepackage{enumitem}
+
+\title{StressAudit-SM: A Compact Robustness Audit for Schema Matching Under Metadata Stress}
+
+\author{
+Anonymous Authors \\
+\texttt{anonymous@anonymous.edu}
+}
+
+\newcommand{\stressaudit}{StressAudit-SM}
+\newcommand{\fone}{\mbox{$\mathrm{F1}$}}
+\newcommand{\ece}{\mbox{$\mathrm{ECE}$}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Schema matchers are usually reported on clean metadata, even though practical integration failures often begin with abbreviated headers, missing table names, and incomplete surrounding context. We present \stressaudit, a compact evaluative protocol for auditing robustness under deterministic metadata stress rather than a new matcher. The audit freezes 52 public schema pairs, one split reused everywhere (12 clean development pairs, 8 stressed development pairs, and 32 held-out test pairs), four metadata conditions, and a CPU-only comparison among a lexical matcher, Similarity Flooding, and a pre-trained language model (PTLM) baseline. Because the selected local Valentine archive contains no non-empty schema descriptions, context stress is instantiated as masking table-name, sibling-context, and type-context metadata across all methods. On the 32 held-out test pairs, the lexical matcher remains best under pair-level \fone{}, achieving 0.9834 on clean data and 0.8816 under header stress, while ranking stability is unchanged in all stressed conditions (Kendall's $\tau = 1.0$). The preregistered correspondence-level \fone{} is now reported alongside pair-level \fone{} in the main table and preserves the same ordering. The broader result is a useful negative finding: in this archive slice, deterministic metadata stress changes absolute quality, calibration, and selective-prediction behavior, but does not invert the method ranking. The full matrix completes well within the declared 2-core, 128\,GB feasibility envelope.
+\end{abstract}
+
+\section{Introduction}
+
+Schema matching remains a core primitive for data integration, dataset discovery, and downstream knowledge construction. Recent evaluation resources and language-model baselines have improved clean-metadata performance \citep{koutras2021valentine,zhang2023schema}, while a fast-growing literature explores LLM-centered matching pipelines \citep{parciak2024schema,sheetrit2024rematch,seedat2024matchmaker,xu2024kcmf,wang2025llmatch}. Yet many practical failures begin before tuple-level evidence is available: headers are abbreviated, table names disappear, and structural metadata becomes incomplete.
+
+This paper studies that narrow failure mode as an evaluation problem rather than a new modeling problem. Classical work already established that noisy schema inputs matter \citep{he2005holistic}. More recent papers study uncertainty-aware schema matching \citep{feng2024promptmatcher} and context-sensitive LLM matching \citep{chen2026construm}. The remaining gap is a small, reproducible, CPU-feasible audit that measures accuracy degradation, ranking stability, calibration transfer, and abstention utility under shared metadata stress.
+
+We therefore build directly on the proposal in \texttt{proposal.md} and instantiate \stressaudit{} as a fixed protocol over 52 public schema pairs from the local Valentine archive. The contribution is the audit recipe and the empirical picture it yields, not a new matcher or a new benchmark family.
+
+Our contributions are:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item We introduce \stressaudit, a compact robustness-audit protocol that freezes the pair inventory, split, stress transforms, calibration procedure, and resource envelope in advance.
+  \item We report a held-out comparison of lexical, structural, and PTLM-style matcher families under clean, header-stress, context-stress, and composite-stress conditions on 32 test pairs.
+  \item We address the preregistration drift explicitly by reporting both pair-level and correspondence-level \fone{} in the main results, and by making table/figure provenance explicit through object-level source files.
+\end{itemize}
+
+Section~\ref{sec:related} reviews prior work, Section~\ref{sec:method} defines the protocol, Section~\ref{sec:experiments} presents results and provenance, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Classical schema matching foundations.}
+Automatic schema matching has a long pre-LLM history spanning surveys, matcher-combination systems, and structural constraints. \citet{rahm2001survey} organize the classical design space, while COMA demonstrates flexible matcher composition over heterogeneous signals \citep{do2002coma}. Structural dependency cues remain important in later archival work such as interattribute-dependency matching \citep{kang2008interattribute}. We do not revisit those algorithmic contributions; instead, we ask how a small modern audit should stress-test representative lexical, structural, and semantic families under shared metadata degradation.
+
+\paragraph{Archival robustness and evaluation foundations.}
+Robustness under noisy schema inputs is not new. \citet{he2005holistic} is the key archival robustness precedent. Valentine provides the public evaluation interface most relevant to our setup \citep{koutras2021valentine}, and PTLM-style encoders provide the modern semantic baseline family we compare against \citep{zhang2023schema}. We build on these archival results rather than claiming novelty on robustness, evaluation, or language-model use per se.
+
+\paragraph{Recent archival systems.}
+Recent peer-reviewed systems such as PRISMA \citep{hellenberg2025prisma}, Magneto \citep{liu2025magneto}, and SMUTF \citep{zhang2025smutf} expand the design space through structural constraints, hybrid small/large-model pipelines, and richer semantic features. These papers primarily optimize matching quality. By contrast, our contribution is evaluative: a small protocol for testing whether conclusions from clean metadata survive deterministic metadata degradation.
+
+\paragraph{Preprints and early-stage LLM evidence.}
+Several closely related recent systems remain preprints or CoRR releases, including Prompt-Matcher \citep{feng2024promptmatcher}, ReMatch \citep{sheetrit2024rematch}, Matchmaker \citep{seedat2024matchmaker}, KcMF \citep{xu2024kcmf}, LLMATCH \citep{wang2025llmatch}, and ConStruM \citep{chen2026construm}. We cite them as evidence that uncertainty handling, retrieval, self-improvement, and context-packing are active directions, but our positioning does not depend on treating these preprints as settled archival baselines.
+
+\paragraph{Positioning.}
+Unlike prior work, \stressaudit{} is neither a new matcher nor a new benchmark release. It is a compact audit recipe for robustness claims about existing matcher families under deterministic metadata stress.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Protocol Scope}
+
+\stressaudit{} fixes the following before final reporting:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item a frozen inventory of 52 public schema pairs;
+  \item one split used everywhere: 12 clean development pairs, 8 stressed development pairs, and 32 held-out test pairs;
+  \item four conditions: clean, header-stress, context-stress, and composite-stress;
+  \item three matcher families: lexical, Similarity Flooding, and PTLM;
+  \item one clean-fit logistic calibrator and one clean-fit abstention threshold per method.
+\end{itemize}
+
+The execution envelope is CPU-only with explicit thread caps of 2 for OMP, MKL, OpenBLAS, and NumExpr, matching \texttt{exp/environment\_setup/results.json} and \texttt{outputs/eval/run\_metadata.json}. The headline protocol uses seed 17 for split freezing and deterministic tie handling.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure1_protocol.pdf}
+  \caption{Overview of \stressaudit. The protocol freezes 52 public schema pairs, applies four deterministic metadata conditions, evaluates three matcher families, fits calibration only on clean development data, and reports final results on 32 held-out test pairs. Source artifact: figure asset \texttt{figures/figure1\_protocol.pdf}; provenance registry \texttt{exp/visualization/results.json}.}
+  \label{fig:protocol}
+\end{figure}
+
+\subsection{Inventory and Stress Conditions}
+
+The inventory contains 18 \texttt{valentine\_standard} pairs, 17 \texttt{header\_poor} pairs, and 17 \texttt{context\_limited\_chembl} pairs. Split counts are 12 clean development pairs, 8 stressed development pairs, and 32 test pairs. The selected archive exposes no non-empty schema descriptions, so metadata completeness is 0.0 in every family-split cell. As a result, context stress is not description masking; instead it removes table-name, sibling-context, and raw-type fields for all methods.
+
+For a source schema $S=\{s_i\}_{i=1}^m$ and target schema $T=\{t_j\}_{j=1}^n$, we evaluate four deterministic views:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item \textbf{Clean}: original metadata.
+  \item \textbf{Header stress}: abbreviation, token deletion, identifier normalization, and one deterministic typo injection on column names.
+  \item \textbf{Context stress}: masking table names, sibling context, and type context while keeping structure and gold correspondences fixed.
+  \item \textbf{Composite stress}: the composition of header stress and context stress.
+\end{itemize}
+
+\subsection{Compared Methods}
+
+\paragraph{Lexical baseline.}
+The lexical matcher computes a normalized header similarity
+\[
+\mathrm{header}(s_i,t_j)=0.5\,\mathrm{Jaccard}(s_i,t_j)+0.5\,\mathrm{Lev}(s_i,t_j),
+\]
+after lowercasing, identifier splitting, and punctuation removal. When auxiliary metadata is present, it computes an analogous lexical context score and combines them with weights 0.7 and 0.3.
+
+\paragraph{Similarity Flooding baseline.}
+Each schema is represented as a graph with one table node, one node per column, and one coarse type node per type category. Initial node-pair similarity uses the same lexical preprocessing as the lexical baseline. Similarity Flooding runs for at most 30 iterations with damping 0.85 and early stopping at maximum update below $10^{-4}$.
+
+\paragraph{PTLM baseline.}
+The PTLM baseline uses \texttt{sentence-transformers/all-MiniLM-L6-v2} on CPU. Each column is encoded as
+\begin{center}
+\small
+\texttt{[TABLE] table [COL] column [DESC] description [TYPE] raw\_type [CTX] context}
+\normalsize
+\end{center}
+with masked fields blanked under context stress. Source and target embeddings are normalized, cosine similarity defines the score matrix, and embeddings are cached per pair-condition.
+
+\paragraph{Matching, calibration, and abstention.}
+All three methods use Hungarian assignment. One global acceptance threshold is selected on the clean development split: 0.6 for lexical, 0.5 for Similarity Flooding, and 0.3 for PTLM. Each method then fits one logistic calibrator on clean-development predictions using selected score and score margin as features, and one abstention threshold to maximize selective pair-level \fone{} with minimum coverage 0.70. The learned abstention thresholds are 0.5, 0.75, and 0.7676 for lexical, Similarity Flooding, and PTLM, respectively.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+Table~\ref{tab:inventory} summarizes the frozen inventory. The test split contains 10 context-limited ChEMBL pairs, 11 header-poor pairs, and 11 Valentine-standard pairs. Mean candidate-pair counts in the test split are 336.50, 355.45, and 1348.09 for those three families. All runs use Python 3.11.15 and satisfy the declared feasibility envelope of 128\,GB RAM and 2 CPU cores, even though the host machine exposes more memory.
+
+We use two provenance tiers throughout. Canonical per-experiment artifacts live in \texttt{exp/*/results.json} and define the frozen inventory, thresholds, runtime envelope, and ablation settings. Derived evaluation artifacts under \texttt{outputs/eval/*.csv} are deterministic summaries materialized from the headline prediction files for table-ready reporting. Whenever a table uses the latter rather than a direct \texttt{exp/*/results.json} file, the caption states that explicitly.
+
+The preregistered primary metric in \texttt{plan.json} is correspondence-level \fone{}. The saved evaluation pipeline also reports mean pair-level \fone{}, which weights each schema pair equally. Rather than choosing one silently, Table~\ref{tab:main-results} now reports both. Pair-level \fone{} remains the main headline summary because the correspondence-level metric is degenerate in one important sense on this test slice: every method-condition cell achieves correspondence recall 1.0 after Hungarian matching and the frozen acceptance thresholds, so correspondence-level \fone{} mostly collapses to precision over accepted edges. All qualitative claims in this paper are required to hold under both metrics.
+
+\begin{table}[t]
+  \caption{Frozen inventory used by \stressaudit. Metadata completeness is 0.0 in every slice because the selected local archive exposes no non-empty schema descriptions. Counts come from the canonical inventory artifact \texttt{exp/data\_inventory/results.json}; the candidate-pair means are the table-ready derived summary in \texttt{outputs/eval/table1.csv}.}
+  \label{tab:inventory}
+  \centering
+  \small
+  \begin{tabular}{lccc}
+    \toprule
+    Group & Pair count & Split or family count & Mean candidate pairs \\
+    \midrule
+    Clean development & 12 & 4/4/4 by family & -- \\
+    Stressed development & 8 & 3/2/3 by family & -- \\
+    Test & 32 & 10/11/11 by family & -- \\
+    Valentine-standard family & 18 & 4/3/11 by split & 1348.09 on test \\
+    Header-poor family & 17 & 4/2/11 by split & 355.45 on test \\
+    Context-limited ChEMBL family & 17 & 4/3/10 by split & 336.50 on test \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Main Results}
+
+Table~\ref{tab:main-results} reports the held-out test results. Under pair-level \fone{}, the clean ranking is lexical $>$ Similarity Flooding $>$ PTLM, and that ranking remains unchanged under header stress, context stress, and composite stress. The preregistered correspondence-level \fone{} shows the same ordering in every condition. Figure~\ref{fig:f1} visualizes the same result in one overall panel plus three family slices, while Figure~\ref{fig:ranking} makes the stability claim explicit with separate panels for Kendall's $\tau$, mean rank shift, and pairwise inversions.
+
+The main finding is therefore negative but still informative: on this frozen public slice, deterministic metadata stress changes absolute quality but not method order. Header stress is the harshest perturbation for the lexical baseline, lowering pair-level \fone{} from 0.9834 to 0.8816, whereas context stress slightly improves that baseline to 0.9952. Similarity Flooding and PTLM are less sensitive in pair-level \fone{} but remain clearly below the lexical matcher.
+
+\begin{table*}[t]
+  \caption{Held-out test performance on 32 schema pairs. For each condition we report pair-level \fone{} (pair) and the preregistered correspondence-level \fone{} (corr). Higher is better. This table is reproduced from derived evaluation artifacts: pair-level values in \texttt{outputs/eval/summary\_metrics.csv} and correspondence-level values in \texttt{outputs/eval/correspondence\_metrics.csv}, both generated from the canonical headline predictions in \texttt{outputs/eval/headline\_calibrated\_predictions.csv}.}
+  \label{tab:main-results}
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{
+  \begin{tabular}{lcccccccc}
+    \toprule
+    & \multicolumn{2}{c}{Clean} & \multicolumn{2}{c}{Header stress} & \multicolumn{2}{c}{Context stress} & \multicolumn{2}{c}{Composite stress} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+    Method & Pair & Corr & Pair & Corr & Pair & Corr & Pair & Corr \\
+    \midrule
+    \textbf{Lexical} & \textbf{0.9834} & \textbf{0.9830} & \textbf{0.8816} & \textbf{0.9810} & \textbf{0.9952} & \textbf{0.9971} & \textbf{0.9438} & \textbf{0.9866} \\
+    Similarity Flooding & 0.7397 & 0.8336 & 0.7212 & 0.8257 & 0.7153 & 0.8065 & 0.7199 & 0.8145 \\
+    PTLM & 0.6840 & 0.7944 & 0.6944 & 0.7944 & 0.7098 & 0.8028 & 0.6875 & 0.7944 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure2_f1.pdf}
+  \caption{Held-out pair-level \fone{} with one overall panel and three family slices. The lexical matcher leads in every panel; header stress hurts most on the Valentine and ChEMBL slices, while context stress is nearly neutral or slightly helpful on this archive subset. Source artifacts: figure asset \texttt{figures/figure2\_f1.pdf}; numeric inputs \texttt{outputs/eval/summary\_metrics.csv} and the derived family slice summary \texttt{outputs/eval/family\_metrics.csv}.}
+  \label{fig:f1}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure3_ranking.pdf}
+  \caption{Ranking stability from clean to each stressed condition. Separate panels show Kendall's $\tau$, mean rank shift, and pairwise inversion count. All stressed conditions preserve the clean ordering lexical $>$ Similarity Flooding $>$ PTLM, so $\tau = 1.0$, mean rank shift $= 0.0$, and inversions $= 0$ throughout. Source artifacts: figure asset \texttt{figures/figure3\_ranking.pdf} and the derived stability summary \texttt{outputs/eval/ranking\_stability.csv}.}
+  \label{fig:ranking}
+\end{figure}
+
+\subsection{Calibration Transfer and Selective Prediction}
+
+Table~\ref{tab:calibration} summarizes calibration and selective prediction on the held-out test split. The lexical matcher is best calibrated on clean data (\ece{} 0.0710, Brier 0.0160) and remains the strongest selective predictor overall. Clean-fit calibration transfer is not uniformly worse under stress: lexical \ece{} decreases under all three stressed conditions, although header stress still raises its Brier score to 0.0248.
+
+Selective prediction remains useful even without ranking inversions. Under header stress, lexical selective precision rises from raw precision 0.8515 to 0.9197 at 0.9316 coverage. Under composite stress, Similarity Flooding improves from raw precision 0.6506 to 0.9784 at 0.5852 coverage. PTLM benefits most under context stress, where selective precision reaches 0.9980 at 0.6415 coverage.
+
+\begin{table*}[t]
+  \caption{Calibration and selective-prediction metrics on held-out test pairs. Lower is better for \ece{}, Brier, and AURC; higher is better for selective precision. This table is reproduced from derived evaluation artifacts \texttt{outputs/eval/calibration\_metrics.csv} and \texttt{outputs/eval/selective\_summary.csv}, both computed from \texttt{outputs/eval/headline\_calibrated\_predictions.csv}.}
+  \label{tab:calibration}
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{
+  \begin{tabular}{llccccc}
+    \toprule
+    Method & Condition & \ece{} $\downarrow$ & Brier $\downarrow$ & AURC $\downarrow$ & Coverage & Selective precision $\uparrow$ \\
+    \midrule
+    Lexical & Clean & 0.0710 & 0.0160 & 0.0006 & 0.9831 & 0.9852 \\
+    Lexical & Header stress & 0.0590 & 0.0248 & 0.0085 & 0.9316 & 0.9197 \\
+    Lexical & Context stress & 0.0432 & 0.0090 & 0.0000 & 0.9974 & 0.9936 \\
+    Lexical & Composite stress & 0.0435 & 0.0212 & 0.0103 & 0.9366 & 0.9807 \\
+    \midrule
+    Similarity Flooding & Clean & 0.2883 & 0.1487 & 0.0453 & 0.6813 & 0.9870 \\
+    Similarity Flooding & Header stress & 0.2777 & 0.1510 & 0.0602 & 0.6742 & 0.9195 \\
+    Similarity Flooding & Context stress & 0.2958 & 0.1524 & 0.0594 & 0.6469 & 0.9955 \\
+    Similarity Flooding & Composite stress & 0.2882 & 0.1480 & 0.0621 & 0.5852 & 0.9784 \\
+    \midrule
+    PTLM & Clean & 0.3105 & 0.1563 & 0.0683 & 0.6129 & 0.7765 \\
+    PTLM & Header stress & 0.3210 & 0.1879 & 0.0796 & 0.5622 & 0.7689 \\
+    PTLM & Context stress & 0.2246 & 0.0958 & 0.0621 & 0.6415 & 0.9980 \\
+    PTLM & Composite stress & 0.2595 & 0.1439 & 0.0798 & 0.5091 & 0.8617 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure4_reliability.pdf}
+  \caption{Reliability diagrams for clean and stressed test predictions, arranged by method (rows) and condition (columns). The lexical matcher stays closer to the diagonal across conditions, whereas Similarity Flooding and PTLM remain overconfident in the mid-confidence region and benefit more from abstention. Source artifacts: figure asset \texttt{figures/figure4\_reliability.pdf} and \texttt{outputs/eval/headline\_calibrated\_predictions.csv}.}
+  \label{fig:reliability}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure5_risk_coverage.pdf}
+  \caption{Risk-coverage curves on the held-out test split under the frozen clean-development abstention thresholds, arranged by method (rows) and condition (columns). Similarity Flooding and PTLM approach low risk only after discarding a larger fraction of predictions, while the lexical matcher stays near-zero risk over a wider coverage range. Source artifacts: figure asset \texttt{figures/figure5\_risk\_coverage.pdf} and \texttt{outputs/eval/headline\_calibrated\_predictions.csv}.}
+  \label{fig:risk}
+\end{figure}
+
+\subsection{Ablations and Efficiency}
+
+We ablate the audit protocol rather than a new model component. Removing calibration raises lexical clean \ece{} from 0.0710 to 0.1319 and lexical clean Brier from 0.0160 to 0.0595. Removing abstention forces coverage to 1.0 and exposes weaker accepted-edge accuracy for Similarity Flooding and PTLM on clean data (0.7147 and 0.6589, respectively), even though the underlying matching outputs are unchanged. Removing the composite-stress summary does not alter the qualitative ranking conclusion.
+
+Runtime is comfortably inside the declared budget. Across all 52 pairs and 4 conditions, the lexical matcher requires 17.09\,s total wall time, Similarity Flooding 86.75\,s, and PTLM 285.88\,s, with peak RSS between 1252.90\,MB and 1261.39\,MB. The pilot-based runtime projection for the full fixed matrix is 0.0439 hours, far below the 8-hour stop rule.
+
+\begin{table}[t]
+  \caption{Protocol ablations and efficiency. The no-calibration rows come from the canonical ablation artifact \texttt{exp/ablations/results.json}. The no-composite summary and runtime rows are reproduced from derived evaluation artifacts \texttt{outputs/eval/ablation\_c\_no\_composite.csv}, \texttt{outputs/eval/runtime\_summary.csv}, and \texttt{outputs/eval/runtime\_projection.json}.}
+  \label{tab:ablations}
+  \centering
+  \small
+  \begin{tabular}{p{0.24\linewidth}p{0.68\linewidth}}
+    \toprule
+    Setting & Observation \\
+    \midrule
+    Full audit & Clean lexical calibration is strongest (\ece{} 0.0710, Brier 0.0160), and lexical header-stress selective precision is 0.9197 at 0.9316 coverage. \\
+    No calibration & Lexical clean \ece{} rises to 0.1319 and Brier to 0.0595; Similarity Flooding clean \ece{} rises to 0.3448; PTLM clean Brier rises to 0.2449. \\
+    No abstention & Coverage becomes 1.0 for all methods and conditions; clean accepted-edge accuracy is 0.9666 for lexical, 0.7147 for Similarity Flooding, and 0.6589 for PTLM. \\
+    No composite summary & The saved no-composite summary still preserves lexical $>$ Similarity Flooding $>$ PTLM on clean, header stress, and context stress. \\
+    Efficiency & Total runtime is 17.09\,s for lexical, 86.75\,s for Similarity Flooding, and 285.88\,s for PTLM; projected end-to-end runtime is 0.0439 hours. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Artifact Provenance and Reproducibility}
+
+To make auditability explicit, we record object-level provenance in \texttt{outputs/eval/paper\_artifact\_manifest.json}. Every table and figure caption above names the source artifact tier it relies on. Table~\ref{tab:repro} addresses the earlier appendix inconsistency by using a single canonical artifact per panel: \texttt{outputs/eval/seed\_sensitivity\_summary.csv} for auxiliary seeds and the immutable headline-only export \texttt{outputs/eval/headline\_stressed\_dev\_transfer.csv} for the stressed-development transfer check.
+
+Panel~A shows that auxiliary seeds 17, 23, and 42 preserve the same method ordering in every condition. Panel~B compares stressed-development calibration against the clean-development clean baseline using the headline transfer artifact derived directly from \texttt{exp/calibration/results.json}. This removes the earlier mixture of overwritten auxiliary summaries and headline calibration values.
+
+\begin{table*}[t]
+  \caption{Reproducibility summary using one canonical artifact per panel. Panel A reports mean pair-level \fone{} with min--max ranges over seeds 17, 23, and 42 from \texttt{outputs/eval/seed\_sensitivity\_summary.csv}. Panel B reports stressed-development transfer relative to the clean-development clean baseline from \texttt{outputs/eval/headline\_stressed\_dev\_transfer.csv}, which is derived directly from \texttt{exp/calibration/results.json}.}
+  \label{tab:repro}
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{
+  \begin{tabular}{llcccc}
+    \toprule
+    Panel & Method & Clean & Header stress & Context stress & Composite stress \\
+    \midrule
+    Seeds & Lexical & 0.9830 [0.9823, 0.9834] & 0.9123 [0.8816, 0.9416] & 0.9970 [0.9952, 0.9986] & 0.9381 [0.9247, 0.9458] \\
+    Seeds & Similarity Flooding & 0.7483 [0.7397, 0.7569] & 0.7375 [0.7212, 0.7467] & 0.7149 [0.7091, 0.7201] & 0.7167 [0.7130, 0.7199] \\
+    Seeds & PTLM & 0.6872 [0.6830, 0.6947] & 0.6918 [0.6893, 0.6944] & 0.7078 [0.7010, 0.7125] & 0.6880 [0.6875, 0.6889] \\
+    \midrule
+    Panel & Method & Header stress & Context stress & Composite stress & Baseline clean-dev clean \\
+    \midrule
+    Transfer & Lexical & \ece{} 0.0662 / Brier 0.0298 & \ece{} 0.0337 / Brier 0.0048 & \ece{} 0.0469 / Brier 0.0391 & \ece{} 0.0566 / Brier 0.0095 \\
+    Transfer & Similarity Flooding & \ece{} 0.2708 / Brier 0.1540 & \ece{} 0.2972 / Brier 0.1488 & \ece{} 0.2889 / Brier 0.1479 & \ece{} 0.2430 / Brier 0.1082 \\
+    Transfer & PTLM & \ece{} 0.3139 / Brier 0.1863 & \ece{} 0.2281 / Brier 0.0959 & \ece{} 0.2674 / Brier 0.1402 & \ece{} 0.2890 / Brier 0.1381 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table*}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main outcome is a negative result on ranking instability. The proposal hypothesized that deterministic metadata stress might change method order on held-out public pairs. It does not. In this slice, metadata stress shifts absolute performance and confidence behavior more than relative ranking.
+
+The archive itself imposes an important limitation. Because none of the 52 selected pairs expose non-empty schema descriptions, our context-stress condition is necessarily a structural-context mask rather than description removal. This is still a real metadata perturbation, but it is narrower than the richer context-loss setting one might study in a benchmark with descriptions.
+
+The metric story also has a limitation. Correspondence-level \fone{} was preregistered, and we now report it in the main table; however, on this test slice it is less informative because correspondence recall is 1.0 in every method-condition cell after matching. Pair-level \fone{} therefore carries more of the robustness signal, especially for large-versus-small schema pairs. We keep both metrics visible and require agreement across them.
+
+Finally, the audit covers only 52 pairs and three baseline families, and PTLM is instantiated with a compact CPU-feasible encoder rather than a larger generative LLM. The protocol is deliberately narrow, so broader generalization remains untested.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper presented \stressaudit, a compact protocol for evaluating schema-matching robustness under deterministic metadata stress. The protocol freezes the pair inventory, split, stress operators, calibration procedure, and CPU-only resource envelope, then compares lexical, structural, and PTLM matcher families on the same held-out public pairs.
+
+Empirically, the lexical baseline is strongest throughout, reaching pair-level \fone{} of 0.9834 on clean data and 0.8816 under header stress, while ranking stability is unchanged in every stressed condition. Reporting the preregistered correspondence-level \fone{} alongside pair-level \fone{} does not change the qualitative conclusion. Calibration and abstention remain useful even when rankings are stable, and the full matrix completes far inside the claimed feasibility budget.
+
+The broader implication is modest but practical: small robustness audits can still be valuable even when they uncover no ranking inversion. Future work should apply the same protocol to archives with richer descriptions, stronger LLM baselines, and stressors that act on tuple values as well as metadata.
+
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\end{document}

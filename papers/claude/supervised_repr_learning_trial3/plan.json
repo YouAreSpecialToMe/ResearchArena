@@ -1,0 +1,257 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup environment and dependencies",
+    "description": "Install all required packages and verify GPU availability. This must complete before any experiments.",
+    "steps": {
+      "step1": "Install PyTorch with CUDA support: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step2": "Install additional dependencies: pip install numpy scipy matplotlib seaborn scikit-learn pandas tqdm",
+      "step3": "Verify GPU availability: run 'python -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_properties(0).total_mem / 1e9)\"' and confirm NVIDIA RTX A6000 with ~48GB VRAM.",
+      "step4": "Create project directory structure: mkdir -p src/ results/{supcon,cc_supcon,ce,hscl,ablations,batch_size,gradient_analysis,confusability_matrices} figures/ logs/",
+      "step5": "Set global random seed infrastructure: create a utility function set_seed(seed) that sets torch.manual_seed, torch.cuda.manual_seed_all, np.random.seed, random.seed, and torch.backends.cudnn.deterministic=True."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare CIFAR-100 dataset",
+    "description": "Download CIFAR-100 and set up data loading with standard SupCon augmentations. CIFAR-100 has 100 classes grouped into 20 superclasses (5 fine-grained classes each), making it ideal for studying confusability patterns.",
+    "steps": {
+      "step1": "Download CIFAR-100 using torchvision.datasets.CIFAR100(root='./data', train=True, download=True). Verify: 50,000 training images, 10,000 test images, 100 classes, 20 superclasses.",
+      "step2": "Implement TwoCropTransform wrapper that applies two independent random augmentations to each image for contrastive learning. Training augmentations: RandomResizedCrop(32, scale=(0.2, 1.0)), RandomHorizontalFlip(), ColorJitter(0.4, 0.4, 0.4, 0.1) with p=0.8, RandomGrayscale(p=0.2), ToTensor(), Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761]).",
+      "step3": "Standard evaluation transform: ToTensor(), Normalize(same mean/std). No augmentation for evaluation.",
+      "step4": "Create training data loader: batch_size=256 (yields 512 augmented views), num_workers=4, pin_memory=True, drop_last=True, shuffle=True.",
+      "step5": "Build a mapping from CIFAR-100 fine labels (100 classes) to 20 superclasses. The coarse labels are available via CIFAR100 with target_type='coarse'. Store this mapping as a dict for confusability analysis.",
+      "step6": "Log dataset statistics: 100 classes, 500 train images/class, 100 test images/class, 32x32 resolution, 20 superclasses with 5 classes each."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare STL-10 and CIFAR-10 for transfer evaluation",
+    "description": "Download STL-10 and CIFAR-10 for transfer learning evaluation. Models trained on CIFAR-100 will be evaluated via linear probing on these datasets.",
+    "steps": {
+      "step1": "Download STL-10: torchvision.datasets.STL10(root='./data', split='train', download=True) and split='test'. 5,000 train, 8,000 test images at 96x96. Resize to 32x32 to match CIFAR-100 encoder.",
+      "step2": "Download CIFAR-10: torchvision.datasets.CIFAR10(root='./data', train=True, download=True). 50,000 train, 10,000 test at 32x32.",
+      "step3": "Create evaluation data loaders for both: batch_size=256, standard test transforms (ToTensor, Normalize with CIFAR-100 mean/std), num_workers=4."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and train Cross-Entropy baseline",
+    "description": "Train ResNet-50 with standard cross-entropy loss as the simple baseline. Uses 1 seed since this is not the primary comparison.",
+    "steps": {
+      "step1": "Implement ResNet-50 adapted for CIFAR-100 32x32 input: change first conv to kernel_size=3, stride=1, padding=1 (instead of 7x7 stride 2), remove max-pool layer. Output feature dimension: 2048.",
+      "step2": "Add classification head: nn.Linear(2048, 100).",
+      "step3": "Train with SGD, momentum=0.9, weight_decay=1e-4, lr=0.5, cosine annealing, 200 epochs, batch_size=256. Standard augmentations: RandomCrop(32, padding=4), RandomHorizontalFlip, Normalize.",
+      "step4": "Train 1 seed (seed=42). Save encoder checkpoint to results/ce/ce_seed42.pth.",
+      "step5": "Evaluate: linear probe (SGD, lr=0.1, 100 epochs, cosine schedule on frozen 2048-dim features) and k-NN (k=200, cosine similarity).",
+      "step6": "Expected runtime: ~15 minutes."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and train SupCon baseline (5 seeds)",
+    "description": "Train standard Supervised Contrastive Learning (Khosla et al., 2020) as the primary baseline. Uses 5 seeds with paired design for statistical power to detect 1-2% improvements over CC-SupCon.",
+    "steps": {
+      "step1": "Implement SupCon loss: L_i = -1/|P(i)| * sum_{p in P(i)} log[ exp(z_i . z_p / tau) / sum_{a in A(i)} exp(z_i . z_a / tau) ], where P(i) are same-class indices, A(i) are all indices except i, tau=0.1. Use the standard formulation from Khosla et al. (2020).",
+      "step2": "Architecture: ResNet-50 (CIFAR-adapted) + 2-layer MLP projection head: Linear(2048, 2048) -> BN -> ReLU -> Linear(2048, 128). L2-normalize the 128-dim output.",
+      "step3": "Training: SGD, momentum=0.9, weight_decay=1e-4, lr=0.5, cosine annealing, tau=0.1, batch_size=256 (512 augmented views), 500 epochs.",
+      "step4": "Train 5 seeds: [42, 123, 456, 789, 1024]. Save encoder weights (without projection head) to results/supcon/supcon_seed{seed}.pth.",
+      "step5": "Log training loss every epoch. Save loss curves for plotting.",
+      "step6": "For each seed: evaluate linear probe accuracy (SGD, lr=0.1, 100 epochs, cosine on frozen 2048-dim features) and k-NN accuracy (k=200).",
+      "step7": "Report mean ± std across 5 seeds.",
+      "step8": "Expected runtime: ~30 min/seed x 5 = ~2.5 hours."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and train H-SCL baseline (3 seeds)",
+    "description": "Implement instance-level hard negative supervised contrastive learning (Jiang et al., 2022, arXiv:2209.00078) as a strong baseline. Essential for comparing instance-level vs. class-pair-level approaches and for the gradient variance analysis.",
+    "steps": {
+      "step1": "Implement H-SCL loss: modify SupCon to upweight hard negatives. For each anchor i, weight negative a by w_a = exp(z_i . z_a / tau_hard)^beta_hard where tau_hard=0.1 and beta_hard=1.0. This concentrates gradient mass on the hardest negatives within each batch.",
+      "step2": "Same architecture, optimizer, schedule, augmentations, and batch size as SupCon.",
+      "step3": "Train 3 seeds: [42, 123, 456] for 500 epochs each.",
+      "step4": "Save encoder checkpoints to results/hscl/hscl_seed{seed}.pth. Also save intermediate checkpoints at epochs [100, 300] for gradient analysis.",
+      "step5": "Evaluate linear probe and k-NN accuracy for each seed.",
+      "step6": "Expected runtime: ~30 min/seed x 3 = ~1.5 hours."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement CC-SupCon method",
+    "description": "Implement the full Confusion-Calibrated Supervised Contrastive Learning method with class-pair confusability reweighting. This is the core novel contribution.",
+    "steps": {
+      "step1": "Implement class centroid tracker: maintain a [100, 128] buffer of EMA class centroids. Update rule: mu_c^(t) = alpha * mu_c^(t-1) + (1-alpha) * mean(z_i for i in class c in batch). L2-normalize centroids after each update. Use alpha=0.99.",
+      "step2": "Implement confusability matrix: conf(i,j) = exp(mu_i . mu_j / tau_c) / sum_{k != i} exp(mu_i . mu_k / tau_c). Symmetrize: conf_hat(i,j) = 0.5 * (conf(i,j) + conf(j,i)). Set diagonal to 0. Use tau_c=0.1.",
+      "step3": "Implement CC-SupCon loss: same as SupCon but each negative pair's exp(z_i . z_a / tau) in the denominator is multiplied by w(y_i, y_a) = 1 + beta * conf_hat(y_i, y_a). Positive pairs keep w=1. Use beta=1.0.",
+      "step4": "Handle edge cases: (a) Classes not seen in a batch: don't update their centroid. (b) First few batches before all centroids initialized: use uniform confusability (all weights = 1, equivalent to SupCon). (c) Detach confusability weights from computation graph (stop gradient through centroids).",
+      "step5": "Log confusability matrices at epochs [1, 10, 50, 100, 200, 300, 400, 500] to results/confusability_matrices/ as .npy files.",
+      "step6": "Unit test: verify that with beta=0, CC-SupCon produces identical loss values to standard SupCon on the same batch."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train CC-SupCon (5 seeds, main comparison)",
+    "description": "Train CC-SupCon with default hyperparameters on CIFAR-100 for 5 seeds, paired with SupCon seeds. This is the primary experiment for the paper's main claim.",
+    "steps": {
+      "step1": "Hyperparameters: beta=1.0, tau_c=0.1, alpha=0.99, warmup=0. All other settings identical to SupCon: lr=0.5, momentum=0.9, wd=1e-4, cosine annealing, tau=0.1, batch_size=256, 500 epochs.",
+      "step2": "Train 5 seeds: [42, 123, 456, 789, 1024] — same seeds as SupCon for paired comparison.",
+      "step3": "Save encoder checkpoints (no projection head) to results/cc_supcon/ccsupcon_seed{seed}.pth. Save confusability matrices at logged epochs for seed=42.",
+      "step4": "For each seed: evaluate linear probe accuracy (same protocol as SupCon) and k-NN accuracy (k=200).",
+      "step5": "Perform paired t-test: for each seed s, compute delta_s = acc_ccsupcon(s) - acc_supcon(s). Test H0: mean(delta) = 0 using scipy.stats.ttest_rel. Report t-statistic, p-value, mean difference, 95% CI.",
+      "step6": "Expected runtime: ~30 min/seed x 5 = ~2.5 hours."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Transfer learning evaluation",
+    "description": "Evaluate CIFAR-100-trained representations on STL-10 and CIFAR-10 via linear probing. Compare all methods.",
+    "steps": {
+      "step1": "For each method and seed: load frozen encoder, extract 2048-dim features for STL-10 and CIFAR-10 train/test sets.",
+      "step2": "STL-10: resize 96x96 → 32x32, extract features, train linear probe (SGD, lr=0.1, 100 epochs, cosine), report top-1 accuracy.",
+      "step3": "CIFAR-10: extract features, train linear probe (same protocol), report top-1 accuracy.",
+      "step4": "Evaluate: CE (1 seed), SupCon (5 seeds), CC-SupCon (5 seeds), H-SCL (3 seeds). For paired methods, perform paired t-test (5 seeds).",
+      "step5": "Expected runtime: ~3 min per probe x ~28 evaluations = ~1.5 hours. Can overlap with training if using CPU for linear probes."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: calibration strength (beta)",
+    "description": "Sweep beta to understand the effect of confusability weighting strength. beta=0 recovers SupCon. This is the most important ablation — it directly tests whether confusability weighting helps and identifies the robust operating range.",
+    "steps": {
+      "step1": "Train CC-SupCon with beta in {0.0, 0.5, 1.0, 2.0, 5.0} on CIFAR-100, 200 epochs, 3 seeds: [42, 123, 456]. All other params: tau_c=0.1, alpha=0.99, warmup=0, lr=0.5, tau=0.1, batch_size=256.",
+      "step2": "beta=0.0 should match SupCon at 200 epochs (sanity check). beta=1.0 matches the main experiment but at 200 epochs (shorter for ablation budget).",
+      "step3": "Evaluate linear probe and k-NN for each (beta, seed) combination.",
+      "step4": "Report mean ± std across 3 seeds for each beta. Plot accuracy vs. beta with error bars.",
+      "step5": "Identify robust operating range: the range of beta where performance is consistently above SupCon baseline.",
+      "step6": "Expected runtime: 5 betas x 3 seeds x ~12 min = ~3 hours. NOTE: share runs with other ablations where possible (e.g., beta=1.0/tau_c=0.1/alpha=0.99 at 200 epochs is reused)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: confusability temperature (tau_c)",
+    "description": "Study how the sharpness of the confusability distribution affects performance. Lower tau_c = sharper (focuses on single most confusable class). Higher tau_c = more uniform.",
+    "steps": {
+      "step1": "Train CC-SupCon with tau_c in {0.05, 0.1, 0.2} on CIFAR-100, 200 epochs, 3 seeds: [42, 123, 456]. Fix beta=1.0, alpha=0.99.",
+      "step2": "tau_c=0.1 at 200 epochs is already covered by the beta ablation (beta=1.0 run). Only need new runs for tau_c={0.05, 0.2}: 2 x 3 = 6 new runs.",
+      "step3": "Evaluate linear probe and k-NN for each (tau_c, seed).",
+      "step4": "Report mean ± std. Plot accuracy vs. tau_c.",
+      "step5": "Expected runtime: 6 runs x ~12 min = ~1.2 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: centroid momentum (alpha) and warmup",
+    "description": "Test centroid momentum (responsiveness vs. stability tradeoff) and warmup (whether delaying confusability weighting helps). Combined into one step to save budget.",
+    "steps": {
+      "step1": "Centroid momentum: train CC-SupCon with alpha in {0.9, 0.95, 0.99, 0.999} on CIFAR-100, 200 epochs, 3 seeds: [42, 123, 456]. Fix beta=1.0, tau_c=0.1. alpha=0.99 is already covered. Need 3 x 3 = 9 new runs.",
+      "step2": "Warmup: train CC-SupCon with warmup W in {0, 50, 100} on CIFAR-100, 200 epochs, 3 seeds: [42, 123, 456]. Fix beta=1.0, tau_c=0.1, alpha=0.99. During first W epochs, beta=0 (standard SupCon). W=0 already covered. Need 2 x 3 = 6 new runs.",
+      "step3": "Evaluate linear probe and k-NN for each configuration.",
+      "step4": "Report mean ± std for each. Plot accuracy vs. alpha and accuracy vs. warmup.",
+      "step5": "Expected runtime: 15 runs x ~12 min = ~3 hours. If budget tight, reduce to 1 seed and use seed=42 only (5 runs = ~1 hour)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Batch size sensitivity experiment",
+    "description": "Compare SupCon and CC-SupCon at different batch sizes. We hypothesize CC-SupCon is less sensitive to batch size because class-pair weights provide a curriculum that partially compensates for fewer negatives at smaller batch sizes. This addresses a secondary success criterion.",
+    "steps": {
+      "step1": "Train SupCon and CC-SupCon (beta=1.0, tau_c=0.1, alpha=0.99) at batch sizes {128, 256, 512} on CIFAR-100 for 200 epochs, 3 seeds: [42, 123, 456].",
+      "step2": "Adjust learning rate with linear scaling: lr = 0.5 * (batch_size / 256). So: bs=128 → lr=0.25, bs=256 → lr=0.5, bs=512 → lr=1.0.",
+      "step3": "batch_size=256 runs for both methods are already covered by the beta ablation (beta=0 for SupCon, beta=1.0 for CC-SupCon at 200 epochs). Need: 2 methods x 2 new batch sizes x 3 seeds = 12 new runs.",
+      "step4": "Evaluate linear probe accuracy for each (method, batch_size, seed).",
+      "step5": "Plot accuracy vs. batch_size for both methods on the same figure with error bars. Compute performance spread (max-min across batch sizes) for each method. CC-SupCon should have smaller spread.",
+      "step6": "Expected runtime: 12 runs x ~12 min = ~2.4 hours. If budget tight, reduce to 1 seed (4 new runs = ~48 min)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Gradient analysis: confusable vs. well-separated pairs",
+    "description": "Measure gradient norms for confusable vs. well-separated class pairs under CC-SupCon, SupCon, and H-SCL. This provides mechanistic evidence that CC-SupCon focuses learning on hard class distinctions and empirically validates the variance reduction argument from Section 2.6 of the proposal.",
+    "steps": {
+      "step1": "Load trained checkpoints from seed=42 at epoch 500 for SupCon, CC-SupCon, and H-SCL.",
+      "step2": "For each method: run 50 batches through the model in eval-mode-with-gradients. For each batch, compute per-negative-pair gradient contributions to the contrastive loss w.r.t. the similarity z_i . z_a for each negative pair (i, a). Aggregate by class pair (y_i, y_a) to get mean gradient magnitude per class pair.",
+      "step3": "Using the CC-SupCon confusability matrix at epoch 500, partition class pairs into 'confusable' (top 20% by confusability score) and 'well-separated' (bottom 20%).",
+      "step4": "Compare mean gradient norm: confusable vs. well-separated pairs for each method. Expect: CC-SupCon shows the largest ratio (confusable/well-separated), confirming it focuses representational effort on hard pairs.",
+      "step5": "Compare gradient variance: compute the variance of per-pair gradient norms across batches for CC-SupCon vs. H-SCL. Expect: CC-SupCon has lower variance (class-pair-level weighting averages out instance noise, validating the variance reduction argument).",
+      "step6": "Produce figures: (a) Box plot of gradient norms for confusable vs. well-separated pairs under each method. (b) Bar chart of gradient variance for CC-SupCon vs. H-SCL. Save to figures/.",
+      "step7": "Expected runtime: ~10 min total (no training, just forward/backward passes on 50 batches per method)."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Confusability matrix structure analysis",
+    "description": "Verify that the learned confusability matrix captures meaningful inter-class structure. This is a primary success criterion: within-superclass confusability should exceed between-superclass confusability.",
+    "steps": {
+      "step1": "Load confusability matrices from CC-SupCon seed=42 at epochs [1, 10, 50, 100, 200, 300, 400, 500].",
+      "step2": "For each epoch: compute mean within-superclass confusability (avg conf_hat(i,j) for i,j in same superclass, i != j) and mean between-superclass confusability (avg conf_hat(i,j) for i,j in different superclasses).",
+      "step3": "Compute the within/between ratio at each epoch. Plot this ratio over training. A ratio > 1 indicates the matrix captures superclass structure.",
+      "step4": "At epoch 500: perform a permutation test (10,000 permutations) or t-test to assess whether within > between is statistically significant (p < 0.05).",
+      "step5": "Identify top-10 most confusable class pairs at epoch 500. Check if they are semantically meaningful (e.g., within the same superclass such as 'leopard' vs 'tiger' in the 'large carnivores' superclass).",
+      "step6": "Compute Spearman rank correlation between confusability matrix and ground-truth superclass membership matrix (1 if same superclass, 0 otherwise).",
+      "step7": "Save analysis to results/confusability_analysis.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Representation geometry and neural collapse analysis",
+    "description": "Analyze how CC-SupCon changes representation geometry compared to SupCon, specifically measuring deviation from simplex ETF and tracking neural collapse metrics.",
+    "steps": {
+      "step1": "For SupCon and CC-SupCon (seed=42), extract class centroids from training set: compute mean L2-normalized 2048-dim feature per class.",
+      "step2": "Compute pairwise cosine similarity matrix (100x100) for both methods. For simplex ETF with 100 classes, all off-diagonal similarities = -1/99 ≈ -0.0101.",
+      "step3": "Measure deviation from simplex ETF: std of off-diagonal cosine similarities. CC-SupCon should have higher std (non-uniform distances, confusable classes pushed further apart).",
+      "step4": "Track neural collapse metrics at epochs [50, 100, 200, 300, 400, 500]: NC1 = trace(S_W)/trace(S_B) (within/between class covariance ratio, lower = more collapsed), NC2 = ||M^T M / ||M^T M||_F - I/C||_F (deviation from simplex ETF, lower = closer).",
+      "step5": "Compute correlation between inter-class distances and confusability scores: Pearson/Spearman between conf_hat(c,c') and cosine distance between class centroids c and c'. Under CC-SupCon, higher confusability should correlate with larger distance (confusable pairs pushed apart).",
+      "step6": "Save to results/geometry_analysis.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical testing and success criteria evaluation",
+    "description": "Run all statistical tests and evaluate whether the primary and secondary success criteria from the proposal are met.",
+    "steps": {
+      "step1": "Primary criterion 1: Paired t-test on CIFAR-100 linear probe accuracy (CC-SupCon vs. SupCon, 5 paired seeds). Use scipy.stats.ttest_rel. Report t-stat, p-value, mean difference, 95% CI, Cohen's d. Success: p < 0.05 and CC-SupCon mean > SupCon mean.",
+      "step2": "Primary criterion 2: Within-superclass vs. between-superclass confusability (from confusability analysis). Success: within > between with p < 0.05.",
+      "step3": "Secondary: k-NN accuracy (paired t-test, 5 seeds). Report mean, std, p-value.",
+      "step4": "Secondary: Transfer learning (STL-10, CIFAR-10) paired t-test, 5 seeds.",
+      "step5": "Secondary: Ablation confirms beta > 0 improves over beta = 0 at 200 epochs.",
+      "step6": "Secondary: Batch size sensitivity — compute performance spread (max - min across batch sizes) for SupCon and CC-SupCon. CC-SupCon should have smaller spread.",
+      "step7": "Secondary: Gradient analysis confirms larger gradients for confusable pairs under CC-SupCon and lower gradient variance than H-SCL.",
+      "step8": "Check failure indicators: (a) CC-SupCon worse on ALL metrics → method may be harmful. (b) Confusability matrix is structureless → signal too noisy. (c) No robust beta operating range → method impractical.",
+      "step9": "Compile all results into results/final_summary.json with all metrics, statistical tests, success criteria verdicts."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create all publication-quality figures and tables for the research paper.",
+    "steps": {
+      "step1": "Figure 1 — Confusability matrix evolution: 4-panel heatmap showing the 100x100 confusability matrix at epochs {1, 100, 300, 500} from CC-SupCon seed=42. Order classes by superclass to reveal block-diagonal structure. Use seaborn heatmap with appropriate colormap. Save as figures/fig1_confusability_evolution.pdf.",
+      "step2": "Figure 2 — Main results bar chart: grouped bar chart comparing CE, SupCon, H-SCL, CC-SupCon on (a) linear probe top-1, (b) k-NN accuracy. Include error bars (std over seeds). Mark statistical significance with asterisks. Save as figures/fig2_main_results.pdf.",
+      "step3": "Figure 3 — Ablation: beta: line plot of linear probe accuracy vs. beta {0, 0.5, 1.0, 2.0, 5.0} with error bars (std, 3 seeds). Mark SupCon baseline (beta=0). Save as figures/fig3_ablation_beta.pdf.",
+      "step4": "Figure 4 — Ablation: all hyperparameters: 3-panel figure for (a) tau_c, (b) alpha, (c) warmup ablations. Bar charts with error bars. Save as figures/fig4_ablations_other.pdf.",
+      "step5": "Figure 5 — Batch size sensitivity: line plot of linear probe accuracy vs. batch_size for SupCon and CC-SupCon with error bars. Annotate performance spread for each method. Save as figures/fig5_batch_size.pdf.",
+      "step6": "Figure 6 — Gradient analysis: (a) Box plot of gradient norms for confusable vs. well-separated pairs under each method. (b) Bar chart comparing gradient variance CC-SupCon vs. H-SCL. Save as figures/fig6_gradient_analysis.pdf.",
+      "step7": "Figure 7 — Representation geometry: (a) Histogram of pairwise cosine similarities for SupCon vs. CC-SupCon. (b) Scatter of confusability vs. inter-class distance. (c) NC1/NC2 training curves. Save as figures/fig7_geometry.pdf.",
+      "step8": "Figure 8 — Confusability structure: (a) Within- vs. between-superclass confusability over training epochs. (b) t-SNE/UMAP of representations colored by superclass for SupCon vs. CC-SupCon. Save as figures/fig8_structure.pdf.",
+      "step9": "Figure 9 — Per-class accuracy: bar chart of per-class accuracy improvement (CC-SupCon - SupCon) sorted by magnitude, with classes colored by superclass. Save as figures/fig9_per_class.pdf.",
+      "step10": "Table 1 — Main results: rows = {CE, SupCon, H-SCL, CC-SupCon}, columns = {Linear Probe, k-NN, STL-10 Transfer, CIFAR-10 Transfer}. Mean ± std. Bold best. Include p-values. Save as figures/table1_main.tex.",
+      "step11": "Table 2 — Ablation results: all configurations x linear probe accuracy. Save as figures/table2_ablations.tex.",
+      "step12": "Styling: font_size=12, colorblind-friendly palette (use seaborn 'colorblind' or matplotlib 'tab10'), figure width appropriate for two-column paper (3.5in single, 7in double). Save all as both PDF and PNG."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Runtime budget and experiment prioritization",
+    "description": "Manage the ~8 hour compute budget with explicit prioritization. Not all experiments may fit; this step defines what to cut if time runs short.",
+    "steps": {
+      "step1": "Priority 1 — MUST complete (~5.5h): SupCon 5 seeds x 500 epochs (~2.5h) + CC-SupCon 5 seeds x 500 epochs (~2.5h) + CE 1 seed x 200 epochs (~0.15h) + all linear probe/kNN evals (~0.3h).",
+      "step2": "Priority 2 — SHOULD complete (~1.5h): Beta ablation: 5 values x 3 seeds x 200 epochs. Reuse beta=1.0 run where possible. If time-constrained, reduce to 3 values {0.0, 1.0, 5.0} x 3 seeds.",
+      "step3": "Priority 3 — SHOULD complete (~1.6h): H-SCL 3 seeds x 500 epochs (~1.5h) + gradient analysis (~0.1h). If tight, reduce to 1 seed.",
+      "step4": "Priority 4 — NICE to have (~2h): Batch size sensitivity: 2 methods x 2 new batch sizes x 3 seeds x 200 epochs. If tight: 1 seed only (save ~1.5h).",
+      "step5": "Priority 5 — NICE to have (~1.5h): tau_c ablation (6 runs), alpha ablation (9 runs), warmup ablation (6 runs) at 200 epochs. If tight: 1 seed only for each.",
+      "step6": "Priority 6 — LOW priority (~0.5h): Transfer evaluation, confusability analysis, geometry analysis, visualization. These use saved checkpoints and are fast.",
+      "step7": "Total estimated: ~7.5h if all priorities complete with 3 seeds for ablations. If Priorities 1-3 take longer, cut Priority 4-5 ablations to 1 seed. NEVER sacrifice the 5-seed main comparison (Priority 1).",
+      "step8": "Run-sharing strategy: the beta ablation at beta=1.0, tau_c=0.1, alpha=0.99, 200 epochs, seed=42 is reused across beta/tau_c/alpha/warmup ablations. Track which runs are shared to avoid redundancy."
+    }
+  }
+]

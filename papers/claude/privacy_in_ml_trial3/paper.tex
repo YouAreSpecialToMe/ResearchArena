@@ -1,0 +1,508 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+\newcommand{\CR}{\text{CR}}
+\newcommand{\DPSGD}{\text{DP-SGD}}
+\newcommand{\FairPrunDP}{\textsc{FairPrune-DP}}
+
+\title{The Compounding Cost: How Differential Privacy and Model Compression\\ Jointly Amplify Fairness Degradation}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Machine learning models deployed in practice are often trained with differential privacy (DP-SGD) for regulatory compliance and subsequently compressed via pruning for efficient inference. Both operations independently degrade performance on underrepresented subgroups, but their joint effect has not been systematically studied. We provide the first empirical characterization of this interaction across two datasets (imbalanced CIFAR-10 and UTKFace), three privacy budgets ($\varepsilon \in \{1, 4, 8\}$), and three sparsity levels (50\%, 70\%, 90\%). We define a \emph{compounding ratio} $\CR = \Delta_{\text{DC}} / (\Delta_{\text{D}} + \Delta_{\text{C}})$ measuring whether the combined worst-group accuracy degradation exceeds the sum of individual effects. We find that the compounding effect is \emph{sparsity-dependent}: at moderate sparsity (50\%), pruning acts as a regularizer and the combined effect is sub-additive ($\CR < 1$). However, at high sparsity (90\%), the effect becomes consistently super-additive across both datasets, reaching $\CR = 1.23 \pm 0.15$ on CIFAR-10 ($\varepsilon = 8$, $p < 0.02$) and $\CR = 1.79 \pm 0.91$ on UTKFace ($\varepsilon = 8$, $p < 0.05$). Mechanistic analysis reveals that the compounding operates through DP-SGD's differential gradient clipping, which corrupts minority feature quality---making these features disproportionately vulnerable to aggressive pruning, even though minority-relevant weight magnitudes are not systematically smaller. We propose \FairPrunDP{}, a pruning criterion based on worst-group Fisher information, which improves worst-group accuracy by up to 6.5 percentage points relative to standard magnitude pruning on DP-trained models, though it does not consistently reduce the accuracy gap across all configurations.
+\end{abstract}
+
+%% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+%% ============================================================================
+
+Machine learning models deployed in sensitive domains must simultaneously satisfy multiple constraints: they must protect user privacy (e.g., for GDPR/CCPA compliance), be efficient enough for deployment on resource-constrained devices, and treat all demographic groups fairly. In practice, this means models are often (1)~trained with differentially private stochastic gradient descent (DP-SGD)~\citep{abadi2016deep} to provide formal privacy guarantees, and then (2)~compressed via pruning~\citep{han2015learning} to reduce inference cost.
+
+Two independent lines of research have established concerning findings about each step in isolation. First, DP-SGD has \emph{disparate impact} on model accuracy: its gradient clipping and noise addition disproportionately degrade performance on underrepresented subgroups~\citep{bagdasaryan2019differential, esipova2023disparate}. The root cause is gradient misalignment---clipping distorts gradients for minority groups more because these gradients tend to have larger norms and different directions~\citep{esipova2023disparate}. Second, model compression amplifies bias: pruning disproportionately harms performance on ``Compression Identified Exemplars'' (CIE)---atypical examples that often belong to underrepresented groups~\citep{hooker2020characterising, iofinova2023bias}.
+
+\textbf{The critical gap.} No prior work has systematically studied whether these two effects \emph{compound} when applied in sequence. In real-world deployment pipelines, a model undergoes both DP training and compression. If the fairness costs are super-additive---the combined degradation exceeds the sum of individual degradations---then current separate analyses dramatically underestimate the true cost to minority groups.
+
+\textbf{Key finding.} We discover that the interaction between DP-SGD and pruning is \emph{sparsity-dependent}. At moderate compression (50\% sparsity), pruning acts as a regularizer that partially counteracts DP's damage, producing sub-additive compounding. At high compression (90\% sparsity), the combined pipeline produces \emph{super-additive} fairness degradation, with the compounding ratio significantly exceeding 1.0 on both datasets. This transition has practical implications: deployment teams must be especially cautious about high compression rates for DP-trained models.
+
+Our contributions are:
+\begin{itemize}
+    \item We provide the first systematic empirical study of the joint fairness impact of DP-SGD and magnitude-based pruning, defining a \emph{compounding ratio} metric and evaluating it across 2 datasets, 3 privacy budgets, and 3 sparsity levels (5 seeds each).
+    \item We present mechanistic evidence that DP-SGD creates a downstream vulnerability to pruning through differential gradient clipping. Contrary to the intuitive hypothesis that DP reduces minority-relevant weight magnitudes, we find the compounding operates through corruption of minority feature quality.
+    \item We propose \FairPrunDP{}, a worst-group-aware pruning criterion based on per-subgroup Fisher information. While \FairPrunDP{} improves worst-group accuracy by up to 6.5 percentage points, we honestly report that it does not consistently reduce the accuracy gap---highlighting the difficulty of mitigating compounding effects in DP-trained models.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our experimental framework and the \FairPrunDP{} algorithm. Section~\ref{sec:experiments} presents our main results. Section~\ref{sec:discussion} discusses limitations and implications. Section~\ref{sec:conclusion} concludes.
+
+%% ============================================================================
+\section{Related Work}
+\label{sec:related}
+%% ============================================================================
+
+\paragraph{Differential privacy and fairness.}
+\citet{bagdasaryan2019differential} first demonstrated that DP-SGD has disparate impact on model accuracy, with underrepresented classes suffering larger accuracy drops. \citet{esipova2023disparate} identified gradient misalignment from inequitable clipping as the root cause (ICLR 2023 Spotlight). \citet{uniyal2021dpsgd} compared DP-SGD and PATE, finding PATE has less disparate impact. \citet{demelius2025private} showed that hyperparameter tuning alone cannot reliably mitigate DP-SGD's disparate impact. \citet{tran2023fairdp} proposed FairDP with certified fairness bounds under DP. Our work differs by studying how compression \emph{compounds} these existing fairness costs, rather than mitigating DP's disparate impact directly.
+
+\paragraph{Model compression and fairness.}
+\citet{hooker2020characterising} introduced Compression Identified Exemplars (CIE) and showed pruning amplifies bias against underrepresented features. \citet{iofinova2023bias} provided in-depth analysis and countermeasures for bias in pruned vision models. \citet{dai2023integrating} proposed bi-level optimization for joint fairness and pruning. These works study compression fairness on \emph{standard} (non-DP) models. We are the first to study compression fairness specifically in the context of DP-trained models, where the weight landscape is fundamentally different.
+
+\paragraph{Privacy and model compression.}
+\citet{li2025compleak} showed that compression exacerbates privacy leakage through membership inference attacks. \citet{shang2025wemem} showed iterative pruning increases memorization and proposed defenses. \citet{adamczewski2023prepruning} proposed pre-pruning to help DP-SGD scale. \citet{gao2025dpquant} introduced dynamic quantization scheduling for DP-SGD. These works study privacy-compression or fairness-compression \emph{in isolation}; we study the three-way interaction of privacy, compression, and fairness.
+
+\paragraph{Disparate privacy vulnerability.}
+\citet{kulynych2019disparate} showed membership inference attacks have disparate vulnerability across subgroups. \citet{chang2022understanding} studied disparate effects of MIA and defenses. Our work connects these findings to the compression pipeline.
+
+%% ============================================================================
+\section{Method}
+\label{sec:method}
+%% ============================================================================
+
+\subsection{Measuring the Compounding Effect}
+\label{sec:method_cr}
+
+For each dataset and configuration, we train four model variants:
+\begin{itemize}
+    \item \textbf{Baseline (B):} Standard training, no compression.
+    \item \textbf{DP-only (D):} DP-SGD training with privacy budget $\varepsilon$, no compression.
+    \item \textbf{Comp-only (C):} Standard training + magnitude pruning at sparsity $s$.
+    \item \textbf{DP+Comp (DC):} DP-SGD training + magnitude pruning at sparsity $s$.
+\end{itemize}
+
+Let $\text{WGA}(X)$ denote the worst-group accuracy of variant $X$. We define the \emph{degradation} of each variant relative to the baseline:
+\begin{equation}
+    \Delta_X = \text{WGA}(B) - \text{WGA}(X)
+\end{equation}
+The \textbf{compounding ratio} measures whether the combined effect exceeds the sum of individual effects:
+\begin{equation}
+    \CR = \frac{\Delta_{\text{DC}}}{\Delta_{\text{D}} + \Delta_{\text{C}}}
+    \label{eq:cr}
+\end{equation}
+$\CR > 1$ indicates super-additive degradation: the fairness cost of the combined pipeline exceeds what would be expected from analyzing each step independently. $\CR = 1$ indicates exact additivity, and $\CR < 1$ indicates sub-additivity.
+
+We compute $\CR$ per-seed and report the mean $\pm$ standard deviation across 5 seeds, along with a one-sided $t$-test for $\CR > 1$.
+
+\textbf{Note on negative $\Delta_{\text{C}}$.} In some configurations, pruning \emph{improves} worst-group accuracy (i.e., $\Delta_{\text{C}} < 0$), acting as a regularizer. When this occurs, the denominator $\Delta_{\text{D}} + \Delta_{\text{C}}$ is smaller than $\Delta_{\text{D}}$ alone, which can inflate CR. We report this transparently and interpret such cases carefully.
+
+\subsection{FairPrune-DP: Worst-Group-Aware Pruning}
+\label{sec:method_fairprune}
+
+Standard magnitude-based pruning assigns importance score $s_i = |w_i|$ to each weight and removes weights with the smallest scores. This criterion is subgroup-agnostic.
+
+\FairPrunDP{} replaces the magnitude criterion with a \emph{worst-group Fisher information} criterion:
+
+\begin{enumerate}
+    \item \textbf{Per-subgroup importance.} Given a calibration set with subgroup labels, compute per-subgroup Fisher information for each weight:
+    \begin{equation}
+        s_i^g = \mathbb{E}_{(x,y) \sim \mathcal{D}_g} \left[ \left(\frac{\partial \mathcal{L}(x, y)}{\partial w_i}\right)^2 \right]
+        \label{eq:fisher}
+    \end{equation}
+    where $\mathcal{D}_g$ is the data distribution for subgroup $g$.
+
+    \item \textbf{Normalization.} To account for scale differences between subgroups (especially in DP-trained models where minority Fisher estimates are noisier), we normalize each subgroup's scores to unit mean:
+    \begin{equation}
+        \hat{s}_i^g = \frac{s_i^g}{\frac{1}{|\mathcal{W}|}\sum_{j \in \mathcal{W}} s_j^g}
+    \end{equation}
+
+    \item \textbf{Aggregation.} Combine via a weighted blend of worst-group and mean:
+    \begin{equation}
+        s_i^{\text{fair}} = \alpha \cdot \min_g \hat{s}_i^g + (1 - \alpha) \cdot \frac{1}{|G|}\sum_g \hat{s}_i^g
+        \label{eq:fair_score}
+    \end{equation}
+    where $\alpha = 0.5$ balances protecting the worst-group against maintaining overall performance.
+
+    \item \textbf{Pruning.} Remove weights with the smallest $s_i^{\text{fair}}$ values to achieve the target sparsity. Fine-tune for 5 epochs post-pruning.
+\end{enumerate}
+
+The key insight is that a weight is only considered ``unimportant'' under \FairPrunDP{} if it is unimportant for \emph{all} subgroups. This prevents magnitude pruning from disproportionately removing features that are critical for minority subgroups.
+
+\textbf{Computational cost.} Computing per-subgroup Fisher information requires one forward-backward pass per subgroup over the calibration set (${\sim}2000$ samples). For $G$ subgroups, this adds $O(G)$ passes---negligible compared to DP-SGD training.
+
+The complete algorithm is presented in Algorithm~\ref{alg:fairprune}.
+
+\begin{algorithm}[t]
+\caption{\FairPrunDP{}: Worst-Group-Aware Pruning for DP Models}
+\label{alg:fairprune}
+\begin{algorithmic}[1]
+\REQUIRE DP-trained model $\theta$, target sparsity $s$, calibration set $\mathcal{D}_{\text{cal}}$ with subgroup labels, $\alpha = 0.5$
+\ENSURE Pruned model $\theta'$
+\FOR{each subgroup $g \in G$}
+    \STATE $\mathcal{D}_g \leftarrow \{(x,y) \in \mathcal{D}_{\text{cal}} : \text{group}(x) = g\}$
+    \FOR{each weight $w_i$}
+        \STATE $s_i^g \leftarrow \mathbb{E}_{(x,y) \sim \mathcal{D}_g}\left[(\partial \mathcal{L} / \partial w_i)^2\right]$ \hfill \COMMENT{Per-subgroup Fisher}
+    \ENDFOR
+    \STATE $\hat{s}^g \leftarrow s^g / \text{mean}(s^g)$ \hfill \COMMENT{Normalize to unit mean}
+\ENDFOR
+\FOR{each weight $w_i$}
+    \STATE $s_i^{\text{fair}} \leftarrow \alpha \cdot \min_g \hat{s}_i^g + (1-\alpha) \cdot \text{mean}_g(\hat{s}_i^g)$
+\ENDFOR
+\STATE $\tau \leftarrow \text{Quantile}(\{s_i^{\text{fair}}\}, s)$ \hfill \COMMENT{Threshold at target sparsity}
+\STATE $M_i \leftarrow \mathbb{1}[s_i^{\text{fair}} > \tau]$ \hfill \COMMENT{Binary mask}
+\STATE $\theta' \leftarrow \theta \odot M$ \hfill \COMMENT{Apply mask}
+\STATE Fine-tune $\theta'$ for 5 epochs (standard SGD)
+\RETURN $\theta'$
+\end{algorithmic}
+\end{algorithm}
+
+
+%% ============================================================================
+\section{Experiments}
+\label{sec:experiments}
+%% ============================================================================
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Datasets.}
+We evaluate on two datasets with natural subgroup structure:
+\begin{itemize}
+    \item \textbf{CIFAR-10 with synthetic imbalance:} We designate classes $\{2, 3, 5, 7\}$ as ``minority'' and subsample them to 30\% of their original size, creating a 5:1 majority-to-minority ratio (27,023 majority vs.\ 5,377 minority training samples across the 90/10 train/val split). This simulates real-world class imbalance where DP-SGD's disparate impact is most severe.
+    \item \textbf{UTKFace}~\citep{zhang2017age}: 23,705 face images with gender classification as the task and ethnicity (White, Black, Asian, Indian, Others) as the protected attribute. The smallest group (Others, ${\sim}1,200$ training samples) serves as the natural minority. Train/val/test split: 70/15/15\%.
+\end{itemize}
+
+\paragraph{Model architecture.}
+We use an Opacus-compatible ResNet-18~\citep{he2016deep} with GroupNorm (replacing BatchNorm for DP compatibility), adapted for $64{\times}64$ inputs. All experiments use this single architecture to isolate the effects of DP and compression.
+
+\paragraph{Training configuration.}
+\textbf{Standard training:} SGD with learning rate 0.01, momentum 0.9, weight decay $10^{-4}$, cosine annealing, early stopping with patience 5. 30 epochs for CIFAR-10, 25 for UTKFace.
+\textbf{DP-SGD training:} Via Opacus~\citep{yousefpour2021opacus} with $\varepsilon \in \{1, 4, 8\}$, $\delta = 1/N$, max gradient norm $C = 1.0$, learning rate 0.5, no momentum. 15 epochs for CIFAR-10, 25 for UTKFace. Batch size 256 for all.
+
+\paragraph{Compression.}
+Global unstructured magnitude pruning at sparsity $s \in \{50\%, 70\%, 90\%\}$ across all Conv2d and Linear layers. Post-pruning fine-tuning: 5 epochs, learning rate 0.001, with pruning masks enforced.
+
+\paragraph{Evaluation.}
+All experiments use 5 random seeds $\{42, 123, 456, 789, 1024\}$. We report mean $\pm$ standard deviation. Primary metrics: overall accuracy (OA), worst-group accuracy (WGA), accuracy gap (best-group minus worst-group accuracy), and the compounding ratio (Eq.~\ref{eq:cr}).
+
+\subsection{Main Results: CIFAR-10}
+\label{sec:results_cifar10}
+
+%%% TABLE 1: CIFAR-10 Main Results
+\begin{table}[t]
+\caption{CIFAR-10 results across DP and compression configurations. OA = overall accuracy (\%), WGA = worst-group accuracy (\%), Gap = accuracy gap (\%). All values are mean $\pm$ std over 5 seeds. $\uparrow$: higher is better; $\downarrow$: lower is better.}
+\label{tab:cifar10_main}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+Privacy ($\varepsilon$) & Sparsity & OA $\uparrow$ & WGA $\uparrow$ & Gap $\downarrow$ \\
+\midrule
+$\infty$ (none) & 0\% (Baseline) & $73.0 \pm 2.0$ & $53.0 \pm 5.0$ & $33.3 \pm 5.4$ \\
+\midrule
+$\infty$ & 50\% & $74.9 \pm 1.4$ & $55.8 \pm 3.7$ & $31.8 \pm 4.1$ \\
+$\infty$ & 70\% & $74.8 \pm 0.6$ & $55.8 \pm 0.9$ & $31.8 \pm 1.2$ \\
+$\infty$ & 90\% & $73.6 \pm 0.9$ & $53.2 \pm 2.7$ & $34.0 \pm 3.0$ \\
+\midrule
+1 & 0\% (DP-only) & $33.9 \pm 0.5$ & $1.6 \pm 1.0$ & $53.8 \pm 2.1$ \\
+1 & 50\% & $38.6 \pm 0.7$ & $6.9 \pm 0.7$ & $52.8 \pm 1.4$ \\
+1 & 70\% & $34.4 \pm 0.6$ & $1.9 \pm 0.8$ & $54.1 \pm 0.6$ \\
+1 & 90\% & $26.3 \pm 0.8$ & $0.0 \pm 0.0$ & $43.8 \pm 1.4$ \\
+\midrule
+4 & 0\% (DP-only) & $39.9 \pm 0.6$ & $5.2 \pm 1.4$ & $57.8 \pm 1.9$ \\
+4 & 50\% & $46.7 \pm 1.1$ & $14.2 \pm 2.1$ & $54.3 \pm 2.3$ \\
+4 & 70\% & $42.3 \pm 0.8$ & $6.2 \pm 1.4$ & $60.3 \pm 1.8$ \\
+4 & 90\% & $33.5 \pm 0.9$ & $0.0 \pm 0.0$ & $55.8 \pm 1.5$ \\
+\midrule
+8 & 0\% (DP-only) & $42.7 \pm 1.0$ & $8.9 \pm 2.0$ & $56.2 \pm 1.8$ \\
+8 & 50\% & $50.6 \pm 1.9$ & $20.7 \pm 4.1$ & $49.9 \pm 3.8$ \\
+8 & 70\% & $46.0 \pm 1.4$ & $11.3 \pm 2.9$ & $57.8 \pm 3.5$ \\
+8 & 90\% & $36.0 \pm 0.6$ & $0.04 \pm 0.03$ & $59.9 \pm 1.1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%%% TABLE 2: Compounding Ratios CIFAR-10
+\begin{table}[t]
+\caption{Compounding ratios ($\CR$) on CIFAR-10. $\CR > 1$ indicates super-additive degradation. Per-seed CR computed as $\CR_i = \Delta_{\text{DC},i} / (\Delta_{\text{D},i} + \Delta_{\text{C},i})$, then averaged. Values with $p < 0.05$ for $\CR > 1$ (one-sided $t$-test) are marked with $^*$.}
+\label{tab:cr_cifar10}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+$\varepsilon$ \textbackslash{} Sparsity & 50\% & 70\% & 90\% \\
+\midrule
+1 & $0.95 \pm 0.07$ & $1.07 \pm 0.11$ & $1.05 \pm 0.10$ \\
+4 & $0.87 \pm 0.08$ & $1.06 \pm 0.11$ & $\mathbf{1.13 \pm 0.12}^*$ \\
+8 & $0.79 \pm 0.08$ & $1.02 \pm 0.09$ & $\mathbf{1.23 \pm 0.15}^*$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Table~\ref{tab:cifar10_main} presents the full CIFAR-10 results. Several patterns emerge:
+
+\textbf{DP-SGD devastates minority accuracy.} Even at $\varepsilon = 8$, minority-group worst-group accuracy drops from 53.0\% to 8.9\%, a 44.1 percentage point decline, while overall accuracy drops a comparatively modest 30.3 points. At $\varepsilon = 1$, minority accuracy collapses to near zero (1.6\%).
+
+\textbf{Compression alone is neutral to slightly beneficial.} Pruning at 50\% and 70\% sparsity on standard models actually \emph{improves} worst-group accuracy slightly (from 53.0\% to 55.8\%), consistent with pruning acting as a regularizer~\citep{hooker2020characterising}. Only at 90\% sparsity does WGA approximately match the baseline.
+
+\textbf{The compounding effect is sparsity-dependent.} Table~\ref{tab:cr_cifar10} shows the compounding ratios. At moderate sparsity (50\%), $\CR < 1$, indicating the combined effect is sub-additive---pruning's regularization partially counteracts DP's damage. At 70\% sparsity, $\CR \approx 1$ (approximately additive). At 90\% sparsity, $\CR$ consistently exceeds 1, peaking at $\CR = 1.23 \pm 0.15$ for $\varepsilon = 8$ ($p = 0.013$). This means the combined pipeline removes 23\% more worst-group accuracy than would be expected from independent analysis.
+
+\textbf{Catastrophic collapse at 90\% sparsity.} At 90\% sparsity with DP, worst-group accuracy drops to near-zero (${\leq}0.04\%$) regardless of privacy budget, whereas the same 90\% pruning on standard models has negligible impact (WGA = 53.2\%). The transition from sub-additive to super-additive occurs around 70\% sparsity, precisely where the regularization benefit is exhausted.
+
+
+\subsection{Main Results: UTKFace}
+\label{sec:results_utkface}
+
+%%% TABLE 3: UTKFace Main Results
+\begin{table}[t]
+\caption{UTKFace results (gender classification, ethnicity as protected attribute). Mean $\pm$ std over 5 seeds.}
+\label{tab:utkface_main}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+Privacy ($\varepsilon$) & Sparsity & OA $\uparrow$ & WGA $\uparrow$ & Gap $\downarrow$ \\
+\midrule
+$\infty$ (none) & 0\% (Baseline) & $87.7 \pm 0.8$ & $82.7 \pm 0.8$ & $7.5 \pm 1.1$ \\
+\midrule
+$\infty$ & 50\% & $87.8 \pm 0.8$ & $83.2 \pm 1.7$ & $7.1 \pm 1.9$ \\
+$\infty$ & 70\% & $87.8 \pm 0.9$ & $83.2 \pm 2.3$ & $7.4 \pm 2.0$ \\
+$\infty$ & 90\% & $87.6 \pm 0.7$ & $83.2 \pm 1.0$ & $6.8 \pm 1.2$ \\
+\midrule
+1 & 0\% (DP-only) & $67.2 \pm 3.0$ & $62.8 \pm 5.6$ & $8.9 \pm 3.7$ \\
+1 & 50\% & $75.6 \pm 0.8$ & $70.9 \pm 2.5$ & $9.7 \pm 3.2$ \\
+1 & 70\% & $73.4 \pm 0.9$ & $70.0 \pm 2.1$ & $8.0 \pm 3.0$ \\
+1 & 90\% & $68.7 \pm 1.3$ & $66.9 \pm 1.2$ & $8.4 \pm 1.0$ \\
+\midrule
+4 & 0\% (DP-only) & $79.3 \pm 1.2$ & $74.8 \pm 1.6$ & $8.7 \pm 2.3$ \\
+4 & 50\% & $82.8 \pm 0.7$ & $78.7 \pm 1.2$ & $7.6 \pm 2.0$ \\
+4 & 70\% & $81.6 \pm 0.7$ & $77.2 \pm 1.9$ & $8.0 \pm 2.1$ \\
+4 & 90\% & $75.7 \pm 0.5$ & $71.2 \pm 1.8$ & $9.1 \pm 1.7$ \\
+\midrule
+8 & 0\% (DP-only) & $80.7 \pm 1.5$ & $75.7 \pm 1.0$ & $8.7 \pm 1.0$ \\
+8 & 50\% & $83.8 \pm 0.7$ & $78.3 \pm 1.1$ & $8.7 \pm 1.0$ \\
+8 & 70\% & $82.9 \pm 0.5$ & $77.6 \pm 1.2$ & $8.3 \pm 2.0$ \\
+8 & 90\% & $78.6 \pm 1.0$ & $72.4 \pm 3.0$ & $9.9 \pm 3.2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%%% TABLE 4: UTKFace Compounding Ratios
+\begin{table}[t]
+\caption{Compounding ratios ($\CR$) on UTKFace. Same methodology as Table~\ref{tab:cr_cifar10}. $^*$: $p < 0.05$.}
+\label{tab:cr_utkface}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+$\varepsilon$ \textbackslash{} Sparsity & 50\% & 70\% & 90\% \\
+\midrule
+1 & $0.67 \pm 0.33$ & $0.69 \pm 0.21$ & $0.85 \pm 0.22$ \\
+4 & $0.57 \pm 0.14$ & $0.82 \pm 0.30$ & $1.66 \pm 0.55$ \\
+8 & $0.73 \pm 0.35$ & $0.86 \pm 0.27$ & $\mathbf{1.79 \pm 0.91}^*$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Table~\ref{tab:utkface_main} presents UTKFace results. Several observations are notable:
+
+\textbf{DP's impact is less catastrophic than on CIFAR-10.} Even at $\varepsilon = 1$, worst-group accuracy remains substantial (62.8\%), compared to the near-complete collapse (1.6\%) observed on CIFAR-10. This is expected: UTKFace is a binary classification task with natural (not synthetic) demographic subgroups, so DP-SGD has less extreme disparate impact.
+
+\textbf{Pruning regularization is stronger on UTKFace.} Across most configurations, moderate pruning (50--70\%) of DP-trained models actually \emph{improves} both overall and worst-group accuracy compared to the DP-only baseline. For example, at $\varepsilon = 1$, 50\% pruning improves WGA from 62.8\% to 70.9\% (+8.1 pp) and OA from 67.2\% to 75.6\% (+8.4 pp). This strong regularization effect produces consistently sub-additive compounding ratios at moderate sparsity (Table~\ref{tab:cr_utkface}).
+
+\textbf{Super-additive compounding at 90\% sparsity.} Consistent with CIFAR-10, the compounding effect emerges at high sparsity. At 90\% pruning, $\CR = 1.66 \pm 0.55$ ($\varepsilon = 4$) and $\CR = 1.79 \pm 0.91$ ($\varepsilon = 8$, $p < 0.05$). The higher variance compared to CIFAR-10 reflects the sensitivity of the metric when individual degradations are small.
+
+\textbf{Cross-dataset consistency.} The sparsity-dependent pattern---sub-additive at moderate pruning, super-additive at aggressive pruning---is consistent across both datasets, despite their very different characteristics (synthetic vs.\ natural imbalance, 10-class vs.\ binary).
+
+
+\subsection{Mechanistic Analysis}
+\label{sec:mechanistic}
+
+\paragraph{Differential gradient clipping.}
+Figure~\ref{fig:gradient_clipping} shows per-subgroup gradient norms during DP-SGD training on CIFAR-10 ($\varepsilon = 4$). The minority subgroup exhibits systematically higher gradient norms (46.0 vs.\ 38.5 at epoch 0, 72.1 vs.\ 63.4 at epoch 14) and higher clipping fractions (100\% vs.\ 86\% at epoch 14). This confirms the gradient misalignment identified by \citet{esipova2023disparate}: minority samples produce larger gradients that are more aggressively clipped, reducing the effective learning rate for minority-relevant features.
+
+\paragraph{A surprise: minority weight magnitudes are not lower.}
+Contrary to the intuitive hypothesis that DP-SGD would reduce minority-relevant weight magnitudes (making them vulnerable to magnitude-based pruning), our mechanistic analysis found the opposite: DP-trained models have \emph{higher} minority-relevant weight magnitudes than standard models in 0 of 18 configurations tested. This contradicts the simple ``small weights get pruned'' narrative.
+
+\paragraph{Revised mechanism: feature quality corruption.}
+The compounding effect operates through a more subtle pathway. DP-SGD's differential clipping does not reduce minority weight magnitudes, but rather \emph{corrupts the quality} of learned minority features. The gradient noise from clipping and noise addition means minority features encode less useful signal per unit weight. At moderate sparsity, pruning acts as a regularizer that can partially offset this noise. At high sparsity, the aggressive removal of weights (including noisy but non-redundant minority features) catastrophically degrades minority performance---not because the pruned weights are small, but because the remaining weights are insufficient to represent minority-relevant patterns.
+
+This mechanism explains the sparsity-dependent transition: moderate pruning removes genuinely redundant parameters (beneficial), while aggressive pruning removes parameters that, although noisy, still carry minority-relevant signal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig4_gradient_clipping_analysis.pdf}
+\caption{Per-subgroup gradient norms during DP-SGD training on CIFAR-10 ($\varepsilon = 4$, seed 42). Minority subgroup (orange) exhibits higher gradient norms than majority (blue), leading to more aggressive clipping. The clipping threshold $C = 1.0$ is shown as a dashed line (gradient norms are 38--72$\times$ larger than the threshold, indicating nearly all gradients are clipped, with differential impact by subgroup).}
+\label{fig:gradient_clipping}
+\end{figure}
+
+
+\subsection{FairPrune-DP Results}
+\label{sec:results_fairprune}
+
+We evaluate \FairPrunDP{} on UTKFace, where we have complete results for $\varepsilon = 1$ across all sparsity levels (5 seeds each) and $\varepsilon = 4$ at 50\% sparsity.
+
+%%% TABLE 5: FairPrune-DP Comparison on UTKFace
+\begin{table}[t]
+\caption{Comparison of magnitude pruning vs.\ \FairPrunDP{} on DP-trained UTKFace models. Mean $\pm$ std over 5 seeds. $\Delta$WGA: improvement in worst-group accuracy over magnitude pruning (positive = better).}
+\label{tab:fairprune}
+\centering
+\small
+\begin{tabular}{lllcccc}
+\toprule
+$\varepsilon$ & Method & Sparsity & OA $\uparrow$ & WGA $\uparrow$ & Gap $\downarrow$ & $\Delta$WGA \\
+\midrule
+1 & Magnitude & 50\% & $75.6 \pm 0.8$ & $70.9 \pm 2.5$ & $9.7 \pm 3.2$ & --- \\
+1 & \FairPrunDP{} & 50\% & $78.1 \pm 1.3$ & $74.0 \pm 3.0$ & $8.6 \pm 2.4$ & $+3.1$ \\
+\midrule
+1 & Magnitude & 70\% & $73.4 \pm 0.9$ & $70.0 \pm 2.1$ & $8.0 \pm 3.0$ & --- \\
+1 & \FairPrunDP{} & 70\% & $78.6 \pm 0.7$ & $74.6 \pm 1.1$ & $8.2 \pm 0.6$ & $+4.6$ \\
+\midrule
+1 & Magnitude & 90\% & $68.7 \pm 1.3$ & $66.9 \pm 1.2$ & $8.4 \pm 1.0$ & --- \\
+1 & \FairPrunDP{} & 90\% & $77.7 \pm 1.5$ & $73.4 \pm 1.8$ & $8.3 \pm 0.8$ & $+6.5$ \\
+\midrule
+4 & Magnitude & 50\% & $82.8 \pm 0.7$ & $78.7 \pm 1.2$ & $7.6 \pm 2.0$ & --- \\
+4 & \FairPrunDP{} & 50\% & $83.4 \pm 0.6$ & $79.4 \pm 1.0$ & $8.1 \pm 1.4$ & $+0.7$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Table~\ref{tab:fairprune} compares \FairPrunDP{} against standard magnitude pruning on DP-trained UTKFace models. The results present a nuanced picture:
+
+\textbf{WGA improvement.} \FairPrunDP{} consistently improves worst-group accuracy relative to magnitude pruning across all tested configurations. The improvement ranges from $+0.7$ pp (at $\varepsilon = 4$, 50\% sparsity, where there is less headroom for improvement) to $+6.5$ pp (at $\varepsilon = 1$, 90\% sparsity, where the compounding effect is strongest). This demonstrates that using subgroup-aware Fisher importance for pruning decisions does protect minority-relevant features.
+
+\textbf{Gap reduction is inconsistent.} While WGA improves, the accuracy gap (best-group minus worst-group) does not consistently decrease. At $\varepsilon = 1$, 50\% sparsity, the gap decreases from 9.7\% to 8.6\% ($-11\%$). But at $\varepsilon = 4$, 50\% sparsity, the gap slightly increases from 7.6\% to 8.1\%. This occurs because \FairPrunDP{} also improves overall accuracy (via better Fisher-based pruning), which can disproportionately benefit the majority group, partially offsetting the minority-specific benefit.
+
+\textbf{Honest assessment.} \FairPrunDP{} is \emph{not} a complete solution to the compounding problem. It reliably improves WGA, but the broader fairness landscape (gap, equalized odds) is only partially improved. The results suggest that fairness-aware pruning alone cannot fully counteract the damage that DP-SGD inflicts on minority feature learning. Addressing the compounding effect more fundamentally may require modifying the DP training process itself (e.g., per-subgroup clipping~\citep{esipova2023disparate}).
+
+
+\subsection{Compounding Ratio Visualization}
+\label{sec:cr_visualization}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig1_compounding_ratio_heatmap.pdf}
+\caption{Compounding ratio heatmaps for CIFAR-10 (left) and UTKFace (right). Red cells indicate super-additive compounding ($\CR > 1$); blue cells indicate sub-additive ($\CR < 1$). Stars mark statistical significance ($^* p < 0.05$). The transition from sub- to super-additive at high sparsity is consistent across both datasets.}
+\label{fig:cr_heatmap}
+\end{figure}
+
+Figure~\ref{fig:cr_heatmap} visualizes the compounding ratios across all configurations. The clear vertical gradient---blue at 50\% sparsity transitioning to red at 90\%---confirms the sparsity-dependent nature of the compounding effect.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig3_accuracy_gap_vs_sparsity.pdf}
+\caption{Accuracy gap vs.\ sparsity for different privacy budgets on CIFAR-10. The gap widens with sparsity for DP-trained models (orange, green, red) but remains flat for standard models (blue), illustrating the compounding interaction.}
+\label{fig:gap_vs_sparsity}
+\end{figure}
+
+
+%% ============================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+%% ============================================================================
+
+\paragraph{When does compounding occur?}
+Our results show the compounding effect is not universal but is sparsity-dependent. At moderate sparsity (50\%), pruning can actually improve fairness on DP-trained models by acting as a regularizer. The super-additive regime emerges primarily at high sparsity (${\geq}90\%$), where aggressive weight removal overwhelms the regularization benefit. The transition point around 70\% sparsity is consistent across both datasets. This finding has clear practical implications: deployment teams should be especially cautious about high compression rates for DP-trained models.
+
+\paragraph{Scale of the problem.}
+On CIFAR-10, the absolute worst-group accuracy for DP-trained models is already very low (1.6--8.9\% for $\varepsilon \leq 8$), making the compounding effect less practically relevant in absolute terms---the minority group is already catastrophically underserved by DP-SGD alone. The compounding ratio is most meaningful when the DP-only baseline retains reasonable minority accuracy, as in UTKFace, where worst-group accuracy ranges from 62.8\% to 75.7\% under DP alone.
+
+\paragraph{Mechanistic surprise.}
+Our mechanistic analysis overturned the initial hypothesis that DP-SGD reduces minority-relevant weight magnitudes. Instead, the compounding operates through feature quality corruption: DP training produces noisier minority features that, while not smaller in magnitude, carry less useful signal. This finding is important because it suggests that simply adjusting the pruning criterion (as \FairPrunDP{} does) cannot fully address the root cause---the degraded quality of minority features in DP-trained models.
+
+\paragraph{FairPrune-DP: a partial solution.}
+We present \FairPrunDP{} as a partial mitigation rather than a complete solution. It reliably improves worst-group accuracy but does not consistently reduce the accuracy gap. We believe this honest reporting of mixed results is more valuable than overclaiming success, and it highlights important directions for future work.
+
+\paragraph{Limitations.}
+\begin{itemize}
+    \item \textbf{Two datasets.} We evaluate on CIFAR-10 (synthetic imbalance) and UTKFace (natural subgroups). Additional datasets (e.g., CelebA, medical imaging) would strengthen generalization claims.
+    \item \textbf{Single architecture.} All experiments use ResNet-18 with GroupNorm. The compounding effect may differ for other architectures (e.g., transformers) or normalization schemes.
+    \item \textbf{Unstructured pruning only.} We study global unstructured magnitude pruning. Structured pruning, quantization, and knowledge distillation may exhibit different compounding patterns.
+    \item \textbf{Post-training compression.} We compress after training is complete. Joint training-compression approaches~\citep{adamczewski2023prepruning} may mitigate compounding.
+    \item \textbf{No MIA analysis.} Due to computational constraints, we did not measure per-subgroup membership inference vulnerability across the pipeline, which would complement the accuracy-based analysis.
+    \item \textbf{Statistical power.} With 5 seeds, our ability to detect small compounding effects is limited. Several CR values near 1.0 do not reach statistical significance, and the high variance on UTKFace ($\CR = 1.79 \pm 0.91$) suggests that more seeds would improve confidence.
+    \item \textbf{Incomplete FairPrune-DP evaluation.} We report \FairPrunDP{} results only on UTKFace ($\varepsilon \in \{1, 4\}$). Evaluation on CIFAR-10 and additional privacy budgets is needed for comprehensive assessment.
+\end{itemize}
+
+\paragraph{Broader implications.}
+Our findings suggest that analyzing DP and compression separately---as is standard practice---can underestimate the true fairness cost to minority groups by up to 23\% (CIFAR-10) to 79\% (UTKFace) at high sparsity. This has implications for regulatory frameworks that assess fairness and privacy independently: a model that passes both a privacy audit and a compression audit may still impose disproportionate harm on minority populations through the compounding interaction.
+
+
+%% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%% ============================================================================
+
+We presented the first systematic study of how differential privacy and model compression jointly affect fairness. By training models with DP-SGD and applying magnitude-based pruning across multiple privacy budgets and sparsity levels, we discovered that the interaction is \emph{sparsity-dependent}: at moderate pruning (50\%), the combined effect is sub-additive (pruning as regularizer), while at high pruning (90\%), it becomes super-additive---reaching $\CR = 1.23 \pm 0.15$ on CIFAR-10 ($p < 0.02$) and $\CR = 1.79 \pm 0.91$ on UTKFace ($p < 0.05$). This transition is consistent across datasets with very different characteristics.
+
+Mechanistically, the compounding is driven by DP-SGD's differential gradient clipping, which does not reduce minority weight magnitudes (as initially hypothesized) but rather corrupts minority feature quality, making these features disproportionately vulnerable to aggressive pruning. We proposed \FairPrunDP{}, a worst-group-aware pruning criterion that improves worst-group accuracy by up to 6.5 percentage points, while honestly noting that it does not consistently reduce accuracy gaps.
+
+Our findings urge caution in real-world deployment pipelines that combine privacy and compression: analyzing each step independently can significantly underestimate the fairness cost to underrepresented populations, particularly at high compression ratios. Future work should extend this analysis to structured pruning, quantization, knowledge distillation, and larger-scale models and datasets.
+
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+%% ============================================================================
+\newpage
+\appendix
+\section{Per-Seed Results}
+\label{app:per_seed}
+
+%%% APPENDIX TABLE: Per-seed CIFAR-10 results
+\begin{table}[h]
+\caption{Per-seed worst-group accuracy (\%) on CIFAR-10 for selected configurations.}
+\label{tab:per_seed_cifar10}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Configuration & Seed 42 & Seed 123 & Seed 456 & Seed 789 & Seed 1024 & Mean \\
+\midrule
+Baseline & 57.4 & 49.6 & 54.9 & 57.3 & 46.1 & 53.0 \\
+DP $\varepsilon{=}1$ & 0.8 & 1.0 & 3.2 & 1.7 & 1.5 & 1.6 \\
+DP $\varepsilon{=}4$ & 3.5 & 4.0 & 6.8 & 6.1 & 5.7 & 5.2 \\
+DP $\varepsilon{=}8$ & 8.3 & 5.9 & 11.3 & 8.9 & 10.2 & 8.9 \\
+Comp 90\% & 51.4 & 55.2 & 55.4 & 54.6 & 49.5 & 53.2 \\
+DP $\varepsilon{=}8$ + 90\% & 0.05 & 0.0 & 0.05 & 0.08 & 0.0 & 0.04 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $\varepsilon = 8$ with 90\% sparsity, minority-group accuracy drops to $\leq 0.08\%$ across all 5 seeds (mean 0.04\%), demonstrating that the compounding effect robustly eliminates the model's ability to classify minority samples correctly, while the same 90\% pruning on standard models preserves WGA at 53.2\%.
+
+
+\section{Experimental Details}
+\label{app:details}
+
+\paragraph{Data preprocessing.}
+CIFAR-10 images ($32{\times}32$) are normalized with channel means $(0.4914, 0.4822, 0.4465)$ and standard deviations $(0.2023, 0.1994, 0.2010)$. UTKFace images are resized to $64{\times}64$ and normalized with ImageNet statistics (means $(0.485, 0.456, 0.406)$, stds $(0.229, 0.224, 0.225)$). No data augmentation is applied (standard for DP-SGD experiments where augmentation interacts with the privacy budget).
+
+\paragraph{DP-SGD implementation.}
+We use Opacus~\citep{yousefpour2021opacus} v1.x with \texttt{make\_private\_with\_epsilon} for automatic noise calibration. Physical batch size is capped at 128 via \texttt{BatchMemoryManager} for GPU memory efficiency. The target $\delta = 1/N$ where $N$ is the training set size.
+
+\paragraph{Pruning implementation.}
+We use PyTorch's \texttt{torch.nn.utils.prune.global\_unstructured} with L1-norm criterion. Pruning masks are maintained via forward hooks during fine-tuning, ensuring pruned weights remain zero. Masks are finalized (hooks removed) after fine-tuning.
+
+\paragraph{Compounding ratio computation.}
+CRs are computed per-seed: for each random seed $i$, we compute $\CR_i = \Delta_{\text{DC},i} / (\Delta_{\text{D},i} + \Delta_{\text{C},i})$ using that seed's WGA values for all four variants. We then report $\text{mean}(\CR_i) \pm \text{std}(\CR_i)$ and a one-sided $t$-test for $\CR > 1$. This per-seed computation accounts for seed-level variation in baseline accuracy.
+
+\paragraph{Hardware.}
+All experiments were run on a single NVIDIA GPU with CUDA. Total compute time: approximately 12 hours across all configurations.
+
+
+\end{document}

@@ -1,0 +1,421 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array}
+
+\title{FOCUS: Object-Centric Evidence as a Causal Update Gate for Realistic Online Vision-Language Adaptation}
+
+\author{Anonymous Authors}
+
+\newcommand{\focus}{\textsc{Focus}}
+\newcommand{\stata}{\textsc{StatA}}
+\newcommand{\wb}{\textsc{Waterbirds}}
+\newcommand{\ca}{\textsc{CounterAnimal}}
+\newcommand{\scorefocus}{s_{\mathrm{focus}}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Realistic online test-time adaptation for CLIP-style vision-language models is fragile because each accepted pseudo-labeled sample can permanently alter the adaptation state. We revisit a narrow hypothesis: can lightweight object-centric evidence act as a safer write signal for \stata{}-style online adaptation? \focus{} builds a full-image view, a foreground view, and a complementary background view, then gates \stata{} updates using agreement and foreground-versus-background support. Following reviewer feedback, we make validation-derived causal thresholds the primary protocol and relegate exact-rate top-$K$ selection to an offline oracle-style ranking analysis. On the causal protocol at the common nominal $50\%$ rate, \focus{} is the strongest causal gate on \wb{}, reaching 71.03\% online accuracy and 46.24\% worst-group accuracy, versus 62.04\%, 62.04\%, and 63.28\% for entropy, max-probability, and CER gating. The same method fails on \ca{}, where it reaches 62.30\% and trails entropy (69.44\%), max-probability (67.93\%), and CER (66.75\%). The mechanistic picture is also negative: \focus{} harmful-update AUPRC remains 0.0227 on \wb{} and 0.0089 on \ca{}, below stronger lightweight baselines, and a background-only ablation outperforms the full score downstream. Correcting the protocol and latency accounting therefore changes the paper's conclusion: object-centric evidence is an intuitively plausible but insufficient standalone update-safety signal for realistic online VLM adaptation.
+\end{abstract}
+
+\section{Introduction}
+
+Online test-time adaptation (TTA) for vision-language models (VLMs) is appealing because it promises stream-time adjustment without retraining. In realistic online settings, however, the central difficulty is not merely making a better prediction on the current image; it is deciding whether the current pseudo-labeled sample is safe to write into the running state at all. \citet{zanella2025realistic} show that this decision matters under temporally correlated streams, while \citet{dobler2024lost} and \citet{sheng2025illusion} show how easily headline TTA gains collapse under stricter evaluation.
+
+This paper studies one deliberately narrow hypothesis. We ask whether \emph{object-centric evidence} can improve the write decision for \stata{} \citep{zanella2025realistic}. The intuition is simple: if the predicted class is supported by a foreground view but not by the complementary background, the sample may be safer for online adaptation than one whose evidence is mostly contextual.
+
+The original version of this study made its matched-rate comparisons by sorting scores over the full test stream and accepting the top-$K$ samples. That protocol is useful as an offline ranking diagnostic, but it is not causal: it uses future information unavailable to a real online system. In this revision, the main results therefore use \emph{validation-derived thresholds} only. Exact-rate runs are retained, but explicitly as offline oracle-style ranking analysis.
+
+Under the corrected protocol, the story is mixed and ultimately negative. On \wb{}, \focus{} is the strongest causal gate by downstream accuracy: at the nominal $50\%$ rate it reaches 71.03\% accuracy and 46.24\% worst-group accuracy, versus 62.04\%/31.07\% for entropy, 62.04\%/31.07\% for max-probability, and 63.28\%/31.66\% for CER. But the mechanistic target is not met: \focus{} harmful-update AUPRC remains 0.0227, below max-probability (0.1026) and CER (0.1935). On \ca{}, \focus{} reaches 62.30\% overall accuracy and 61.29\% balanced accuracy, while entropy, max-probability, and CER reach 69.44\%/69.05\%, 67.93\%/68.00\%, and 66.75\%/66.45\%, respectively. A background-only ablation further outperforms the full score downstream on both datasets.
+
+Our contributions are:
+\begin{itemize}
+    \item We reformulate \focus{} as a causal online update-gating study for \stata{}, with validation-derived thresholds as the primary evaluation and exact-rate top-$K$ selection explicitly demoted to offline ranking analysis.
+    \item We report matched-threshold experiments on \wb{} and \ca{} with sparse counterfactual harmful-update labels, simple object-centric ablations, and corrected latency accounting that separates cached gate latency from full end-to-end cost.
+    \item We show that the central hypothesis is not supported overall: object-centric evidence can help on \wb{}, but it does not yield the best harmful-update ranking, it fails on \ca{}, and its apparent gains are partly reproduced by simpler background-only filtering.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} defines \focus{} and the corrected protocols, Section~\ref{sec:experiments} presents results, Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Realistic online VLM adaptation.}
+Our setting follows \citet{zanella2025realistic}, which argues that VLM TTA should be evaluated under temporally correlated online streams and introduces \stata{} as a strong statistics-based online baseline. \citet{dobler2024lost} and \citet{sheng2025illusion} both caution that many VLM TTA gains weaken under stronger comparisons. Those papers motivate the narrow scope of this work: we study update selection for a fixed adapter rather than claiming a new TTA family.
+
+\paragraph{Reliability-oriented update filtering.}
+Recent VLM TTA work increasingly focuses on which pseudo-labels should influence the model. ReTA uses consistency-aware reliability signals \citep{liang2025advancing}; other work studies uncertainty modeling, cache filtering, and conservative pseudo-label use \citep{zhou2025bayesian, nguyen2025adaptive, zhai2025mitigating}. \focus{} is closest in spirit to this literature, but it asks a narrower question: does object-centric evidence improve the write decision for \stata{} relative to those lighter reliability proxies?
+
+\paragraph{Online VLM TTA beyond confidence gating.}
+Several directly relevant VLM TTA methods in the workspace pursue stronger adaptation objectives rather than better write filters. TDA uses a lightweight dynamic cache for efficient training-free adaptation \citep{karmanov2024efficient}; BATCLIP performs bimodal online adaptation for CLIP under corruptions \citep{maharana2025batclip}; and CLIPTTA replaces entropy-style updates with a contrastive objective aligned with CLIP pretraining \citep{lafon2025cliptta}. These methods are important context for our negative result: if lightweight gating is insufficient, stronger update rules or multimodal objectives may be the more promising direction.
+
+\paragraph{Selective prediction and abstention.}
+Outside VLM TTA, selective prediction studies when a model should abstain rather than commit. Confidence-based selective classification and integrated reject-option networks provide a broader conceptual backdrop for update gating \citep{geifman2017selective, geifman2019selectivenet}. Our problem differs because the decision is not whether to answer, but whether to modify persistent online state. Still, this literature grounds the idea that ranking examples by update safety is a form of selective decision-making rather than a new adaptation mechanism.
+
+\paragraph{Object-centric and context-aware debiasing.}
+Foreground-background decomposition is already established for CLIP robustness and TTA. SegDebias uses segmentation to mitigate bias in CLIP predictions \citep{wu2025segdebias}; GS-Bias learns spatial corrections during single-image TTA \citep{huang2025gsbias}; Fair Context Learning targets evidence imbalance in VLM adaptation \citep{yun2026fair}. Broader evidence that CLIP-style models overuse contextual features comes from work on task bias, spurious features, and robust context-aware recognition \citep{menon2022task, wang2024sober, janouskova2025robust}. Our claim is narrower than all of these: not that object-centric reasoning is new, but that it may or may not be useful as an online write-safety signal.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setting}
+
+We consider an online stream $\{x_t\}_{t=1}^T$ processed by a frozen CLIP backbone with \stata{} adaptation state $\mathcal{S}_t$ \citep{zanella2025realistic}. At time $t$, the model predicts a pseudo-label $\hat{y}_t$ from the current state, then either updates or skips:
+\begin{equation}
+\mathcal{S}_{t+1} =
+\begin{cases}
+\mathcal{U}(\mathcal{S}_t, x_t, \hat{y}_t), & g_t = 1, \\
+\mathcal{S}_t, & g_t = 0,
+\end{cases}
+\end{equation}
+where $\mathcal{U}$ is the unchanged \stata{} update rule and $g_t \in \{0,1\}$ is the gate. The entire paper is about designing and evaluating $g_t$.
+
+\subsection{\focus{} Score}
+
+For each image $x$, \focus{} constructs three views using the same frozen CLIP ViT-B/16 backbone:
+\begin{enumerate}
+    \item the original image $x_{\mathrm{full}}$;
+    \item a foreground-focused crop $x_{\mathrm{fg}}$;
+    \item a complementary background image $x_{\mathrm{bg}}$.
+\end{enumerate}
+Let $z_{\mathrm{full}}, z_{\mathrm{fg}}, z_{\mathrm{bg}} \in \mathbb{R}^C$ be class logits over $C$ classes and let $k = \arg\max_c z_{\mathrm{full},c}$. We define
+\begin{align}
+a(x) &= \mathbf{1}\!\left[\arg\max z_{\mathrm{full}} = \arg\max z_{\mathrm{fg}}\right], \\
+f(x) &= p_{\mathrm{fg}}(k), \\
+b(x) &= \max_c p_{\mathrm{bg}}(c),
+\end{align}
+where $p_{\mathrm{fg}}$ and $p_{\mathrm{bg}}$ are the softmax distributions of $z_{\mathrm{fg}}$ and $z_{\mathrm{bg}}$. The score is
+\begin{equation}
+\scorefocus(x) = a(x)\big(f(x) - \lambda b(x) - \tau\big).
+\end{equation}
+Validation tuning selected $\lambda = 1.0$ and $\tau = 0.0$.
+
+\subsection{Primary Causal Protocol}
+
+The main experiments use only \emph{causal}, validation-derived thresholds. For dataset $d$, seed $s$, target rate $r \in \{0.3, 0.5, 0.7\}$, and score function $m$, we compute validation scores $\{m(x_i)\}_{i=1}^{N_{\mathrm{val}}}$ and define
+\begin{equation}
+\theta^{(d,s,r)}_m = Q_q\!\left(\{m(x_i)\}_{i=1}^{N_{\mathrm{val}}}\right),
+\end{equation}
+with $q=1-r$ when larger scores are better and $q=r$ for entropy. Online inference then accepts a sample immediately when its score crosses that frozen threshold. This is the primary deployment-faithful protocol.
+
+Because thresholds are fixed before the test stream starts, the realized acceptance rate is allowed to drift under distribution shift. That drift is a feature, not a bug: it reflects what would happen in an actual online system whose calibration was frozen on validation data.
+
+\subsection{Offline Exact-Rate Ranking Protocol}
+
+We also retain an \emph{offline oracle-style} protocol for ranking analysis. For a full test stream of length $T$, we sort the stream scores and accept exactly $K=\mathrm{round}(rT)$ samples. This removes rate drift and isolates how well each score ranks candidate updates, but it is not causal because the accept/reject decision for time $t$ depends on future scores. We therefore use this protocol only to contrast with the causal results; we do not interpret it as realistic online adaptation.
+
+\subsection{Foreground and Background Views}
+
+Foreground views are derived from CLIP attention rollout over the last six vision-attention blocks, followed by thresholding, largest-component cleanup, and a resized crop. Pilot diagnostics show zero empty-mask fallbacks on both datasets, mean rollout time 16.72\,ms on \wb{} and 16.43\,ms on \ca{}, and mean extra view-construction plus extra encoding cost 40.03\,ms and 40.90\,ms, respectively. We also include an independent-mask sanity check that rebuilds the views using spectral residual saliency.
+
+\subsection{Baselines}
+
+We compare \focus{} against four baselines:
+\begin{itemize}
+    \item zero-shot CLIP;
+    \item plain \stata{} with unconditional updates;
+    \item entropy and max-softmax gates;
+    \item CER, a ReTA-style consistency score used only as an update gate.
+\end{itemize}
+We also test four simple object-centric ablations: agreement-only, foreground-only, background-only, and no-background ($a(x)f(x)$).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Datasets.}
+We use two context-sensitive benchmarks. \wb{} is loaded from the Hugging Face mirror because no local WILDS installation was available in this workspace. It has two classes and four groups defined by label-place combinations. \ca{} is loaded from the Hugging Face mirror and evaluated on deterministic class-balanced validation and test subsets of sizes 1024 and 1536, respectively, because only one split was exposed.
+
+\paragraph{Backbone, streams, and seeds.}
+All runs use \texttt{openai/clip-vit-base-patch16} with prompt template \texttt{a photo of a \{class\_name\}}. Streams follow the realistic online protocol with $\gamma=0.3$ and batch size 128. The reporting seeds are $\{7,17,37\}$; seed 27 is retained only as a frozen confirmation run and is not averaged into the main tables.
+
+\paragraph{Sparse harmful-update labels.}
+On each validation stream we inspect the first 256 samples, probe every fourth position, and compare the average labeled accuracy over the next 16 samples between an \emph{update} branch and a \emph{skip} branch. An update is labeled harmful if the update branch is worse by at least 0.25 percentage points. This yields 192 direct labels per dataset across the three reporting seeds. Harmful updates are rare: 14/192 positives on \wb{} (7.29\%) and 2/192 on \ca{} (1.04\%).
+
+\paragraph{Metrics.}
+We report online accuracy, balanced accuracy, \wb{} worst-group accuracy, realized acceptance rate, accepted-update precision, direct harmful-update AUPRC/AUROC, and latency. Following reviewer feedback, we distinguish \emph{cached stream latency} from \emph{full end-to-end latency}. For \focus{}, end-to-end latency adds rollout and extra-view encoding overhead to the cached stream-time update loop.
+
+\subsection{Causal Threshold Results}
+
+Table~\ref{tab:causal-main} is the main result. It uses only validation-derived thresholds, so every update decision is causal.
+
+The causal findings are mixed. On \wb{}, \focus{} is the strongest gate by downstream performance: at the nominal $50\%$ rate it reaches 71.03\% overall accuracy and 46.24\% worst-group accuracy, well above entropy (62.04\%, 31.07\%), max-probability (62.04\%, 31.07\%), and CER (63.28\%, 31.66\%). However, it still trails plain \stata{} on worst-group accuracy (48.75\%) and trails zero-shot CLIP on overall accuracy (81.93\%).
+
+On \ca{}, the conclusion reverses. \focus{} reaches 62.30\% overall accuracy and 61.29\% balanced accuracy, below entropy (69.44\%, 69.05\%), max-probability (67.93\%, 68.00\%), and CER (66.75\%, 66.45\%). The thresholded rates also drift differently across methods: entropy, max-probability, and CER all realize only 35.9--37.4\% acceptance at the nominal 50\% setting, while \focus{} realizes 52.8\%. This is exactly why the exact-rate analysis must be treated separately: causal thresholding and offline rate matching answer different questions.
+
+\begin{table*}[t]
+\caption{Primary causal-threshold results at the nominal $50\%$ target rate. All thresholds are calibrated on validation streams and then frozen; realized acceptance rates on test are therefore allowed to drift. Harmful-update AUPRC is computed from the sparse counterfactual labels. End-to-end latency reports the full per-image cost; for \focus{} it adds rollout and extra-view overhead (16.72\,ms + 40.03\,ms on \wb{}, 16.43\,ms + 40.90\,ms on \ca{}) to the cached stream latency. Best gated result in each dataset block is in \textbf{bold}.}
+\label{tab:causal-main}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccccc}
+\toprule
+Method & \multicolumn{4}{c}{\wb{}} & \multicolumn{4}{c}{\ca{}} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+& Acc.\ $\uparrow$ & Worst-group $\uparrow$ & Harmful AUPRC $\uparrow$ & End-to-end ms $\downarrow$
+& Acc.\ $\uparrow$ & Bal.\ Acc.\ $\uparrow$ & Realized rate & End-to-end ms $\downarrow$ \\
+\midrule
+Zero-shot CLIP & \textbf{81.93 $\pm$ 5.52} & 16.43 $\pm$ 11.77 & 0.0169 $\pm$ 0.0037 & \textbf{0.02 $\pm$ 0.00}
+& 67.32 $\pm$ 0.00 & 66.41 $\pm$ 0.00 & 0.00 & \textbf{0.01 $\pm$ 0.00} \\
+Plain \stata{} & 72.49 $\pm$ 6.17 & \textbf{48.75 $\pm$ 8.26} & 0.0169 $\pm$ 0.0037 & 0.32 $\pm$ 0.01
+& 62.41 $\pm$ 0.59 & 61.03 $\pm$ 0.55 & 1.00 & 0.48 $\pm$ 0.01 \\
+Entropy gate & 62.04 $\pm$ 6.23 & 31.07 $\pm$ 2.82 & 0.0285 $\pm$ 0.0082 & 0.29 $\pm$ 0.01
+& \textbf{69.44 $\pm$ 2.69} & \textbf{69.05 $\pm$ 2.66} & 0.36 & 0.34 $\pm$ 0.00 \\
+MaxProb gate & 62.04 $\pm$ 6.23 & 31.07 $\pm$ 2.82 & 0.1026 $\pm$ 0.0846 & 0.28 $\pm$ 0.01
+& 67.93 $\pm$ 1.22 & 68.00 $\pm$ 1.02 & 0.37 & 0.35 $\pm$ 0.00 \\
+CER gate & 63.28 $\pm$ 7.07 & 31.66 $\pm$ 2.64 & \textbf{0.1935 $\pm$ 0.1349} & 0.29 $\pm$ 0.00
+& 66.75 $\pm$ 2.64 & 66.45 $\pm$ 2.85 & 0.37 & 0.35 $\pm$ 0.00 \\
+\focus{} & \textbf{71.03 $\pm$ 6.11} & \textbf{46.24 $\pm$ 7.68} & 0.0227 $\pm$ 0.0034 & 57.03
+& 62.30 $\pm$ 1.42 & 61.29 $\pm$ 1.44 & 0.53 & 57.71 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+Figure~\ref{fig:cumulative} shows the cumulative \wb{} trajectory for the median \focus{} seed under the same causal threshold protocol as Table~\ref{tab:causal-main}. The qualitative pattern mirrors the table: \focus{} tracks plain \stata{} more closely than the other causal gates on \wb{}, but this gain does not transfer to \ca{}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/waterbirds_cumulative_accuracy.png}
+\caption{Cumulative online accuracy on the \wb{} test stream at the nominal $50\%$ rate for the median \focus{} reporting seed under the causal threshold protocol. The comparison uses the causal entropy, CER, and \focus{} gates; no offline exact-rate curves are shown here. \focus{} stays closer to plain \stata{} than entropy or CER on this dataset, but the same pattern does not hold on \ca{}.}
+\label{fig:cumulative}
+\end{figure}
+
+\subsection{Offline Exact-Rate Ranking Analysis}
+
+The exact-rate protocol uses future information and is therefore not a realistic online method. We keep it only as an oracle-style ranking analysis. Appendix~\ref{app:exact} contrasts the causal and exact-rate results at the common nominal $50\%$ rate.
+
+The comparison is instructive. On \wb{}, causal and exact-rate results are nearly identical for all methods, so the original conclusion was not driven by the protocol there. On \ca{}, exact-rate control removes threshold drift and lifts entropy from 35.9\% realized acceptance to exactly 50\%, reducing its accuracy from 69.44\% to 64.13\%. \focus{} changes much less (62.30\% causal vs.\ 62.20\% exact), so the exact-rate analysis preserves the same qualitative conclusion: the object-centric gate is not competitive on \ca{} even when rate drift is removed. We therefore interpret the exact-rate results as a useful ranking diagnostic, not as deployable online adaptation.
+
+\subsection{Does \focus{} Rank Harmful Updates Better?}
+
+The answer is no. On the direct harmful-update labels, \focus{} improves over entropy on \wb{} but not over the stronger baselines. In the pilot study, \focus{} reaches direct harmful-update AUPRC 0.142 and AUROC 0.600 on \wb{}, better than entropy (0.062, 0.319) but below max-probability (0.207, 0.681) and CER (0.196, 0.658). In the three-seed main study, \wb{} direct harmful-update AUPRC is only 0.0227 for \focus{}, versus 0.1026 for max-probability and 0.1935 for CER. On \ca{}, only 2 of 192 candidate updates are harmful, so all ranking results should be treated cautiously; even there, \focus{} does not emerge as the strongest signal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/harmful_update_pr_curves.png}
+\caption{Precision-recall curves for harmful-update ranking on the sparse counterfactual labels. Each curve ranks candidate updates by the raw score before thresholding. On \wb{}, \focus{} improves over entropy but remains below max-probability and CER. On \ca{}, the direct label is too sparse for strong conclusions.}
+\label{fig:pr}
+\end{figure}
+
+\subsection{Ablations Under Offline Exact-Rate Control}
+
+Table~\ref{tab:ablation} uses offline exact-rate comparisons for the simple variants and hard \focus{}, while the soft-gate row reports its realized near-$50\%$ acceptance from the dedicated ablation run. This mixed provenance is explicit because the hard \focus{} exact-rate row lives in the main-study artifact, whereas the soft and independent-mask controls live in the ablation artifact. Under this oracle-style comparison, the full object-centric score is not necessary to reproduce the strongest downstream behavior. The background-only gate is the best simple variant on both datasets. It reaches 79.79\% accuracy on \wb{} and 65.84\% on \ca{}, exceeding hard \focus{} by 8.60 and 3.64 points, respectively. Agreement-only is also stronger than \focus{} on \wb{}.
+
+The soft gate does not materially change the conclusion: on \wb{} it reaches 72.47\% accuracy, essentially matching hard \focus{}, while harmful-update AUPRC remains 0.0227. The independent-mask sanity check is also unfavorable. Replacing CLIP rollout with spectral saliency lowers \focus{} to 57.29\% on \wb{} and 54.17\% on \ca{}, indicating substantial sensitivity to the mask source.
+
+\begin{table*}[t]
+\caption{Ablations at the common nominal $50\%$ setting. Agreement-only, foreground-only, background-only, no-background, independent-mask, and hard \focus{} use offline exact-rate selection, so those rows are ranking-oracle comparisons. The \focus{} soft row instead reports the realized acceptance from its dedicated soft-gating ablation run (0.4977 $\pm$ 0.0158 on \wb{}). Best simple variant in each dataset is in \textbf{bold}. The background-only control is the strongest simple ablation downstream on both datasets.}
+\label{tab:ablation}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+Method & \wb{} Acc.\ $\uparrow$ & \wb{} Bal.\ Acc.\ $\uparrow$ & \wb{} Harmful AUPRC $\uparrow$
+& \ca{} Acc.\ $\uparrow$ & \ca{} Bal.\ Acc.\ $\uparrow$ & \ca{} Harmful AUPRC $\uparrow$ \\
+\midrule
+Agreement-only & 76.82 $\pm$ 1.29 & 65.19 $\pm$ 10.19 & 0.0175 $\pm$ 0.0033
+& 64.39 $\pm$ 1.43 & 63.11 $\pm$ 1.57 & 0.0091 $\pm$ 0.0075 \\
+Foreground-only & 62.60 $\pm$ 6.71 & 66.96 $\pm$ 10.84 & 0.0721 $\pm$ 0.0767
+& 62.17 $\pm$ 1.71 & 61.32 $\pm$ 1.83 & 0.0115 $\pm$ 0.0102 \\
+Background-only & \textbf{79.79 $\pm$ 3.84} & \textbf{69.19 $\pm$ 13.79} & \textbf{0.0432 $\pm$ 0.0199}
+& \textbf{65.84 $\pm$ 1.34} & \textbf{64.27 $\pm$ 1.30} & \textbf{0.0269 $\pm$ 0.0255} \\
+No-background & 62.60 $\pm$ 6.71 & 66.96 $\pm$ 10.84 & 0.0721 $\pm$ 0.0767
+& 62.17 $\pm$ 1.71 & 61.32 $\pm$ 1.83 & 0.0117 $\pm$ 0.0102 \\
+\focus{} soft & 72.47 $\pm$ 5.54 & 71.20 $\pm$ 9.76 & 0.0227 $\pm$ 0.0034
+& -- & -- & -- \\
+\focus{} independent mask & 57.29 $\pm$ 0.74 & 66.19 $\pm$ 0.97 & --
+& 54.17 $\pm$ 1.47 & 67.41 $\pm$ 1.05 & -- \\
+Hard \focus{} & 71.19 $\pm$ 5.98 & 70.97 $\pm$ 10.07 & 0.0227 $\pm$ 0.0034
+& 62.20 $\pm$ 1.51 & 61.10 $\pm$ 1.47 & 0.0089 $\pm$ 0.0064 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\subsection{Efficiency and Qualitative Analysis}
+
+The original draft compared only cached stream-time latencies, which understated the real cost of \focus{}. The corrected numbers are simple. In the cached online loop, \focus{} costs 0.28\,ms per image on \wb{} and 0.39\,ms on \ca{}, similar to the other gates. But the full method also requires rollout generation and extra foreground/background encoding, adding 16.72\,ms + 40.03\,ms on \wb{} and 16.43\,ms + 40.90\,ms on \ca{}. The full end-to-end per-image cost is therefore about 57.03\,ms on \wb{} and 57.71\,ms on \ca{}, over two orders of magnitude larger than the cached gate-only number.
+
+Figure~\ref{fig:runtime} visualizes this corrected accounting for one full seed-7 test stream per dataset. The stacked bars report total seconds over the entire stream, not milliseconds per image; dividing those totals by the stream lengths recovers the reported 57.03\,ms and 57.71\,ms end-to-end per-image costs. The workflow runtime summary is recorded in \texttt{exp/report/results.json}: the complete audited workflow, including calibration, main study, ablations, and figure generation, finishes in 6.44 minutes on one RTX A6000 GPU, and the main-and-ablation stage accounts for 5.00 of those minutes. Figure~\ref{fig:qualitative} shows representative decompositions. The views are often semantically plausible, but plausibility does not translate into a stronger update-safety ranking.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/runtime_breakdown.png}
+\caption{Runtime breakdown for \focus{} on the full seed-7 test stream of each dataset at the common nominal $50\%$ rate. Bars are total wall-clock seconds accumulated over the stream; they are not per-image timings. The stack separates rollout generation, extra-view encoding, gate scoring, and \stata{} updates, and the dominant cost is the extra object-centric preprocessing rather than gate scoring itself.}
+\label{fig:runtime}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/qualitative_focus_grid.png}
+\caption{Representative \focus{} decompositions on \wb{}. Each example shows the original image, foreground crop, and complementary background. Although many masks look reasonable, the aggregate experiments show that this evidence is not a reliable standalone write-safety signal.}
+\label{fig:qualitative}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The corrected paper supports a narrower and more defensible claim than the original draft. Object-centric evidence can help on \wb{}, a dataset where context bias is unusually salient and the rollout masks are derived from the same backbone used for recognition. But that evidence does not yield the best harmful-update ranking, it does not transfer to \ca{}, and it is partly reproduced by a much simpler background-only rule.
+
+Several limitations matter for interpretation. First, the benchmark is intentionally small: only \wb{} and \ca{} were run under the audited protocol. Second, the direct harmful-update labels are sparse by design, especially on \ca{}, where only two positive events are observed. Third, \focus{} uses CLIP-derived masks, and the independent-mask sanity check shows that its behavior is sensitive to that choice. Fourth, SegDebias was not executed in this workspace, so we do not claim a like-for-like comparison with segmentation-heavy debiasing methods. Finally, the causal threshold protocol itself reveals a practical challenge: threshold transfer under shift can drift acceptance rates substantially, which complicates any attempt to deploy a fixed gate across domains.
+
+These limitations do not nullify the paper; they define its value. The main contribution is methodological. Once the evaluation is made causal and the latency accounting is corrected, the object-centric hypothesis looks weaker than its qualitative intuition suggests. That negative result is useful because it narrows where future work should look: stronger uncertainty estimation, better causal diagnostics of update harm, and less circular ways of constructing object evidence.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We studied whether object-centric evidence can serve as an update-safety signal for realistic online VLM adaptation. \focus{} uses full-image, foreground, and background views to decide whether \stata{} should update on the current sample. Under a causal validation-threshold protocol, the result is mixed and overall negative.
+
+On \wb{}, \focus{} is the strongest causal gate downstream, reaching 71.03\% online accuracy and 46.24\% worst-group accuracy at the nominal 50\% rate. On \ca{}, it falls to 62.30\% and trails all three non-object-centric gates. The mechanistic evidence is also unfavorable: \focus{} harmful-update AUPRC remains below max-probability and CER, and a background-only ablation outperforms the full score downstream on both datasets. Corrected efficiency reporting further shows that the true end-to-end cost of \focus{} is about 57\,ms per image, not the sub-millisecond cached gate-only number.
+
+The broader implication is that visually sensible object cues are not enough by themselves to solve write safety in realistic online adaptation. Future work should treat object-centric evidence as one ingredient in a larger reliability pipeline rather than as a standalone gating rule.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{19}
+
+\bibitem[Dobler et~al.(2024)Dobler, Marsden, Raichle, and Yang]{dobler2024lost}
+Mario Dobler, Robert~A. Marsden, Tobias Raichle, and Bin Yang.
+\newblock A lost opportunity for vision-language models: A comparative study of online test-time adaptation for vision-language models.
+\newblock {\em arXiv preprint arXiv:2405.14977}, 2024.
+
+\bibitem[Geifman and El-Yaniv(2017)]{geifman2017selective}
+Yonatan Geifman and Ran El-Yaniv.
+\newblock Selective classification for deep neural networks.
+\newblock In {\em Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem[Geifman and El-Yaniv(2019)]{geifman2019selectivenet}
+Yonatan Geifman and Ran El-Yaniv.
+\newblock SelectiveNet: A deep neural network with an integrated reject option.
+\newblock In {\em Proceedings of the 36th International Conference on Machine Learning}, 2019.
+
+\bibitem[Huang et~al.(2025)Huang, Zhang, Xie, Chao, and Ji]{huang2025gsbias}
+Zhaohong Huang, Yuxin Zhang, Jingjing Xie, Fei Chao, and Rongrong Ji.
+\newblock {GS-Bias}: Global-spatial bias learner for single-image test-time adaptation of vision-language models.
+\newblock {\em arXiv preprint arXiv:2507.11969}, 2025.
+
+\bibitem[Janouskova et~al.(2025)Janouskova, Gavrus, and Matas]{janouskova2025robust}
+Klara Janouskova, Cristian Gavrus, and Jiri Matas.
+\newblock Robust context-aware object recognition.
+\newblock {\em arXiv preprint arXiv:2510.00618}, 2025.
+
+\bibitem[Liang et~al.(2025)Liang, Chen, Xiong, Zhou, Lyu, Lin, Niu, Zhao, Han, and Ding]{liang2025advancing}
+Yiwen Liang, Hui Chen, Yizhe Xiong, Zihan Zhou, Mengyao Lyu, Zijia Lin, Shuaicheng Niu, Sicheng Zhao, Jungong Han, and Guiguang Ding.
+\newblock Advancing reliable test-time adaptation of vision-language models under visual variations.
+\newblock {\em arXiv preprint arXiv:2507.09500}, 2025.
+
+\bibitem[Karmanov et~al.(2024)Karmanov, Guan, Lu, El Saddik, and Xing]{karmanov2024efficient}
+Adilbek Karmanov, Dayan Guan, Shijian Lu, Abdulmotaleb El~Saddik, and Eric Xing.
+\newblock Efficient test-time adaptation of vision-language models.
+\newblock {\em arXiv preprint arXiv:2403.18293}, 2024.
+
+\bibitem[Lafon et~al.(2025)Lafon, Vargas~Hakim, Rambour, Desrosier, and Thome]{lafon2025cliptta}
+Marc Lafon, Gustavo Adolfo Vargas~Hakim, Cl{\'e}ment Rambour, Christian Desrosier, and Nicolas Thome.
+\newblock {CLIPTTA}: Robust contrastive vision-language test-time adaptation.
+\newblock {\em arXiv preprint arXiv:2507.14312}, 2025.
+
+\bibitem[Menon et~al.(2022)Menon, Chandratreya, and Vondrick]{menon2022task}
+Sachit Menon, Ishaan~Preetam Chandratreya, and Carl Vondrick.
+\newblock Task bias in vision-language models.
+\newblock {\em arXiv preprint arXiv:2212.04412}, 2022.
+
+\bibitem[Maharana et~al.(2024)Maharana, Zhang, Karlinsky, Feris, and Guo]{maharana2025batclip}
+Sarthak Kumar Maharana, Baoming Zhang, Leonid Karlinsky, Rogerio Feris, and Yunhui Guo.
+\newblock {BATCLIP}: Bimodal online test-time adaptation for {CLIP}.
+\newblock {\em arXiv preprint arXiv:2412.02837}, 2024.
+
+\bibitem[Nguyen et~al.(2025)Nguyen, Bui, Choo, and Nguyen]{nguyen2025adaptive}
+Khanh-Binh Nguyen, Phuoc-Nguyen Bui, Hyunseung Choo, and Duc~Thanh Nguyen.
+\newblock Adaptive cache enhancement for test-time adaptation of vision-language models.
+\newblock {\em arXiv preprint arXiv:2508.07570}, 2025.
+
+\bibitem[Sheng et~al.(2025)Sheng, Liang, He, Wang, and Tan]{sheng2025illusion}
+Lijun Sheng, Jian Liang, Ran He, Zilei Wang, and Tieniu Tan.
+\newblock The illusion of progress? A critical look at test-time adaptation for vision-language models.
+\newblock {\em arXiv preprint arXiv:2506.24000}, 2025.
+
+\bibitem[Wang et~al.(2024)Wang, Lin, Chen, Schmidt, Han, and Zhang]{wang2024sober}
+Qizhou Wang, Yong Lin, Yongqiang Chen, Ludwig Schmidt, Bo Han, and Tong Zhang.
+\newblock A sober look at the robustness of {CLIP}s to spurious features.
+\newblock {\em arXiv preprint arXiv:2403.11497}, 2024.
+
+\bibitem[Wu and Cai(2025)]{wu2025segdebias}
+Fangyu Wu and Yujun Cai.
+\newblock {SegDebias}: Test-time bias mitigation for {ViT}-based {CLIP} via segmentation.
+\newblock {\em arXiv preprint arXiv:2511.00523}, 2025.
+
+\bibitem[Yun et~al.(2026)Yun, Masukawa, Jeong, Huang, Chen, and Imani]{yun2026fair}
+Sanggeon Yun, Ryozo Masukawa, SungHeon Jeong, Wenjun Huang, Hanning Chen, and Mohsen Imani.
+\newblock Fair context learning for evidence-balanced test-time adaptation in vision-language models.
+\newblock {\em arXiv preprint arXiv:2602.07027}, 2026.
+
+\bibitem[Zanella et~al.(2025)Zanella, Fuchs, De~Vleeschouwer, and Ben~Ayed]{zanella2025realistic}
+Maxime Zanella, Cl{\'e}ment Fuchs, Christophe De~Vleeschouwer, and Ismail Ben~Ayed.
+\newblock Realistic test-time adaptation of vision-language models.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pages 25103--25112, 2025.
+
+\bibitem[Zhai et~al.(2025)Zhai, Chen, Zhang, Sha, and Li]{zhai2025mitigating}
+Haotian Zhai, Xinyu Chen, Can Zhang, Tianming Sha, and Ruirui Li.
+\newblock Mitigating cache noise in test-time adaptation for large vision-language models.
+\newblock {\em arXiv preprint arXiv:2503.18334}, 2025.
+
+\bibitem[Zhou et~al.(2025)Zhou, Ye, Li, Li, Zhu, Deng, Liu, and Lei]{zhou2025bayesian}
+Lihua Zhou, Mao Ye, Shuaifeng Li, Nianxin Li, Xiatian Zhu, Lei Deng, Hongbin Liu, and Zhen Lei.
+\newblock Bayesian test-time adaptation for vision-language models.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pages 29999--30009, 2025.
+
+\end{thebibliography}
+
+\appendix
+\section{Causal vs. Exact-Rate Comparison}
+\label{app:exact}
+
+\begin{table}[h]
+\caption{Causal-threshold versus exact-rate results at the nominal $50\%$ setting. ``Exact'' denotes the offline oracle-style top-$K$ protocol and should not be interpreted as causal online adaptation.}
+\label{tab:exact-appendix}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+Method & \wb{} causal & \wb{} exact & \ca{} causal & \ca{} exact \\
+\midrule
+Entropy & 62.04 / 0.51 & 62.47 / 0.50 & 69.44 / 0.36 & 64.13 / 0.50 \\
+CER & 63.28 / 0.50 & 63.38 / 0.50 & 66.75 / 0.37 & 64.80 / 0.50 \\
+\focus{} & 71.03 / 0.50 & 71.19 / 0.50 & 62.30 / 0.53 & 62.20 / 0.50 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Each cell reports overall online accuracy and realized acceptance rate. The \wb{} numbers change little between protocols, while the \ca{} entropy and CER results change substantially because causal threshold transfer drifts their realized rates downward. This is precisely why the exact-rate experiments are best viewed as offline ranking analysis rather than deployable online adaptation.
+
+\section{Reproducibility Summary}
+\label{app:repro}
+
+\paragraph{Datasets and streams.}
+\wb{} is evaluated from the Hugging Face mirror with its standard two-class, four-group label-place structure. \ca{} is evaluated from the Hugging Face mirror using deterministic class-balanced validation and test subsets of sizes 1024 and 1536. All streams use the realistic online construction with $\gamma=0.3$ and batch size 128.
+
+\paragraph{Seeds.}
+The reporting seeds are $\{7,17,37\}$. Seed 27 is reserved for confirmation runs only and is not averaged into the main tables. Harmful-update pilots use the same reporting seeds.
+
+\paragraph{Threshold selection.}
+The primary causal protocol uses frozen validation thresholds at target rates $\{0.3,0.5,0.7\}$. For \focus{}, validation selects $\lambda=1.0$, $\tau=0.0$, and the common nominal comparison rate $0.5$ using mean validation direct harmful-update AUPRC. Exact-rate results instead sort the test-stream scores offline and accept exactly $K=\mathrm{round}(rT)$ samples.
+
+\paragraph{Result files backing the manuscript.}
+Table~\ref{tab:causal-main} uses \texttt{exp/causal\_threshold/results.json}. Table~\ref{tab:ablation} has mixed row provenance, recorded explicitly in \texttt{exp/report/results.json}: agreement-only, foreground-only, background-only, no-background, \focus{} soft, and \focus{} independent-mask come from \texttt{exp/ablations/results.json}, while hard \focus{} comes from the exact-rate \texttt{focus} row in \texttt{exp/main\_study/results.json}. Figure~\ref{fig:pr} and Figure~\ref{fig:qualitative} are generated during the report stage recorded in \texttt{exp/report/results.json}. Figure~\ref{fig:cumulative} uses the causal \wb{} cumulative plot in \texttt{figures/waterbirds\_cumulative\_accuracy.png}. Figure~\ref{fig:runtime} uses \texttt{figures/runtime\_breakdown.png}. The workflow runtime summary cited in the paper is stored in \texttt{exp/report/results.json} and points to the stage-level accounting in \texttt{artifacts/results/runtime\_accounting.json}. The consolidated audit artifact \texttt{results.json} mirrors the headline rows from the stage-specific files and records the overall claim check.
+
+\end{document}

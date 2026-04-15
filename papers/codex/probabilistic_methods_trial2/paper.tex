@@ -1,0 +1,359 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2024.sty}{
+  \usepackage[preprint]{neurips_2024}
+}{
+  \usepackage[margin=1in]{geometry}
+}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{array}
+\usepackage{listings}
+
+\title{Hierarchical Diagonal-GMM Posteriors for Localized Conformal Prediction:\\A Scoped Negative Result}
+
+\author{Anonymous Authors}
+
+\newcommand{\chip}{CHiP-RLCP}
+\newcommand{\cov}{\mathrm{Cov}}
+\newcommand{\setsize}{\mathrm{Size}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Localized conformal prediction aims to improve subgroup behavior without sacrificing the exact finite-sample marginal guarantees of split conformal prediction. This paper evaluates a pragmatic fallback to an unrealized probabilistic-circuit design: a two-level hierarchical diagonal Gaussian-mixture classifier whose posterior responsibilities define soft local weights for randomized localized conformal prediction. The resulting method, \chip, combines coarse and fine memberships, removes groups with less than 20 units of calibration mass, and mixes local overlap weights with a global fallback weight of 0.10. We benchmark this fallback on three tabular classification settings with fixed train/calibration/test splits and three seeds: a synthetic hierarchical mixture problem, the Anuran Calls taxonomy task, and the Mice Protein dataset. The main result is negative. On Anuran, \chip\ raises worst external-group coverage from 0.000 for split conformal prediction to 0.586, but flat GMM localization reaches 0.803 and explicit finite-group baselines reach 0.880 (Batch GCP) and 0.906 (Batch MCP). On the synthetic hierarchy, \chip\ achieves 0.363 worst-group coverage versus 0.536 for Batch MCP and 0.909 for Batch GCP. Thus the implemented hierarchy can improve over global conformalization, but it does not justify claims that hierarchical latent localization is necessary or superior once strong flat and explicit-group baselines are included.
+\end{abstract}
+
+\section{Introduction}
+Conformal prediction gives exact distribution-free marginal coverage, but marginal guarantees can mask large failures on semantically meaningful subpopulations. This gap has motivated localized, weighted, and group-aware variants that adapt calibration to the test point or to external group structure \citep{guan2023localized,han2022splitlocalized,hore2025localweights,jung2022batch,bairaktari2025kandinsky,zhang2024posterior,plassier2025probabilistic}. In parallel, probabilistic circuits and related tractable latent-variable models offer efficient posterior computations that appear well matched to soft subgroup discovery \citep{poon2011sumproduct,ventola2023pcsknow,kang2024colep}.
+
+The original goal of this project was to study localized conformal prediction driven by latent structure extracted from a probabilistic circuit. That implementation was not completed in this workspace. Rather than claim evidence we do not have, we report a narrower empirical study based on the model that was actually run: a two-level hierarchical diagonal Gaussian-mixture classifier over $(x,y)$ coupled with randomized local-weight conformal prediction. The question is pragmatic: does this hierarchical fallback improve subgroup coverage compared with simpler localizers and with explicit finite-group baselines under the same score function and CPU budget?
+
+The answer is mixed and mostly negative. The fallback is sometimes better than split conformal prediction on structured groups, especially on Anuran, but it is not consistently better than flat GMM localization and it is weaker than strong finite-group baselines when those groups are known. On the synthetic task, \chip\ achieves marginal coverage 0.913 and worst external-group coverage 0.363, compared with 0.907 and 0.354 for split conformal prediction, 0.906 and 0.340 for flat GMM localization, 0.536 for Batch MCP, and 0.909 for the stored Batch GCP runs. On Anuran, \chip\ improves worst-group coverage from 0.000 under split conformal prediction to 0.586, but flat GMM, Batch GCP, and Batch MCP reach 0.803, 0.880, and 0.906, respectively. On Mice, \chip\ remains competitive on mean external-group gap at 0.034, but flat GMM is better on both worst-group coverage and mean gap at 0.889 and 0.032, while Batch MCP is best only on marginal coverage at 0.937.
+
+Our contributions are:
+\begin{itemize}
+  \item We formalize and evaluate a hierarchical diagonal-GMM fallback for localized conformal prediction, derived from the implemented code rather than the unrealized probabilistic-circuit proposal.
+  \item We provide a controlled three-dataset, three-seed benchmark against split conformal prediction, class-conditional conformal prediction, kNN localization, flat GMM localization, finite-group Batch MCP, a disclosed auxiliary Batch GCP comparator where runs exist, and a synthetic oracle localizer.
+  \item We show that the hierarchical fallback is not a clear win: paired Wilcoxon tests across nine dataset-seed pairs find no significant improvement in worst-group coverage over split conformal prediction ($p=0.25$, Holm-corrected $0.5$) or flat GMM localization ($p=0.4609$, Holm-corrected $0.5$).
+  \item We document a scoped negative result: in this benchmark, hierarchy alone is not enough to beat either a strong flat localizer or an explicit finite-group optimizer.
+\end{itemize}
+
+Section~\ref{sec:related} situates the study within local and approximate-conditional conformal prediction. Section~\ref{sec:method} describes the hierarchical fallback and baselines. Section~\ref{sec:experiments} reports the benchmark, ablations, and diagnostics. Section~\ref{sec:discussion} discusses limitations. Appendix~\ref{app:repro} gives compact pseudocode and the exact aggregation and rounding rules used to produce the tables.
+
+\section{Related Work}
+\label{sec:related}
+Recent work on local conformal prediction replaces a single global quantile with test-point-dependent neighborhoods or weights. This line should be read relative to classical global and class-conditional conformal baselines: those methods are simple and efficient, but they do not target subgroup disparities unless the label itself captures the relevant structure. \citet{guan2023localized} give a general weighted framework for localized conformal prediction, while \citet{han2022splitlocalized} study split localized conformal prediction as a computationally cheaper approximation. \citet{hore2025localweights} then show that randomized local-weight conformal prediction can recover robust finite-sample guarantees under arbitrary weight functions. Our method uses their randomized weighted p-values directly, but contributes no new guarantee; it only changes the learned soft localizer.
+
+Several recent papers push beyond classical localization toward richer approximate-conditional or soft-group validity. \citet{plassier2025probabilistic} propose probabilistic conformal prediction with approximate conditional validity, explicitly targeting conditional coverage through probabilistic conditioning events. \citet{zhang2024posterior} use posterior cluster assignments to define soft subpopulations inside conformal prediction. \citet{bairaktari2025kandinsky} broaden the target further to overlapping and fractional groups defined jointly on covariates and labels. These papers are the closest conceptual neighbors to our setting. Relative to them, our paper is narrower: we do not introduce a new validity notion or optimization objective, but instead ask whether a cheap hierarchical latent localizer is empirically better than flat localization under the same score function.
+
+Another line of work assumes the relevant groups are known and optimizes directly for them. Batch multivalid conformal prediction iteratively raises thresholds to repair coverage deficits over a fixed family of groups \citep{jung2022batch}. In our benchmark this is the strongest baseline whenever those candidate groups coincide with the evaluation groups, because it directly optimizes the target notion of subgroup coverage rather than relying on a learned latent surrogate. This distinction is central to our empirical finding: when groups are specified, explicit finite-group calibration dominates the learned hierarchy.
+
+On the latent-model side, probabilistic circuits and related tractable models offer structured latent decompositions and exact or efficient posterior inference \citep{poon2011sumproduct,ventola2023pcsknow}. COLEP also combines conformal prediction with probabilistic-circuit-based reasoning, but for certified robustness rather than subgroup-adaptive calibration \citep{kang2024colep}. Our implementation does not include a probabilistic circuit; it uses a much simpler hierarchical diagonal GMM. The correct empirical comparison is therefore against practical local and group-aware conformal baselines, not as a test of the broader probabilistic-circuit literature.
+
+Unlike prior approximate-conditional and local CP papers, this study isolates one concrete design question: whether a \emph{hierarchical} soft localizer learned from features is better than a flat soft localizer or a fixed-group optimizer when all methods share the same conformity score $s(x,y)=1-p(y \mid x)$. In this benchmark, the answer is no.
+
+\section{Method}
+\label{sec:method}
+\subsection{Hierarchical diagonal-GMM classifier}
+The predictive model is a two-level hierarchical mixture over features and labels. We first fit a coarse diagonal Gaussian mixture with 4 components to the training features. Each training point is then assigned to its maximum-responsibility coarse component, and a second diagonal Gaussian mixture with 2 fine components is fit within that coarse cluster. If a coarse cluster is too small, the implementation backs off to the highest-responsibility training points for that component.
+
+For a fine component $(c,f)$, class probabilities are estimated by additive smoothing on the hard fine assignments:
+\begin{equation}
+  \hat{p}(y=k \mid c,f)
+  =
+  \frac{N_{cfk} + 1}{\sum_{k'} N_{cfk'} + K},
+\end{equation}
+where $K$ is the number of classes. Given a test feature vector $x$, the model computes the joint fine-component posterior weights and then marginalizes them to obtain
+\begin{equation}
+  \hat{p}(y \mid x)
+  =
+  \sum_{c=1}^{4}\sum_{f=1}^{2}
+  \hat{p}(c,f \mid x)\hat{p}(y \mid c,f).
+\end{equation}
+The conformity score shared by all learned-localizer methods is
+\begin{equation}
+  s(x,y) = 1 - \hat{p}(y \mid x).
+\end{equation}
+Lower scores are better.
+
+\subsection{Localized weighted conformal prediction}
+Let $\{(x_i,y_i)\}_{i=1}^{n_{\mathrm{cal}}}$ be the calibration sample and let $s_i=s(x_i,y_i)$ be the score of the true label. The hierarchical model supplies a soft membership vector $m(x)\in\mathbb{R}^G_{\ge 0}$ over the retained coarse and fine groups. The full \chip\ variant concatenates the coarse and fine posteriors after multiplying each block by 0.5. Before filtering there are 12 candidate groups in total: 4 coarse groups and up to 8 fine groups. We then remove any group whose total calibration mass is less than 20. All 12 groups survive on Synthetic and Anuran for every seed, whereas Mice retains 8, 5, and 7 groups for seeds 11, 22, and 33, respectively.
+
+For a test point $x$, the overlap between calibration point $i$ and $x$ is
+\begin{equation}
+  b_i(x) = \sum_{g=1}^{G} \min\{m_g(x_i), m_g(x)\}.
+\end{equation}
+The final local weights mix these overlaps with a global fallback weight $\lambda=0.10$:
+\begin{equation}
+  w_i(x)
+  =
+  \frac{\lambda}{n_{\mathrm{cal}}+1}
+  +
+  (1-\lambda)\frac{b_i(x)}{\sum_{j=1}^{n_{\mathrm{cal}}} b_j(x) + b_{\mathrm{self}}(x)},
+\end{equation}
+where $b_{\mathrm{self}}(x)=\sum_g m_g(x)$ is the overlap of the test point with itself. The pseudo-point weight receives the same fallback term and its normalized share of $b_{\mathrm{self}}(x)$.
+
+Prediction uses the randomized weighted p-value from \citet{hore2025localweights}. For candidate label $y$ with score $s(x,y)$,
+\begin{equation}
+  p_y(x)
+  =
+  \sum_{i=1}^{n_{\mathrm{cal}}} w_i(x)\mathbf{1}\{s_i > s(x,y)\}
+  +
+  U\!\left(
+    \sum_{i=1}^{n_{\mathrm{cal}}} w_i(x)\mathbf{1}\{s_i = s(x,y)\}
+    + w_{\mathrm{test}}(x)
+  \right),
+\end{equation}
+with $U\sim \mathrm{Unif}(0,1)$. The prediction set is $\{y : p_y(x) > \alpha\}$.
+
+\subsection{Baselines}
+We compare against:
+\begin{itemize}
+  \item \textbf{Split CP}: a single global quantile of the calibration true-label scores.
+  \item \textbf{Class-conditional CP}: one quantile per label when the class has at least 40 calibration examples, otherwise the global quantile.
+  \item \textbf{kNN RLCP}: the same randomized local-weight procedure, but memberships are induced by Gaussian-kernel similarities to the $k$ nearest calibration points, with $k=100$ on Synthetic, $150$ on Anuran, and $80$ on Mice.
+  \item \textbf{Flat GMM RLCP}: the same randomized local-weight procedure with memberships from a diagonal GMM fit to the training features, using 12 components on Synthetic and Anuran and 8 on Mice, followed by the same calibration-mass filter.
+  \item \textbf{Batch GCP}: a stored finite-group group-conditional baseline available only on Synthetic and Anuran. The saved runs use 12 candidate groups and are reported directly from the corresponding \texttt{exp/*batch\_gcp*/results.json} artifacts.
+  \item \textbf{Batch MCP}: iterative finite-group multivalid thresholding over the fixed external candidate groups, with at most 20 update rounds, tolerance 0.01, and minimum group size 20.
+  \item \textbf{Oracle RLCP}: Synthetic only, using the ground-truth fine latent groups as memberships.
+\end{itemize}
+
+\subsection{Ablations}
+We also evaluate four ablations of the hierarchical fallback on Synthetic and Anuran:
+\begin{itemize}
+  \item \textbf{Flat-only}: use only the fine posterior memberships.
+  \item \textbf{Coarse-only}: use only the coarse posterior memberships.
+  \item \textbf{No-fallback}: remove the hierarchy-specific fallback behavior while keeping the same learned memberships.
+  \item \textbf{Uniform-overlap}: threshold memberships at 0.05 and then use hard overlap weights.
+\end{itemize}
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+All experiments are CPU-only and use the saved runtime budget of 2 CPU cores, 128 GB RAM, no GPU, and at most 2 parallel jobs. We evaluate three seeds $\{11,22,33\}$ at $\alpha=0.10$ for the main benchmark and also report the saved secondary runs at $\alpha=0.05$ in Appendix~\ref{app:secondary-alpha}. Every method uses the same train/calibration/test splits for a given seed. The main incompleteness is baseline availability: Batch GCP was executed for Synthetic and Anuran, but not for Mice, and the saved $\alpha=0.05$ bundle covers only Synthetic and Anuran with Split CP, Flat GMM RLCP, Batch MCP, and \chip.
+
+\paragraph{Datasets.}
+The synthetic task contains 4000 training examples, 2000 calibration examples, and 2000 test examples with 12 standardized features, 4 classes, and three evaluation group families: 4 coarse groups, 8 fine groups, and 16 coarse-by-class groups. The Anuran Calls dataset contains 3597/1799/1799 train/calibration/test examples with 22 MFCC features, 10 classes, and 22 candidate groups derived from 4 families, 8 genera, and 10 family-by-class intersections. The Mice Protein dataset contains 540/270/270 train/calibration/test examples with 77 features after median imputation, 8 classes, and 10 candidate groups from genotype, treatment, behavior, and genotype-by-treatment.
+
+Figure~\ref{fig:anuran-taxonomy} visualizes the Anuran taxonomy diagnostic from the artifact bundle. It shows the nested family/genus structure that defines the external evaluation groups and the candidate groups for the explicit finite-group baselines; these labels are not used to train \chip.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.62\linewidth]{figures/anuran_taxonomy.pdf}
+\caption{Anuran evaluation taxonomy used by the benchmark. Family and genus define the external groups, and family-by-class intersections are added as candidate groups for evaluation and the explicit finite-group baselines. These taxonomy labels are not used by the learned localizers during training.}
+\label{fig:anuran-taxonomy}
+\end{figure}
+
+\paragraph{Metrics.}
+We report marginal coverage, worst external-group coverage, mean external-group coverage gap, mean prediction-set size, and total runtime. Group metrics are computed only on evaluation groups above the minimum support thresholds used by the code: 50 for the synthetic group families, 30 for Anuran families and genera, and 20 for the Mice group families.
+
+\subsection{Main results}
+Table~\ref{tab:main-results} gives the core comparison. All displayed values are arithmetic means over seeds, rounded from the saved aggregates using the appendix rule in Appendix~\ref{app:repro}. The overall pattern is consistent across datasets. \chip\ preserves near-nominal marginal coverage, but its subgroup gains are modest and inconsistent relative to strong baselines. Flat GMM localization is usually as good or better. Among the explicit finite-group baselines, Batch MCP is best on Anuran and on Mice marginal coverage, while Flat GMM RLCP is best on the Mice subgroup metrics and the stored Batch GCP artifacts are materially stronger on Synthetic and competitive on Anuran.
+
+\begin{table*}[t]
+\caption{Main results at $\alpha=0.10$, averaged over seeds $\{11,22,33\}$. Best values in each dataset/column are in \textbf{bold}. Higher is better for marginal and worst-group coverage; lower is better for mean gap, set size, and runtime. Batch GCP is reported only where stored runs exist.}
+\label{tab:main-results}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccc}
+\toprule
+Dataset & Method & Marginal cov.\ $\uparrow$ & Worst-group cov.\ $\uparrow$ & Mean gap $\downarrow$ & Mean set size $\downarrow$ & Runtime (s) $\downarrow$ \\
+\midrule
+Synthetic & Split CP & 0.907 & 0.354 & 0.111 & \textbf{3.208} & \textbf{1.297} \\
+Synthetic & Class-cond.\ CP & 0.907 & 0.469 & 0.106 & 3.254 & 1.297 \\
+Synthetic & kNN RLCP & 0.916 & 0.386 & 0.100 & 3.265 & 25.172 \\
+Synthetic & Flat GMM RLCP & 0.906 & 0.340 & 0.103 & 3.216 & 3.303 \\
+Synthetic & Oracle RLCP & 0.907 & 0.368 & 0.101 & 3.243 & 2.496 \\
+Synthetic & Batch GCP & \textbf{0.966} & \textbf{0.909} & \textbf{0.066} & 3.781 & 1.327 \\
+Synthetic & Batch MCP & 0.936 & 0.536 & 0.093 & 3.441 & 1.302 \\
+Synthetic & \chip & 0.913 & 0.363 & 0.106 & 3.245 & 2.362 \\
+\midrule
+Anuran & Split CP & 0.911 & 0.000 & 0.203 & 1.817 & \textbf{0.769} \\
+Anuran & Class-cond.\ CP & 0.879 & 0.000 & 0.141 & \textbf{1.705} & 0.770 \\
+Anuran & kNN RLCP & 0.949 & 0.622 & 0.105 & 2.105 & 19.176 \\
+Anuran & Flat GMM RLCP & 0.955 & 0.803 & 0.070 & \textbf{2.052} & 3.368 \\
+Anuran & Batch GCP & 0.913 & 0.880 & \textbf{0.036} & 2.060 & 0.789 \\
+Anuran & Batch MCP & \textbf{0.963} & \textbf{0.906} & 0.063 & 2.088 & 0.776 \\
+Anuran & \chip & 0.953 & 0.586 & 0.101 & 2.410 & 2.651 \\
+\midrule
+Mice & Split CP & 0.910 & 0.858 & 0.033 & \textbf{3.937} & \textbf{0.095} \\
+Mice & Class-cond.\ CP & 0.910 & 0.858 & 0.033 & \textbf{3.937} & \textbf{0.095} \\
+Mice & kNN RLCP & 0.912 & 0.858 & 0.033 & \textbf{3.937} & 0.366 \\
+Mice & Flat GMM RLCP & 0.923 & \textbf{0.889} & \textbf{0.032} & 3.959 & 0.423 \\
+Mice & Batch MCP & \textbf{0.937} & 0.877 & 0.048 & 4.178 & 0.097 \\
+Mice & \chip & 0.906 & 0.840 & 0.034 & 4.168 & 0.288 \\
+\bottomrule
+\end{tabular}
+\par}
+\end{table*}
+
+The Batch GCP rows materially change the interpretation on Synthetic in particular: Batch GCP reaches worst-group coverage 0.909 with mean set size 3.781, far above \chip\ at 0.363 and also above Batch MCP at 0.536. On Anuran, Batch GCP again matters, reaching worst-group coverage 0.880 and the smallest mean external-group gap at 0.036, although Batch MCP remains best on worst-group coverage at 0.906. No Batch GCP run exists for Mice, so the Mice comparison is only against Batch MCP.
+
+Figure~\ref{fig:tradeoff} summarizes the accuracy-efficiency tradeoff for the uniformly available main-manifest methods. Excluding the auxiliary Batch GCP artifacts that exist only on Synthetic and Anuran, the synthetic and Anuran panels still show the main point visually: \chip\ is not on a better Pareto frontier than flat GMM localization, and Batch MCP is the strongest uniformly available fixed-group baseline. Figure~\ref{fig:parity} reinforces this directly by comparing \chip\ and flat GMM localization on worst-group coverage and runtime.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/worst_group_vs_set_size.pdf}
+\caption{Worst external-group coverage versus mean prediction-set size for the uniformly available main-manifest methods, with 95\% confidence intervals across three seeds. The dashed line marks the nominal 0.90 target. Batch GCP is omitted because stored runs exist only for Synthetic and Anuran. Within the uniformly available methods, Batch MCP is the strongest fixed-group baseline, while \chip\ is not on a better tradeoff frontier than flat GMM localization.}
+\label{fig:tradeoff}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fallback_parity.pdf}
+\caption{Parity plots comparing \chip\ with flat GMM localization. The left panel shows worst-group coverage and the right panel total runtime, both averaged across seeds. \chip\ is faster than flat GMM localization on all three datasets, but its subgroup coverage is worse on Anuran and Mice and only slightly better on Synthetic.}
+\label{fig:parity}
+\end{figure}
+
+\paragraph{Dataset-specific behavior.}
+The Anuran dataset is the clearest case where localization matters. Split conformal prediction and class-conditional conformal prediction both collapse to 0.000 worst-group coverage because at least one supported genus receives no covered points. In seed 11, that failing group is genus Scinax with $n=37$ for split conformal prediction; on that same genus, \chip\ reaches coverage 0.8649, while Batch GCP and Batch MCP reach 0.9459 and 0.9110, respectively. This is a real improvement, but the flat GMM baseline and the explicit-group baselines still do better on average.
+
+The synthetic task reveals a different failure mode. Here the observed groups are aligned with a latent hierarchy, yet the hierarchical fallback still does not dominate. In seed 11, split conformal prediction has coverage 0.1690 on coarse-by-class group $1|0$ ($n=71$); on that same group, Batch GCP reaches 0.9577. The hierarchy helps, but much less than directly calibrating on the external groups.
+
+On Mice, all methods already have relatively strong subgroup behavior, so the room for improvement is small. Flat GMM localization gives the best worst-group coverage at 0.889 and the smallest mean external-group gap at 0.032, while \chip\ is slightly worse than split conformal prediction on worst-group coverage and only competitive, not best, on the mean gap.
+
+\subsection{Statistical testing}
+The paired tests in the saved results are deliberately modest. Across the 9 dataset-seed pairs where both methods are available, a Wilcoxon signed-rank test finds no significant improvement in worst external-group coverage for \chip\ over split conformal prediction ($p=0.25$, Holm-corrected 0.5) or over flat GMM localization ($p=0.4609$, Holm-corrected 0.5). A size comparison against Batch MCP is skipped because no dataset-seed pair satisfies the pre-registered coverage filter for both methods. The evidence therefore supports a parity-or-worse interpretation, not a positive claim.
+
+\subsection{Ablations}
+Table~\ref{tab:ablation} shows that the hierarchy is not the decisive ingredient. On Synthetic, all variants cluster tightly in worst-group coverage between 0.310 and 0.377, and the best ablation is the hard-overlap uniform variant rather than the full hierarchical model. On Anuran, the full hierarchical version is not best either: flat-only and no-fallback both outperform it in worst-group coverage and mean gap, while coarse-only is clearly worst. The ablations point to a simple conclusion: the extra hierarchy does not reliably add value beyond a strong fine-level localizer.
+
+\begin{table}[t]
+\caption{Ablation study for \chip\ on the two datasets where ablations were run. Metrics are averaged over seeds and rounded using the rule in Appendix~\ref{app:repro}.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+Dataset & Variant & Worst-group cov.\ $\uparrow$ & Mean gap $\downarrow$ & Mean set size $\downarrow$ \\
+\midrule
+Synthetic & Full \chip & 0.363 & 0.106 & 3.245 \\
+Synthetic & Coarse-only & 0.368 & 0.108 & 3.257 \\
+Synthetic & Flat-only & 0.310 & \textbf{0.105} & \textbf{3.202} \\
+Synthetic & No-fallback & 0.358 & 0.107 & 3.251 \\
+Synthetic & Uniform-overlap & \textbf{0.377} & 0.106 & 3.250 \\
+\midrule
+Anuran & Full \chip & 0.586 & 0.101 & 2.410 \\
+Anuran & Coarse-only & 0.432 & 0.117 & \textbf{2.224} \\
+Anuran & Flat-only & \textbf{0.632} & 0.094 & 2.470 \\
+Anuran & No-fallback & 0.631 & \textbf{0.090} & 2.409 \\
+Anuran & Uniform-overlap & 0.613 & 0.098 & 2.417 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Diagnostics and runtime}
+The hierarchical fallback is not prohibitively slow. Relative to flat GMM localization, it is faster on every dataset: 2.362 versus 3.303 seconds on Synthetic, 2.651 versus 3.368 on Anuran, and 0.288 versus 0.423 on Mice. It is also far faster than kNN RLCP, whose total runtime reaches 25.172 seconds on Synthetic and 19.176 on Anuran. Figure~\ref{fig:runtime} shows that these costs stay within the recorded CPU budget and that the learned hierarchy remains small: all 12 candidate groups survive filtering on Synthetic and Anuran, while Mice retains 8, 5, and 7 groups across the three seeds.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/runtime_budget.pdf}
+\caption{Runtime-budget diagnostics for \chip\ across seeds and datasets. The hierarchical localizer stays small and CPU-feasible in this benchmark, but the runtime advantage over flat GMM localization does not translate into better subgroup performance.}
+\label{fig:runtime}
+\end{figure}
+
+Figure~\ref{fig:synthetic-oracle} gives the synthetic coarse and fine group coverages. On these plotted groups, both methods stay close to nominal and \chip\ is slightly higher on average than the oracle localizer. The main synthetic failure comes from the harder coarse-by-class intersections, not from the coarse or fine groups shown in the figure.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/synthetic_oracle_groupwise.pdf}
+\caption{Average synthetic groupwise coverage for coarse and fine groups. The dashed line marks the nominal 0.90 target. In the stored runs, both methods are close to nominal on these plotted groups, and \chip\ is slightly higher on average than Oracle RLCP on both the coarse and fine families. The larger synthetic gap therefore comes from the unplotted coarse-by-class intersections summarized in Table~\ref{tab:main-results}.}
+\label{fig:synthetic-oracle}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main lesson is methodological rather than celebratory. The fallback hierarchy helps relative to purely global conformal prediction on some structured data, but the improvement is not robust to stronger baselines. If the groups of interest are already known, explicit finite-group baselines are the better tools in this benchmark: Batch MCP is best on Anuran and on Mice marginal coverage, while Flat GMM RLCP is best on the Mice subgroup metrics and the stored Batch GCP runs are strongest on Synthetic and competitive on Anuran. If the goal is a learned localizer, a flat GMM is at least competitive and often stronger.
+
+This result should not be overgeneralized. First, the study does \emph{not} test the original probabilistic-circuit idea, because no learnable SPN or exact internal posterior extraction was implemented here. Second, the benchmark is restricted to three tabular datasets and three seeds, so the paired tests have low power. Third, baseline availability is uneven: Batch GCP exists only for Synthetic and Anuran, while Batch MCP is available on all three datasets. Fourth, the hierarchical model is intentionally simple: diagonal covariances, hard assignments during class-probability estimation, and only two latent levels. A stronger latent model might behave differently.
+
+There is also a practical limitation in the metric itself. Worst-group coverage is unstable when the hardest groups are tiny or defined by class intersections. Our evaluation code mitigates this by requiring minimum support, but the synthetic coarse-by-class groups still expose sharp failure modes that are difficult for any soft localizer to repair without directly calibrating on those groups.
+
+\section{Conclusion}
+This paper reports a scoped negative result on hierarchical localization for conformal prediction. We evaluated an implemented two-level hierarchical diagonal-GMM fallback, \chip, rather than the unrealized probabilistic-circuit method originally proposed. The fallback maintains near-nominal marginal coverage and can improve subgroup behavior over split conformal prediction, most notably on Anuran where worst external-group coverage rises from 0.000 to 0.586. However, it does not beat stronger alternatives: flat GMM localization reaches 0.803 worst-group coverage on Anuran and 0.889 on Mice; Batch MCP reaches 0.906 on Anuran and 0.877 on Mice; and the stored Batch GCP artifacts reach 0.909 on Synthetic and 0.880 on Anuran.
+
+The conclusion is therefore narrow and defensible. In this benchmark, hierarchy by itself is not enough to justify a new localized conformal method once explicit-group and strong flat-localizer baselines are included. Future work should revisit the original idea with an actual probabilistic circuit, richer latent structure, and evaluation settings where the target groups are not already known to the baseline.
+
+\appendix
+
+\section{Compact Method Summary}
+\label{app:method}
+\noindent
+\fbox{%
+\begin{minipage}{0.97\linewidth}
+\textbf{Algorithm 1: \chip}
+\begin{enumerate}
+  \item Fit a 4-component diagonal GMM to training features $X$.
+  \item Within each coarse component, fit a 2-component diagonal GMM.
+  \item Estimate smoothed class frequencies $\hat p(y \mid c,f)$ on hard fine assignments.
+  \item For each test point $x$, form coarse and fine posterior memberships $m(x)$, then drop groups with calibration mass below 20.
+  \item Compute overlaps $b_i(x)=\sum_g \min\{m_g(x_i),m_g(x)\}$.
+  \item Form mixed local weights with fallback $\lambda=0.10$ and a pseudo-point self-overlap term.
+  \item For each candidate label $y$, compute the randomized weighted p-value of \citet{hore2025localweights}.
+  \item Output $C_\alpha(x)=\{y: p_y(x)>\alpha\}$.
+\end{enumerate}
+\end{minipage}
+}
+
+\section{Aggregation and Rounding Rules}
+\label{app:repro}
+Every number in the tables comes from saved artifacts in this workspace.
+\begin{itemize}
+  \item Main-table rows for Split CP, class-conditional CP, kNN RLCP, flat GMM RLCP, Oracle RLCP, Batch MCP, and \chip\ are arithmetic means over the three $\alpha=0.10$ seed runs already aggregated in \texttt{results/summary\_table.csv}.
+  \item Batch GCP is not included by the current aggregation script, so its rows are computed directly from the three stored files \texttt{exp/synthetic\_seed*\_batch\_gcp\_alpha0p1/results.json} and \texttt{exp/anuran\_seed*\_batch\_gcp\_alpha0p1/results.json}.
+  \item The ablation table averages the three $\alpha=0.10$ runs for each variant from the corresponding \texttt{exp/*/results.json} files.
+  \item Displayed decimals use half-up rounding to three places. For example, the synthetic flat-GMM marginal coverage aggregate is 0.9055, which is reported as 0.906.
+  \item Statistical tests are copied from \texttt{results/significance\_tests.json}. Dataset sizes, preprocessing, and candidate-group counts come from \texttt{results/dataset\_summary.json}, \texttt{results/group\_definitions.json}, and \texttt{results/runtime\_budget.json}.
+\end{itemize}
+
+\section{Saved Secondary Runs at \texorpdfstring{$\alpha=0.05$}{alpha=0.05}}
+\label{app:secondary-alpha}
+Table~\ref{tab:alpha005} summarizes the saved secondary runs in \texttt{results/secondary\_manifest.json}. These runs were executed only for Synthetic and Anuran, and only for Split CP, Flat GMM RLCP, Batch MCP, and \chip. Each row is therefore a single saved run rather than a three-seed average, so we report the values descriptively and do not compare them with significance tests.
+
+\begin{table*}[t]
+\caption{Saved secondary runs at $\alpha=0.05$. These values come directly from \texttt{results/secondary\_manifest.json}. Best values within each dataset/column are in \textbf{bold}. Higher is better for marginal and worst-group coverage; lower is better for mean gap, set size, and runtime.}
+\label{tab:alpha005}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccc}
+\toprule
+Dataset & Method & Marginal cov.\ $\uparrow$ & Worst-group cov.\ $\uparrow$ & Mean gap $\downarrow$ & Mean set size $\downarrow$ & Runtime (s) $\downarrow$ \\
+\midrule
+Synthetic & Split CP & 0.959 & 0.582 & 0.066 & \textbf{3.519} & \textbf{0.125} \\
+Synthetic & Flat GMM RLCP & 0.970 & \textbf{0.761} & 0.049 & 3.649 & 1.946 \\
+Synthetic & Batch MCP & \textbf{0.989} & \textbf{0.761} & \textbf{0.048} & 3.891 & 0.128 \\
+Synthetic & \chip & 0.962 & 0.627 & 0.062 & 3.609 & 1.231 \\
+\midrule
+Anuran & Split CP & 0.955 & 0.405 & 0.096 & \textbf{2.131} & \textbf{0.169} \\
+Anuran & Flat GMM RLCP & \textbf{0.983} & 0.910 & 0.040 & 2.145 & 2.953 \\
+Anuran & Batch MCP & \textbf{0.983} & \textbf{0.954} & \textbf{0.038} & 2.418 & 0.177 \\
+Anuran & \chip & 0.980 & 0.865 & 0.046 & 2.523 & 2.014 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\bibliographystyle{plainnat}
+\bibliography{paper_refs}
+
+\end{document}

@@ -1,0 +1,326 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for SMAK-CP experiments including numpy, scipy, scikit-learn, pandas, matplotlib, and seaborn for visualization.",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy scikit-learn pandas matplotlib seaborn tqdm",
+      "step3": "Verify installation by importing numpy, scipy, sklearn in Python",
+      "step4": "Create directory structure: mkdir -p data results figures logs"
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate and Prepare Synthetic Datasets",
+    "description": "Create synthetic datasets with controlled heteroscedasticity and distribution drift for controlled evaluation.",
+    "steps": {
+      "step1": "Generate Synthetic Heteroscedastic dataset: Y = sin(2πX) + σ(X)·ε where σ(X) = 0.1 + 0.5·|X|, X ~ Uniform(-1,1), ε ~ N(0,1). Generate n=3000 samples. Save as data/synthetic_hetero.csv.",
+      "step2": "Generate Synthetic Distribution Drift dataset: Piecewise stationary with 4 segments of 750 samples each (total n=3000). Segment 1: Y = X + ε. Segment 2: Y = 2X + 2ε. Segment 3: Y = -X + 0.5ε. Segment 4: Y = 0.5X + ε. Save as data/synthetic_drift.csv.",
+      "step3": "Generate Synthetic Density-Varying dataset: Mixture of high-density (70% N(0,0.1)) and low-density (30% N(2,1)) regions. Y = sin(X) + 0.1·ε, n=3000. Save as data/synthetic_density.csv.",
+      "step4": "Compute and save dataset statistics to data/dataset_stats.json."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Real-World UCI Datasets",
+    "description": "Download and prepare smaller UCI regression datasets for realistic evaluation.",
+    "steps": {
+      "step1": "Download Bike Sharing dataset (hour.csv) from UCI. Target: cnt. Features: temp, atemp, hum, windspeed, hr. Use first 5000 samples sorted by datetime. Save as data/bike_sharing.csv.",
+      "step2": "Download Concrete Compressive Strength dataset from UCI. Use all 1030 samples. Target: strength. 8 normalized features. Save as data/concrete.csv.",
+      "step3": "Download Air Quality dataset from UCI. Use CO(GT) as target, 5 sensor features. Remove missing values, use first 3000 samples. Save as data/air_quality.csv.",
+      "step4": "Normalize all features to [0,1] using MinMaxScaler fitted on first 20% of data. Save scalers to data/scalers.pkl.",
+      "step5": "Create metadata files for each dataset with n_samples, n_features, temporal flag."
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run Split Conformal Prediction Baseline",
+    "description": "Simple baseline: standard split conformal prediction with fixed quantile on calibration set. No adaptation.",
+    "steps": {
+      "step1": "Implement split_cp.py with class SplitConformalPredictor. Parameters: alpha=0.1, calibration_ratio=0.2.",
+      "step2": "Method: Train Ridge regression on training set. Compute non-conformity scores |Y - Ŷ| on calibration set. Use (1-alpha) quantile as threshold.",
+      "step3": "For streaming evaluation: at each step t, predict interval [Ŷ - q, Ŷ + q] where q is fixed from calibration. Compute coverage indicator.",
+      "step4": "Run on all 6 datasets with seeds [0, 1, 2]. Save results to results/split_cp_{dataset}_seed{seed}.json with fields: coverage_history, set_width_history, avg_coverage, avg_width.",
+      "step5": "Compute metrics: marginal coverage, average set width."
+    },
+    "estimated_time_minutes": 5,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run ACI (Adaptive Conformal Inference) Baseline",
+    "description": "Strong online baseline: Gibbs & Candès 2021 ACI method with online miscoverage level adaptation.",
+    "steps": {
+      "step1": "Implement aci.py with class ACIPredictor. Parameters: alpha=0.1, gamma=0.05 (adaptation rate).",
+      "step2": "Method: Update quantile with learning rate gamma: q_{t+1} = q_t + gamma·(alpha - 1{y_t ∉ C_t}).",
+      "step3": "Use same underlying Ridge predictor as Split CP for fair comparison.",
+      "step4": "Run on all 6 datasets with seeds [0, 1, 2]. Save results to results/aci_{dataset}_seed{seed}.json.",
+      "step5": "Compute metrics: marginal coverage, MSCE (10 uniform bins), average set width."
+    },
+    "estimated_time_minutes": 5,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run Fixed-Bandwidth Kernel CP Baseline",
+    "description": "Single-scale kernel-based CP with fixed bandwidth (represents standard kernel CP methods like RLCP without adaptation).",
+    "steps": {
+      "step1": "Implement fixed_kernel_cp.py with class FixedKernelCP. Parameters: alpha=0.1, bandwidth=0.1 (fixed), window_size=500.",
+      "step2": "Method: At each step t, compute kernel weights w_i = exp(-||X_i - X_t||²/(2h²)) for i in recent window. Compute weighted quantile.",
+      "step3": "Run on all 6 datasets with seeds [0, 1, 2]. Use bandwidth=0.1 (tuned on small validation).",
+      "step4": "Save results to results/fixed_kernel_cp_{dataset}_seed{seed}.json. Compute: marginal coverage, MSCE, WSC (10 bins), avg width.",
+      "step5": "This is the key comparison baseline representing fixed-bandwidth methods."
+    },
+    "estimated_time_minutes": 10,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement SMAK-CP Core Framework",
+    "description": "Implement the full SMAK-CP algorithm with multi-scale kernel hierarchy and online bandwidth adaptation.",
+    "steps": {
+      "step1": "Implement smak_cp.py with class SMAKCP. Parameters: alpha=0.1, K=4 scales, rho=2.0, h0=0.1, eta=0.05, window_size=500, n_min=20, T0=100, lambda_reg=0.1.",
+      "step2": "Multi-scale hierarchy: bandwidths h^(k) = h0 · rho^(k-1) for k=1..K → [0.1, 0.2, 0.4, 0.8].",
+      "step3": "Online adaptation: Update base bandwidth via log(h_{t+1}) = log(h_t) - eta · sign(sum_k w_t^(k) · Delta_t^(k)).",
+      "step4": "Hierarchical warm-up: t ≤ T0 fixed, T0 < t ≤ 2·T0 gradual, t > 2·T0 full adaptation.",
+      "step5": "Scale reliability: w_t^(k) ∝ exp(-lambda_reg · sum |Delta_s^(k)|). Fallback to k=1 if no scale has n_eff ≥ n_min."
+    },
+    "estimated_time_minutes": 30
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SMAK-S (Single-Scale Selection) Variant",
+    "description": "SMAK-CP with single-scale selection based on maximum effective sample size. This is the main proposed method.",
+    "steps": {
+      "step1": "Selection: k* = argmax_k n_t^(k)(X_t) among scales with n_t^(k) ≥ n_min.",
+      "step2": "Prediction: Form interval using quantile from selected scale k*.",
+      "step3": "Run on all 6 datasets with seeds [0, 1, 2]. Same hyperparameters across all runs.",
+      "step4": "Save detailed logs: selected_scale_history, bandwidth_history, coverage_discrepancy_history.",
+      "step5": "Save results to results/smak_s_{dataset}_seed{seed}.json with: marginal_coverage, MSCE, WSC, avg_width, runtime.",
+      "step6": "Track coverage in 100-step windows for convergence analysis."
+    },
+    "estimated_time_minutes": 15,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SMAK-W (Weighted Aggregation) Variant",
+    "description": "SMAK-CP with weighted combination of quantiles across all active scales.",
+    "steps": {
+      "step1": "Weighted aggregation: q_agg = sum_{k in A_t} w_tilde^(k) · q^(k) with normalized reliability weights.",
+      "step2": "Prediction: Form interval using aggregated quantile q_agg.",
+      "step3": "Run on all 6 datasets with seeds [0, 1, 2].",
+      "step4": "Save results to results/smak_w_{dataset}_seed{seed}.json with all metrics.",
+      "step5": "Compare coverage variance against SMAK-S to assess stability."
+    },
+    "estimated_time_minutes": 15,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run SMAK-I (Multi-Scale Intersection) Variant",
+    "description": "SMAK-CP with calibrated intersection of prediction sets from multiple scales.",
+    "steps": {
+      "step1": "Calibrated intersection: alpha_k = alpha · w^(k) / sum_j w^(j) (adaptive calibration).",
+      "step2": "Form per-scale intervals C^(k) = [Ŷ - q^(k), Ŷ + q^(k)] with scale-specific quantiles.",
+      "step3": "Intersection: C = intersection_{k in A_t} C^(k).",
+      "step4": "Run on all 6 datasets with seeds [0, 1, 2].",
+      "step5": "Save results to results/smak_i_{dataset}_seed{seed}.json.",
+      "step6": "Check for overly conservative sets (avg width > 2x SMAK-S). Report if intersection hurts efficiency."
+    },
+    "estimated_time_minutes": 15,
+    "parallelizable": true,
+    "num_runs": 6
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Fixed vs Adaptive Bandwidth",
+    "description": "Test contribution of online bandwidth adaptation by comparing against fixed-bandwidth version of SMAK-S.",
+    "steps": {
+      "step1": "Implement SMAK-S-Fixed: Same as SMAK-S but disable bandwidth adaptation after warmup. Keep bandwidth fixed at final warmup value.",
+      "step2": "Run on 2 key datasets: synthetic_drift (shows adaptation benefit) and synthetic_hetero.",
+      "step3": "Use seed 0 only (ablation focused on mechanism, not statistical significance).",
+      "step4": "Compute: coverage drift over time (50-step windows), MSCE in different segments.",
+      "step5": "Save results to results/ablation_adaptation_{dataset}.json.",
+      "step6": "Test: Adaptive bandwidth reduces coverage deviation during drift periods."
+    },
+    "estimated_time_minutes": 5,
+    "parallelizable": true,
+    "num_runs": 2
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Multi-Scale vs Single-Scale",
+    "description": "Test contribution of multi-scale structure by comparing against single-scale.",
+    "steps": {
+      "step1": "Implement SMAK-SingleScale: K=1, bandwidth fixed at 0.28 (geometric mean of multi-scale).",
+      "step2": "Run on 2 datasets: synthetic_density (tests density adaptation) and bike_sharing.",
+      "step3": "Use seed 0 only.",
+      "step4": "Analyze by density: Compare MSCE in high-density vs low-density regions.",
+      "step5": "Save results to results/ablation_multiscale_{dataset}.json.",
+      "step6": "Test: Multi-scale reduces MSCE in low-density regions while maintaining high-density performance."
+    },
+    "estimated_time_minutes": 5,
+    "parallelizable": true,
+    "num_runs": 2
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Cold-Start Strategy",
+    "description": "Test contribution of hierarchical warm-up protocol.",
+    "steps": {
+      "step1": "Implement SMAK-S-NoWarmup: Disable warmup. Enable adaptation immediately from t=1.",
+      "step2": "Run on 2 datasets: synthetic_hetero, synthetic_density. Focus on first 200 steps.",
+      "step3": "Use seed 0 only.",
+      "step4": "Track: coverage violations (|coverage - 0.9| > 0.05) in first 200 steps.",
+      "step5": "Save results to results/ablation_warmup_{dataset}.json.",
+      "step6": "Test: Warmup reduces early coverage violations by >50%."
+    },
+    "estimated_time_minutes": 5,
+    "parallelizable": true,
+    "num_runs": 2
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Number of Scales K",
+    "description": "Analyze sensitivity to number of scales in the hierarchy.",
+    "steps": {
+      "step1": "Run SMAK-S with K ∈ {2, 3, 4, 5} scales. Adjust rho to maintain similar bandwidth range.",
+      "step2": "Test on synthetic_density dataset only (single dataset for sensitivity).",
+      "step3": "Use seed 0 only.",
+      "step4": "Measure: MSCE, avg set width, runtime per step.",
+      "step5": "Save results to results/ablation_kscales_K{K}.json.",
+      "step6": "Identify tradeoff between coverage quality and computational cost."
+    },
+    "estimated_time_minutes": 8,
+    "parallelizable": true,
+    "num_runs": 4
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute Statistical Significance Tests",
+    "description": "Perform paired statistical tests to verify significant improvements over baselines.",
+    "steps": {
+      "step1": "Aggregate results across seeds for each method-dataset pair. Compute mean and std for: marginal_coverage, MSCE, avg_width, WSC.",
+      "step2": "Perform paired t-tests: SMAK-S vs each baseline on each dataset for MSCE and avg_width. Use scipy.stats.ttest_rel.",
+      "step3": "Report: t-statistic, p-value. Flag significant at p < 0.05.",
+      "step4": "Save to results/statistical_tests.json.",
+      "step5": "Verify: MSCE significantly lower than fixed-bandwidth methods (p < 0.05)."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Analyze Coverage Convergence and Stability",
+    "description": "Detailed analysis of coverage behavior over time to validate theoretical convergence claims.",
+    "steps": {
+      "step1": "For each method, compute rolling coverage in 100-step windows.",
+      "step2": "Compute coverage deviation: |rolling_coverage - 0.9|.",
+      "step3": "Compute: mean deviation, max deviation, convergence time (first window where deviation < 0.03 and stays < 0.05 for 5 windows).",
+      "step4": "For synthetic_drift, compute coverage per segment. Measure recovery time after each drift point.",
+      "step5": "Save convergence analysis to results/convergence_analysis.json."
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Local Coverage Analysis by Data Density",
+    "description": "Analyze conditional coverage performance in different data density regions.",
+    "steps": {
+      "step1": "For each dataset, compute local data density using k-NN with k=50.",
+      "step2": "Bin points into 3 density regions: low (bottom 25%), medium (25-75%), high (top 25%).",
+      "step3": "Compute coverage and average set width for each region separately for each method.",
+      "step4": "Create comparison table: method × density_region with coverage and width metrics.",
+      "step5": "Test: SMAK-CP maintains more consistent coverage across density regions vs fixed-bandwidth.",
+      "step6": "Save to results/local_coverage_analysis.json."
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Runtime and Computational Efficiency Analysis",
+    "description": "Measure and compare computational cost of all methods.",
+    "steps": {
+      "step1": "Extract runtime per prediction for each method from saved results.",
+      "step2": "Compute: mean runtime per step (ms), relative slowdown vs Split CP.",
+      "step3": "Profile SMAK-CP components: kernel computation, quantile estimation, bandwidth adaptation, scale selection.",
+      "step4": "Test: SMAK-CP runtime within 2× of single-scale methods.",
+      "step5": "Save to results/runtime_analysis.json."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Coverage and Width Trajectory Plots",
+    "description": "Create time-series plots showing coverage and set width evolution for paper figures.",
+    "steps": {
+      "step1": "Load results for: Split CP, ACI, Fixed-Kernel, SMAK-S on synthetic_drift dataset.",
+      "step2": "Figure 1: Coverage trajectory. X-axis: time. Y-axis: rolling coverage (100-step window). Line at 0.9. Vertical lines at drift points. 4 methods with colors. Shaded 95% CI across seeds.",
+      "step3": "Figure 2: Set width trajectory. Same format, Y-axis is average set width.",
+      "step4": "Figure 3: Bandwidth adaptation for SMAK-S. X-axis: time. Y-axis: base bandwidth h_t^(1).",
+      "step5": "Save to figures/fig1_coverage_traj.pdf, figures/fig2_width_traj.pdf, figures/fig3_bandwidth_adapt.pdf."
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Comparative Performance Bar Charts",
+    "description": "Create bar charts comparing methods across datasets and metrics.",
+    "steps": {
+      "step1": "Figure 4: MSCE comparison. X-axis: datasets (6). Y-axis: MSCE. Grouped bars for 5 methods. Error bars show std across seeds. Significance indicators (* for p<0.05).",
+      "step2": "Figure 5: Average set width comparison. Same format. Lower is better.",
+      "step3": "Figure 6: Runtime comparison. Y-axis: relative runtime (Split CP = 1). Log scale.",
+      "step4": "Save to figures/fig4_msce_comparison.pdf, figures/fig5_width_comparison.pdf, figures/fig6_runtime_comparison.pdf."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Ablation Study Visualizations",
+    "description": "Create figures showing contribution of each component.",
+    "steps": {
+      "step1": "Figure 7: Cold-start comparison. X-axis: first 200 steps. Y-axis: |coverage - 0.9|. Two lines: with/without warmup.",
+      "step2": "Figure 8: Multi-scale benefit by density. X-axis: density region (low, medium, high). Y-axis: MSCE. Compare SMAK-S vs Single-Scale.",
+      "step3": "Figure 9: Number of scales sensitivity. X-axis: K (2,3,4,5). Y-axis: MSCE (left) and runtime (right).",
+      "step4": "Save to figures/fig7_warmup_ablation.pdf, figures/fig8_multiscale_ablation.pdf, figures/fig9_kscales_ablation.pdf."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Tables for Paper",
+    "description": "Create formatted tables with all key results for inclusion in paper.",
+    "steps": {
+      "step1": "Table 1: Main results. Rows: methods (5). Columns: Marginal Coverage, MSCE, WSC, Avg Width, Runtime. Report mean ± std across datasets and seeds. Best in bold.",
+      "step2": "Table 2: Dataset-specific results for SMAK-S. Rows: datasets (6). Columns: Coverage, MSCE, Width.",
+      "step3": "Table 3: Ablation summary. Rows: ablation conditions. Columns: relevant metrics.",
+      "step4": "Save as CSV: figures/table1_main.csv, figures/table2_datasets.csv, figures/table3_ablation.csv.",
+      "step5": "Also save LaTeX versions: figures/table1_main.tex, etc."
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Summary and Success Criteria Verification",
+    "description": "Summarize all results and verify success criteria from proposal.",
+    "steps": {
+      "step1": "Verify Criterion 1: Target marginal coverage (0.9 ± 0.02). Check SMAK-S coverage across all datasets. Report pass/fail.",
+      "step2": "Verify Criterion 2: MSCE significantly lower than fixed-bandwidth. Report p-value. Pass if p < 0.05.",
+      "step3": "Verify Criterion 3: 10-30% tighter prediction sets than Fixed-Kernel. Compute width reduction. Pass if within range.",
+      "step4": "Verify Criterion 4: Runtime within 2× of single-scale. Report relative runtime. Pass if < 2.0.",
+      "step5": "Verify Criterion 5: Cold-start reduces violations by >50%. Compare warmup vs no-warmup in first 200 steps. Pass if reduction > 50%.",
+      "step6": "Create results/SUCCESS_CRITERIA.md with detailed verification.",
+      "step7": "Document any failures honestly with analysis."
+    },
+    "estimated_time_minutes": 10
+  }
+]

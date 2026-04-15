@@ -1,0 +1,164 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and set up project structure",
+    "description": "Install all required Python packages and create the project directory structure for experiments, results, and figures.",
+    "steps": {
+      "step1": "Create a virtual environment or use the existing Python environment. Install packages: numpy, scipy, pandas, matplotlib, seaborn, scikit-learn, networkx, causal-learn (pip install causallearn), statsmodels, tqdm, joblib.",
+      "step2": "Create directory structure: src/ (source code), results/ (raw results), figures/ (paper figures), data/ (cached datasets).",
+      "step3": "Create src/e_values.py — implements e-value computation: (a) calibrator-based e-values from p-values using universal calibrator e = 1/(p * e * log(1/p)) for p < 1/e, else 0; (b) split-likelihood-ratio e-values using data splitting (fit model on first half, evaluate likelihood ratio on second half).",
+      "step4": "Create src/e_ci_tests.py — implements e-value CI tests: (a) E-value Fisher-z test for linear Gaussian data (compute partial correlation, get p-value via Fisher-z, convert to e-value via calibrator, OR compute split-LR e-value); (b) E-value kernel CI test for nonlinear data (split data, fit kernel ridge regression on first half, compute likelihood ratio on second half).",
+      "step5": "Create src/e_pc.py — implements the E-PC algorithm: modified PC-stable that uses e-value CI tests, accumulates evidence across K folds, computes edge-specific e-values, and applies e-BH procedure for FDR-controlled edge selection.",
+      "step6": "Create src/pc_p.py — implements the PC-p baseline (Strobl et al., 2019): PC algorithm that computes edge-specific p-values (maximum p-value across CI tests for each edge) and applies BY FDR correction.",
+      "step7": "Create src/data_generation.py — implements synthetic data generation: linear Gaussian, linear non-Gaussian (exponential noise), and nonlinear additive noise models on random DAGs (Erdos-Renyi and scale-free).",
+      "step8": "Create src/metrics.py — implements evaluation metrics: SHD, FDR (false discovery rate = false edges / total reported edges), TPR (true positive rate = true edges / total true edges), F1, precision, orientation accuracy.",
+      "step9": "Create src/utils.py — utility functions for DAG generation (ER and SF graphs), CPDAG conversion, result I/O, and seed management.",
+      "step10": "Verify installation by running a small test: generate a 5-node ER graph, sample 200 observations, run standard PC, compute metrics."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic datasets and load real-world benchmarks",
+    "description": "Pre-generate all synthetic datasets with fixed seeds for reproducibility, and load standard benchmark networks (Sachs, ALARM, Asia, Insurance) for real-data experiments.",
+    "steps": {
+      "step1": "Define experimental grid for synthetic data: graph types = {ER, SF}; num_nodes p = {10, 20, 50}; average_degree = {2, 4}; sample_sizes n = {200, 500, 1000, 2000}; data_types = {linear_gaussian, nonlinear_additive}; seeds = {42, 123, 456}. Total: 2 × 3 × 2 × 4 × 2 × 3 = 288 synthetic datasets.",
+      "step2": "For each configuration, generate: (a) a random DAG using the specified graph type and degree; (b) edge weights sampled uniformly from [-1, -0.5] ∪ [0.5, 1]; (c) data sampled from the structural equation model. For linear_gaussian: X_i = sum(w_ji * X_j) + N(0, 1). For nonlinear_additive: X_i = sum(tanh(w_ji * X_j)) + N(0, 0.5).",
+      "step3": "Save each dataset as a dictionary: {'data': np.array, 'true_dag': np.array, 'true_cpdag': np.array, 'config': dict}. Save to data/synthetic/ with naming convention: {graph_type}_{p}_{degree}_{n}_{data_type}_seed{seed}.npz.",
+      "step4": "Load real-world benchmark networks from causal-learn's built-in datasets or manually specify adjacency matrices: (a) Asia (8 nodes, 8 edges) — generate 5000 samples from known BN parameters; (b) Sachs (11 nodes, 17 edges) — load the observational dataset (853 samples); (c) ALARM (37 nodes, 46 edges) — generate 5000 samples from known BN parameters; (d) Insurance (27 nodes, 52 edges) — generate 5000 samples.",
+      "step5": "For real-world networks where ground truth is available as a BN, sample multiple datasets with different seeds (42, 123, 456) for repeated evaluation. Save to data/real/.",
+      "step6": "Compute and log summary statistics for all datasets: number of nodes, edges, samples, sparsity, max degree. Save to data/dataset_summary.csv."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run baseline methods on all datasets",
+    "description": "Run standard PC, PC-stable, PC-p (with BY correction), and GES on all synthetic and real datasets. These serve as baselines for comparison with E-PC.",
+    "steps": {
+      "step1": "Implement a unified experiment runner: run_experiment(method, data, true_dag, config) -> dict of metrics. Each method returns an estimated CPDAG and edge-level scores (p-values for PC-p, BIC scores for GES).",
+      "step2": "Run PC-stable (from causal-learn) with alpha values {0.01, 0.05, 0.1} on all synthetic datasets. Use Fisher-z test for linear_gaussian data. Record: estimated CPDAG, runtime, all metrics (SHD, FDR, TPR, F1, precision, orientation accuracy).",
+      "step3": "Run PC-p baseline on all synthetic datasets: (a) Run PC-stable to get edge-specific p-values (max p-value across all CI tests for each edge); (b) Apply BY correction at FDR levels q = {0.05, 0.1, 0.2}; (c) Remove edges that are not significant after BY correction. Record same metrics.",
+      "step4": "Run GES (from causal-learn) on all synthetic datasets with default BIC scoring. Record same metrics.",
+      "step5": "Run all baselines on real-world datasets (Asia, Sachs, ALARM, Insurance) with the same configurations.",
+      "step6": "Save all results to results/baselines/ as JSON files: one file per dataset with all method results. Format: {dataset_name: {method: {metrics: {...}, runtime: float, config: {...}}}}.",
+      "step7": "Estimated runtime: ~2 minutes per dataset × 288 synthetic × 4 methods / 2 cores ≈ 19 hours. SCOPE REDUCTION: Run linear_gaussian only for full grid; nonlinear_additive only for p={10,20}, n={500,1000}, degree=2. Reduces to ~180 effective dataset-method pairs × ~1 min = ~3 hours for baselines."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run E-PC on all datasets",
+    "description": "Run the proposed E-PC algorithm with e-value CI tests and e-BH FDR control on all synthetic and real datasets. Compare against baselines at matched FDR levels.",
+    "steps": {
+      "step1": "Run E-PC with calibrator-based e-values (default configuration): K=5 folds, FDR targets q={0.05, 0.1, 0.2}, using Fisher-z p-values converted via universal calibrator. Run on all synthetic datasets in the experimental grid.",
+      "step2": "Run E-PC with split-likelihood-ratio e-values: K=5 folds, FDR targets q={0.05, 0.1, 0.2}. For linear Gaussian data, use the split-LR approach (fit linear model on first half, compute LR on second half). Run on all linear_gaussian synthetic datasets.",
+      "step3": "Run E-PC on real-world datasets (Asia, Sachs, ALARM, Insurance) with both calibrator and split-LR e-values, K=5, q={0.05, 0.1, 0.2}.",
+      "step4": "For each run, record: estimated CPDAG, edge-specific e-values, fold-level e-values (for anytime analysis), runtime, all metrics (SHD, FDR, TPR, F1, precision, orientation accuracy).",
+      "step5": "Save results to results/epc/ with the same format as baselines.",
+      "step6": "Estimated runtime: E-PC has ~2-3x overhead vs PC due to data splitting and fold processing. ~3 min per dataset × ~180 datasets / 2 cores ≈ 4.5 hours. With scope reduction, target ~2.5 hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "FDR calibration analysis",
+    "description": "The core experiment: compare actual FDR vs nominal FDR across methods to test whether E-PC achieves well-calibrated FDR control while PC-p is overly conservative.",
+    "steps": {
+      "step1": "For each method and FDR target q, compute the empirical FDR averaged across all seeds for each experimental configuration. Empirical FDR = (number of false edges in estimated skeleton) / (total edges in estimated skeleton).",
+      "step2": "Create a calibration table: for each (method, q, graph_type, p, degree), compute mean and std of empirical FDR across seeds and sample sizes. A well-calibrated method should have empirical FDR ≈ q.",
+      "step3": "Compute calibration error: |empirical_FDR - q| for each method. Average across configurations to get overall calibration quality.",
+      "step4": "For standard PC (no FDR control), compute the empirical FDR at each alpha level to show that FDR is uncontrolled and grows with graph size.",
+      "step5": "Statistical test: for each configuration, test whether E-PC's empirical FDR is within 10% of the nominal level (i.e., empirical FDR ≤ 1.1 * q). Report the fraction of configurations satisfying this criterion (target: ≥ 80%).",
+      "step6": "Save calibration analysis to results/analysis/fdr_calibration.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Power analysis at matched FDR levels",
+    "description": "Compare the number of true edges recovered (power/TPR) by E-PC vs PC-p at the same nominal FDR level. This tests the core claim that e-values provide higher power by avoiding conservative BY corrections.",
+    "steps": {
+      "step1": "For each nominal FDR level q = {0.05, 0.1, 0.2}, extract TPR for E-PC and PC-p across all datasets.",
+      "step2": "Compute paired differences in TPR (E-PC minus PC-p) for each dataset/seed combination.",
+      "step3": "Run paired t-test (or Wilcoxon signed-rank test) on TPR differences across all configurations. Report p-value and effect size (Cohen's d).",
+      "step4": "Break down power comparison by graph size (p), sample size (n), and graph type to identify where E-PC's advantage is largest.",
+      "step5": "Compute the relative improvement: (TPR_EPC - TPR_PCp) / TPR_PCp × 100% for each configuration.",
+      "step6": "Save power analysis to results/analysis/power_comparison.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: e-value construction method",
+    "description": "Compare calibrator-based e-values vs split-likelihood-ratio e-values to understand which construction yields better power while maintaining FDR control.",
+    "steps": {
+      "step1": "Select a subset of synthetic datasets: p={10, 20, 50}, degree=2, n={500, 1000}, linear_gaussian, all 3 seeds = 18 datasets.",
+      "step2": "Run E-PC with: (a) universal calibrator e-values; (b) split-likelihood-ratio e-values. Both with K=5 folds, q=0.1.",
+      "step3": "Compare metrics: FDR, TPR, F1, SHD for both e-value construction methods.",
+      "step4": "Analyze: calibrator approach is simpler but may lose power in conversion; split-LR is more direct but requires model fitting.",
+      "step5": "Save to results/analysis/ablation_evalue_type.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: number of folds K",
+    "description": "Study how the number of data folds K affects E-PC's power and FDR control. More folds allow more evidence accumulation but reduce per-fold sample size.",
+    "steps": {
+      "step1": "Select subset: p={10, 20}, degree=2, n={1000, 2000}, linear_gaussian, all 3 seeds = 12 datasets.",
+      "step2": "Run E-PC with K = {2, 3, 5, 8, 10} folds, q=0.1, using calibrator-based e-values.",
+      "step3": "For each K, record FDR, TPR, F1, and runtime.",
+      "step4": "Plot TPR and FDR as a function of K to identify the sweet spot.",
+      "step5": "Save to results/analysis/ablation_num_folds.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation study: anytime validity",
+    "description": "Verify the anytime-valid property: demonstrate that stopping E-PC after processing K' < K folds still yields valid FDR control.",
+    "steps": {
+      "step1": "Select subset: p={10, 20, 50}, degree=2, n=1000, linear_gaussian, all 3 seeds = 9 datasets.",
+      "step2": "Run E-PC with K=10 folds, q=0.1. After each fold k=1,...,10, record the intermediate e-values and apply e-BH to get the graph at that stopping point.",
+      "step3": "For each stopping point k, compute empirical FDR and TPR.",
+      "step4": "Verify: FDR ≤ q at every stopping point (the anytime-valid property). TPR should increase monotonically with more folds.",
+      "step5": "Save to results/analysis/anytime_validity.json."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Scalability analysis",
+    "description": "Measure runtime of all methods as graph size increases to characterize the computational overhead of E-PC.",
+    "steps": {
+      "step1": "Generate additional datasets for scalability: p = {10, 20, 50, 100}, degree=2, n=1000, linear_gaussian, seed=42.",
+      "step2": "Run each method (PC-stable, PC-p, E-PC-calibrator, E-PC-split-LR, GES) and record wall-clock runtime.",
+      "step3": "Plot runtime vs number of nodes for each method.",
+      "step4": "Report the overhead factor of E-PC vs standard PC: runtime_EPC / runtime_PC.",
+      "step5": "Save to results/analysis/scalability.json."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Aggregate results and test success criteria",
+    "description": "Compile all results and formally test each success criterion from the proposal.",
+    "steps": {
+      "step1": "Aggregate all metrics into a single DataFrame: columns = [method, graph_type, p, degree, n, data_type, seed, q, FDR, TPR, F1, SHD, precision, orientation_accuracy, runtime].",
+      "step2": "Test Success Criterion 1: 'E-PC controls FDR within 10% of nominal across ≥80% of configurations.' Count configurations where empirical_FDR ≤ 1.1 * q. Report fraction.",
+      "step3": "Test Success Criterion 2: 'E-PC recovers significantly more true edges than PC-p at matched FDR levels.' Run paired statistical test on TPR at each q level. Report p-value.",
+      "step4": "Test Success Criterion 3: 'Anytime validity holds at every stopping point.' Report max FDR violation across all stopping points and configurations.",
+      "step5": "Test Success Criterion 4: 'E-PC achieves competitive or superior SHD and F1 vs PC at best-tuned alpha.' Compare E-PC (q=0.1) vs PC-stable at best alpha. Report differences.",
+      "step6": "Test Success Criterion 5: 'Results hold across both linear Gaussian and nonlinear data.' Repeat criteria 1-2 separately for each data type.",
+      "step7": "Save comprehensive results table to results/all_results.csv and success criteria evaluation to results/success_criteria.json."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for the research paper covering FDR calibration, power comparison, ablations, and real-data results.",
+    "steps": {
+      "step1": "Figure 1 — FDR Calibration Plot: For each method, plot empirical FDR (y-axis) vs nominal FDR target q (x-axis) with error bars across seeds. Include a diagonal y=x line for reference. Separate panels for p={10, 20, 50}. Save as figures/fig1_fdr_calibration.pdf.",
+      "step2": "Figure 2 — Power Comparison: Bar chart or grouped plot showing TPR for each method at matched FDR levels (q=0.1). Group by graph size p. Include error bars across seeds. Save as figures/fig2_power_comparison.pdf.",
+      "step3": "Figure 3 — FDR-Power Tradeoff Curve: Plot TPR vs empirical FDR for each method by varying their respective thresholds (alpha for PC, q for PC-p and E-PC). This is analogous to an ROC curve. Save as figures/fig3_fdr_power_tradeoff.pdf.",
+      "step4": "Figure 4 — Anytime Validity: Plot empirical FDR and TPR as a function of number of folds processed (K'). Show that FDR stays below q at all stopping points while TPR increases. Save as figures/fig4_anytime_validity.pdf.",
+      "step5": "Figure 5 — Ablation: Number of Folds: Plot F1 score vs K for different graph sizes. Save as figures/fig5_ablation_folds.pdf.",
+      "step6": "Figure 6 — Scalability: Log-log plot of runtime vs number of nodes for each method. Save as figures/fig6_scalability.pdf.",
+      "step7": "Table 1 — Main Results Table: LaTeX table with SHD, FDR, TPR, F1 for all methods across key configurations (p={10,20,50}, n=1000, degree=2, linear_gaussian). Bold best results. Save as figures/table1_main_results.tex.",
+      "step8": "Table 2 — Real Data Results: LaTeX table with metrics for all methods on Asia, Sachs, ALARM, Insurance networks. Save as figures/table2_real_data.tex.",
+      "step9": "Table 3 — Ablation Summary: LaTeX table comparing e-value construction methods (calibrator vs split-LR). Save as figures/table3_ablation_evalue.tex.",
+      "step10": "All figures use matplotlib with seaborn styling, font size 12, tight layout, and colorblind-friendly palettes. Save both PDF and PNG versions."
+    }
+  }
+]

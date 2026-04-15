@@ -1,0 +1,305 @@
+\documentclass{article}
+
+\usepackage{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{enumitem}
+
+\title{Matched-Budget Evaluation of Weak-View Residuals for One-Run Differential Privacy Auditing}
+
+\author{Anonymous Authors}
+
+\newcommand{\eps}{\varepsilon}
+\newcommand{\del}{\delta}
+\newcommand{\rclean}{r_{\mathrm{clean}}}
+\newcommand{\rmean}{r_{\mathrm{mean}}}
+\newcommand{\rworst}{r_{\mathrm{worst}}}
+\newcommand{\ragree}{r_{\mathrm{agree}}}
+\newcommand{\lambdasection}{\texorpdfstring{\(\lambda\)}{lambda}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+One-run privacy auditing makes empirical auditing of differentially private (DP) training practical, and recent work showed that quantile-regression calibration substantially strengthens final-model-only black-box auditing. We study a narrower follow-up question: after adopting that calibrated single-view baseline, do repeated weak, label-preserving views add measurable privacy evidence once every extra query is charged honestly? We evaluate this in a one-run audit with fixed audit pools, randomized orderings, and matched-total-query comparisons on Fashion-MNIST and CIFAR-10 under realized privacy budgets near \(\eps=3.94\) and \(\eps=7.95\). The weak-view method combines clean, worst-view, and agreement residuals derived from \(K=4\) weak views, while all residual calibrators and score-selection steps are fit only on public data. Across four seeds, 240 audit pairs per checkpoint, and query budgets from 40 to 1200, the structured weak-view score does not improve the primary metric, the empirical \(\eps\) lower bound at \(\del=10^{-5}\), over the clean quantile baseline in any setting. On CIFAR-10, for example, the clean quantile baseline reaches mean full-pool lower bounds of 0.136 at target \(\eps=4\) and 0.158 at target \(\eps=8\), versus 0.093 and 0.078 for the structured weak-view score. The main finding is therefore negative but operationally useful: in this compute-bounded one-run setting, extra weak-view queries do not yield additional privacy evidence beyond a strong single-view quantile baseline when evaluated under matched query accounting.
+\end{abstract}
+
+\section{Introduction}
+Empirical privacy auditing asks whether a training pipeline behaves as privately as its formal accounting suggests. One-run auditing made this practical by embedding many neighboring comparisons into a single training run \citep{steinke2023privacy}, and subsequent work strengthened the conversion from empirical distinguishability to privacy evidence \citep{mahloujifar2024auditing}. In the final-model-only black-box setting, \citet{liu2025enhancing} further showed that the per-example score itself matters substantially: quantile-regression calibration can outperform raw loss and materially strengthen one-run auditing.
+
+This paper studies a deliberately narrower question than prior multi-query membership inference work. Repeated queries, augmentations, and robustness-based scoring are already known to help membership inference in other settings \citep{he2022semileak,rahimian2020sampling,choquettechoo2021labelonly,wu2024yoqo}. What remains unclear is whether such extra views still help once the comparison point is not a weak single-query baseline, but rather the quantile-calibrated single-view one-run auditor of \citet{liu2025enhancing}, and once every additional query is charged explicitly.
+
+We therefore evaluate weak-view residual auditing under a matched-budget protocol. The protocol fixes a finite audit pool, counts the clean query together with all weak-view queries, and compares methods as a function of consumed queries rather than candidate count. The resulting claim is modest: this is not a new attack class, but a protocol-focused empirical test of whether weak-view residuals add privacy evidence beyond a strong single-view baseline.
+
+Our contributions are:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+    \item We instantiate a public-data-only weak-view residual auditor for one-run DP auditing, combining clean-view, worst-view, and agreement residuals without changing the underlying one-run privacy conversion.
+    \item We evaluate that auditor under a matched-total-query protocol on Fashion-MNIST and CIFAR-10 with four seeds, 240 audit pairs per checkpoint, and query budgets from 40 to 1200.
+    \item We find a consistent negative result: the structured weak-view score does not improve the empirical \(\eps\) lower bound over the clean quantile baseline in any of the four dataset/privacy settings, and proxy \(\lambda\)-selection frequently collapses to \(\lambda=0\).
+\end{itemize}
+
+Section~\ref{sec:related} reviews the most relevant auditing and repeated-query literature. Section~\ref{sec:method} describes the weak-view residual score and matched-budget protocol. Section~\ref{sec:experiments} presents the experimental setup and results. Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{One-run auditing and privacy conversion.}
+Privacy auditing with one training run was introduced by \citet{steinke2023privacy}, who showed how to pack many neighboring comparisons into a single audited training job. \citet{mahloujifar2024auditing} strengthened the privacy conversion through \(f\)-DP analysis. Our work leaves the neighboring-dataset construction and empirical lower-bound conversion unchanged; we vary only the final-model score and the fairness protocol used to compare scores.
+
+\paragraph{Quantile-regression one-run auditing.}
+The closest baseline is \citet{liu2025enhancing}, which argues that final-model-only one-run auditing benefits substantially from quantile-regression calibration of black-box scores. Their result sharply raises the bar for follow-up work: extra signal sources must beat a strong calibrated baseline, not merely raw loss. Our paper is best understood as an incremental evaluation around that baseline.
+
+\paragraph{Repeated-query and multi-view membership inference.}
+Prior work already established that repeated queries can help membership inference in broader settings. Semi-Leak uses repeated augmented queries against semi-supervised models \citep{he2022semileak}. Sampling Attacks amplify label-only membership inference through repeated stochastic queries \citep{rahimian2020sampling}. Label-only attacks estimate robustness through many perturbation queries \citep{choquettechoo2021labelonly}, while YOQO reduces the query burden of that line of work \citep{wu2024yoqo}. These papers constrain our novelty claim, but they do not answer our question directly because they do not study one-run DP auditing with empirical \(\eps\) lower bounds, quantile-calibrated single-view baselines, and matched total-query accounting.
+
+\paragraph{Other recent auditing directions.}
+Recent auditing work tightened black-box auditing \citep{annamalai2024nearly}, introduced adversarial samples in final-model-only settings \citep{yoon2024adversarial}, avoided retraining through PANORAMIA \citep{kazmi2024panoramia}, strengthened hidden-state auditing \citep{cebere2025tighter}, studied sequential auditing \citep{gonzalez2025sequentially}, and optimized canaries for one-run auditing \citep{wang2026optimizing}. Our study is orthogonal to these directions: we keep the standard one-run setup fixed and ask whether weak-view test-time scoring helps under honest query accounting.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Threat Model and Goal}
+We assume the one-run neighboring-dataset auditing setup of \citet{steinke2023privacy}: the auditor observes only the final DP model, has no gradients or hidden states, and evaluates a fixed audit pool of member/non-member candidate pairs. All auxiliary fitting, screening, and score selection uses only non-private data. The goal is not to maximize generic attack AUC, but to maximize empirical privacy evidence, measured as an empirical \(\eps\) lower bound at \(\del=10^{-5}\).
+
+\subsection{Public Data Splits}
+For each dataset and seed, the training set is partitioned into a private base split, a public calibration split, a public proxy split, a public screening split, and an audit reserve. The executed configuration uses 42{,}000 private training examples, 6{,}000 calibration examples, 4{,}000 proxy examples, 4{,}000 screening examples, and 4{,}000 reserve examples for Fashion-MNIST; CIFAR-10 uses 32{,}000, 6{,}000, 4{,}000, 4{,}000, and 4{,}000 respectively. The audit reserve supplies a fixed pool of 240 neighboring candidate pairs per checkpoint.
+
+\subsection{Audit Pool Construction}
+Each audit pool contains 120 random in-distribution pairs and 120 FGSM-derived pairs. For every pair, one source example and one same-class reserve example define the neighboring choice. A binary membership mask determines which side is inserted into the private training set. FGSM canaries are generated with a non-private surrogate trained only on public data.
+
+\subsection{Base Statistics and Quantile Residuals}
+For an input-label pair \((x,y)\), the base statistic is the negative cross-entropy loss,
+\[
+b(x,y) = \log p_\theta(y \mid x),
+\]
+where larger values indicate higher confidence in the true label. Following \citet{liu2025enhancing}, we residualize each statistic against public difficulty features
+\[
+z(x) = \big(\text{surrogate loss},\ \text{surrogate entropy},\ \text{surrogate max prob},\ y,\ \text{reference feature norm}\big).
+\]
+
+For a target statistic \(t(x)\), three gradient-boosted quantile regressors estimate the 0.5, 0.9, and 0.95 conditional quantiles on the public calibration split. The residual used for auditing is
+\[
+r_t(x) = \frac{t(x) - \widehat{q}_{0.9}(z(x))}{\max\{\widehat{q}_{0.95}(z(x)) - \widehat{q}_{0.5}(z(x)), \tau_t\}},
+\]
+where \(\tau_t\) is a denominator floor learned from the public calibration distribution.
+
+\subsection{Weak-View Statistics}
+Each candidate is queried once on the clean input and \(K\) times on weak label-preserving views \(a_1(x),\dots,a_K(x)\). The executed study uses \(K=4\) for the main method and \(K=2\) for one ablation. From the weak views we compute:
+\begin{align*}
+\rclean(x) &= r_{b,\mathrm{clean}}(x), \\
+\rmean(x) &= r_{\text{mean weak loss}}(x), \\
+\rworst(x) &= r_{\text{worst weak loss}}(x), \\
+\ragree(x) &= r_{\text{agreement rate}}(x).
+\end{align*}
+
+The main structured score is
+\[
+S_{\mathrm{structured}}(x) = \max\{\rclean(x), \rworst(x), \lambda \ragree(x)\}.
+\]
+We compare it against:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+    \item \textbf{Raw loss}: the clean negative-loss score \(b(x,y)\),
+    \item \textbf{Clean quantile}: \(S_{\mathrm{clean}}(x)=\rclean(x)\),
+    \item \textbf{Mean only}: \(S_{\mathrm{mean}}(x)=\rmean(x)\).
+\end{itemize}
+
+\subsection{Transform Screening}
+Weak transforms are screened once per dataset on the public screening split using a public reference model. A transform passes only if clean accuracy drop is at most 1 percentage point, FGSM accuracy drop is at most 1 percentage point, clean agreement with the untransformed reference prediction is at least 98\%, and FGSM agreement is at least 98\%.
+
+This screening is intentionally conservative and materially affects the experiment. For Fashion-MNIST, exactly two Gaussian-noise transforms survive: `noise\_001' with clean agreement 0.997 and FGSM agreement 1.000, and `noise\_003' with clean agreement 0.994 and FGSM agreement 0.992. For CIFAR-10, only one transform survives: `noise\_0005', with clean agreement 0.993 and FGSM agreement 0.988. The CIFAR-10 condition is therefore a stress case in which the \(K=4\) weak-view score effectively repeats one surviving weak transform.
+
+\subsection{Public-Only \lambdasection{} Selection}
+The scalar \(\lambda \in \{0, 0.25, 0.5, 0.75, 1.0\}\) is selected using only the public proxy split. For each dataset/seed combination, three non-private proxy auditors are trained on disjoint public pseudo-member and pseudo-nonmember subsets, then evaluated with the same matched-budget pipeline at a proxy query budget of 200. We record both the median-AUC and median-\(\eps\)-lower-bound selections, but use the \(\eps\)-selected value in the headline method.
+
+\subsection{Matched-Budget Evaluation}
+The core protocol measures privacy evidence as a function of consumed queries. If a method with query cost \(c\) per candidate audits \(m\) candidates, it consumes \(cm\) queries. For the single-view methods \(c=1\); for the \(K=4\) weak-view methods \(c=5\); for the \(K=2\) ablation \(c=3\).
+
+For each checkpoint, we evaluate 20 random orderings of the same 240-pair audit pool over query budgets from 40 to 1200 in steps of 40. We report:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+    \item \textbf{Matched-budget curves}: methods are compared at equal consumed query budgets.
+    \item \textbf{Same-candidate curves}: all methods are evaluated on the same prefix of candidates, allowing multi-view methods to spend more queries per candidate.
+\end{itemize}
+
+The primary metric is the empirical \(\eps\) lower bound at \(\del=10^{-5}\), computed from ROC thresholds with beta-binomial confidence bounds. Secondary metrics are ROC AUC and TPR at low FPR.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+We evaluate on Fashion-MNIST and CIFAR-10. Fashion-MNIST uses a small CNN trained with DP-SGD for 10 epochs, batch size 512, learning rate 0.55, momentum 0.9, weight decay \(10^{-4}\), and max gradient norm 1.0. CIFAR-10 uses a frozen pretrained ResNet-18 backbone with a trained linear head, optimized with DP-SGD for 8 epochs, batch size 1024, learning rate 0.35, momentum 0.9, weight decay \(5\times 10^{-4}\), and max gradient norm 1.0. All runs use four seeds \(\{7,17,27,37\}\).
+
+The realized privacy budgets are close to their targets: Fashion-MNIST reaches \(\eps=3.943\) and \(\eps=7.954\), while CIFAR-10 reaches \(\eps=3.942\) and \(\eps=7.914\). Mean test accuracies are 0.839 and 0.843 on Fashion-MNIST, and 0.399 and 0.402 on CIFAR-10, for targets \(\eps=4\) and \(\eps=8\) respectively. Mean per-checkpoint runtime is 1.14--1.17 minutes on Fashion-MNIST and 0.88--0.89 minutes on CIFAR-10.
+
+\subsection{Main Results}
+Table~\ref{tab:main} reports full-pool results, and Figures~\ref{fig:eps-curves} and~\ref{fig:auc-curves} show matched-budget curves. The central result is negative: the structured weak-view score never improves the empirical \(\eps\) lower bound over the clean quantile baseline under matched total-query accounting.
+
+On CIFAR-10, the clean quantile baseline is the strongest method on the primary metric among the compared methods in the high-privacy regime and remains stronger than the structured weak-view score in both privacy settings. At target \(\eps=4\), clean quantile reaches \(0.136 \pm 0.178\) versus \(0.093 \pm 0.187\) for the structured score; at target \(\eps=8\), the gap is \(0.158 \pm 0.273\) versus \(0.078 \pm 0.155\). The mean-only weak-view control slightly exceeds clean quantile at target \(\eps=4\) on full-pool \(\eps\) lower bound (\(0.173 \pm 0.261\) versus \(0.136 \pm 0.178\)), but this advantage disappears in the matched-budget curves because it spends five queries per candidate.
+
+On Fashion-MNIST, weak views are also unhelpful on the primary metric. At target \(\eps=4\), both clean quantile and structured score yield mean empirical lower bound \(0.000\), while raw loss has a nonzero mean of \(0.169 \pm 0.338\) driven by a single FGSM-heavy seed. At target \(\eps=8\), clean quantile attains \(0.049 \pm 0.098\), mean-only attains \(0.009 \pm 0.018\), and structured again collapses to \(0.000\). Across all four settings, the full-pool paired structured-minus-clean difference recorded in `results.json' is non-positive or zero, and no sustained positive matched-budget region appears. The secondary same-candidate curves show one small counterexample: on Fashion-MNIST at target \(\eps=4\) and budget 200, the mean structured-minus-clean difference is \(+0.0042\) (0.0141 versus 0.0099), but it disappears by budget 240 and does not carry over to the matched-budget evaluation.
+
+\begin{table*}[t]
+\caption{Full-pool audit results over all 240 audit pairs per checkpoint. All entries are mean \(\pm\) standard deviation across 4 seeds. Best \(\eps\) lower bound and AUC in each dataset/privacy block are bolded. Higher is better for all reported metrics.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccc}
+\toprule
+Dataset & Target \(\eps\) & Method & Empirical \(\eps\) LB \(\uparrow\) & ROC AUC \(\uparrow\) & TPR@1\% FPR \(\uparrow\) \\
+\midrule
+\multirow{4}{*}{Fashion-MNIST} 
+& \multirow{4}{*}{4} 
+& Raw loss & \textbf{0.169 \(\pm\) 0.338} & \textbf{0.508 \(\pm\) 0.009} & 0.000 \(\pm\) 0.000 \\
+& & Clean quantile & 0.000 \(\pm\) 0.000 & 0.505 \(\pm\) 0.014 & \textbf{0.023 \(\pm\) 0.018} \\
+& & Mean only & 0.000 \(\pm\) 0.000 & 0.506 \(\pm\) 0.010 & 0.019 \(\pm\) 0.014 \\
+& & Structured weak views & 0.000 \(\pm\) 0.000 & 0.496 \(\pm\) 0.023 & 0.014 \(\pm\) 0.019 \\
+\midrule
+\multirow{4}{*}{Fashion-MNIST} 
+& \multirow{4}{*}{8} 
+& Raw loss & \textbf{0.052 \(\pm\) 0.103} & 0.459 \(\pm\) 0.019 & 0.000 \(\pm\) 0.000 \\
+& & Clean quantile & 0.049 \(\pm\) 0.098 & 0.463 \(\pm\) 0.022 & 0.016 \(\pm\) 0.017 \\
+& & Mean only & 0.009 \(\pm\) 0.018 & 0.467 \(\pm\) 0.020 & \textbf{0.022 \(\pm\) 0.018} \\
+& & Structured weak views & 0.000 \(\pm\) 0.000 & \textbf{0.497 \(\pm\) 0.008} & 0.018 \(\pm\) 0.014 \\
+\midrule
+\multirow{4}{*}{CIFAR-10} 
+& \multirow{4}{*}{4} 
+& Raw loss & 0.011 \(\pm\) 0.022 & 0.484 \(\pm\) 0.029 & 0.012 \(\pm\) 0.005 \\
+& & Clean quantile & 0.136 \(\pm\) 0.178 & 0.496 \(\pm\) 0.036 & 0.027 \(\pm\) 0.027 \\
+& & Mean only & \textbf{0.173 \(\pm\) 0.261} & 0.496 \(\pm\) 0.038 & \textbf{0.031 \(\pm\) 0.025} \\
+& & Structured weak views & 0.093 \(\pm\) 0.187 & \textbf{0.503 \(\pm\) 0.012} & 0.029 \(\pm\) 0.030 \\
+\midrule
+\multirow{4}{*}{CIFAR-10} 
+& \multirow{4}{*}{8} 
+& Raw loss & 0.008 \(\pm\) 0.012 & 0.476 \(\pm\) 0.027 & 0.012 \(\pm\) 0.005 \\
+& & Clean quantile & \textbf{0.158 \(\pm\) 0.273} & 0.481 \(\pm\) 0.030 & 0.012 \(\pm\) 0.008 \\
+& & Mean only & 0.146 \(\pm\) 0.280 & 0.481 \(\pm\) 0.026 & \textbf{0.014 \(\pm\) 0.010} \\
+& & Structured weak views & 0.078 \(\pm\) 0.155 & \textbf{0.499 \(\pm\) 0.022} & \textbf{0.014 \(\pm\) 0.010} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure1_matched_budget_eps.pdf}
+\caption{Matched-budget empirical \(\eps\) lower-bound curves versus consumed queries. Means and standard deviations are aggregated over 4 seeds and 20 random audit-pool orderings per seed. Across all four dataset/privacy settings, the structured weak-view curve does not show a sustained advantage over the clean quantile baseline.}
+\label{fig:eps-curves}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure2_matched_budget_auc.pdf}
+\caption{Matched-budget ROC AUC curves versus consumed queries. Weak-view aggregation can mildly improve AUC, especially on CIFAR-10, but these AUC gains do not translate into stronger empirical \(\eps\) lower bounds once the extra query cost is accounted for.}
+\label{fig:auc-curves}
+\end{figure*}
+
+\subsection{Ablations}
+Figure~\ref{fig:ablations} studies which parts of the weak-view pipeline matter. The ablations confirm the main result rather than overturning it.
+
+First, residualization matters. On CIFAR-10 at target \(\eps=4\), removing residualization drops the mean full-pool empirical lower bound of the structured score from 0.093 to 0.000. On Fashion-MNIST at target \(\eps=8\), removing residualization raises the mean lower bound from 0.000 to 0.047, but still does not beat the clean quantile baseline at 0.049.
+
+Second, the agreement feature is mostly inactive because public proxy selection chooses \(\lambda_{\eps}=0\) in every seed and every setting. This means the headline structured score reduces to \(\max\{\rclean,\rworst\}\) in the executed experiments. The \(\lambda\)-selection pathology is visible in Figure~\ref{fig:lambda}: the median proxy empirical lower bound is 0.0 for every \(\lambda\), while proxy AUC weakly favors \(\lambda=0.25\).
+
+Third, the \(\lambda\)-selection criterion is itself unstable. The \(\eps\)-tuned and AUC-tuned selections agree in all four Fashion-MNIST target-\(\eps=4\) seeds, disagree in one of four Fashion-MNIST target-\(\eps=8\) seeds, and disagree in all eight CIFAR-10 seeds across the two privacy regimes. In those CIFAR-10 runs, \(\lambda_{\eps}=0\) for every seed while \(\lambda_{\mathrm{AUC}}=0.25\) for every seed. This matters for robustness: the agreement feature is not supported by the privacy objective even when it modestly improves a proxy attack metric, so the method's composition is sensitive to the tuning target rather than stably identified by the public proxy audits.
+
+Fourth, reducing the number of weak views does not rescue the method. The \(K=2\) structured variant remains below or equal to the clean quantile baseline on the primary metric in all four settings.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/figure3_ablations.pdf}
+\caption{Ablation summary. Left: full-method and component-removal comparisons across dataset/privacy settings. Right: breakdown by canary family. The structured weak-view score does not deliver stronger empirical \(\eps\) lower bounds than the clean quantile baseline, and the CIFAR-10 stress case highlights that only one screened transform survives.}
+\label{fig:ablations}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/figure4_lambda_selection.pdf}
+\caption{Proxy \(\lambda\)-selection summary aggregated across all settings. Median proxy empirical \(\eps\) lower bound is 0.0 for every \(\lambda\), while proxy AUC is slightly higher for \(\lambda \ge 0.25\) than for \(\lambda=0\). In the executed experiments, \(\lambda_{\eps}\) selects 0.0 in all 16 dataset/seed/privacy combinations.}
+\label{fig:lambda}
+\end{figure}
+
+\subsection{Analysis}
+Two observations explain the negative result. First, the matched-budget accounting is strict: a \(K=4\) weak-view score spends five queries per candidate, so any per-candidate gain must be large to beat a calibrated single-view method at equal query cost. The same-candidate curves are mostly negative as well; Appendix~\ref{app:same-candidate} shows only one positive mean structured-minus-clean difference, \(+0.0042\) on Fashion-MNIST at target \(\eps=4\) and budget 200, and even that exception vanishes by budget 240.
+
+Second, the weak transforms that survive screening are extremely conservative. Fashion-MNIST retains only Gaussian noise with standard deviations 0.01 and 0.03, and CIFAR-10 retains only Gaussian noise with standard deviation 0.005. The local neighborhoods explored by the weak views are therefore narrow, especially on CIFAR-10, where repeated views mostly probe one near-identity transform. Under those conditions, extra queries appear largely redundant once clean-view difficulty has already been calibrated.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main implication is practical rather than algorithmic. In this one-run final-model-only setting, researchers should not assume that repeated weak views automatically strengthen empirical privacy auditing. If a strong single-view quantile baseline is already available, extra views may increase AUC slightly yet still fail to improve the privacy metric that matters after honest accounting.
+
+The study has several limitations. First, it is intentionally compute bounded: we evaluate only two datasets, two privacy targets, and four seeds. Second, the CIFAR-10 model is a linear probe on a frozen pretrained ResNet-18, not full end-to-end DP training. Third, transform screening is conservative by design, and on CIFAR-10 only one transform survives, making the weak-view condition unusually narrow. Fourth, proxy \(\lambda\)-selection is degenerate in this regime: the mean fraction of zero proxy empirical lower bounds is 0.939 on Fashion-MNIST at target \(\eps=4\), 0.954 on Fashion-MNIST at target \(\eps=8\), 0.951 on CIFAR-10 at target \(\eps=4\), and 0.958 on CIFAR-10 at target \(\eps=8\). This weakens our ability to test richer agreement-weighted combinations.
+
+These limitations also point to future work. More diverse but still label-preserving transforms, stronger proxy selection objectives, and settings with larger audit pools or stronger base leakage may reveal regimes where weak views help. Our result is therefore not ``weak views never help,'' but ``they do not help here once the comparison is made against a strong calibrated baseline under matched total-query accounting.''
+
+\section{Conclusion}
+\label{sec:conclusion}
+We evaluated whether weak-view residual scores improve one-run DP auditing beyond a quantile-calibrated single-view baseline. Using fixed audit pools, public-only calibration and tuning, and matched-total-query evaluation on Fashion-MNIST and CIFAR-10, we found that they do not. The structured weak-view score never exceeded the clean quantile baseline on the primary metric, the empirical \(\eps\) lower bound at \(\del=10^{-5}\), in any of the four dataset/privacy settings; on CIFAR-10, for example, clean quantile achieved mean lower bounds of 0.136 and 0.158 at target \(\eps=4\) and \(\eps=8\), compared with 0.093 and 0.078 for the structured score.
+
+This is a negative result, but a useful one. It suggests that in compute-bounded one-run auditing, effort may be better spent on stronger single-view calibration and better audit-pool construction than on additional weak-view queries that consume budget without improving privacy evidence. Future work should test whether this conclusion changes under richer transform families, larger audits, or stronger proxy selection signals.
+
+\appendix
+
+\section{Reproducibility Appendix}
+\label{app:repro}
+
+The executed environment differed from the preregistered stack. The run used the preexisting Conda environment `/home/zz865/.conda/envs/ar' rather than the planned Python 3.10 stack; the saved `version\_note' records Python 3.11, Opacus 1.5.4, NumPy 2.x, and a CIFAR-10 preprocessing correction to ImageNet normalization for the frozen pretrained ResNet-18 backbone. The saved hardware snapshot reports one NVIDIA RTX A6000 GPU (driver 570.124.06, CUDA 12.8), 4 CPU cores, and 503~GiB RAM. The full package list is stored in `results.json' and `exp/environment/logs/system\_info.json'.
+
+All stochastic components used the executed seeds \(\{7,17,27,37\}\), with audit-ordering seeds \(\{0,\dots,19\}\), query budgets \(\{40,80,\dots,1200\}\), audit-pool size 240, primary weak-view count \(K=4\), and \(K=2\) as the only executed weak-view ablation. The reporting metadata explicitly records two protocol deviations: the environment mismatch above and the proposal-to-execution seed-count mismatch, since `proposal.md' still mentions 3 seeds while the executed study uses 4. Two optional plan items were not run: the true-label margin sensitivity analysis and the \(K=8\) weak-view ablation.
+
+Transform screening used canonical seed 7 and produced the following frozen recipes. On Fashion-MNIST, only `noise\_001' and `noise\_003' passed screening, with \((\mathrm{clean\ agree}, \mathrm{FGSM\ agree})=(0.997,1.000)\) and \((0.994,0.992)\) respectively; the dataset is not marked as a stress case. On CIFAR-10, only `noise\_0005' passed, with \((0.993,0.988)\), and the saved screening log marks the dataset as a stress case.
+
+\begin{table}[t]
+\caption{Executed \(\lambda\)-selection outcomes by setting. Entries list the per-seed public-proxy selections for the privacy objective and the AUC objective, in seed order \(\{7,17,27,37\}\).}
+\label{tab:lambda-appendix}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Setting & \(\lambda_{\eps}\) & \(\lambda_{\mathrm{AUC}}\) \\
+\midrule
+Fashion-MNIST, target \(\eps=4\) & [0, 0, 0, 0] & [0, 0, 0, 0] \\
+Fashion-MNIST, target \(\eps=8\) & [0, 0, 0, 0] & [0, 0, 0.25, 0] \\
+CIFAR-10, target \(\eps=4\) & [0, 0, 0, 0] & [0.25, 0.25, 0.25, 0.25] \\
+CIFAR-10, target \(\eps=8\) & [0, 0, 0, 0] & [0.25, 0.25, 0.25, 0.25] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Same-Candidate Summary}
+\label{app:same-candidate}
+
+Table~\ref{tab:same-candidate-diff} summarizes the secondary same-candidate analysis by reporting the mean empirical \(\eps\) lower-bound difference \(S_{\mathrm{structured}}-S_{\mathrm{clean}}\) at representative budgets. The one positive entry is Fashion-MNIST at target \(\eps=4\) and budget 200; all other reported entries are non-positive, and the difference is 0.0000 or negative by budget 240 in every setting.
+
+\begin{table}[t]
+\caption{Secondary same-candidate mean empirical \(\eps\) lower-bound differences, computed as structured minus clean quantile from `artifacts/figures/source\_data/same\_candidate\_curves.csv'. Positive values favor the structured weak-view score.}
+\label{tab:same-candidate-diff}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Setting & 120 & 160 & 200 & 240 \\
+\midrule
+Fashion-MNIST, target \(\eps=4\) & -0.0012 & -0.0076 & 0.0042 & 0.0000 \\
+Fashion-MNIST, target \(\eps=8\) & -0.0542 & -0.0726 & -0.0638 & -0.0488 \\
+CIFAR-10, target \(\eps=4\) & -0.0297 & -0.0331 & -0.0318 & -0.0430 \\
+CIFAR-10, target \(\eps=8\) & -0.0475 & -0.0412 & -0.0721 & -0.0809 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

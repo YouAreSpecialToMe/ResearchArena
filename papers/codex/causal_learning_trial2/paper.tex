@@ -1,0 +1,356 @@
+\newif\ifneuripsstyle
+\IfFileExists{neurips_2025.sty}{\neuripsstyletrue}{\neuripsstylefalse}
+\documentclass{article}
+\ifneuripsstyle
+  \usepackage[final]{neurips_2025}
+\else
+  \usepackage[margin=1in]{geometry}
+  \usepackage[numbers,sort&compress]{natbib}
+\fi
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{hyperref}
+
+\title{PACER-Cert as a Benchmark for\\Stopping-Certificate Calibration in CPU-Only Active Causal Discovery}
+\author{Anonymous Authors}
+
+\newcommand{\method}{PACER-Cert}
+\newcommand{\score}{\mathrm{Score}}
+\newcommand{\certmass}{\mathcal{C}}
+\newcommand{\qe}{q_e}
+\newcommand{\de}{D}
+\newcommand{\amb}{A}
+\newcommand{\elim}{R}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Active causal discovery already has adaptive experimental design, Bayesian intervention scoring, and explicit finite-sample stopping rules. That prior art weakens any broad novelty claim for a new stopping heuristic, but leaves a narrower empirical question open: can an interpretable edge-level stopping certificate be calibrated well enough to justify early stopping under strict CPU-only constraints? We answer that question with a benchmark and analysis paper centered on \method, a compact policy that maintains at most 24 weighted DAG particles, scores interventions with an ambiguity--eliminability--detectability surrogate, and stops when the remaining budget-resolvable ambiguity mass falls below a threshold. We evaluate 192 rollouts on 24 linear-Gaussian synthetic benchmarks with graph sizes $p\in\{10,15\}$, budgets of 300 intervention samples, and CPU-only execution, plus 48 saved calibration states, 285 calibration tuples, 38 oracle stopping-label rows, and a 6-state direct-lookahead falsification study. \method saves 186.46 intervention samples on average, but its stopping certificate is poorly calibrated: overall $\de(e\mid I,m)$ has AUROC 0.521 and Spearman 0.036 against empirical resolvability, while the edge-level stopping score $\qe$ for \method achieves AUROC 0.375 and Brier score 0.484 on oracle labels. On weak-edge problems, \method stops on every rollout yet reaches only 0.325 directed F1, versus 0.392 for random active and 0.386 for the same policy forced to spend the full budget. The benchmark therefore supports a negative conclusion: the main contribution is diagnostic evidence about certificate calibration, not a claim of computational efficiency, and this surrogate is not trustworthy enough to justify stopping decisions.
+\end{abstract}
+
+\section{Introduction}
+
+Active causal discovery studies how to choose interventions that orient edges quickly under limited samples. Recent work already covers adaptive online design \citep{elahi2024aoed}, graph-theoretic intervention policies \citep{squires2020dct}, Bayesian intervention optimization \citep{wang2024bio, toth2022abci, zhang2023optimal}, finite-sample Bayesian learning from interventions \citep{zhou2024sampleefficient}, and scalable intervention targeting heuristics \citep{olko2023git, tigas2022where}. A lightweight stopping heuristic is therefore difficult to justify as a standalone method contribution.
+
+This paper asks a narrower question: \emph{can an interpretable edge-level stopping certificate reliably predict when the remaining intervention budget is no longer worth spending on unresolved edges?} We study that question in a deliberately constrained regime: linear-Gaussian structural equation models (SEMs), perfect single-node interventions, an observational warm start of 200 samples, intervention batches in $\{25,50,100\}$, and CPU-only execution.
+
+\method is the vehicle for that study rather than the headline contribution. It maintains a capped set of weighted DAG particles, combines edge ambiguity, eliminable mass, and a local Gaussian KL-to-power surrogate to score interventions, and stops when predicted budget-resolvable ambiguity mass drops below a threshold. The main contribution is the benchmark around that heuristic: calibration against continuation simulations, oracle stopping-label prediction, trust diagnostics, direct-lookahead falsification, and paired instance-level comparisons against stopping and non-stopping baselines. We do not claim that \method is a faster policy than those baselines; the contribution is diagnostic calibration evidence.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate active-discovery stopping as a benchmark problem that separates uncertainty representation, action scoring, and stopping-certificate calibration.
+  \item We instantiate that benchmark with \method, a CPU-feasible edge-level stopping heuristic built from at most 24 weighted DAG particles and a local detectability surrogate.
+  \item We evaluate 192 rollouts on 24 core synthetic instances, plus 48 saved calibration states, 285 calibration tuples, 38 oracle stopping-label rows, and a 6-state direct-lookahead ablation.
+  \item We show that \method fails the benchmark's calibration tests: overall $\de(e\mid I,m)$ reaches AUROC 0.521 and Spearman 0.036 against empirical resolvability, while \method's stopping score $\qe$ reaches AUROC 0.375 and Brier 0.484 on oracle labels.
+  \item We identify a negative empirical conclusion: on weak-edge problems, \method leaves 208.33 intervention samples unused on average yet falls to 0.325 directed F1, compared with 0.392 for random active and 0.386 for the same policy forced to spend the full budget.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} defines the benchmark and the \method heuristic, Section~\ref{sec:experiments} presents the benchmark results and falsification tests, Section~\ref{sec:discussion} discusses implications and limitations, Section~\ref{sec:conclusion} concludes, and Appendix~\ref{app:repro} records reproducibility details and artifact provenance.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Adaptive intervention design.}
+Active intervention design has moved from identifiability questions to sequential finite-sample policies. Directed clique tree methods provide strong graph-theoretic intervention policies once an essential graph is available \citep{squires2020dct}. ABCI studies active Bayesian causal inference with explicit posterior reasoning over graph structure \citep{toth2022abci}. Zhang et al.\ optimize interventions for task-directed state steering rather than edge-level stopping \citep{zhang2023optimal}. Tigas et al.\ broaden the design space toward scalable experimental design over intervention locations and values \citep{tigas2022where}. These papers primarily study action choice rather than edge-level stopping-certificate calibration.
+
+\paragraph{Stopping and sample efficiency.}
+AOED introduces adaptive online experimental design with online termination logic inside a Bayesian intervention-design loop \citep{elahi2024aoed}. Sample-efficient Bayesian learning of causal graphs from interventions pushes further toward explicit finite-sample stopping and acquisition rules \citep{zhou2024sampleefficient}. These published conference papers already cover the main ``budget-aware stopping'' narrative. Our work therefore does not claim a new stopping principle; it treats stopping as an empirical prediction problem and asks whether a more compact certificate is calibrated enough to support stopping in practice.
+
+\paragraph{Lightweight acquisition baselines and evaluation.}
+Bayesian intervention optimization studies globally decisive interventions without an edge-level stopping certificate \citep{wang2024bio}. GIT provides a practical gradient-informed targeting baseline \citep{olko2023git}. Power analysis for causal discovery highlights the core finite-sample issue that some orientations are intrinsically difficult to resolve \citep{kummerfeld2024power}. OCDB argues for more diagnostic causal-discovery evaluation protocols \citep{zhou2024ocdb}. We follow that diagnostic spirit by treating stopping calibration, not only final structural accuracy, as a first-class target.
+
+\paragraph{Positioning.}
+Unlike prior work on adaptive design and Bayesian stopping, we do not claim a new state-of-the-art stopping rule. Instead, we ask whether a cheap and interpretable edge-level surrogate can be trusted. In the present benchmark, the answer is largely negative.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Study framing}
+
+We treat an active causal discovery policy as the combination of three components:
+\begin{enumerate}
+  \item an uncertainty representation over plausible graphs,
+  \item an action-scoring rule for interventions,
+  \item a stopping rule that decides whether additional samples are worth spending.
+\end{enumerate}
+The benchmark asks whether the stopping component is calibrated. \method is one concrete instantiation of this design space.
+
+\subsection{Problem setup}
+
+Let the true data-generating process be a linear-Gaussian SEM over variables $X_1,\dots,X_p$ with DAG $G^\star$. We begin with observational data $D_{\mathrm{obs}}$ and then adaptively choose single-node perfect interventions $(I_t,m_t)$ with batch size $m_t\in\{25,50,100\}$ until a total intervention budget of 300 samples is exhausted or the policy stops earlier.
+
+For evaluation, we focus on directed F1, structural Hamming distance (SHD), unused budget, runtime, and the area under directed-F1-versus-samples (AUC). For stopping calibration, we evaluate two predictive quantities:
+\begin{itemize}
+  \item $\de(e\mid I,m)$: predicted resolvability of a disputed edge $e$ under action $(I,m)$,
+  \item $\qe(B_{\mathrm{rem}})$: best predicted resolvability of edge $e$ under the remaining budget.
+\end{itemize}
+
+\subsection{Compact uncertainty representation}
+
+\method maintains at most $M=24$ weighted DAG particles. Starting from $D_{\mathrm{obs}}$, it:
+\begin{enumerate}
+  \item draws 24 bootstrap resamples,
+  \item runs FGES on each resample to obtain a CPDAG,
+  \item samples up to 3 DAG extensions per CPDAG,
+  \item fits linear-Gaussian SEM parameters,
+  \item scores each DAG with a BIC-style objective on accumulated data,
+  \item deduplicates and retains at most 24 particles with normalized weights.
+\end{enumerate}
+
+This is not intended as a faithful posterior approximation. It is a compressed uncertainty representation designed to expose local disagreements cheaply enough for CPU-only rollouts.
+
+\subsection{Edge ambiguity and eliminable mass}
+
+For each unordered pair $e=\{u,v\}$, the particle set induces three local edge-state probabilities:
+\[
+p_{\mathrm{fwd}}(e),\qquad p_{\mathrm{rev}}(e),\qquad p_0(e),
+\]
+corresponding to $u\rightarrow v$, $v\rightarrow u$, and no edge.
+
+We summarize uncertainty with two statistics:
+\[
+\amb(e)=\frac{H\!\left(p_{\mathrm{fwd}},p_{\mathrm{rev}},p_0\right)}{\log 3},
+\qquad
+\elim(e)=1-\left(p_{\mathrm{fwd}}^2+p_{\mathrm{rev}}^2+p_0^2\right).
+\]
+$\amb(e)$ measures disagreement, while $\elim(e)$ measures how much weighted mass would collapse if $e$ became known.
+
+\subsection{Local resolvability surrogate}
+
+For a disputed edge $e$, candidate intervention $(I,m)$, and particle $G_k$, \method constructs a local rival graph $G_k^{\mathrm{alt}(e)}$ by reversing $e$ when acyclic and otherwise deleting it. It then restricts attention to the edge endpoints and a local non-intervened neighborhood, computes the local interventional Gaussian KL divergence, and defines
+\[
+\lambda_{k,e}(I,m)=2m\cdot \mathrm{KL}\!\left(P^{do(I)}_{G_k}\,\|\,P^{do(I)}_{G_k^{\mathrm{alt}(e)}}\right).
+\]
+The corresponding asymptotic power proxy at significance level $\alpha=0.05$ is averaged over unresolved particles:
+\[
+\de(e\mid I,m)=\sum_k \bar{w}_{k,e}\,
+\Pr\!\left[\chi_1^2\!\left(\lambda_{k,e}(I,m)\right)>\chi^2_{1,0.95}\right].
+\]
+
+We emphasize that $\de(e\mid I,m)$ is a heuristic predictor, not a guarantee. The central question of the paper is whether this heuristic is calibrated.
+
+\subsection{Action scoring and stopping}
+
+Candidate action $(I,m)$ receives score
+\[
+\score(I,m)=\frac{1}{m}\sum_{e\in E_{\mathrm{amb}}}\amb(e)\elim(e)\de(e\mid I,m).
+\]
+
+For remaining budget $B_{\mathrm{rem}}$, define the best predicted remaining resolvability
+\[
+\qe(B_{\mathrm{rem}})=\max_{(I,m):\,m\le B_{\mathrm{rem}}} \de(e\mid I,m).
+\]
+The total budget-resolvable ambiguity mass is
+\[
+\certmass(B_{\mathrm{rem}})=\sum_{e\in E_{\mathrm{amb}}}\amb(e)\elim(e)\qe(B_{\mathrm{rem}}).
+\]
+\method stops when $\certmass(B_{\mathrm{rem}})<\epsilon_{\mathrm{stop}}$.
+
+The algorithm also reports per-edge certificate metadata: $(p_{\mathrm{fwd}},p_{\mathrm{rev}},p_0)$, $\qe$, the best remaining action, a low-trust flag when effective sample size is below 4 or the local neighborhood size exceeds 6, and an ``unlikely-to-resolve-under-budget'' flag when $\qe<0.35$.
+
+\subsection{Calibration protocol}
+
+The benchmark evaluates the certificate in three ways.
+
+\paragraph{Calibration tuples.}
+For saved decision states, candidate edges, and candidate actions, we estimate empirical resolvability by 40 continuation simulations from the true SCM. Empirical resolvability is the fraction of continuations in which the correct local edge state becomes top-weighted after one update.
+
+\paragraph{Oracle stopping labels.}
+For a state with remaining budget $B_{\mathrm{rem}}$, the oracle label is 1 if at least one allowed remaining action resolves the correct edge state with empirical probability at least 0.8.
+
+\paragraph{Direct lookahead.}
+On a tiny subset of states, we replace the surrogate with direct Monte Carlo lookahead over the same candidate actions and compare action rankings and stop-versus-continue decisions.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental setup}
+
+The core benchmark contains 24 synthetic linear-Gaussian SEM instances: two graph sizes ($p\in\{10,15\}$), two graph families (Erd\H{o}s--R\'enyi and scale-free), two edge-weight regimes (weak and mixed), and three seeds each. Every method uses the same observational warm start of 200 samples, the same total intervention budget of 300 samples, the same batch-size menu $\{25,50,100\}$, and the same replay streams.
+
+We compare eight rollout policies available in the workspace:
+\texttt{fges\_only},
+\texttt{random\_active},
+\texttt{git},
+\texttt{aoed\_lite},
+\texttt{pacer\_no\_d},
+\texttt{pacer\_cert},
+\texttt{pacer\_fixed\_batch},
+and \texttt{pacer\_full\_budget}.
+The last two are ablations of \method, respectively fixing batch size and disabling early stopping.
+
+The pilot stage tuned stopping thresholds on four auxiliary $p=8$ instances, one for each graph-family/regime combination. The tuning objective was directed F1 minus $0.01\times$ unused budget. For \method, $\epsilon_{\mathrm{stop}}=0.20$ scored best at $-1.0584$, ahead of 0.30 ($-1.1209$) and 0.40 ($-1.7013$). For AOED-lite, $(\tau_{\mathrm{stop}},\eta_{\mathrm{stop}})=(0.80,0.002)$ and $(0.90,0.002)$ tied at 0.0655, both outperforming $(0.90,0.005)$ at $-1.0672$; the benchmark therefore fixed $(0.80,0.002)$. The pilot runtimes were 44.69\,s for \method and 27.53\,s for AOED-lite, so the optional shortlist reduction was not activated.
+
+The calibration suite uses 48 saved states from auxiliary $p=8$ problems and 285 calibration tuples for $\de(e\mid I,m)$. It also includes 38 oracle-label rows for $\qe$ and 6 direct-lookahead test states.
+
+\subsection{Main benchmark results}
+
+Table~\ref{tab:core} summarizes the core benchmark. The strongest final structural result comes from forcing \method to spend the full budget: \texttt{pacer\_full\_budget} reaches directed F1 0.4966 and SHD 7.7917. Among lightweight non-stopping baselines, \texttt{random\_active} and \texttt{git} are competitive at directed F1 0.4647 and 0.4750. By contrast, \method with early stopping reaches directed F1 0.4428 while leaving 186.46 samples unused on average.
+
+This budget saving is not free. On the weak-edge slice, where stopping should be most useful, \method stops on all 12 rollouts and leaves 208.33 samples unused on average, but its mean final directed F1 is only 0.3252, versus 0.3921 for random active, 0.4056 for AOED-lite, and 0.3862 for the same policy forced to spend the full budget. Figure~\ref{fig:f1} shows the weak-slice trajectories: \method improves early, then often stops before the more difficult orientations are resolved.
+
+The predeclared paired per-instance analysis leads to the same conclusion. Across the 24 matched benchmark instances, \method has significantly lower directed-F1 AUC than random active (mean paired delta $-0.266$, 95\% bootstrap CI $[-0.349,-0.176]$, Wilcoxon $p=1.63\times10^{-5}$), GIT ($-0.281$, CI $[-0.368,-0.195]$, $p=1.31\times10^{-5}$), AOED-lite ($-0.091$, CI $[-0.169,-0.013]$, $p=1.94\times10^{-2}$), and PACER-no-D ($-0.076$, CI $[-0.150,-0.008]$, $p=4.38\times10^{-2}$). Final directed F1 and SHD differences are not significant against any of those baselines, while unused-budget gains are significant in every comparison. Appendix Table~\ref{tab:paired} reports the full paired summary.
+
+\begin{table*}[t]
+\caption{Core benchmark summary over 24 rollouts per method. Best values are in \textbf{bold}. Higher is better for Directed F1, AUC, and Unused Budget; lower is better for SHD and runtime.}
+\label{tab:core}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Method & Directed F1 $\uparrow$ & SHD $\downarrow$ & Unused Budget $\uparrow$ & AUC Directed F1 $\uparrow$ & Runtime (s) $\downarrow$ \\
+\midrule
+FGES-only & 0.3769 $\pm$ 0.2213 & 9.6250 $\pm$ 3.5851 & \textbf{300.00} $\pm$ 0.00 & --- & \textbf{6.67} $\pm$ 5.48 \\
+Random active & 0.4647 $\pm$ 0.1613 & 8.0833 $\pm$ 2.5353 & 0.00 $\pm$ 0.00 & 0.4282 $\pm$ 0.1612 & 23.60 $\pm$ 13.96 \\
+GIT & 0.4750 $\pm$ 0.2338 & 8.1250 $\pm$ 3.6986 & 0.00 $\pm$ 0.00 & 0.4440 $\pm$ 0.1962 & 28.90 $\pm$ 15.30 \\
+AOED-lite & 0.4766 $\pm$ 0.1764 & 8.4167 $\pm$ 3.3090 & 119.79 $\pm$ 85.01 & 0.2536 $\pm$ 0.1371 & 21.39 $\pm$ 12.48 \\
+PACER-no-D & 0.4146 $\pm$ 0.1732 & 9.1250 $\pm$ 3.1112 & 120.83 $\pm$ 110.99 & 0.2386 $\pm$ 0.1962 & 0.45 $\pm$ 0.28 \\
+PACER-Cert & 0.4428 $\pm$ 0.1915 & 8.5417 $\pm$ 2.9485 & 186.46 $\pm$ 97.52 & 0.1627 $\pm$ 0.1674 & 83.57 $\pm$ 76.70 \\
+PACER fixed batch & 0.4463 $\pm$ 0.1708 & 8.4167 $\pm$ 3.0633 & 127.08 $\pm$ 94.38 & 0.2268 $\pm$ 0.1382 & 34.89 $\pm$ 24.22 \\
+PACER full budget & \textbf{0.4966 $\pm$ 0.2105} & \textbf{7.7917 $\pm$ 3.2165} & 0.00 $\pm$ 0.00 & \textbf{0.4672 $\pm$ 0.1937} & 125.56 $\pm$ 68.59 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{figures/figure1_directed_f1_vs_samples.pdf}
+\caption{Weak-regime directed F1 versus interventional samples for six methods, computed from the checkpoint table over the 12 weak-regime core instances. Each point is the mean directed F1 at an exact cumulative-sample checkpoint, with the shaded band showing the bootstrap 95\% confidence interval across available runs at that checkpoint. Methods that stop early contribute only through their realized stopping checkpoint; there is no forward fill after stopping.}
+\label{fig:f1}
+\end{figure}
+
+\subsection{Stopping-certificate calibration}
+
+The central result of the paper is negative. Across 285 calibration tuples, the surrogate $\de(e\mid I,m)$ has Brier score 0.4048, ECE$_{10}$ 0.3853, AUROC 0.5210, AUPRC 0.4404, and Spearman 0.0362 against empirical resolvability. Figure~\ref{fig:reliability} shows the reliability curve and scatter: predictions are systematically miscalibrated across rollout sources, while the ambiguity-only ablation \texttt{pacer\_no\_d} places mass at 1 by construction and therefore contributes a visibly degenerate band of points.
+
+The edge-level stopping score $\qe$ is worse. On 38 oracle-label rows, the overall $\qe$ predictor has AUROC 0.3182 and Brier score 0.6492. Restricting to \method alone still yields AUROC 0.3750, Brier 0.4835, ECE$_{10}$ 0.5297, and Spearman $-0.2124$. Table~\ref{tab:calibration} summarizes these calibration results.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_reliability_scatter.pdf}
+\caption{Calibration of the local detectability surrogate $\de(e\mid I,m)$ on 285 calibration tuples built from 48 saved auxiliary states, with 40 continuation simulations per tuple. Left: a 10-bin reliability curve comparing the mean predicted $\de(e\mid I,m)$ with the mean empirical resolvability in each equal-width prediction bin. Right: tuple-level predicted versus empirical resolvability, colored by rollout source. The dashed diagonal is perfect calibration.}
+\label{fig:reliability}
+\end{figure}
+
+\subsection{Ablations}
+
+The main internal ablation is \texttt{pacer\_no\_d}, which removes detectability from both action scoring and stopping. It is much cheaper in the current implementation, but that compute gap is not a fair matched-compute comparison. Even so, its structural performance is not dramatically worse than \method (directed F1 0.4146 versus 0.4428), while its stopping labels are also poorly calibrated (AUROC 0.5000 and Brier 0.8333 on 18 oracle rows). Detectability therefore does not rescue the stopping certificate in this benchmark.
+
+The fixed-batch ablation shows that adaptive batch size is not the dominant issue: \texttt{pacer\_fixed\_batch} reaches directed F1 0.4463 with 127.08 unused samples and substantially lower runtime than \method. The full-budget ablation is more revealing. Forcing \method to continue to exhaustion raises directed F1 from 0.4428 to 0.4966 overall. The mean post-stop regret is 0.0538 overall, 0.0610 on weak-edge instances, and 0.0466 on mixed instances.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.78\linewidth]{figures/figure3_unused_budget_vs_regret.pdf}
+\caption{Unused budget versus post-stop regret for \method over the 24 core instances. Each point is one instance; color marks graph family and marker shape marks node count. Post-stop regret is the directed-F1 gap between the stopped \method rollout and the corresponding \texttt{pacer\_full\_budget} rollout on the same instance. Positive regret at large unused budgets indicates that early stopping often leaves recoverable accuracy on the table.}
+\label{fig:regret}
+\end{figure}
+
+\subsection{Trust diagnostics and direct lookahead}
+
+The benchmark predeclared a trust criterion based on positive rank correlation, mean absolute error at most 0.15, and the absence of concentrated overconfident errors. Every reported trust stratum fails that test. For $\de(e\mid I,m)$, Erd\H{o}s--R\'enyi instances have Spearman $-0.116$ and mean absolute error 0.468; even the best stratum, scale-free mixed, still has mean absolute error 0.192 and is marked untrustworthy. For $\qe$, low effective sample size is especially problematic: the \texttt{lt4} ESS bucket has AUROC 0.1429 and low-trust-flag rate 1.0.
+
+The direct-lookahead falsification study reaches the same conclusion. On 6 saved states, surrogate and direct lookahead agree on the top-ranked action in only 2 cases, although they agree on stop-versus-continue in 5 of 6 cases. The disagreement is concentrated in choosing 100-sample batches when direct lookahead preferred 25-sample batches.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_trust_strata.pdf}
+\caption{Oracle-label calibration of $\qe$ across trust strata, computed from the 38 oracle rows. Left: AUROC by ESS bucket, with counts 10 (\texttt{lt4}), 22 (\texttt{4to8}), and 6 (\texttt{gte8}). Right: AUROC by local-neighborhood bucket, with counts 30 (\texttt{le4}), 7 (\texttt{5to6}), and 1 (\texttt{gt6}). The \texttt{gt6} stratum contains a single oracle row, so its AUROC is undefined and no informative bar is available.}
+\label{fig:trust}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Calibration summary for the local resolvability surrogate and edge-level stopping score. ``Overall $D$'' uses all 285 calibration tuples. The $\qe$ rows use the 38 oracle stopping-label rows. Higher is better for AUROC, AUPRC, and Spearman; lower is better for Brier, ECE$_{10}$, and MACE.}
+\label{tab:calibration}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccr}
+\toprule
+Quantity & Brier $\downarrow$ & ECE$_{10}$ $\downarrow$ & MACE $\downarrow$ & AUPRC $\uparrow$ & Spearman $\uparrow$ & AUROC $\uparrow$ & Count \\
+\midrule
+Overall $D(e\mid I,m)$ & 0.4048 & 0.3853 & 0.4726 & 0.4404 & 0.0362 & 0.5210 & 285 \\
+$q_e$ overall & 0.6492 & 0.6735 & 0.7063 & 0.2230 & -0.3022 & 0.3182 & 38 \\
+$q_e$ for PACER-Cert & \textbf{0.4835} & \textbf{0.5297} & \textbf{0.5920} & \textbf{0.3594} & \textbf{-0.2124} & \textbf{0.3750} & 20 \\
+$q_e$ for PACER-no-D & 0.8333 & 0.8333 & 0.8333 & 0.1667 & --- & 0.5000 & 18 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Compute characteristics}
+
+The benchmark was designed for CPU-only execution and did complete in that regime, but the stopping heuristic is not especially cheap in wall-clock time. \method has mean runtime 83.57\,s, median runtime 60.59\,s, and 90th-percentile runtime 174.53\,s, compared with 21.39\,s mean for AOED-lite, 28.90\,s for GIT, and 23.60\,s for random active. The full-budget variant reaches a median of 121.69\,s and a 90th percentile of 211.84\,s. On the memory-probe instance, peak resident memory stays between 190.66\,MB and 196.91\,MB across all methods. These measurements reinforce that the paper's main claim is diagnostic calibration evidence rather than computational efficiency.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The main conclusion is not that stopping certificates are useless. It is that this particular lightweight certificate is not calibrated enough to justify strong stopping claims. The certificate is easy to inspect and often conservative in the coarse stop-versus-continue sense, but it does not rank actions reliably, and its confident stopping decisions still incur nontrivial regret.
+
+The negative result is informative for three reasons. First, ambiguity and detectability are not interchangeable. Adding the local KL-to-power surrogate improves over the ambiguity-only stopping score on some metrics, but not nearly enough to make the certificate trustworthy. Second, local trust diagnostics matter. Low effective sample size and larger local neighborhoods are exactly where one would expect the compressed particle approximation and locality assumptions to break down, and that is where calibration deteriorates most. Third, stopping should be evaluated as a predictive problem, not only as a budget-efficiency problem. A method can save many samples and still stop for the wrong reasons.
+
+This study also has clear limitations. We evaluate only synthetic linear-Gaussian SEMs, perfect single-node interventions, one observational sample size, and relatively small graphs. The particle set is deliberately capped at 24, which may be too aggressive for some instances. AOED-lite is a CPU-feasible approximation rather than a full reimplementation of AOED. Finally, the calibration suite uses 40 continuation simulations per tuple and only 6 direct-lookahead states, which is enough to falsify strong claims but not enough to characterize all failure modes.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced a benchmark for stopping-certificate calibration in CPU-only active causal discovery and used \method as a concrete test case. The benchmark combines standard structural metrics with calibration tuples, oracle stopping labels, trust diagnostics, and direct lookahead.
+
+The empirical result is negative. \method leaves 186.46 intervention samples unused on average and always stops early on the weak slice, but its stopping certificate is poorly calibrated: $\de(e\mid I,m)$ achieves AUROC 0.521 and Spearman 0.036 against empirical resolvability, while \method's stopping score $\qe$ reaches AUROC 0.375 on oracle labels. On weak-edge problems, \method reaches directed F1 0.325 versus 0.392 for random active and 0.386 for the same policy forced to spend the full budget, with mean post-stop regret 0.061.
+
+The broader implication is that interpretable stopping certificates are worth benchmarking, but should not be trusted without explicit calibration tests. Future work should study richer uncertainty representations, better-localized resolvability models, and stronger direct-lookahead approximations before treating certificate-based stopping as reliable.
+
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\appendix
+
+\section{Reproducibility and Artifact Layout}
+\label{app:repro}
+
+\paragraph{Environment and seeds.}
+All experiments were run in a CPU-only Python 3.11 environment with numerical backends pinned to one thread and two worker processes in the study plan. The core benchmark used seeds $\{11,22,33\}$; the auxiliary calibration set used seeds $\{101,202,303\}$. The shared setup was 200 observational samples, a 300-sample intervention budget, and allowed batch sizes $\{25,50,100\}$.
+
+\paragraph{Threshold tuning.}
+The pilot tuner in \texttt{exp/pilot/run.py} selected one auxiliary instance for each graph-family/regime combination and scored each threshold configuration by directed F1 minus $0.01\times$ unused budget. The frozen settings were $\epsilon_{\mathrm{stop}}=0.20$ for \method and $(\tau_{\mathrm{stop}},\eta_{\mathrm{stop}})=(0.80,0.002)$ for AOED-lite. The pilot runtimes did not trigger the optional shortlist reduction, so the final benchmark used the full candidate menu.
+
+\paragraph{How the calibration artifacts were built.}
+The 48 saved states are listed in \path{exp/calibration/saved_state_manifest.json}; all are early-phase states drawn from auxiliary $p=8$ rollouts, with method counts 10 (\texttt{pacer\_cert}), 10 (\texttt{random\_active}), 10 (\texttt{git}), 9 (\texttt{aoed\_lite}), and 9 (\texttt{pacer\_no\_d}). From those states, the calibration procedure evaluated at most two ambiguous edges and at most three candidate actions per edge, producing 285 tuples in \path{exp/calibration/calibration_tuples.csv}: 60 from \texttt{pacer\_cert}, 57 from \texttt{random\_active}, 60 from \texttt{git}, 54 from \texttt{aoed\_lite}, and 54 from \texttt{pacer\_no\_d}. Oracle stopping labels were constructed only for the stopping-style methods, yielding 38 rows in \path{exp/calibration/oracle_labels.csv}: 20 for \texttt{pacer\_cert} and 18 for \texttt{pacer\_no\_d}. Each tuple or oracle row used 40 continuation simulations from the true SCM.
+
+\paragraph{Artifact layout.}
+Core rollout summaries live in \path{exp/core_benchmark/benchmark_rollouts.csv} and checkpoint trajectories in \path{exp/core_benchmark/checkpoint_records.csv}. Aggregate metric summaries are in \path{exp/aggregate/results.json} and the paper-ready figures are stored under \path{figures/}. Calibration summaries, trust diagnostics, and direct-lookahead outputs live under \path{exp/calibration/}. An example certificate table at a stop decision is provided in \path{exp/calibration/appendix/appendix_certificate_table.md}.
+
+\paragraph{Paired-comparison protocol.}
+The paired comparisons in Appendix Table~\ref{tab:paired} use the 24 matched benchmark instances and the implementation in \path{exp/shared/metrics.py}: each 95\% confidence interval is a 2000-resample bootstrap interval over mean paired differences and each $p$-value comes from a Wilcoxon signed-rank test. We predeclared post-stop regret as an evaluation target, but did not include it in the cross-method paired table because the required matched no-stop counterfactual was only run for \method via \texttt{pacer\_full\_budget}. We therefore report regret only for that within-method continuation comparison.
+
+\begin{table*}[t]
+\caption{Paired comparisons for PACER-Cert against the four predeclared baselines over the 24 matched core instances. Each cell reports the mean paired difference, the 95\% bootstrap confidence interval on that mean from 2000 resamples, and the Wilcoxon signed-rank $p$-value. Positive deltas favor PACER-Cert for final directed F1 and unused budget. For directed-F1 AUC, negative deltas indicate that PACER-Cert is worse. The runtime column is baseline minus PACER-Cert, so negative deltas mean PACER-Cert is slower.}
+\label{tab:paired}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Baseline & $\Delta$ AUC Directed F1 & $\Delta$ Final Directed F1 & $\Delta$ Unused Budget & $\Delta$ Runtime (baseline$-$PACER-Cert) \\
+\midrule
+Random active & $-0.266$ [$-0.349,-0.176$], $p=1.63\times10^{-5}$ & $-0.022$ [$-0.077,0.040$], $p=0.469$ & $186.46$ [$145.83,220.83$], $p=5.46\times10^{-5}$ & $-59.97$ [$-86.50,-36.05$], $p=3.66\times10^{-5}$ \\
+GIT & $-0.281$ [$-0.368,-0.195$], $p=1.31\times10^{-5}$ & $-0.032$ [$-0.111,0.041$], $p=0.503$ & $186.46$ [$145.83,220.83$], $p=5.46\times10^{-5}$ & $-54.66$ [$-81.85,-30.87$], $p=4.30\times10^{-4}$ \\
+AOED-lite & $-0.091$ [$-0.169,-0.013$], $p=1.94\times10^{-2}$ & $-0.034$ [$-0.101,0.043$], $p=0.259$ & $66.67$ [$17.71,116.67$], $p=1.47\times10^{-2}$ & $-62.18$ [$-88.82,-37.57$], $p=3.66\times10^{-5}$ \\
+PACER-no-D & $-0.076$ [$-0.150,-0.008$], $p=4.38\times10^{-2}$ & $0.028$ [$-0.029,0.088$], $p=0.332$ & $65.63$ [$23.96,111.46$], $p=1.68\times10^{-2}$ & $-83.12$ [$-113.10,-55.14$], $p=1.19\times10^{-7}$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\end{document}

@@ -1,0 +1,123 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Deterministic CPU-only setup",
+    "description": "Configure a reproducible Bayesian quadrature study that explicitly uses 2 CPU cores, 128GB RAM, 0 GPUs, and at most about 8 total wall-clock hours.",
+    "steps": {
+      "step1": "Use Python 3.11 with numpy==1.26.*, scipy==1.12.*, scikit-learn==1.4.*, pandas==2.2.*, matplotlib==3.8.*, seaborn==0.13.*, statsmodels==0.14.*, and joblib==1.3.*. Do not install PyTorch, JAX, GPyTorch, or any GPU-dependent package.",
+      "step2": "Set OPENBLAS_NUM_THREADS=1, MKL_NUM_THREADS=1, OMP_NUM_THREADS=1, and NUMEXPR_NUM_THREADS=1. Run all experiment batches with joblib n_jobs=2. Record available_cpu_cores=2 and available_gpu_count=0 in the run manifest so the plan explicitly accounts for zero GPU parallelism.",
+      "step3": "Implement one shared GP-BQ backend for all external recalibration methods and for the uncalibrated baseline. Restrict kernels to {RBF, Matern-3/2, Matern-5/2}; use empirical-Bayes model selection by log marginal likelihood; use a fixed 7-point log-lengthscale grid in [-2.0, 1.0]; estimate amplitude in closed form per candidate when possible; and use nugget 1e-8 with jitter escalation 1e-8, 1e-6, 1e-4 if Cholesky fails.",
+      "step4": "Implement Bayes-Sard cubature as the strong internal baseline with a degree-1 polynomial mean space, the same design points, the same kernel family search, and the same linear algebra tolerances as the base GP-BQ backend.",
+      "step5": "Implement the strong external fallback family exactly as pre-registered: global variance scaling, monotone isotonic roughness inflation, and monotone piecewise-constant roughness inflation with at most 4 bins. Treat all three as heuristic external recalibrators, not conformal predictors, and do not claim exact finite-sample coverage.",
+      "step6": "Implement an optional kernel-marginalization comparison only on a reduced hard-case subset. Approximate it by finite mixture averaging over the 21 candidates formed by 3 kernel families x 7 lengthscales with uniform prior weights, so the comparison remains feasible on CPU.",
+      "step7": "Use the same random seeds [11, 23, 37] for every method. For each target-budget-seed tuple, reuse the exact same design points across uncalibrated GP-BQ, all external recalibrators, Bayes-Sard, and kernel marginalization when active.",
+      "step8": "Write raw outputs to results/raw/{block}_{seed}.csv with columns task_id, split, measure, dimension, family, instance_id, budget_n, method, nominal_level, mean_estimate, variance_estimate, inflation_factor, ci_lower, ci_upper, abs_error, covered, interval_width, wis, runtime_sec, selected_kernel, selected_log_lengthscale, roughness_score, fill_distance_proxy, cond_proxy, probe_group_id. Save summaries to results/summary/*.csv and figures to figures/*.pdf and figures/*.png.",
+      "step9": "Run a smoke test covering 1 measure, 1 dimension, 2 probes, 2 targets, both budgets, and all main methods. Require the smoke test to finish in under 10 minutes and verify that reference integrals, calibration fitting, and summary generation all complete before launching the full matrix."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Frozen targets and pooled probe bank",
+    "description": "Build a synthetic benchmark with exact or cheap high-accuracy reference integrals, a large pre-registered analytic probe bank, and no target-label use in calibration or model selection.",
+    "steps": {
+      "step1": "Use two integration measures: Uniform[0,1]^d and N(0, I_d). Use dimensions d in {1, 2, 3}. Keep all experiments in these low-dimensional settings so analytic kernel means and CPU-only reference integration remain cheap.",
+      "step2": "Construct one fixed 72-probe bank per measure. Include 24 polynomial or orthogonal-basis probes, 24 oscillatory probes spanning a frequency ladder, and 24 localized probes spanning width and location ladders; ensure each family contains easy, medium, and hard instances. Freeze the bank before any target evaluation.",
+      "step3": "Split each 72-probe bank once into 48 calibration probes and 24 held-out test probes. Keep probe identities grouped throughout analysis so repeated instances from the same underlying probe are never treated as independent for cross-validation or uncertainty summaries.",
+      "step4": "Evaluate each probe under budgets n in {16, 32} and design seeds [11, 23, 37]. This yields 48 x 2 x 3 = 288 pooled calibration probe instances and 24 x 2 x 3 = 144 held-out probe instances per measure.",
+      "step5": "For targets, define 4 families per measure-dimension pair with exactly 2 target functions each: matched smooth controls, oscillatory mismatch, localized bump mismatch, and kinked or cusp-like mismatch. This yields 2 measures x 3 dimensions x 4 families x 2 targets = 48 targets total.",
+      "step6": "Define matched smooth targets as low-order polynomial plus low-frequency sinusoidal combinations that align reasonably with the kernel bank. Define oscillatory targets with frequencies above the calibration bank median. Define bump targets with narrow or off-center localized structure. Define kinked targets using absolute-value, hinge, or cusp terms with known or cheap reference integrals.",
+      "step7": "Compute exact integrals analytically whenever possible. For remaining targets, precompute reference values using deterministic high-accuracy quadrature matched to the measure and dimension: tensor Gauss-Legendre for Uniform in d=1 or d=2, sparse-grid Smolyak Gauss-Hermite or Gauss-Legendre for d=3, and one cached 2e6-sample randomized quasi-Monte Carlo estimate only if analytic and deterministic rules are unavailable. Require reference standard error below max(1e-6, 0.05 x median uncalibrated absolute error from the smoke test).",
+      "step8": "Generate one scrambled Sobol design for each measure-dimension-target-budget-seed tuple and reuse it for every method. Store the design matrix and function values once so calibration methods differ only in interval construction, not in observations."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Simple and strong comparison methods",
+    "description": "Compare the proposed external recalibration study against a simple baseline, a strong internal baseline, and a strong but cheap external fallback family under identical designs and tuning effort.",
+    "steps": {
+      "step1": "Baseline 1, simple: uncalibrated plug-in GP-BQ with empirical-Bayes kernel selection from {RBF, Matern-3/2, Matern-5/2}. Report native Gaussian 90% and 95% credible intervals with no post-hoc inflation.",
+      "step2": "Baseline 2, strong external fallback: global variance scaling. For each measure and nominal level, compute probe standardized errors z=|I-mu|/max(s, 1e-12) on the pooled calibration probe instances, using grouped aggregation by probe identity. Set the inflation factor tau_alpha to the grouped empirical upper quantile of z after averaging within probe across budgets and seeds so calibration is statistically stable.",
+      "step3": "Baseline 3, strong internal baseline: Bayes-Sard cubature with degree-1 polynomial mean space, the same kernels, the same budgeted search grid, and native Gaussian intervals. Treat this as the main literature-strength baseline because it addresses misspecification inside the quadrature model.",
+      "step4": "Baseline 4, hardest-case subset only: kernel marginalization on a reduced 12-target subset consisting of 1 target per family for each measure at dimensions d in {1, 2}. Evaluate it only for the hardest oscillatory, bump, and kinked settings plus matched controls so cost stays bounded.",
+      "step5": "Use the same targets, probe instances, designs, budgets, and seeds for every baseline. Log runtime, width, weighted interval score, coverage, and coverage gap so any coverage improvement is judged jointly with efficiency and width inflation."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Probe-only external recalibration transfer study",
+    "description": "Evaluate whether pooled probe-only recalibration can transfer to unseen targets without target labels, while explicitly framing the methods as heuristic external inflation rules rather than exact conformal procedures.",
+    "steps": {
+      "step1": "Run the shared GP-BQ backend on every calibration probe, held-out probe, and target. Keep the posterior mean fixed for all external recalibrators and modify only the posterior variance through multiplicative inflation.",
+      "step2": "For each probe or target, compute three diagnostics on the shared design: roughness_score from standardized finite-difference variation, fill_distance_proxy from nearest-neighbor spacing, and cond_proxy from the kernel Gram-matrix condition proxy. Use roughness_score as the only mandatory input to local recalibrators; log the other two for secondary analysis only.",
+      "step3": "Fit three external recalibration rules separately for 90% and 95% nominal intervals and separately for each measure: Rule A is global variance scaling; Rule B is monotone isotonic inflation tau_alpha(r) fit on pooled calibration probes with sample weights equal to the number of grouped probe averages represented; Rule C is monotone piecewise-constant inflation with at most 4 roughness bins, bin edges selected by grouped leave-one-probe-out cross-validation.",
+      "step4": "Before fitting Rule B or Rule C, reduce repeated probe instances by computing one grouped calibration record per probe and budget, averaging z and roughness over the 3 design seeds. This keeps 48 x 2 = 96 grouped calibration records per measure and avoids pretending that seed-level repetitions are fully independent.",
+      "step5": "Tune local-rule regularization entirely on calibration probes by grouped leave-one-probe-out cross-validation over probe identity. For isotonic, tune clipping upper bound in {2.0, 2.5, 3.0}. For the step rule, tune number of bins in {2, 3, 4} and clipping upper bound in {2.0, 2.5, 3.0}. Optimize mean weighted interval score subject to absolute coverage gap at the target nominal level not exceeding 0.05 on held-out probe folds.",
+      "step6": "Select one final external rule independently for 90% and 95% by comparing Rule A, Rule B, and Rule C on grouped leave-one-probe-out calibration performance. Refit the selected rule on all 48 calibration probes and then evaluate it once on the 24 held-out probes and once on all 48 targets. Do not use held-out probes or targets for model selection.",
+      "step7": "If a target roughness lies outside the observed calibration roughness range for the selected local rule, fall back automatically to global scaling. Record fallback_to_global=1 so support mismatch is visible in analysis rather than silently absorbed.",
+      "step8": "Save main results to results/summary/main_results.csv with columns method, measure, dimension, family, budget_n, nominal_level, coverage, coverage_gap, mean_width, wis, median_abs_error, width_inflation_vs_uncalibrated, fallback_rate, mean_runtime_sec."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablations, fallback checks, and probe-bank sensitivity",
+    "description": "Make statistical stability and probe-bank dependence first-class outcomes by testing each novel component, each simpler fallback, and several explicit probe-target mismatch scenarios.",
+    "steps": {
+      "step1": "Ablation 1, no local information: use only global variance scaling with the same pooled calibration data. This isolates whether roughness-aware transfer helps beyond the strongest simple fallback.",
+      "step2": "Ablation 2, isotonic versus stepwise local rule: compare the selected local rule against the other local rule under identical calibration records, clipping, and grouped cross-validation. This tests whether any gain comes from monotonicity alone or from the specific functional form.",
+      "step3": "Ablation 3, reduced calibration sample: refit the same external rules using only one budget level n=32 and all 48 calibration probes. This measures how much pooled budget repetition contributes to stability.",
+      "step4": "Ablation 4, no roughness conditioning: replace roughness_score with a constant while leaving the isotonic or stepwise pipeline unchanged. This checks whether apparent local gains are just regularization artifacts rather than transferred roughness information.",
+      "step5": "Fallback analysis 1, leave-one-probe-out model selection: report probe-CV performance for global scaling, isotonic inflation, and stepwise inflation side by side, then verify whether the selected rule remains best on the 24 held-out probes. If local rules do not beat global scaling on held-out probes, declare global scaling the recommended default.",
+      "step6": "Fallback analysis 2, probe-only monotone inflation on an enlarged bank: repeat local-rule fitting on random half-bank subsets of size 36 probes, with 20 random subset draws per measure. Measure the standard deviation of target 95% coverage and WIS across recalibrated subset choices.",
+      "step7": "Probe-bank sensitivity analysis 1, leave-one-family-out: calibrate after removing one probe family at a time from the 48 calibration probes, then test on target families aligned with the removed family. Expect oscillatory-family removal to hurt oscillatory targets most, and likewise for bumps.",
+      "step8": "Probe-bank sensitivity analysis 2, severity-range holdout: remove the roughest oscillatory probes or the narrowest bump probes from calibration, then re-evaluate on matching hard targets. Quantify how much performance degrades relative to the full-bank calibration.",
+      "step9": "Probe-bank sensitivity analysis 3, matched-generator transfer: for oscillatory and bump mechanisms in d in {1, 2}, create 4-level severity ladders shared by probes and targets and test whether target undercoverage improves when the calibration bank spans that severity range. Report Spearman correlation between probe grouped z-summaries and target coverage gaps across severity levels.",
+      "step10": "Optional runtime-protection rule: if cumulative runtime exceeds 6.5 hours before sensitivity analysis starts, keep leave-one-family-out and random half-bank analyses, but reduce matched-generator ladders from 4 levels to 3 and skip kernel marginalization on matched controls. Do not reduce the number of random seeds below 3."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Metrics, success criteria, and falsification",
+    "description": "Evaluate interval quality, width, cost, and transfer honestly, with explicit success conditions and explicit ways the hypothesis can fail.",
+    "steps": {
+      "step1": "Primary metrics are empirical coverage at 90% and 95%, absolute coverage gap, weighted interval score, mean interval width, width inflation relative to uncalibrated GP-BQ, median absolute integration error, fallback rate, and runtime in seconds. Report all metrics for matched controls, each misspecified family, the aggregate misspecified union, held-out probes, and the reduced hard-case subset.",
+      "step2": "Use paired comparisons on identical target-budget-seed tuples for all method contrasts. For each primary contrast, compute the mean paired difference and a 95% bootstrap confidence interval using resampling over target identities with 2000 bootstrap replicates; keep all seeds within a target together during resampling.",
+      "step3": "Primary success criterion 1: on the union of misspecified target families, at least one external recalibrator improves 95% coverage over uncalibrated GP-BQ by at least 0.05 absolute.",
+      "step4": "Primary success criterion 2: the selected external rule improves mean 95% weighted interval score over uncalibrated GP-BQ while keeping median width inflation on matched smooth controls at or below 1.75x.",
+      "step5": "Primary success criterion 3: a roughness-aware rule beats global scaling on at least one misspecified family in weighted interval score without losing more than 0.03 absolute coverage on the other misspecified families.",
+      "step6": "Primary success criterion 4: across the 20 random half-bank recalibrations, the standard deviation of target 95% coverage is below 0.04; otherwise the paper should conclude that transfer is bank-fragile.",
+      "step7": "Primary success criterion 5: held-out probe performance is directionally consistent with target-side gains in the matched-generator analysis. If held-out probes favor global scaling while targets favor local rules only sporadically, present the result as unstable and recommend the simpler method.",
+      "step8": "Disproof conditions are pre-registered. The main hypothesis is not supported if all external rules fail to improve misspecified-target 95% coverage by at least 0.05, if improvements come only with width inflation above 1.75x on matched controls, if Bayes-Sard dominates the selected external rule on all misspecified families in both coverage gap and WIS, or if probe-bank sensitivity analyses show coverage standard deviation at or above 0.04 with no interpretable pattern."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Runtime accounting and execution order",
+    "description": "Estimate the full experimental workload before execution, order the runs to surface blockers early, and keep the study inside the 8-hour budget on 2 CPU cores.",
+    "steps": {
+      "step1": "Stage A, reference generation: compute and cache all exact or high-accuracy target integrals first. Budget 45 to 60 minutes wall-clock time for 48 targets because most references are analytic and the remainder use deterministic quadrature or cached quasi-Monte Carlo only once.",
+      "step2": "Stage B, core model fits: run GP-BQ and Bayes-Sard on 48 targets x 2 budgets x 3 seeds = 288 target instances, plus GP-BQ on 72 probes x 2 budgets x 3 seeds x 2 measures = 864 probe instances. Assume 2 to 4 seconds per GP-BQ fit and 3 to 5 seconds per Bayes-Sard fit at these small n values, giving about 1.8 to 2.8 serial hours and about 0.9 to 1.4 wall-clock hours on 2 CPU cores for the core fit stage.",
+      "step3": "Stage C, external recalibration fitting: grouped calibration aggregation, leave-one-probe-out selection, held-out-probe evaluation, and target interval reconstruction should take under 30 minutes because they operate on at most 96 grouped calibration records per measure and reuse cached GP-BQ outputs.",
+      "step4": "Stage D, probe-bank sensitivity and ablations: random half-bank analysis uses 20 subsets x 2 measures plus leave-one-family-out, severity-range holdout, and matched-generator ladders. Budget 2.5 to 3.5 wall-clock hours. Run this stage only after main results and held-out-probe summaries are complete.",
+      "step5": "Stage E, kernel marginalization subset: run only on the reduced 12-target hard-case subset, not on the full benchmark. Budget 45 to 75 minutes wall-clock time. Skip matched-control kernel-marginalization cases first if runtime pressure appears.",
+      "step6": "Stage F, aggregation and visualization: budget 30 to 45 minutes to generate summary CSVs, bootstrap intervals, tables, and figures from cached results.",
+      "step7": "Total planned wall-clock time is approximately 5.6 to 7.8 hours on 2 CPU cores with zero GPUs. Execute in the order Stage A, smoke test, Stage B, Stage C, main-result checkpoint, Stage D, Stage E, Stage F so a stable fallback result is available even if the final optional subset runs are pruned.",
+      "step8": "Write results/summary/runtime_accounting.csv with planned_wall_clock_hours, actual_wall_clock_hours, cpu_cores_used, gpu_count, completed_blocks, skipped_blocks, and reason_for_any_pruning."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Figures and tables for transfer and stability",
+    "description": "Produce paper-ready outputs that foreground calibration quality, fallback behavior, and probe-bank dependence instead of overstating novelty.",
+    "steps": {
+      "step1": "Figure 1: plot empirical 95% coverage versus target family with separate panels for matched smooth, oscillatory, bump, and kinked targets. Include uncalibrated GP-BQ, global scaling, selected local recalibrator, and Bayes-Sard, with a horizontal 0.95 reference line and error bars over target-level bootstrap intervals.",
+      "step2": "Figure 2: plot weighted interval score versus mean width inflation for all methods on the aggregate misspecified union, with point size proportional to runtime. This shows whether calibration gains come from useful uncertainty correction or from brute-force interval widening.",
+      "step3": "Figure 3: held-out probe versus target transfer plot. On the x-axis place held-out probe coverage gap or WIS improvement relative to uncalibrated GP-BQ; on the y-axis place the corresponding target-side improvement. Include one point per method and measure so transfer consistency is visible.",
+      "step4": "Figure 4: probe-bank sensitivity plot with 20 random half-bank draws per measure. Show the distribution of target 95% coverage for global scaling and the selected local rule. Mark the full-bank result as a reference line.",
+      "step5": "Figure 5: matched-generator severity plot for oscillatory and bump mechanisms, with severity on the x-axis and panels for grouped probe z, target coverage gap, and fallback rate. This figure is mandatory because probe-bank alignment is a central claim.",
+      "step6": "Table 1: main benchmark table with rows for methods and columns for coverage_90, coverage_95, WIS_90, WIS_95, width_inflation, median_abs_error, runtime_sec on the misspecified union and on matched smooth controls.",
+      "step7": "Table 2: ablation and fallback table with rows for global only, isotonic, stepwise, reduced calibration sample, no roughness conditioning, leave-one-family-out, and severity-range holdout; columns coverage_95, WIS_95, width_inflation, fallback_rate, and notes on failure mode.",
+      "step8": "Table 3: reduced hard-case comparison with kernel marginalization, showing coverage_95, WIS_95, width, and runtime_sec for the 12-target subset.",
+      "step9": "Save a manifest to results/summary/figure_manifest.json listing each figure or table, exact source CSV paths, grouping keys, filters, nominal levels, and any bootstrap settings used."
+    }
+  }
+]

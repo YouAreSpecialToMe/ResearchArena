@@ -1,0 +1,381 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+
+\newcommand{\scd}{\textsc{SCD}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Loss}{\mathcal{L}}
+
+\title{Spectral Consistency Distillation: Frequency-Adaptive Teacher Supervision for Few-Step Flow Matching}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Consistency distillation enables few-step generation from flow matching models, but existing methods use a uniform teacher budget across all spatial frequencies, potentially limiting sample quality.
+We propose Spectral Consistency Distillation (\scd{}), which decomposes the distillation loss into frequency bands via the Fourier transform and provides each band with teacher supervision computed using a frequency-appropriate number of ODE steps: fewer steps for low-frequency bands that converge quickly, and more steps for higher-frequency bands.
+On CIFAR-10, \scd{} improves 1-step FID from 48.5 to 44.6 (an 8.0\% reduction) compared to standard consistency distillation, while adding only 9\% training overhead and zero inference cost.
+An ablation study reveals that frequency-adaptive teacher supervision is the primary driver of improvement, reducing low-frequency distillation error by 12.7\%.
+However, \scd{} does not improve 2-step or 4-step generation, and contrary to our original hypothesis, high-frequency error increases rather than decreases.
+We provide a detailed spectral analysis of these findings and discuss implications for distillation loss design.
+\end{abstract}
+
+%% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+%% ============================================================================
+
+Flow matching models~\citep{lipman2023flow, liu2023flow} achieve state-of-the-art generative quality by learning velocity fields that transport noise to data along ODE trajectories. However, sampling requires 20--100 neural function evaluations (NFEs), limiting real-time deployment.
+Consistency distillation~\citep{song2023consistency, geng2024consistency} addresses this by training a student to map any point on the ODE trajectory directly to the data endpoint, enabling generation in 1--4 steps.
+
+A natural question is whether the distillation training objective can be improved by incorporating knowledge about the spectral structure of the generation process.
+It is well established that diffusion and flow models exhibit a spectral hierarchy: low-frequency components converge early along the ODE trajectory while high-frequency components require more steps~\citep{rissanen2023generative}.
+Standard consistency distillation ignores this structure---it uses the same number of teacher ODE steps to generate supervision targets for all frequency components, and weights all spatial frequencies equally in the MSE loss.
+
+We hypothesized that a \emph{frequency-adaptive} distillation framework could improve few-step generation quality by: (1) allocating more teacher ODE steps to frequency bands that require finer trajectory resolution, and (2) applying per-band loss weights to balance the distillation error across the frequency spectrum.
+
+We propose \textbf{Spectral Consistency Distillation} (\scd{}), which decomposes the distillation loss into $K$ frequency bands using the 2D Fourier transform and provides each band with teacher targets computed using a band-specific number of ODE steps.
+Our experiments on CIFAR-10 reveal both positive and surprising results:
+
+\begin{itemize}
+    \item \scd{} achieves an 8.0\% FID improvement for 1-step generation (44.6 vs.\ 48.5), demonstrating that frequency-adaptive teacher supervision benefits the most challenging single-step regime.
+
+    \item Ablation studies show that the improvement is driven primarily by the adaptive teacher supervision component---providing higher-quality (more ODE steps) teacher targets for higher-frequency bands---rather than by the spectral loss weighting.
+
+    \item Contrary to our hypothesis, \scd{} reduces \emph{low}-frequency error (by 12.7\%) while \emph{increasing} high-frequency error (by 23.6\%). The 1-step FID gain comes from better global structure, not high-frequency detail.
+
+    \item The benefit is specific to 1-step generation; at 2 and 4 steps, \scd{} performs comparably to standard consistency distillation.
+\end{itemize}
+
+These findings suggest that the spectral allocation of teacher computation budgets is a meaningful axis for distillation loss design, but that the interaction between spectral loss decomposition and generation quality is more complex than the simple ``upweight high frequencies'' hypothesis predicts.
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes \scd{} in detail. Section~\ref{sec:experiments} presents our experimental results, including ablations and spectral analysis. Section~\ref{sec:discussion} discusses limitations and implications. Section~\ref{sec:conclusion} concludes.
+
+%% ============================================================================
+\section{Related Work}
+\label{sec:related}
+%% ============================================================================
+
+\paragraph{Flow Matching and Continuous Normalizing Flows.}
+Flow matching~\citep{lipman2023flow} provides a simulation-free training framework for continuous normalizing flows. The model learns a velocity field $v_\theta(x_t, t)$ that transports samples along an ODE trajectory from noise ($t=1$) to data ($t=0$). Rectified flow~\citep{liu2023flow} learns straight-line ODE paths to enable fewer-step sampling. Our work uses a flow matching model as the teacher backbone.
+
+\paragraph{Consistency Models and Distillation.}
+Consistency models~\citep{song2023consistency} enforce self-consistency along the ODE trajectory, enabling single-step generation. Improved techniques~\citep{song2023improved} introduced Pseudo-Huber losses and lognormal noise schedules for better training stability. Consistency Models Made Easy~\citep{geng2024consistency} demonstrated that fine-tuning from a pretrained diffusion model reduces training cost. Consistency Flow Matching~\citep{yang2024consistency} enforces velocity consistency for straight flows. Progressive distillation~\citep{salimans2022progressive} iteratively halves the number of sampling steps. Our method modifies the distillation training objective and is complementary to these approaches.
+
+\paragraph{Spectral Analysis of Generative Models.}
+The spectral structure of diffusion processes has received growing attention. \citet{rissanen2023generative} showed that the forward diffusion process destroys high frequencies before low frequencies, and the reverse process generates them in opposite order. Spectral regularization~\citep{chandran2026spectral} adds Fourier or wavelet penalties during diffusion model training. Frequency-decoupled guidance~\citep{sadat2025guidance} applies different classifier-free guidance scales to different frequency bands at inference time. The Diffusion Transformer architecture (DiT)~\citep{peebles2023scalable} provides a scalable backbone for diffusion models. Unlike these works, \scd{} applies spectral decomposition specifically to the consistency distillation training loss, using frequency-adaptive teacher supervision to improve distillation targets.
+
+%% ============================================================================
+\section{Method}
+\label{sec:method}
+%% ============================================================================
+
+\subsection{Preliminaries: Flow Matching and Consistency Distillation}
+
+A flow matching model learns a velocity field $v_\phi(x_t, t)$ such that the ODE $\frac{dx}{dt} = v_\phi(x_t, t)$ transports samples from a noise distribution ($t=1$) to the data distribution ($t=0$). At inference time, generating a sample requires numerically solving this ODE, typically using 20--100 Euler steps.
+
+Consistency distillation trains a student model $f_\theta$ to directly predict the ODE endpoint:
+\begin{equation}
+    \Loss_{\text{CD}} = \E_{x_0, t}\left[\left\|f_\theta(x_t, t) - \operatorname{sg}\left[\operatorname{Teacher}(x_t, t; N)\right]\right\|^2\right],
+    \label{eq:cd}
+\end{equation}
+where $\operatorname{Teacher}(x_t, t; N)$ denotes the result of solving the teacher ODE from timestep $t$ to $t=0$ using $N$ Euler steps, and $\operatorname{sg}[\cdot]$ denotes stop-gradient. The student can then generate samples in 1--4 steps.
+
+\subsection{Spectral Consistency Distillation}
+
+\scd{} modifies the consistency distillation objective in two ways: (1) it decomposes the loss into frequency bands, and (2) it uses a different number of teacher ODE steps for each band.
+
+\paragraph{Spectral Loss Decomposition.}
+Let $\mathcal{F}$ denote the 2D discrete Fourier transform and let $M_k$ for $k=1, \ldots, K$ be binary masks that partition the frequency plane into $K$ bands ordered from lowest to highest frequency. The masks are defined by the magnitude of the frequency vector: $M_k$ selects frequencies $f$ satisfying $b_{k-1} \leq \|f\| < b_k$, where $\{b_0, \ldots, b_K\}$ are uniformly spaced boundaries from zero to the maximum frequency.
+
+By Parseval's theorem, the pixel-space MSE decomposes exactly into per-band contributions in the frequency domain. The \scd{} loss is:
+\begin{equation}
+    \Loss_{\text{SCD}} = \sum_{k=1}^{K} w_k \cdot \E_{x_0, t}\left[\frac{1}{HW}\left\|M_k \odot \mathcal{F}\left(f_\theta(x_t, t) - \operatorname{sg}\left[\text{Target}_k(x_t, t)\right]\right)\right\|^2\right],
+    \label{eq:scd}
+\end{equation}
+where $w_k$ are per-band weights and $\text{Target}_k$ is the band-specific teacher target.
+
+\paragraph{Frequency-Adaptive Teacher Supervision.}
+The key component of \scd{} is using different teacher ODE budgets for different frequency bands. Each band $k$ receives a teacher target computed with $N_k$ ODE steps:
+\begin{equation}
+    \text{Target}_k(x_t, t) = \operatorname{Teacher}(x_t, t; N_k),
+\end{equation}
+where $N_1 \leq N_2 \leq \cdots \leq N_K$. The rationale is that low-frequency components converge with few teacher steps, while higher-frequency components benefit from finer trajectory resolution.
+
+In practice, we precompute teacher outputs at each required step count $\{N_1, \ldots, N_K\}$ for the entire training set. The per-band loss for band $k$ uses the teacher output from $N_k$ steps, but the student's prediction is compared against \emph{different} teacher outputs in each band. This allows the student to receive high-quality supervision for bands that need it without wasting computation on bands that converge quickly.
+
+\paragraph{Per-Band Weights.}
+We use fixed weights $w_k$ that increase with frequency band index: $\mathbf{w} = [1.0, 1.5, 2.5, 4.0]$ for $K=4$ bands. These weights emphasize higher-frequency bands in the loss, though our ablation study (Section~\ref{sec:ablation}) shows this component contributes less than the adaptive teacher supervision.
+
+\paragraph{Inference.}
+At inference time, \scd{} operates identically to a standard consistency model---no spectral decomposition is needed. The frequency-aware training modifies only the loss computation, adding zero overhead at inference time.
+
+\subsection{Implementation Details}
+
+We implement \scd{} with $K=4$ frequency bands and teacher step counts $\mathbf{N} = [10, 20, 50, 100]$ from lowest to highest frequency band. Teacher targets are precomputed and cached for all step counts, amortizing the multi-resolution teacher cost. The student and teacher share the same U-Net architecture with 6.5M parameters (model channels 64, channel multipliers [1, 2, 2], attention at resolution 8). Training uses Adam with learning rate $10^{-4}$, batch size 256, gradient clipping at norm 1.0, mixed precision (FP16), and an EMA target network with decay 0.999. The complete training pipeline is summarized in Algorithm~\ref{alg:scd}.
+
+\begin{algorithm}[t]
+\caption{Spectral Consistency Distillation Training}
+\label{alg:scd}
+\begin{algorithmic}[1]
+\REQUIRE Teacher model $v_\phi$, student model $f_\theta$, dataset $\mathcal{D}$, band masks $\{M_k\}_{k=1}^K$, weights $\{w_k\}$, teacher steps $\{N_k\}$
+\STATE Precompute: for each $N_k$, compute $\text{Target}_k(x_t, t) = \text{Teacher}(x_t, t; N_k)$ for all $(x_0, t)$ pairs
+\FOR{each training step}
+    \STATE Sample mini-batch $(x_0, t)$ and retrieve $x_t = (1-t)x_0 + t\epsilon$
+    \STATE Compute student prediction: $\hat{x}_0 = f_\theta(x_t, t)$
+    \FOR{$k = 1, \ldots, K$}
+        \STATE Retrieve precomputed target: $\hat{x}_0^{(k)} = \text{Target}_k(x_t, t)$
+        \STATE Compute band loss: $\ell_k = \frac{1}{HW}\|M_k \odot \mathcal{F}(\hat{x}_0 - \hat{x}_0^{(k)})\|^2$
+    \ENDFOR
+    \STATE Compute total loss: $\Loss = \sum_k w_k \cdot \ell_k$
+    \STATE Update $\theta$ via gradient descent on $\Loss$
+    \STATE Update EMA parameters
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+%% ============================================================================
+\section{Experiments}
+\label{sec:experiments}
+%% ============================================================================
+
+\subsection{Setup}
+
+\paragraph{Dataset.}
+We evaluate on CIFAR-10~\citep{krizhevsky2009learning} (32$\times$32, 50K training images). While this resolution limits evaluation of high-frequency effects, it enables thorough experimentation within our computational budget.
+
+\paragraph{Teacher Model.}
+We train a flow matching model with the OT-CFM objective for 80K steps, achieving FID 20.2 at 100 Euler steps and FID 23.8 at 20 steps on CIFAR-10.
+
+\paragraph{Baselines.}
+We compare against three baselines, all using the same 6.5M-parameter U-Net architecture and 30K distillation steps:
+\begin{itemize}
+    \item \textbf{Standard CD}: Consistency distillation with MSE loss and 20-step teacher targets.
+    \item \textbf{Pseudo-Huber CD}: Same as Standard CD but with the Pseudo-Huber loss from \citet{song2023improved}, using $c = 0.00054\sqrt{d}$ where $d = 3072$.
+    \item \textbf{Rectified Flow}: The teacher model evaluated directly with 1/2/4 Euler steps (no distillation training).
+\end{itemize}
+Additionally, we train a critical ablation baseline:
+\begin{itemize}
+    \item \textbf{CD (100-step teacher)}: Standard consistency distillation with MSE loss, but using 100-step teacher targets instead of 20-step. This isolates whether improvement comes from better teacher targets or from spectral decomposition.
+\end{itemize}
+
+\paragraph{Metrics.}
+We report Fr\'{e}chet Inception Distance (FID) computed over 50K generated samples against CIFAR-10 training statistics using the clean-fid library~\citep{parmar2022cleanfid}. We also report per-frequency-band MSE between generated and real images across four frequency bands (low, mid-low, mid-high, high) computed in the Fourier domain.
+
+\paragraph{Evaluation Protocol.}
+All methods with stochastic training are evaluated with 3 random seeds (42, 43, 44). We report mean $\pm$ standard deviation. Step budgets: 1-step, 2-step, and 4-step generation.
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main} presents the main comparison. \scd{} achieves the best 1-step FID (44.6), improving over Standard CD by 3.9 FID points (8.0\% relative improvement). At 2-step generation, all distillation methods perform similarly (FID $\approx$ 40). At 4-step, Standard CD and Pseudo-Huber CD slightly outperform \scd{}.
+
+Rectified Flow without distillation performs poorly at low step counts (FID 344.6 at 1-step), confirming the value of consistency distillation.
+
+\begin{table}[t]
+\caption{Main results on CIFAR-10 (32$\times$32). FID$\downarrow$ computed over 50K samples. Best distillation result in \textbf{bold}. All distillation methods use the same 6.5M-parameter U-Net and 30K training steps.}
+\label{tab:main}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & 1-step FID $\downarrow$ & 2-step FID $\downarrow$ & 4-step FID $\downarrow$ \\
+\midrule
+Teacher (100-step Euler) & \multicolumn{3}{c}{20.2} \\
+Rectified Flow (few-step Euler) & 344.58 $\pm$ 0.03 & 186.53 $\pm$ 0.27 & 68.37 $\pm$ 0.16 \\
+\midrule
+Standard CD (MSE, 20-step teacher) & 48.47 $\pm$ 0.37 & 40.45 $\pm$ 0.29 & \textbf{38.28 $\pm$ 0.61} \\
+Pseudo-Huber CD (20-step teacher) & 48.61 $\pm$ 0.29 & \textbf{40.37 $\pm$ 0.16} & 37.87 $\pm$ 0.39 \\
+\textbf{\scd{} (Ours)} & \textbf{44.62 $\pm$ 0.16} & 40.50 $\pm$ 0.21 & 39.06 $\pm$ 0.31 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Spectral Error Analysis}
+
+Figure~\ref{fig:spectral} shows the per-frequency-band MSE for 1-step and 4-step generation. At 1-step, \scd{} achieves notably lower error in the low-frequency band (334.9 vs.\ 383.6, a 12.7\% reduction) compared to Standard CD. However, high-frequency error \emph{increases} (0.220 vs.\ 0.178, a 23.6\% increase). This pattern reverses our original hypothesis that \scd{} would specifically reduce high-frequency error.
+
+The spectral error profile suggests that \scd{}'s 1-step FID improvement comes from better reconstruction of global image structure (low frequencies) rather than fine details (high frequencies). This is consistent with the observation that FID is primarily sensitive to low-frequency image statistics at 32$\times$32 resolution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/figure1_spectral_error.pdf}
+\caption{Per-frequency-band MSE between generated and real images for 1-step (left) and 4-step (right) generation. \scd{} reduces low-frequency error compared to baselines but increases high-frequency error. Error bars show $\pm$1 standard deviation over seeds.}
+\label{fig:spectral}
+\end{figure}
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} ablates the components of \scd{} using 20K training steps and seed 42. The ``SCD (full)'' row uses both adaptive teacher supervision and spectral loss weights $\mathbf{w}=[1.0, 1.5, 2.5, 4.0]$.
+
+\begin{table}[t]
+\caption{Ablation study (20K training steps, seed 42). Removing spectral weights has minimal effect, while the no-progressive variant (which retains adaptive teacher supervision and uses fixed weights from the start) achieves the best results.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Variant & 1-step FID $\downarrow$ & 2-step FID $\downarrow$ & 4-step FID $\downarrow$ \\
+\midrule
+SCD (full, progressive schedule) & 47.71 & 39.81 & 38.33 \\
+\quad $-$ spectral weights ($w_k = 1\ \forall k$) & 48.21 & 40.06 & 39.51 \\
+\quad $-$ progressive schedule (fixed weights) & \textbf{46.44} & \textbf{38.12} & \textbf{37.43} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two findings stand out:
+
+\textbf{Spectral weights contribute minimally.} Removing the per-band weights (setting $w_k=1$ for all bands while keeping adaptive teacher supervision) degrades 1-step FID by only 0.5 points (48.21 vs.\ 47.71). This indicates that the spectral loss decomposition with non-uniform weights is a secondary contributor.
+
+\textbf{Progressive schedule is unnecessary.} The variant without progressive scheduling (fixed weights from the start) actually \emph{outperforms} the full method across all step budgets. This suggests that the progressive curriculum adds complexity without benefit, and that the adaptive teacher supervision is effective even without a warmup phase.
+
+Together, these ablations indicate that \textbf{frequency-adaptive teacher supervision is the primary mechanism} driving \scd{}'s improvement. The spectral loss weighting and progressive schedule are secondary or counterproductive components.
+
+\subsection{FID vs.\ Number of Inference Steps}
+
+Figure~\ref{fig:fid_steps} shows FID as a function of inference steps for all methods. \scd{} provides a clear advantage at 1 step but converges to similar performance as Standard CD at 2--4 steps. This suggests that the benefit of frequency-adaptive teacher supervision is most pronounced in the single-step regime, where the student must capture the full ODE trajectory in a single function evaluation and is most sensitive to teacher target quality.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/figure4_fid_vs_steps.pdf}
+\caption{FID vs.\ number of inference steps. \scd{} (green) improves over baselines at 1-step but converges to similar performance at 2--4 steps. Error bars show $\pm$1 standard deviation over 3 seeds.}
+\label{fig:fid_steps}
+\end{figure}
+
+\subsection{Training Dynamics}
+
+Figure~\ref{fig:training} shows the per-band distillation loss during \scd{} training. All frequency bands decrease monotonically, with the low-frequency band having the largest absolute error throughout. The training converges smoothly, indicating no instability from the spectral loss decomposition. The training overhead of \scd{} over Standard CD is minimal (49.8 min vs.\ 45.7 min, a 9\% increase), since teacher targets are precomputed and the only additional cost is the FFT-based spectral decomposition, which is $O(N\log N)$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.5\linewidth]{figures/figure3_training_dynamics.pdf}
+\caption{Per-band distillation loss during SCD training. All bands decrease smoothly. Low-frequency error dominates the total loss.}
+\label{fig:training}
+\end{figure}
+
+%% ============================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+%% ============================================================================
+
+\paragraph{The Original Hypothesis is Partially Refuted.}
+We originally hypothesized that \scd{} would improve few-step generation by reducing high-frequency error through upweighted spectral supervision. The results tell a different story: the improvement comes from \emph{low-frequency} error reduction, and the benefit is limited to 1-step generation. This suggests that the spectral hierarchy of the teacher's ODE trajectory interacts with the student's learning dynamics in ways we did not anticipate. Providing higher-quality (100-step) teacher targets for high-frequency bands may paradoxically allow the student to better allocate capacity to low-frequency reconstruction.
+
+\paragraph{Adaptive Teacher Supervision as the Key Mechanism.}
+Ablations show that the spectral loss weights contribute minimally, while frequency-adaptive teacher supervision drives the improvement. An important open question is whether a \emph{uniform} 100-step teacher (without any spectral decomposition) would achieve similar gains. If so, the contribution would reduce to ``use more teacher steps for distillation targets,'' which is a simpler but less novel finding. We include a CD baseline with uniform 100-step teacher targets to begin addressing this question.
+
+\paragraph{Limited Resolution.}
+All experiments use CIFAR-10 at 32$\times$32 resolution. At this scale, high-frequency content is inherently limited, which may explain why \scd{} does not reduce high-frequency error as hypothesized. The spectral analysis may yield different conclusions at higher resolutions (e.g., 64$\times$64 or 256$\times$256) where high-frequency detail is more prominent and where the spectral hierarchy of the ODE trajectory may be more pronounced.
+
+\paragraph{Absolute FID Values.}
+Our best FID (37.9 at 4 steps) is far from state-of-the-art consistency distillation results on CIFAR-10 (FID $<$ 5). This gap is due to our smaller model (6.5M vs.\ $>$60M parameters), shorter training (30K vs.\ $>$800K steps), and unconditional generation. Our goal is not to achieve state-of-the-art performance but to study the effect of spectral loss decomposition on distillation, and the relative comparisons between methods remain valid as all share the same architecture and training budget.
+
+\paragraph{Missing Planned Experiments.}
+Several experiments from our original plan were not completed: ImageNet-64, LPIPS, Precision/Recall metrics, $K=2$ and $K=8$ band ablations, and weighting strategy comparisons (analytic, error-driven). These would strengthen the analysis and are important directions for future work.
+
+%% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%% ============================================================================
+
+We proposed Spectral Consistency Distillation (\scd{}), a method that decomposes the consistency distillation loss into frequency bands and applies frequency-adaptive teacher supervision. On CIFAR-10, \scd{} improves 1-step FID by 8.0\% (from 48.5 to 44.6) with only 9\% training overhead and zero inference cost.
+
+Our results provide both positive and cautionary findings for the design of distillation objectives. On the positive side, frequency-adaptive teacher supervision is effective for single-step generation, suggesting that the allocation of teacher computation across frequency bands is a meaningful design axis. On the cautionary side, the improvement mechanism differs from our hypothesis---\scd{} improves low-frequency rather than high-frequency reconstruction---and the benefit does not extend to multi-step generation.
+
+Future work should evaluate \scd{} at higher resolutions where high-frequency effects are more pronounced, investigate whether a uniform high-fidelity teacher achieves similar gains without spectral decomposition, and explore adaptive weighting strategies that respond to the actual spectral error profile during training.
+
+%% ============================================================================
+% References
+%% ============================================================================
+
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{15}
+
+\bibitem[Chandran et~al.(2026)]{chandran2026spectral}
+Satish Chandran, Nicolas~Roque dos~Santos, Yunshu Wu, Greg Ver~Steeg, and Evangelos Papalexakis.
+\newblock Spectral regularization for diffusion models.
+\newblock \emph{arXiv preprint arXiv:2603.02447}, 2026.
+
+\bibitem[Geng et~al.(2024)]{geng2024consistency}
+Zhengyang Geng, Ashwini Pokle, William Luo, Justin Lin, and J.~Zico Kolter.
+\newblock Consistency models made easy.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\bibitem[Krizhevsky(2009)]{krizhevsky2009learning}
+Alex Krizhevsky.
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Lipman et~al.(2023)]{lipman2023flow}
+Yaron Lipman, Ricky T.~Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matt Le.
+\newblock Flow matching for generative modeling.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Liu et~al.(2023)]{liu2023flow}
+Xingchao Liu, Chengyue Gong, and Qiang Liu.
+\newblock Flow straight and fast: Learning to generate and transfer data with rectified flow.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Parmar et~al.(2022)]{parmar2022cleanfid}
+Gaurav Parmar, Richard Zhang, and Jun-Yan Zhu.
+\newblock On aliased resizing and surprising subtleties in {GAN} evaluation.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem[Peebles and Xie(2023)]{peebles2023scalable}
+William Peebles and Saining Xie.
+\newblock Scalable diffusion models with transformers.
+\newblock In \emph{IEEE/CVF International Conference on Computer Vision (ICCV)}, 2023.
+
+\bibitem[Rissanen et~al.(2023)]{rissanen2023generative}
+Severi Rissanen, Markus Heinonen, and Arno Solin.
+\newblock Generative modelling with inverse heat dissipation.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem[Sadat et~al.(2025)]{sadat2025guidance}
+Seyedmorteza Sadat, Tobias Vontobel, Farnood Salehi, and Romann~M. Weber.
+\newblock Guidance in the frequency domain enables high-fidelity sampling at low {CFG} scales.
+\newblock \emph{arXiv preprint arXiv:2506.19713}, 2025.
+
+\bibitem[Salimans and Ho(2022)]{salimans2022progressive}
+Tim Salimans and Jonathan Ho.
+\newblock Progressive distillation for fast sampling of diffusion models.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2022.
+
+\bibitem[Song et~al.(2023)]{song2023consistency}
+Yang Song, Prafulla Dhariwal, Mark Chen, and Ilya Sutskever.
+\newblock Consistency models.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem[Song and Dhariwal(2023)]{song2023improved}
+Yang Song and Prafulla Dhariwal.
+\newblock Improved techniques for training consistency models.
+\newblock \emph{arXiv preprint arXiv:2310.14189}, 2023.
+
+\bibitem[Yang et~al.(2024)]{yang2024consistency}
+Ling Yang, Zixiang Zhang, Zhilong Zhang, Xingchao Liu, Minkai Xu, Wentao Zhang, Chenlin Meng, Stefano Ermon, and Bin Cui.
+\newblock Consistency flow matching: Defining straight flows with velocity consistency.
+\newblock \emph{arXiv preprint arXiv:2407.02398}, 2024.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,112 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Create a fixed lightweight runtime",
+    "description": "Set up one deterministic environment that matches the pre-registered benchmark scope and the single-GPU eight-hour budget.",
+    "steps": {
+      "step1": "Create one Python 3.11 environment with pinned lightweight dependencies only: pytorch>=2.3 with CUDA, numpy, scipy, pandas, scikit-learn, anndata, scanpy, pyarrow, matplotlib, seaborn, and joblib. Do not add GEARS or foundation-model packages to the required path.",
+      "step2": "Fix the only random seeds to {11, 23, 37}. Reuse the matched seed for perturbation-level train/validation partitioning, PCA fitting, neural initialization, data-loader shuffling, and bootstrap resampling.",
+      "step3": "Enable deterministic settings where available: random.seed, numpy.random.seed, torch.manual_seed, torch.cuda.manual_seed_all, cudnn.deterministic=True, and cudnn.benchmark=False. Record any residual nondeterminism in the run log.",
+      "step4": "Freeze one shared experiment configuration before running anything: max_hvgs=2000, forced_gene_cap=2200 including perturbed target genes, string_embedding_dim=128, residual_pca_dim=64, train_val_split=0.8/0.2 at the perturbation level inside the released training perturbations, ridge_alpha_grid={0.1,1.0,10.0,100.0}, pls_components_grid={8,16,32}, retrieval_k_grid={5,10,20}, mlp_hidden_dim=256, dropout=0.1, batch_size=64 perturbations, optimizer=AdamW, learning_rate=1e-3, weight_decay=1e-4, max_epochs=100, and early_stopping_patience=10.",
+      "step5": "Use CPU parallelism only for preprocessing, linear-model selection, and bootstrap aggregation with n_jobs=4. Use the single RTX A6000 only for the compact MLP ablation runs, which must execute sequentially because only one GPU is available."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare train-only targets and perturbation descriptors",
+    "description": "Build the exact train-only centroids, residual targets, and STRING-derived descriptors needed to test whether Systema-style residualization is useful as a training target.",
+    "steps": {
+      "step1": "Use only the two primary processed perturbation-generalization datasets from Wei et al.: Adamson and Replogle K562 Essential. Do not add a third dataset to the required plan.",
+      "step2": "Respect the released unseen-perturbation train/test split identities. Inside each training perturbation set, create a seed-specific 80/20 train/validation partition at the perturbation level for hyperparameter selection. Never use held-out test perturbations for model or target selection.",
+      "step3": "Restrict to single-gene perturbations with matched control cells and enough observations to form stable centroids: require at least 20 cells for a perturbation centroid and at least 100 control cells in the training partition. Log every dropped perturbation and the exclusion reason.",
+      "step4": "For each dataset and seed, compute preprocessing from training cells only: library normalize to 1e4 counts per cell, apply log1p, select up to 2000 highly variable genes on the training split, and force-include all perturbed target genes that appear anywhere in the dataset split. If the union exceeds 2200 genes, remove the lowest-ranked non-target HVGs until the cap is met.",
+      "step5": "Collapse cells to one gene-expression centroid per perturbation after preprocessing. Compute the train-only perturbed reference mu_pert_train(d,s) as the mean centroid over training perturbations and the train-only control centroid x_ctrl_train(d,s) from training controls only.",
+      "step6": "Define the pre-registered primary residual target exactly as r_sys(p;d,s)=x_p-mu_pert_train(d,s). Define the control-referenced residual x_p-x_ctrl_train(d,s) only for a later optional sensitivity check, not for any main-model selection.",
+      "step7": "Construct one fixed perturbation descriptor from STRING v12 human interactions with combined_score>=700. Restrict the graph to the retained gene universe, row-normalize the adjacency, and compute a 128-dimensional truncated-SVD embedding. Represent each perturbation by its target-gene embedding; assign a zero vector to isolated genes and record that status.",
+      "step8": "Fit one 64-dimensional PCA basis on the training residual targets r_sys only for each dataset-seed pair. Train all learned residual predictors in this residual PCA space and reconstruct gene-space centroids only for final evaluation.",
+      "step9": "Precompute cosine similarity between each validation or test perturbation descriptor and all training perturbation descriptors. Cache the top 20 training neighbors, similarity weights, and neighbor residual PCA vectors for later retrieval models.",
+      "step10": "Write a dataset audit table per dataset and seed containing cell counts, perturbation counts, retained gene count, control count, mean cells per perturbation, fraction of test perturbations with nonzero STRING embeddings, fraction with at least one STRING-connected training neighbor, and the final residual PCA dimensionality."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the fixed nine-model benchmark ladder",
+    "description": "Evaluate the exact pre-registered candidate set without expanding the baseline pool beyond the proposal.",
+    "steps": {
+      "step1": "Run Train Perturbed Mean, which predicts x_hat=mu_pert_train(d,s) for every held-out perturbation. This is the required simple baseline floor.",
+      "step2": "Run Train Perturbed Median, which predicts the per-gene median centroid across training perturbations. Keep it in every summary because prior benchmarks found it unexpectedly competitive.",
+      "step3": "Run Non-residualized Ridge by regressing the 128-dimensional STRING embedding onto the full perturbation centroid represented in a 64-dimensional PCA basis fit on training full centroids only. Select alpha from {0.1,1.0,10.0,100.0} on the validation perturbations using validation perturbed-reference Pearson as the primary selector and RMSE as a guardrail tie-breaker.",
+      "step4": "Run Residualized Ridge by regressing the same STRING embedding onto the 64-dimensional residual PCA target r_sys. Reconstruct predictions as mu_pert_train plus the predicted residual. Select alpha on validation with the same selector.",
+      "step5": "Run Residualized PLS from the same STRING embedding to the residual PCA target. Select n_components from {8,16,32}, capped at min(n_train_perturbations-1, 32), using validation perturbed-reference Pearson and RMSE.",
+      "step6": "Run Residualized Linear Embedding by first projecting the 128-dimensional STRING descriptor to 32 dimensions with training-only PCA and then fitting ridge regression to the residual PCA target. Select alpha from {0.1,1.0,10.0,100.0} on validation.",
+      "step7": "Run Retrieval-only Residual kNN by reconstructing each query from the similarity-weighted average of the top-K training residual PCA vectors and then adding mu_pert_train. Select K from {5,10,20} on validation.",
+      "step8": "Select the best residualized non-retrieval baseline strictly from {Residualized Ridge, Residualized PLS, Residualized Linear Embedding}. Do not include Residualized MLP, Random Forest, or any unregistered comparator in this selection step.",
+      "step9": "For every dataset and seed, save validation metrics, chosen hyperparameters, test-set predictions, runtime, and peak memory for all seven baseline-ladder models before training the retrieval-augmented models."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Test retrieval only as a secondary add-on",
+    "description": "Keep the central question on residualization and evaluate retrieval only after the target definition is fixed and the best residualized non-retrieval baseline is selected.",
+    "steps": {
+      "step1": "Run ReSRP-Linear on a 193-dimensional input formed by concatenating the 128-dimensional STRING descriptor, the 64-dimensional similarity-weighted neighbor residual summary, and one scalar equal to the maximum neighbor similarity. Fit a linear residual predictor with L2 penalty selected from {1e-5,1e-4,1e-3} on validation.",
+      "step2": "Run ReSRP-MLP on the same 193-dimensional input with architecture Linear(193,256), GELU, Dropout(0.1), Linear(256,64). Keep parameter count under 100k so the comparison remains about target definition plus retrieval, not model scale.",
+      "step3": "Train ReSRP-MLP with pure residual-space MSE loss, AdamW, learning_rate=1e-3, weight_decay=1e-4, batch_size=64, max_epochs=100, and early stopping on validation perturbed-reference Pearson with RMSE as a tie-breaker. Do not add ranking loss or other objective terms that expand scope without serving the main claim.",
+      "step4": "Run both retrieval models on Adamson and Replogle K562 Essential for seeds {11,23,37}. Save per-perturbation reconstructed centroids, chosen hyperparameters, retrieved neighbors, similarity weights, runtime, and peak GPU memory.",
+      "step5": "Define the retrieval comparison exactly as best {ReSRP-Linear, ReSRP-MLP} versus the already selected best residualized non-retrieval baseline. Treat any retrieval result as secondary and do not let it redefine the primary residualization conclusion."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run the minimal required ablations and contingency checks",
+    "description": "Keep only the analyses needed to interpret residualization, retrieval, and the adequacy of STRING descriptors under the eight-hour budget.",
+    "steps": {
+      "step1": "Ablation 1 residual-target versus full-target: train one compact embedding-only MLP with architecture Linear(128,256), GELU, Dropout(0.1), Linear(256,64) under two target definitions on each dataset and seed: full centroid target in full-centroid PCA space versus residual target r_sys in residual PCA space. This is the direct fixed-capacity test of whether residualization helps as a training target.",
+      "step2": "Ablation 2 retrieval contribution: rerun the ReSRP-MLP architecture with the retrieval summary features zeroed out while keeping the same optimization settings. This tests whether neighbor residual summaries add signal beyond the perturbation descriptor alone.",
+      "step3": "Ablation 3 feature-sufficiency contingency: rerun Residualized Ridge on each dataset and seed with three descriptor variants: true STRING embedding, randomly permuted STRING embedding across target genes, and a degree-only scalar feature replicated to the input dimension. Use this to determine whether conclusions about residualization could be artifacts of weak perturbation features.",
+      "step4": "If and only if at least 45 minutes remain after all required runs finish, run one optional sensitivity analysis with the control-referenced residual target using the same compact embedding-only MLP on Adamson only. This analysis is explicitly optional and cannot change the main conclusion."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Use interpretable primary endpoints and seed-averaged inference",
+    "description": "Evaluate the benchmark with direct metric differences instead of a rank-only primary endpoint and keep inference aligned with the dataset-level study design.",
+    "steps": {
+      "step1": "For every dataset and seed, compute the primary metric perturbed-reference Pearson between x_hat-mu_pert_train and x_true-mu_pert_train across all held-out perturbation centroids. This is the main endpoint for both the residualization and retrieval questions.",
+      "step2": "For every dataset and seed, compute reconstructed-centroid RMSE in gene space as the co-primary guardrail. Report it alongside Pearson for every model and every comparison.",
+      "step3": "Compute secondary metrics for descriptive support only: nearest-centroid top-1 accuracy among held-out perturbations, median rank of the true perturbation under cosine similarity to predicted centroids, composite rank over the four metrics, perturbed-reference Pearson on the top 100 training-residual high-variance genes, runtime, and peak memory.",
+      "step4": "Evaluate the primary residualization question with the fixed comparison Residualized Ridge versus Non-residualized Ridge. Evaluate the secondary retrieval question with the fixed comparison best ReSRP variant versus the selected best residualized non-retrieval baseline.",
+      "step5": "For each dataset separately, estimate uncertainty by paired bootstrap over held-out perturbations within each seed using 1000 bootstrap draws. In each draw, compute the metric difference for each seed and average those three seed-specific differences inside the draw to obtain one seed-averaged bootstrap difference.",
+      "step6": "Report a 95 percent confidence interval for the seed-averaged perturbed-reference Pearson difference and the seed-averaged RMSE difference on each dataset. Do not use fixed-effects meta-analysis across seeds.",
+      "step7": "Declare the residualization claim supported only if Residualized Ridge improves perturbed-reference Pearson over Non-residualized Ridge on both Adamson and Replogle K562 Essential and does not materially worsen RMSE on either dataset.",
+      "step8": "Require one additional practical guardrail for the residualization claim: at least one model from {Residualized Ridge, Residualized PLS, Residualized Linear Embedding} must also beat Train Perturbed Mean on perturbed-reference Pearson on both datasets.",
+      "step9": "Declare the retrieval add-on supported only if the best ReSRP variant improves perturbed-reference Pearson over the selected best residualized non-retrieval baseline on both datasets, does not worsen RMSE, and also outperforms Retrieval-only Residual kNN. If the STRING contingency fails, interpret any null residualization result as inconclusive due to weak perturbation descriptors rather than as evidence against residualization."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce a compact benchmark-note figure set",
+    "description": "Generate only the figures and tables needed to communicate the residualization result, the secondary retrieval result, and the STRING contingency analysis.",
+    "steps": {
+      "step1": "Create one main results table for Adamson and Replogle K562 Essential with rows exactly matching the nine pre-registered candidate models: Train Perturbed Mean, Train Perturbed Median, Non-residualized Ridge, Residualized Ridge, Residualized PLS, Residualized Linear Embedding, Retrieval-only Residual kNN, ReSRP-Linear, and ReSRP-MLP. Report perturbed-reference Pearson, RMSE, top-1 accuracy, median rank, runtime, and peak memory.",
+      "step2": "Create one comparison table for the required ablations showing the compact MLP full-target versus residual-target result, the ReSRP-MLP no-retrieval result, and the Residualized Ridge descriptor-contingency results with true STRING, permuted STRING, and degree-only features.",
+      "step3": "Plot one two-panel figure of seed-averaged metric differences with 95 percent bootstrap intervals: panel A for Residualized Ridge minus Non-residualized Ridge and panel B for best ReSRP minus best residualized non-retrieval baseline. In each panel, show both perturbed-reference Pearson difference and RMSE difference for both datasets.",
+      "step4": "Plot one descriptor-contingency bar chart per dataset showing Residualized Ridge performance under true STRING, permuted STRING, and degree-only descriptors. This figure is required to support the interpretation of negative residualization results.",
+      "step5": "Save figures as both PDF and PNG, save aggregate metrics as CSV, save per-perturbation predictions and retrieval metadata as parquet, and save seed-specific audit tables and hyperparameter selections as JSON."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Verify feasibility against the eight-hour budget",
+    "description": "Pre-allocate time to each block and lock the cut order before execution so the required study remains feasible on one RTX A6000 and four CPU cores.",
+    "steps": {
+      "step1": "Budget 50 to 60 minutes for environment setup, dataset loading, preprocessing, centroid construction, train-only references, STRING descriptor generation, PCA fitting, and neighbor-cache creation across both datasets. Use 4 CPU cores for parallel preprocessing and caching.",
+      "step2": "Budget 70 to 85 minutes for the baseline ladder over two datasets and three seeds. Mean and median baselines are negligible, Ridge and Linear Embedding runs should stay under 2 minutes each, PLS under 3 minutes each, and Retrieval-only Residual kNN under 2 minutes each after caches exist.",
+      "step3": "Budget 55 to 70 minutes for ReSRP-Linear and ReSRP-MLP across both datasets and three seeds. ReSRP-Linear should stay under 3 minutes per run and ReSRP-MLP under 8 minutes per run on the single GPU with early stopping.",
+      "step4": "Budget 95 to 115 minutes for the three required analysis blocks across both datasets and three seeds: compact MLP full-target versus residual-target, ReSRP-MLP with retrieval removed, and Residualized Ridge descriptor contingency. Run only the compact MLP variants on GPU; keep the descriptor contingency on CPU.",
+      "step5": "Budget 35 to 45 minutes for paired bootstrap aggregation, result tables, and final plotting on CPU, plus a 35 to 45 minute contingency buffer for one rerun or recovery from a failed job.",
+      "step6": "Treat the plan as feasible only if the total estimated wall-clock time remains about 5.8 to 7.0 hours. This leaves limited slack inside the eight-hour budget without depending on optional cuts.",
+      "step7": "If runtime still slips, cut work only in this order: optional control-reference sensitivity, low-priority case-study style plots if any were added outside this plan, then repeated bootstrap draws beyond 1000. Do not cut datasets, seeds, Train Perturbed Median, the fixed candidate set, the compact MLP full-target versus residual-target ablation, the no-retrieval ablation, or the STRING feature-sufficiency contingency."
+    }
+  }
+]

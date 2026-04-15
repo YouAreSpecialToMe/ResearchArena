@@ -1,0 +1,140 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Pre-register the narrow assignment-analysis claim",
+    "description": "Freeze the paper scope before running experiments so the study stays an incremental but rigorous post-hoc reranking analysis rather than drifting into a broader evaluator or generation-method claim.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment and install pinned dependencies: `torch==2.2.*`, `torchvision==0.17.*`, `diffusers==0.30.*`, `transformers==4.40.*`, `accelerate`, `xformers`, `safetensors`, `datasets`, `numpy`, `scipy`, `scikit-learn`, `pandas`, `matplotlib`, `seaborn`, `pillow`, `opencv-python`, `pycocotools`, `networkx`, plus the official or reference implementations needed for DAAM, GroundingDINO, GenEval, and T2I-CompBench evaluation.",
+      "step2": "Cache the exact pretrained models used across all runs: generator `stabilityai/stable-diffusion-xl-base-1.0`, detector `GroundingDINO-Tiny`, and verifier encoder `google/siglip-base-patch16-224`. Do not introduce extra reward models, repair loops, or generation-time attention-control methods because they would confound the assignment-centric claim.",
+      "step3": "Write `configs/experiment_manifest.json` before any full run with the fixed SDXL generation settings `512x512`, Euler ancestral sampler, `30` denoising steps, `CFG=7.5`, prompt seeds `[11, 22, 33]`, candidate budget `K=4`, primary metrics `slot_assignment_accuracy`, `all_atoms_pass`, and `GenEval overall`, and the exact ablations `assignment source`, `counterfactual scoring`, `null/count`, `aggregation`, and `candidate budget`.",
+      "step4": "Record the resource assumptions exactly as available: `1 x NVIDIA RTX A6000 48GB`, `60GB RAM`, `4 CPU cores`, and `~8 hours total GPU-critical wall-clock`. State explicitly that there is no multi-GPU parallelism, so GPU-heavy stages are serialized while CPU parsing, bookkeeping, bootstrap statistics, and plotting may overlap on the four CPU cores.",
+      "step5": "Run a `10`-prompt smoke test first and log peak VRAM, per-image runtime, DAAM trace size, and detector throughput. Abort and simplify if peak memory exceeds `44GB`, if DAAM hooks are unstable, or if measured end-to-end runtime projects past the `8`-hour budget."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build fixed splits and an assignment-aware prompt representation",
+    "description": "Use one deterministic data pipeline for all methods so every comparison shares the same prompts, parsing rules, and supported semantics.",
+    "steps": {
+      "step1": "Download prompt metadata and official evaluation scripts for GenEval and T2I-CompBench. Preserve the original prompt ids, benchmark source, and category labels in every derived file.",
+      "step2": "Create a development split of exactly `40` prompts: `20` from GenEval and `20` from T2I-CompBench, stratified across `count`, `attribute or color binding`, and `left/right/above/below` relations. Use this split only for threshold sanity checks and temperature fixing; do not use it for final model selection.",
+      "step3": "Create the held-out main test split of exactly `200` prompts: `120` GenEval prompts covering `count`, `color`, and `position`, plus `80` T2I-CompBench prompts restricted to `attribute binding` and `object relation` examples whose relations are only `left of`, `right of`, `above`, or `below`.",
+      "step4": "Create a transfer split of exactly `30` hand-written prompts outside benchmark templates but following the same supported grammar. Keep the transfer set separate from the official benchmark metrics and use it only for the grounded generalization check.",
+      "step5": "Implement a deterministic parser that outputs `object_groups`, `count_atoms`, `attribute_atoms`, and `relation_atoms`. For repeated objects such as `two red apples`, create one group `G_apple` with requested count `2` and two exchangeable demand units `apple#1` and `apple#2` used only during assignment.",
+      "step6": "Reject prompts whose semantics cannot be grounded cleanly with 2D boxes, including unsupported relations, occlusion-heavy wording, or repeated-object constructions whose relation scope is ambiguous. Save `splits/dev.json`, `splits/test.json`, `splits/transfer.json`, and `splits/summary.csv` with prompt text, parsed atoms, rejection reasons, and benchmark provenance."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement cached SDXL DAAM tracing and shared features",
+    "description": "Make DAAM capture feasible on a single A6000 by tracing only the prompt phrases needed for assignment and storing compact aggregated artifacts that can be reused by all baselines and ablations.",
+    "steps": {
+      "step1": "Hook SDXL cross-attention only for object and attribute token spans extracted by the parser. Ignore stopwords and unsupported prompt fragments so the trace volume stays small and deterministic.",
+      "step2": "During generation, keep only the final `10` denoising steps, average cross-attention over heads and SDXL upsampling blocks online, and accumulate directly into one `64 x 64` latent-space heatmap per tracked phrase per step. Do not save raw per-layer attention tensors.",
+      "step3": "Serialize each image's DAAM traces as compressed `fp16` `npz` files under `artifacts/daam_cache/<dataset>/<prompt_id>/seed_<seed>/cand_<k>.npz`, with metadata fields `phrase`, `token_span`, `step_ids`, and `heatmap_shape`. Target storage is `0.4-0.6 MB` per image and at most `1.5 GB` for the `2400`-image main cache.",
+      "step4": "After generation, upsample each phrase map once to image space, normalize it to sum to `1`, compute DAAM mass inside each candidate box, and cache the resulting scalar box-level features in `artifacts/box_features/*.jsonl` so downstream rerankers do not need to reopen the diffusion trace.",
+      "step5": "Use a fixed compatibility formula for any DAAM-enabled assignment method: `compat(s,b) = z(det_conf(s,b)) + z(attn_mass(s,b)) + z(size_prior(s,b))`, where `size_prior` weakly penalizes boxes smaller than `1%` or larger than `60%` of image area and `z(.)` is computed over candidate boxes for the same phrase within the same image."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Generate one shared SDXL candidate cache",
+    "description": "Hold generation constant across all rerankers so any measured gain comes from assignment and verification rather than from different image samples.",
+    "steps": {
+      "step1": "For every prompt in the `200`-prompt test split and every seed in `[11, 22, 33]`, generate `K=4` SDXL candidates with the fixed settings `512x512`, Euler ancestral sampling, `30` steps, and `CFG=7.5`. This yields the main cache of `200 x 3 x 4 = 2400` images.",
+      "step2": "Generate the `40`-prompt development cache with the same settings, producing `40 x 3 x 4 = 480` images for threshold sanity checks, score-distribution inspection, and figure dry runs. Keep dev results separate from the final tables.",
+      "step3": "Generate a candidate-budget subset on `40` held-out test prompts with `K=8` and the same three seeds, yielding `40 x 3 x 8 = 960` extra images used only for the candidate-budget analysis.",
+      "step4": "Store images under `artifacts/candidate_cache/<dataset>/<prompt_id>/seed_<seed>/cand_<k>.png` and save one metadata row per image with prompt id, prompt text, seed, candidate id, runtime, sampler settings, DAAM trace path, and deterministic cache hashes.",
+      "step5": "Define the no-reranking baseline `single_sample` as always selecting `cand_0` from the shared cache. Use the identical image cache for every later method so benchmark scripts and human analyses operate on the same generated population."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run simple and strong reranking baselines fairly",
+    "description": "Compare the proposed method against at least one simple baseline and multiple strong structured baselines under the same parser, detections, and candidate cache.",
+    "steps": {
+      "step1": "Baseline 1 `best_of_4_global_siglip`: score each full image with `google/siglip-base-patch16-224` against the full prompt and select the highest-scoring candidate. Save only the selected candidate id and the global image-text score.",
+      "step2": "Baseline 2 `detector_only_structured`: run `GroundingDINO-Tiny` on each noun phrase with `box_threshold=0.25`, `text_threshold=0.20`, NMS IoU `0.5`, and at most `4` boxes per phrase. Assign slots or repeated-object demand units using `z(det_conf) + z(size_prior)` with explicit `null` nodes and one-box capacity, score attributes with positive-only SigLIP crop similarity, score relations from assigned box geometry, and aggregate with the same geometric mean used by the full method.",
+      "step3": "Baseline 3 `crop_structured_siglip`: use the same detector proposals and null-capable matching, but assign each slot or demand unit to the crop with the highest positive SigLIP score subject to one-box capacity. Use the same count logic, relation logic, and score aggregation. Treat this as the strongest non-DAAM structured baseline and the closest empirical comparator to crop-structured inference work.",
+      "step4": "Baseline 4 `daam_no_counterfactual`: keep the full DAAM-assisted compatibility and null-capable matching, but replace attribute margins with positive-only crop similarity. This isolates the value of assignment evidence when counterfactual verification is removed.",
+      "step5": "Save all baseline outputs to `results/baselines.jsonl` with fields `method`, `dataset`, `prompt_id`, `seed`, `selected_candidate_id`, `final_score`, `atomic_scores`, `group_counts`, `slot_assignments`, `latency_sec`, and `feature_cache_paths` so evaluation code can treat baselines and the full method identically."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run the full Assign-and-Verify reranker",
+    "description": "Evaluate the proposed training-free reranker exactly as claimed: DAAM-assisted assignment with explicit null and repeated-object handling, followed by counterfactual crop verification and soft conjunction.",
+    "steps": {
+      "step1": "For each cached image, reuse the stored GroundingDINO proposals and DAAM box features to solve capacitated slot assignment with explicit `null` nodes. Each unique slot or repeated-object demand unit may match one real box or one `null`, and each real box has capacity `1`.",
+      "step2": "For every slot or demand unit, save the chosen box or `null`, the runner-up box, assignment margin, and per-box compatibility terms. For every repeated-object group, also save the unordered set of distinct non-null matched boxes and the number of unused high-confidence same-noun boxes.",
+      "step3": "Score existence and count with `count_score(g) = exp(-|m_g-c_g|) * exp(-0.5 * extra_box_penalty(g))`, where `m_g` is the number of distinct non-null assigned boxes and `extra_box_penalty(g)` counts confident unused same-noun detections when the prompt requests an exact count.",
+      "step4": "For each non-null assigned slot crop, build a positive phrase and an in-prompt counterfactual negative set. Example: for `red cube and blue sphere`, negatives for `red cube` include `blue cube` and `red sphere`. Score attributes with `sigmoid((sim(crop,p_plus) - max_n sim(crop,n)) / 0.05)` using SigLIP similarity.",
+      "step5": "Score relations `left of`, `right of`, `above`, and `below` with signed center-margin geometry and a dev-fixed `tau_r`. Aggregate all atom scores with `exp(mean(log(1e-4 + atom_score)))`, using global SigLIP only as a tie-breaker when two final scores differ by less than `0.01`.",
+      "step6": "Write outputs to `results/assign_and_verify.jsonl` and save audit artifacts under `artifacts/audits/` showing prompt atoms, detector boxes, assigned boxes or `null`, DAAM overlays, repeated-object grouped matches, hardest negative phrases, and score decompositions for later qualitative analysis."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Pre-register ablations for each claimed component",
+    "description": "Remove one novel ingredient at a time while keeping prompts, seeds, candidate cache, detector thresholds, and evaluation code fixed.",
+    "steps": {
+      "step1": "Ablation A `assignment_source`: replace `detector + DAAM` compatibility with `detector only` while keeping null handling, repeated-object demand units, counterfactual attribute scoring, and geometric-mean aggregation unchanged. This is the primary mechanism ablation.",
+      "step2": "Ablation B `counterfactual_scoring`: keep the full DAAM-assisted assignment but replace attribute margins with positive-only crop similarity. This tests whether in-prompt counterfactual negatives contribute beyond better assignment.",
+      "step3": "Ablation C `null_and_count`: force every slot or demand unit to take the best non-null box whenever one exists and remove the extra-box penalty from count scoring. This directly tests whether explicit `null` handling and exact-count accounting matter.",
+      "step4": "Ablation D `aggregation_rule`: replace the geometric-mean soft conjunction with an arithmetic mean over atom scores while keeping assignments and per-atom scores fixed. This checks whether gains are coming from the combiner rather than the assignment mechanism.",
+      "step5": "Ablation E `candidate_budget`: on the `40`-prompt `K=8` subset, compare `global SigLIP`, `crop_structured_siglip`, `daam_no_counterfactual`, and the full method. This determines whether the verifier still helps when reranking has more search diversity.",
+      "step6": "Save ablation outputs to `results/ablations.jsonl` using the same schema as the main method, and report absolute drops from the full method on both grounding and final reranking metrics."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Make assignment quality the primary measured variable",
+    "description": "Directly test whether DAAM changes slot-to-region correspondence decisions rather than only acting as a final score tie-breaker.",
+    "steps": {
+      "step1": "Construct a manual grounding set of exactly `100` prompt-image pairs sampled from the shared test cache before reranking, stratified evenly across benchmark source and across `count`, `attribute or color binding`, `relation`, and plausible-`null` cases.",
+      "step2": "For each sampled pair, annotate the correct box or `null` for every unique slot, the correct unordered set of boxes for every repeated-object group, whether extra same-noun boxes should count as over-generation, and whether the parsed prompt atoms are all satisfied.",
+      "step3": "Use one primary annotator for the full `100` pairs and a second pass on a `25`-pair overlap for adjudication. Budget `45-60` seconds per pair for first-pass labeling and record agreement notes so the annotation effort remains around `2.0-2.5` human hours.",
+      "step4": "Report `slot_assignment_accuracy` as the primary grounding metric. For unique slots, count a prediction correct only if it matches the annotated box or `null`. For repeated-object groups, count it correct only if the predicted unordered non-null set matches exactly. Also report `group_count_accuracy`, `null_decision_accuracy`, and assignment-margin distributions for correct versus incorrect assignments.",
+      "step5": "Evaluate `detector_only_structured`, `crop_structured_siglip`, `daam_no_counterfactual`, and the full method on the same manual set. Interpret DAAM as mechanism-supporting only if it improves assignment over both detector-only and crop-only structured baselines.",
+      "step6": "Run the strongest non-DAAM baseline and the full method on the `30`-prompt transfer set with the same manual grounding protocol to test whether any assignment gains persist outside benchmark templates."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate reranking quality, human preference, and failure conditions",
+    "description": "Use paired statistics and explicit success or failure criteria so the study can falsify its own mechanism claim.",
+    "steps": {
+      "step1": "Treat `slot_assignment_accuracy` on the manual `100`-pair grounding set, `all_atoms_pass` on the selected candidate for each prompt-seed pair, and `GenEval overall accuracy` as the three primary reported results. Present them in that order in the main result table.",
+      "step2": "For benchmark-facing evaluation, report GenEval overall and per-category accuracy on `count`, `color`, and `position`, plus the selected T2I-CompBench subset metrics for `attribute binding` and `object relation` using official scripts wherever possible. Also report method-centric `group_count_accuracy` and repeated-object exact-count success.",
+      "step3": "As a secondary sanity check, sample up to `60` prompt-seed pairs on which the full method and `crop_structured_siglip` choose different candidates. Show blinded image pairs plus the prompt to annotators, allow `left`, `right`, or `tie`, and report pairwise human preference win rate for the full method. Do not treat this as a primary claim metric.",
+      "step4": "Measure cost for every method: reranking latency per image, end-to-end latency per prompt-seed, peak GPU memory during generation with DAAM hooks, and CPU time for parsing, statistics, and plotting. Separate generation cost from post-hoc reranking cost because all methods share the same cache.",
+      "step5": "Use paired bootstrap resampling with `1000` resamples over prompt-seed pairs for reranking metrics and over annotated prompt-image pairs for grounding metrics. Report `95%` confidence intervals for differences between the full method and each baseline, and run McNemar tests on binary exact-assignment outcomes for the manual set.",
+      "step6": "Pre-register success and failure criteria exactly once. Success requires at least `+8` absolute points over `detector_only_structured` on `slot_assignment_accuracy`, at least `+3` points over the strongest non-DAAM structured baseline on `all_atoms_pass`, and at least `+4` points over `best_of_4_global_siglip` on GenEval overall. The main mechanism claim fails if confidence intervals overlap zero against strong baselines, if DAAM does not improve assignment, or if gains appear only as holistic tie-breaking without corresponding assignment gains."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Prepare mechanism-focused tables and figures",
+    "description": "Produce paper artifacts that show both the narrow novelty positioning and whether better assignment actually explains the reranking gains.",
+    "steps": {
+      "step1": "Create a nearest-prior-work comparison table with rows `LogicRank`, `crop-structured inference`, `T2I-FineEval`, `CompQuest or CompAlign`, `TIFA or VQAScore`, and `Assign-and-Verify`, and columns `crop selection`, `logical or atomic composition`, `explicit slot assignment`, `generator-native grounding`, and `post-hoc verification`. Use this table in the paper to support the incremental novelty framing.",
+      "step2": "Create the main quantitative table with rows `single_sample`, `best_of_4_global_siglip`, `detector_only_structured`, `crop_structured_siglip`, `daam_no_counterfactual`, and `assign_and_verify`. Include columns for `slot_assignment_accuracy`, `group_count_accuracy`, `null_decision_accuracy`, `all_atoms_pass`, GenEval overall, GenEval count, GenEval color, GenEval position, T2I-CompBench attribute binding, T2I-CompBench relation, reranking seconds per prompt-seed, and post-hoc seconds per image.",
+      "step3": "Plot an ablation figure with one bar per ablation and separate panels for grounding metrics and final reranking metrics. Plot absolute drop from the full method so the user can see which components affect assignment versus end metrics.",
+      "step4": "Plot assignment margin against exact-assignment correctness for `detector_only_structured` and `assign_and_verify`, plus a repeated-object calibration plot showing requested count versus predicted matched count. These figures should reveal whether DAAM mainly sharpens assignment confidence and whether null handling improves count calibration.",
+      "step5": "Assemble qualitative grids for `8` prompts showing all `4` cached candidates, detector proposals, selected assignments for the strongest non-DAAM baseline and the full method, DAAM heatmaps, repeated-object grouped matches, and atom pass or fail summaries. Include at least `2` failure cases where DAAM is noisy or assignment remains ambiguous.",
+      "step6": "Save figures under `artifacts/figures` and tables under `artifacts/tables` in both CSV and LaTeX formats so the paper artifact can be regenerated without rerunning experiments."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Verify feasibility within the single-GPU eight-hour budget",
+    "description": "Estimate runtime conservatively using the actual image counts and the fact that only one GPU is available.",
+    "steps": {
+      "step1": "Budget SDXL generation with online DAAM tracing at a conservative `5.5` seconds per `512x512` image on one RTX A6000. The main cache of `2400` images therefore costs about `3.67` GPU hours, the dev cache of `480` images costs about `0.73` hours, and the `K=8` subset of `960` images costs about `1.47` hours, for `5.87` hours total generation time.",
+      "step2": "Budget shared post-generation feature extraction on the `2400`-image main cache at `0.35` seconds per image for GroundingDINO-Tiny and `0.30` seconds per image for SigLIP crop scoring and assignment-feature caching, for about `0.43` GPU hours total. DAAM post-processing is not budgeted separately because its heavy cost is already included during generation.",
+      "step3": "Budget baseline scoring, full-method scoring, and ablation rescoring over cached features at about `0.55` hours total. These stages mostly reuse cached detections, crops, DAAM box masses, and prompt parses, so they should not require additional image generation.",
+      "step4": "Budget benchmark scripts, bootstrap confidence intervals, qualitative figure rendering, and disagreement sampling at about `0.55` hours of mostly CPU work. Use the four CPU cores in parallel for parsing, JSONL aggregation, statistics, and plotting while the GPU is idle.",
+      "step5": "Total conservative GPU-critical wall-clock budget is about `5.87 + 0.43 + 0.55 + 0.55 = 7.40` hours, leaving about `0.60` hours of slack under the `8`-hour limit. Treat human annotation time `2.0-2.5` hours as separate from the GPU budget and stop early if the smoke test projects total runtime above budget."
+    }
+  }
+]

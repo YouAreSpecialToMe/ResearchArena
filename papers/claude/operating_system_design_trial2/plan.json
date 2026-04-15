@@ -1,0 +1,201 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up Python environment and dependencies",
+    "description": "Install required Python packages for the trace-driven tiered memory simulator, statistical analysis, and visualization. All experiments run on CPU only.",
+    "steps": {
+      "step1": "Create a virtual environment: python3 -m venv venv && source venv/bin/activate",
+      "step2": "Install core dependencies: pip install numpy scipy pandas matplotlib seaborn tqdm",
+      "step3": "Create the project directory structure: mkdir -p src/ traces/ results/{exp1_single_tenant,exp2_heterogeneity,exp3_multitenant,exp4_ablation,exp5_sensitivity,exp6_composability,exp7_adversarial} figures/supplementary",
+      "step4": "Verify Python version >= 3.8 and all imports work with a quick smoke test script"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Build the trace-driven tiered memory simulator",
+    "description": "Implement a trace-driven tiered memory simulator in Python that models page placement, access latency, and migration scheduling across 2 memory tiers (fast DRAM + slow CXL). This is the core experimental infrastructure for all experiments.",
+    "steps": {
+      "step1": "Implement the MemoryTier class in src/memory.py modeling a single tier with parameters: capacity_pages (int), read_latency_ns (e.g., 80 for DRAM, 200 for CXL), write_latency_ns. Support both 4KB base pages and 2MB huge pages. Track current occupancy.",
+      "step2": "Implement the PageTracker class in src/page_tracker.py that maintains per-page metadata: page_id (int), current_tier (0=fast, 1=slow), page_size (4096 or 2097152), access_count_current_epoch (int), access_count_history (deque of last 8 epochs for decay estimation), owner_tenant (int, for multi-tenant mode). Use a dictionary keyed by page_id.",
+      "step3": "Implement the TieredMemorySystem class in src/simulator.py that: (a) holds 2 MemoryTier objects, (b) processes memory access traces by looking up page tier and accumulating weighted access latency (access_count * tier_latency), (c) at each epoch boundary invokes the page ranker then the migration scheduler, (d) executes accepted migrations by updating page-to-tier mappings, (e) tracks per-epoch and cumulative metrics.",
+      "step4": "Implement the epoch loop in the simulator: epoch_length = configurable number of memory accesses (default: 100,000). At each epoch boundary: (a) invoke the page ranking policy to produce candidate list [(page_id, benefit, cost)], (b) pass candidates to the migration scheduler, (c) execute accepted migrations (move pages between tiers, respecting tier capacities by performing swaps or paired promote/demote), (d) record per-epoch metrics, (e) update PageTracker access histories and reset current-epoch counters.",
+      "step5": "Implement initial page placement: randomly assign pages to tiers such that fast tier is filled to capacity. Use the random seed for reproducibility. For multi-tenant mode, distribute pages round-robin across tenants.",
+      "step6": "Implement metrics collection in src/metrics.py: per-epoch metrics include total_weighted_latency, num_migrations, bandwidth_used_bytes, migration_benefit (sum of benefits of migrated pages), migration_efficiency (benefit / bandwidth). Cumulative metrics: total_latency, empirical_competitive_ratio (offline_optimal_benefit / scheduler_benefit across all epochs). Per-tenant metrics for multi-tenant mode.",
+      "step7": "Write unit tests in tests/test_simulator.py: verify (a) correct latency accounting (page in fast tier gets fast latency, slow tier gets slow latency), (b) migration correctly updates page tier, (c) tier capacity constraints are respected, (d) epoch boundaries trigger scheduling correctly. Run tests to confirm correctness."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement page ranking policies",
+    "description": "Implement three pluggable page ranking policies that produce migration candidate lists. Each policy outputs a list of (page_id, benefit, cost) tuples where benefit measures the expected improvement from migration and cost is the migration bandwidth cost (page size in bytes).",
+    "steps": {
+      "step1": "Define the PageRanker abstract base class in src/rankers.py with method rank(page_tracker, fast_tier, slow_tier) -> list[(page_id, benefit, cost)]. The method identifies promotion candidates (hot pages in slow tier) and demotion candidates (cold pages in fast tier).",
+      "step2": "Implement TPPRanker (TPP-style hotness ranking): benefit = access_count_current_epoch. Promotion candidates: pages in slow tier with access_count > 0, sorted by access_count descending. Demotion candidates: pages in fast tier with access_count == 0 (cold pages). Cost = page_size.",
+      "step3": "Implement ColloidRanker (Colloid-style latency impact ranking): benefit = access_count_current_epoch * (slow_tier.read_latency_ns - fast_tier.read_latency_ns). This weights accesses by the latency gap between tiers. Same candidate selection as TPP. Cost = page_size.",
+      "step4": "Implement ALTORanker (ALTO-style AOL ranking): benefit = access_count_current_epoch * (current_tier.read_latency_ns / fast_tier.read_latency_ns). For promotion candidates in slow tier, this equals access_count * (slow_latency / fast_latency). For demotion candidates, benefit is negative (penalty for removing from fast tier). Cost = page_size.",
+      "step5": "Write unit tests verifying each ranker produces correct benefit values and candidate ordering for simple test cases."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Implement migration scheduling algorithms",
+    "description": "Implement all migration schedulers (baselines and BKS variants) as pluggable modules conforming to a common interface: schedule(candidates, budget_bytes) -> list[page_id].",
+    "steps": {
+      "step1": "Define the MigrationScheduler abstract base class in src/schedulers.py with method schedule(candidates: list[(page_id, benefit, cost)], budget_bytes: int) -> list[page_id]. All schedulers implement this interface.",
+      "step2": "Implement GreedyByRank scheduler: sort candidates by benefit (descending), accept in order until cumulative cost exceeds budget. This is the primary baseline representing current practice in TPP, Colloid, ALTO.",
+      "step3": "Implement FIFOFixedRate scheduler: accept candidates in their original list order (arrival order) up to the bandwidth budget. This is the simplest baseline (TPP default behavior).",
+      "step4": "Implement RandomScheduler: randomly shuffle candidates (using the provided seed), accept in shuffled order until budget exhausted. This is the lower-bound baseline.",
+      "step5": "Implement OfflineOptimal scheduler: solve the 0-1 knapsack exactly using dynamic programming. Since candidate counts are typically 100-1000 per epoch and costs are in units of 4KB pages, use the standard DP approach with cost discretization to 4KB granularity. This provides the per-epoch upper bound on achievable benefit.",
+      "step6": "Implement BKSDensity scheduler (our simplest method): sort candidates by benefit density (benefit / cost) descending, accept greedily until budget exhausted. This is the simplest BKS variant that already addresses cost heterogeneity.",
+      "step7": "Implement BKSThreshold scheduler (our primary method): sort by benefit density. Use exponential threshold function phi(L) = d_min * (d_max/d_min)^L where L = current_bandwidth_used / budget is the utilization fraction (0 to 1), d_min and d_max are the minimum and maximum densities in the candidate set. Accept candidate c_i only if density(c_i) >= phi(L). This achieves O(log R)-competitive ratio.",
+      "step8": "Implement BKSDecay scheduler (our full method with temporal awareness): before scheduling, adjust each candidate's benefit using decay factor: b'_i = b_i * (1 + 0.5 * trend_i), where trend_i is the normalized slope of the EWMA of access counts over the last 4 epochs (range [-1, 1]). Positive trend (warming page) gets boosted benefit; negative trend (cooling page) gets reduced benefit. Then apply BKSThreshold on adjusted benefits. Requires access to PageTracker history.",
+      "step9": "Write unit tests in tests/test_schedulers.py: verify (a) all schedulers respect budget constraints, (b) GreedyByRank selects highest-benefit items, (c) BKSDensity selects highest-density items, (d) OfflineOptimal matches brute-force on small instances (n <= 15), (e) BKSThreshold accepts items above the threshold and rejects below."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate synthetic memory access traces",
+    "description": "Create synthetic traces with controlled properties to systematically evaluate scheduler behavior. Synthetic traces allow precise parameter variation and adversarial input construction.",
+    "steps": {
+      "step1": "Implement a trace generator in src/trace_generator.py with parameters: num_pages (total pages), working_set_fraction (fraction accessed frequently), zipf_skew (Zipf distribution parameter s), page_size_mix (fraction of pages that are 2MB huge pages, rest are 4KB), total_accesses (total accesses in trace), num_phases (number of working set shifts). Output: numpy array of (page_id, page_size) per access.",
+      "step2": "Generate 'zipf-stable' traces: num_pages=10000, working_set=20%, Zipf s=1.0, no phase changes, total_accesses=10M. Generate 4 variants with page_size_mix in {0.0, 0.1, 0.3, 0.5}. These test steady-state scheduling.",
+      "step3": "Generate 'zipf-shifting' traces: same as zipf-stable but with num_phases=5 (working set shifts every 2M accesses, with 30% of hot pages replaced). 4 page_size_mix variants. These test adaptation to changing patterns.",
+      "step4": "Generate 'adversarial' traces designed to expose greedy-by-rank weakness: in each adversarial epoch, one 2MB page has benefit slightly above any single 4KB page, but 400+ 4KB pages collectively offer 100x more benefit-density. Bandwidth budget allows either the 2MB page or ~400 4KB pages. Generate variants with adversarial epoch fraction in {0.1, 0.5, 1.0}.",
+      "step5": "Generate 'multi-tenant' trace bundles: create independent trace streams for 2, 4, and 8 tenants with Zipf skews randomly drawn from {0.8, 1.0, 1.2, 1.5} and varying working set sizes (5K-20K pages per tenant).",
+      "step6": "Save all traces as compressed numpy arrays (.npz) with metadata JSON. Verify trace statistics (access distribution, page counts, phase boundaries) match intended parameters. Log summary statistics."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate realistic memory access traces from program archetypes",
+    "description": "Generate traces mimicking real application memory behavior based on published characterizations of SPEC CPU 2017 benchmarks. Since SPEC requires a license, we model 6 application archetypes with statistically representative access patterns.",
+    "steps": {
+      "step1": "Implement an archetype trace generator in src/archetype_traces.py that models 6 application types: (a) 'mcf-like': pointer-chasing, large irregular working set (50K pages, low locality, Zipf s=0.6, 3 phases), (b) 'lbm-like': streaming access (30K pages, mostly sequential with Zipf s=0.3, stable), (c) 'xalancbmk-like': mixed pattern (20K pages, two distinct phases with Zipf s=1.0), (d) 'omnetpp-like': object-heavy (40K pages, many small objects, Zipf s=0.9, gradual drift), (e) 'bwaves-like': large working set streaming (60K pages, Zipf s=0.5, stable), (f) 'cactuBSSN-like': regular strided (25K pages, strided pattern, Zipf s=1.2, stable).",
+      "step2": "For each archetype, generate 10M-access traces with 3 page_size variants: 'uniform-4KB' (page_size_mix=0.0), 'uniform-2MB' (page_size_mix=1.0), 'mixed' (page_size_mix varies by archetype: 0.1-0.3). Total: 6 archetypes x 3 variants = 18 traces.",
+      "step3": "Validate traces by computing and logging per-trace statistics: working set size over time, access frequency distribution (verify Zipf parameter match), reuse distance distribution, sequential access fraction.",
+      "step4": "Save all traces in the same compressed format as synthetic traces."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Experiment 1: Single-tenant performance comparison",
+    "description": "Compare all migration schedulers on single-tenant workloads across realistic and synthetic traces. This is the primary experiment testing whether BKS improves application performance over greedy-by-rank under bandwidth constraints. Uses 3 random seeds.",
+    "steps": {
+      "step1": "Configure tiered memory system: Tier 0 (fast DRAM): capacity=30% of total pages, read_latency=80ns. Tier 1 (slow CXL): capacity=70% of total pages, read_latency=200ns. Epoch length: 100,000 accesses. Use Colloid-style ranking as the default page ranker.",
+      "step2": "Define bandwidth budget sweep: {10%, 20%, 30%, 50%, 100%} of maximum migration rate. Maximum rate = fast_tier_capacity_bytes / epoch_time (all fast-tier pages could be replaced in one epoch at 100%).",
+      "step3": "Run all 6 schedulers (GreedyByRank, FIFO, Random, OfflineOptimal, BKSDensity, BKSThreshold) on the primary trace set: 6 realistic 'mixed' traces + 4 zipf-stable synthetic traces = 10 traces. Use 3 random seeds (42, 123, 456) for initial page placement.",
+      "step4": "For each run, record per-epoch and cumulative metrics: total_weighted_latency, num_migrations, bandwidth_used, migration_efficiency, competitive_ratio_vs_optimal.",
+      "step5": "Compute summary statistics: mean and std across seeds for each (scheduler, trace, bandwidth_pct) triple. Compute relative improvement of BKSThreshold over GreedyByRank as a percentage: improvement = (greedy_latency - bks_latency) / greedy_latency * 100.",
+      "step6": "Runtime estimate: 10 traces x 6 schedulers x 5 bandwidth levels x 3 seeds = 900 runs. Each run processes 10M accesses, estimated ~10-20s per run. With 2 cores: ~900 * 15s / 2 = ~1.9 hours.",
+      "step7": "Save all results to results/exp1_single_tenant/ as CSV: columns = trace, scheduler, bandwidth_pct, seed, total_latency, num_migrations, bandwidth_used, migration_efficiency, competitive_ratio."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 2: Page size heterogeneity impact",
+    "description": "Evaluate how page size heterogeneity affects scheduler performance. This directly tests the core hypothesis: BKS's benefit-density approach should show the largest advantage with mixed page sizes (4KB + 2MB) where the page size ratio R=512.",
+    "steps": {
+      "step1": "Use the 6 realistic archetypes, each with 3 page_size variants (uniform-4KB, uniform-2MB, mixed). Run all 6 schedulers with bandwidth budget fixed at 20% (the most constrained realistic setting). 3 seeds.",
+      "step2": "For each archetype and page_size variant, compute the performance gap: (greedy_latency - bks_latency) / greedy_latency * 100.",
+      "step3": "Verify key prediction: the gap should be near zero for uniform page sizes (where density-based and rank-based ordering are equivalent since all costs are equal) and largest for mixed page sizes (where cost heterogeneity matters).",
+      "step4": "Compute the effective page size ratio R for each configuration: R = max(page_size) / min(page_size). R=1 for uniform, R=512 for mixed. Plot performance gap vs log(R).",
+      "step5": "Total runs: 6 archetypes x 3 page_size variants x 6 schedulers x 3 seeds = 324 runs. Most overlap with Exp 1 data. Net new: ~216 runs, ~27 minutes on 2 cores.",
+      "step6": "Save results to results/exp2_heterogeneity/."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Experiment 3: Multi-tenant contention",
+    "description": "Evaluate BKS in multi-tenant settings where multiple workloads compete for shared migration bandwidth. Measure both total system throughput and fairness across tenants.",
+    "steps": {
+      "step1": "Implement multi-tenant mode in the simulator: run multiple independent trace streams with separate page sets but a shared migration bandwidth budget. Implement 4 bandwidth allocation policies: (a) 'equal-share': each tenant gets B/N budget, uses GreedyByRank within share, (b) 'greedy-global': merge all tenants' candidates, schedule globally by GreedyByRank, (c) 'BKS-global': merge all candidates, schedule globally by BKSThreshold, (d) 'BKS-fair': BKSThreshold with per-tenant minimum guarantee of B/(2N), remaining budget allocated by density globally.",
+      "step2": "Run with 2, 4, and 8 tenants. Tenant workloads: 2T = (mcf-like, lbm-like), 4T = add (xalancbmk-like, omnetpp-like), 8T = add (bwaves-like, cactuBSSN-like, plus 2 zipf-stable with skews 0.8 and 1.5). All use 'mixed' page sizes. Bandwidth = 20% of max rate. 3 seeds.",
+      "step3": "Metrics: (a) total system latency (sum across tenants), (b) per-tenant latency, (c) Jain's fairness index: J = (sum(x_i))^2 / (N * sum(x_i^2)) where x_i = latency_improvement_ratio for tenant i, (d) worst-case tenant latency ratio (max/min).",
+      "step4": "Hypothesis: BKS-fair achieves better total throughput than equal-share (which wastes budget on low-demand tenants) AND better fairness than greedy-global (which can starve tenants with lower-density candidates).",
+      "step5": "Total runs: 3 tenant_counts x 4 policies x 3 seeds = 36 runs. ~30s each = ~9 minutes on 2 cores.",
+      "step6": "Save results to results/exp3_multitenant/."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 4: Ablation study of BKS components",
+    "description": "Ablate each novel component of BKS to quantify its individual contribution: (1) density-based ordering, (2) threshold-based acceptance, (3) decay-adjusted benefits.",
+    "steps": {
+      "step1": "Define 5 ablation variants: (a) BKS-Full = density ordering + threshold acceptance + decay adjustment, (b) BKS-NoDensity = rank ordering + threshold + decay (removes density's contribution), (c) BKS-NoThreshold = density ordering + greedy acceptance + decay (removes threshold's contribution), (d) BKS-NoDecay = density ordering + threshold + static benefits (removes temporal awareness), (e) BKS-DensityOnly = density ordering + greedy + static (simplest BKS, equivalent to BKSDensity).",
+      "step2": "Run all 5 variants on 6 realistic 'mixed' traces at bandwidth = {20%, 50%}. 3 seeds. Total: 5 x 6 x 2 x 3 = 180 runs.",
+      "step3": "For each variant, compute performance relative to BKS-Full. The performance drop when removing a component reveals that component's marginal contribution.",
+      "step4": "Expected ranking: BKS-Full >= BKS-NoDecay > BKS-NoThreshold > BKS-NoDensity, with density being the most important component (addresses the R=512 worst case) and decay being beneficial mainly for phase-changing workloads.",
+      "step5": "Runtime: 180 runs x ~15s = ~22 minutes on 2 cores.",
+      "step6": "Save results to results/exp4_ablation/."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 5: Sensitivity analysis",
+    "description": "Sweep key system parameters to identify operating regimes where BKS provides the largest gains and where gains diminish.",
+    "steps": {
+      "step1": "Sweep epoch length: {10K, 50K, 100K, 500K, 1M} accesses per epoch. Use mcf-like and lbm-like traces (mixed page sizes), bandwidth=20%, 3 seeds. Run GreedyByRank and BKSThreshold. Total: 5 x 2 x 2 x 3 = 60 runs.",
+      "step2": "Sweep tier latency ratio: fast_tier=80ns, slow_tier in {120, 160, 200, 300, 400} ns (ratios 1.5x to 5x). Use mcf-like (mixed), bandwidth=20%, 3 seeds. Run GreedyByRank and BKSThreshold. Total: 5 x 2 x 3 = 30 runs.",
+      "step3": "Sweep fast tier capacity fraction: {10%, 20%, 30%, 50%, 70%} of total pages. Use mcf-like (mixed), bandwidth=20%, 3 seeds. Run GreedyByRank and BKSThreshold. Total: 5 x 2 x 3 = 30 runs.",
+      "step4": "Sweep bandwidth budget: already covered in Exp 1 (10%-100%). Extract and re-analyze.",
+      "step5": "For each sweep, plot BKS improvement (%) over GreedyByRank vs the swept parameter. Expected: gains are largest when bandwidth is constrained, epochs are shorter, latency ratio is higher, and fast tier is smaller.",
+      "step6": "Total new runs: ~120, ~15 minutes on 2 cores. Save results to results/exp5_sensitivity/."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 6: Composability with different ranking policies",
+    "description": "Demonstrate that BKS improves performance when composed with any page ranking policy, validating its role as a general-purpose scheduling layer.",
+    "steps": {
+      "step1": "Run experiments using all 3 ranking policies (TPP-style, Colloid-style, ALTO-style) as the upstream page ranker, paired with both GreedyByRank and BKSThreshold as the downstream scheduler.",
+      "step2": "Use 6 realistic 'mixed' traces, bandwidth=20%, 3 seeds. Total: 6 x 3 x 2 x 3 = 108 runs.",
+      "step3": "For each ranking policy, compute BKS improvement over GreedyByRank. Success criterion: BKS improves at least 2 of 3 ranking policies.",
+      "step4": "Cross-compare: which (ranker, scheduler) combination performs best? This reveals interactions between ranking and scheduling.",
+      "step5": "Runtime: 108 runs x ~15s = ~14 minutes on 2 cores. Save results to results/exp6_composability/."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Experiment 7: Adversarial analysis and competitive ratio validation",
+    "description": "Construct worst-case inputs to empirically validate the theoretical competitive ratio bounds. Verify greedy-by-rank approaches Omega(R) on adversarial inputs while BKS stays within O(log R).",
+    "steps": {
+      "step1": "Use the adversarial traces from Data Preparation. Run GreedyByRank, BKSDensity, BKSThreshold, and OfflineOptimal on adversarial traces with adversarial epoch fractions {10%, 50%, 100%}. 3 seeds. Total: 3 x 4 x 3 = 36 runs.",
+      "step2": "Compute empirical competitive ratios: offline_optimal_benefit / scheduler_benefit for each run across all epochs. Plot competitive ratio vs adversarial fraction.",
+      "step3": "Verify predictions: GreedyByRank competitive ratio should grow toward R=512 as adversarial fraction -> 1.0. BKSThreshold should stay bounded by O(log 512) ~ O(9).",
+      "step4": "Construct a second adversarial scenario varying R: use page sizes (4KB, 8KB), (4KB, 64KB), (4KB, 2MB) giving R in {2, 16, 512}. Run GreedyByRank and BKSThreshold. Plot competitive ratio vs R with theoretical bounds overlaid (linear for greedy, logarithmic for BKS).",
+      "step5": "Total: ~60 runs, ~8 minutes. Save results to results/exp7_adversarial/."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical analysis and success criteria evaluation",
+    "description": "Aggregate all results, perform statistical significance tests, and evaluate against the 4 success criteria from the proposal.",
+    "steps": {
+      "step1": "Load all results from experiments 1-7. Compute aggregate statistics: mean, std, 95% CI across seeds for each configuration.",
+      "step2": "Success criterion 1 (Theory): From Exp 7, verify greedy-by-rank empirical competitive ratio exceeds R/10 on adversarial inputs and BKSThreshold ratio stays below 2*log2(R). Document theoretical proofs (Omega(R) lower bound for greedy, O(log R) upper bound for BKS) for the paper.",
+      "step3": "Success criterion 2 (Practice): From Exp 1 at bandwidth=20%, count realistic traces where BKSThreshold improves latency by >= 3% over GreedyByRank. Target: at least 4 of 6 archetypes. Run paired t-tests (across 3 seeds) for statistical significance (p < 0.05).",
+      "step4": "Success criterion 3 (Composability): From Exp 6, verify BKS improves at least 2 of 3 ranking policies. Compute improvement percentages and p-values.",
+      "step5": "Success criterion 4 (Fairness): From Exp 3, compare Jain's fairness index of BKS-fair vs equal-share partitioning. Run paired t-tests.",
+      "step6": "Compute effect sizes (Cohen's d) for all key comparisons. Report 95% confidence intervals.",
+      "step7": "Create summary table: rows = success criteria, columns = metric, target, achieved_value, p_value, pass/fail. Save to results/success_criteria_summary.csv."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures",
+    "description": "Create publication-quality figures for all experiments. Target 8 main figures for the paper body plus supplementary plots.",
+    "steps": {
+      "step1": "Figure 1 (Motivation): Bar chart showing a single adversarial epoch where GreedyByRank selects 1 large page while BKS selects many small high-density pages. Annotate with benefit achieved by each. Use concrete numerical example from adversarial traces. Save as figures/fig1_motivation.pdf.",
+      "step2": "Figure 2 (Main results - Exp 1): Grouped bar chart showing normalized latency (relative to OfflineOptimal = 1.0) for each scheduler across the 6 realistic 'mixed' traces at bandwidth=20%. Error bars from 3 seeds. Secondary panel: line plot of BKS improvement (%) vs bandwidth budget (10%-100%). Save as figures/fig2_main_results.pdf.",
+      "step3": "Figure 3 (Heterogeneity - Exp 2): Three-panel plot (uniform-4KB, uniform-2MB, mixed) showing performance gap between GreedyByRank and BKSThreshold for each archetype. Highlight that gap is near zero for uniform and largest for mixed. Save as figures/fig3_heterogeneity.pdf.",
+      "step4": "Figure 4 (Multi-tenant - Exp 3): Two subplots: (a) total system latency per policy at 2/4/8 tenants, (b) Jain's fairness index per policy at 2/4/8 tenants. Save as figures/fig4_multitenant.pdf.",
+      "step5": "Figure 5 (Ablation - Exp 4): Grouped bar chart showing performance of each ablation variant relative to BKS-Full, for 6 traces at bandwidth=20%. Reveals marginal contribution of each component. Save as figures/fig5_ablation.pdf.",
+      "step6": "Figure 6 (Sensitivity - Exp 5): 2x2 grid of line plots: BKS improvement (%) vs (a) epoch length, (b) latency ratio, (c) fast tier fraction, (d) bandwidth budget. Error bars from seeds. Save as figures/fig6_sensitivity.pdf.",
+      "step7": "Figure 7 (Composability - Exp 6): Grouped bar chart showing latency for (GreedyByRank, BKSThreshold) x (TPP, Colloid, ALTO) rankers, averaged across traces. Demonstrates consistent improvement regardless of ranker. Save as figures/fig7_composability.pdf.",
+      "step8": "Figure 8 (Competitive ratio - Exp 7): Two subplots: (a) empirical competitive ratio vs adversarial fraction for each scheduler, (b) competitive ratio vs R with theoretical bounds (linear for greedy, logarithmic for BKS) overlaid as dashed lines. Save as figures/fig8_competitive_ratio.pdf.",
+      "step9": "Supplementary: (a) per-epoch latency time series for mcf-like trace showing GreedyByRank vs BKSThreshold adaptation over time, (b) scatter plot of candidates (benefit vs cost) with accepted/rejected coloring for each scheduler in one epoch, (c) bandwidth utilization time series. Save to figures/supplementary/.",
+      "step10": "Table 1: LaTeX table summarizing improvement of BKS over baselines for all traces and bandwidth levels. Include p-values. Save as figures/table1_summary.tex.",
+      "step11": "Consistent styling: matplotlib with seaborn, colorblind-friendly 'Set2' palette, font size 11, figsize 3.5in (single-column) or 7in (full-width). Save all as PDF + PNG at 300 DPI."
+    }
+  }
+]

@@ -1,0 +1,419 @@
+\documentclass{article}
+
+\newif\ifneuripsstyle
+\IfFileExists{neurips_2025.sty}{\neuripsstyletrue}{\neuripsstylefalse}
+\ifneuripsstyle
+  \usepackage[preprint]{neurips_2025}
+\else
+  \usepackage[margin=1in]{geometry}
+  \usepackage{natbib}
+\fi
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\title{Optimization Remarks as a Feasibility Signal for Low-Budget LLVM Micro-Search\\A Pilot Against Random and ProbeDelta}
+
+\author{Anonymous Author(s)}
+
+\date{}
+
+\newcommand{\method}{Remark-State Search}
+\newcommand{\passes}{\{\texttt{inline}, \texttt{loop-rotate}, \texttt{licm}, \texttt{loop-unroll}, \texttt{loop-vectorize}, \texttt{slp-vectorizer}\}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+LLVM optimization remarks are a cheap diagnostic stream, but it is unclear whether they help even a very small online search budget. We study a six-pass, length-at-most-four LLVM micro-search space with an 18-evaluation budget on eight short-running kernels and compare three executable policies: Random, ProbeDelta, and an interpretable remark-state heuristic. The original statistics-driven baseline is retained only as a blocked comparator because the local LLVM 18.1.3 optimized build advertises \texttt{-stats -stats-json} yet emits no usable counters. A precondition study shows that 5 of the 6 searched passes satisfy the pilot's remark-reliability criterion, while 0 of 6 satisfy the statistics criterion on this build. On the six non-flat benchmarks, ProbeDelta and \method{} both reach the exhaustively measured oracle text size in 1.00 $\pm$ 0.00 evaluations on average, compared with 2.33 $\pm$ 0.94 for Random. All executable search methods nevertheless converge to the same final mean text-size improvement of 4.81\% $\pm$ 1.99 relative to \texttt{default<Oz>}. The paper is therefore a feasibility pilot rather than a general evidence-study: remark-derived state improves anytime sample efficiency over Random, but does not outperform a simpler adaptive baseline built only from measured probe deltas.
+\end{abstract}
+
+\section{Introduction}
+
+Compiler autotuning and phase ordering remain dominated by search cost: the space of candidate pass sequences is large, target-dependent, and often poorly served by fixed optimization levels \citep{ashouri2018survey}. Recent work has moved well beyond pure pass-identity search. Some methods reduce complexity by imposing structure on the search space or by modeling pass interactions \citep{burgstaller2024osl,liu2024dco,pan2025synergistic}. Others exploit online compiler-emitted evidence, such as LLVM compilation statistics, inside adaptive optimization loops \citep{zhao2025citroen}, or move toward richer causal and LLM-guided evidence pipelines \citep{pan2026ecco}. Against that backdrop, a small CPU-only experiment is not a credible vehicle for a new general evidence-aware optimizer.
+
+This paper instead isolates a narrower empirical question. LLVM exposes two distinct online evidence streams that are cheap to collect during search: \texttt{-stats -stats-json} counters and \texttt{-pass-remarks*} optimization remarks. The former are dense numeric summaries; the latter are sparse event records that explicitly describe applied transformations, missed opportunities, and blockers. CITROEN already shows that compilation statistics can guide phase ordering \citep{zhao2025citroen}. Our pilot does not test whether remarks beat statistics-driven search overall. It tests only whether a remark-based policy improves over Random and over a simple adaptive baseline built from measured probe deltas in the tiny-budget regime where every evaluation matters and learned surrogates are hard to fit.
+
+We study that question in a deliberately restricted six-pass LLVM micro-search space. All methods start from the same canonical IR, share the same fixed warm-up prelude, and receive the same budget of 18 \texttt{opt} evaluations per benchmark. Because the installed LLVM 18.1.3 build exposes \texttt{-stats-json} flags but emits no usable counters, the statistics baseline is not silently replaced; it is reported as infeasible and the study is explicitly downgraded to a feasibility and negative-result pilot under a blocked statistics baseline.
+
+Our contributions are:
+\begin{itemize}
+  \item We present a controlled pilot of remark-based search in a six-pass, length-at-most-four LLVM micro-search space under a matched 18-evaluation budget, while explicitly treating the planned statistics-driven baseline as infeasible on the tested build.
+  \item We provide a precondition analysis showing that optimization remarks are available for 5 of the 6 searched passes, whereas usable \texttt{-stats-json} counters are unavailable for all 6 passes on this LLVM 18.1.3 optimized build.
+  \item We report both fixed compiler baselines (\texttt{default<Oz>} and \texttt{warmup+default<Oz>}) and matched-budget search baselines, and we show a negative empirical result: \method{} improves anytime sample efficiency over Random but ties ProbeDelta, with all executable search methods converging to the same final mean text-size improvement of 4.81\%.
+\end{itemize}
+
+Section~\ref{sec:related} reviews compiler autotuning work, Section~\ref{sec:method} describes the micro-search protocol and remark-state representation, Section~\ref{sec:experiments} presents the setup and results, Section~\ref{sec:repro} summarizes reproducibility artifacts, Section~\ref{sec:discussion} discusses limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+This paper sits inside the broad compiler autotuning and phase-ordering literature surveyed by \citet{ashouri2018survey}. That survey frames the central difficulty as finding good optimization sequences under severe search-cost constraints, spanning iterative compilation, feature-based autotuning, and machine learning guided search. Our work adopts that framing, but studies only a tiny, explicitly budgeted LLVM subspace.
+
+Classical iterative-compilation work established both the promise and the cost of search. \citet{agakov2006focus}, \citet{cavazos2007counters}, and \citet{fursin2011milepost} showed that machine learning and compiler-side features can reduce the expense of iterative optimization, while still treating search cost as the central systems bottleneck. Our pilot inherits that framing, but asks a smaller question than those papers: whether one specific compiler-emitted signal, optimization remarks, adds value in a low-budget online loop.
+
+One major modern line of work reduces search complexity by exploiting structure in the pass space. Optimization Space Learning aims for lightweight non-iterative autotuning \citep{burgstaller2024osl}. DCO models pass dependence and constructs sub-sequences to make search more efficient \citep{liu2024dco}. The CGO 2025 synergistic-search work reduces the effective search space through pass synergies \citep{pan2025synergistic}. These papers motivate our restricted setup: if structural restrictions already help, then a new evidence stream should justify itself even after the search space has been made small.
+
+Another line of work uses compiler-emitted evidence during search. CITROEN is the nearest published neighbor because it uses pass-related LLVM compilation statistics as the online evidence stream in a Gaussian-process Bayesian optimization framework with dynamic module-level budget allocation \citep{zhao2025citroen}. Our paper does not attempt a full reproduction of CITROEN. Instead, it targets CITROEN's central evidence idea, namely compiler-emitted statistics as online guidance, but reports that this baseline is blocked in our environment because \texttt{-stats-json} emits no usable counters here. The empirical claim of this paper is therefore narrower: whether optimization remarks improve over Random and simple probe deltas in a matched-budget micro-search setting.
+
+LLVM also has its own diagnostics-oriented literature and tooling lineage around optimization remarks. \citet{nemet2016compilerassisted} introduced optimization remarks and \texttt{opt-viewer} as a way to inspect successful, missed, and analysis events directly alongside source locations, with the explicit goal of making compiler decisions more actionable during performance analysis. The LLVM remarks documentation formalizes the same triad of passed, missed, and analysis records, together with serialized YAML/bitstream formats and downstream tools such as \texttt{opt-viewer}, \texttt{opt-stats}, and \texttt{opt-diff} \citep{llvmremarksdocs}. \citet{mistrih2019remarksupdate} then documented practical scaling work on remark storage and parsing, including the bitstream format and \texttt{libRemarks}. Our paper differs from that diagnostics literature in purpose: rather than helping a human inspect a single compilation, we test whether a normalized subset of the same remark stream is strong enough to drive a tiny automated search loop.
+
+Recent systems also illustrate the broader evidence-aware design space. Protean provides a flexible fine-grain LLVM phase-ordering framework rather than a narrowly scoped evidence comparison \citep{ashouri2026protean}. ECCO goes further by combining richer evidence with causal reasoning and LLM-guided search \citep{pan2026ecco}. Both are recent 2026 arXiv preprints rather than settled peer-reviewed baselines, so we cite them as evidence of current directions, not as established comparison targets. Unlike those systems, our contribution is intentionally modest: a controlled positive-or-negative study of whether remark-derived blocker state is worth carrying forward as a baseline in low-budget LLVM micro-search.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Search Space and Common Setup}
+
+Let $\mathcal{P}$ denote the fixed pass vocabulary \passes. A candidate pipeline is a sequence $s \in \mathcal{P}^{\le 4}$ with maximum length four. The resulting search space contains
+\[
+\sum_{\ell=1}^{4} 6^\ell = 1{,}554
+\]
+candidate sequences per benchmark, which we exhaustively enumerate for analysis.
+
+All methods start from the same canonical bitcode generated from source with
+\begin{verbatim}
+clang -O0 -Xclang -disable-llvm-passes
+      -Xclang -disable-O0-optnone -emit-llvm
+\end{verbatim}
+and then apply the same fixed warm-up prelude
+\begin{verbatim}
+mem2reg,sroa,instcombine,simplifycfg,loop-simplify,lcssa
+\end{verbatim}
+before the searched sequence. This keeps the six-pass search space meaningful without hiding extra tuning freedom inside the setup.
+
+We report two fixed compiler baselines. \texttt{default<Oz>} is the externally interpretable size-optimization baseline applied directly to canonical IR. \texttt{warmup+default<Oz>} applies the same warm-up prelude first, then \texttt{default<Oz>}; it is a diagnostic control for whether the warm-up itself changes the fixed baseline.
+
+\subsection{Metrics}
+
+The main executable objective is final binary text size, denoted $y_b(s)$ for benchmark $b$ and candidate $s$. Because the full search space is small, we can compute the benchmark-specific oracle
+\[
+o_b = \min_{s \in \mathcal{P}^{\le 4}} y_b(s)
+\]
+exactly. The primary comparative metric for adaptive search is therefore \emph{first-hit oracle evaluation}: the first evaluation index at which a method reaches $o_b$ on a benchmark whose text-size landscape is non-flat.
+
+We also report final text-size change and final instruction-count change relative to \texttt{default<Oz>}. Runtime is measured only on the fixed four-program runtime subset. The reported \emph{runtime metric} is speedup relative to \texttt{default<Oz>},
+\[
+\text{speedup}(b,s)=
+\frac{\text{runtime}_{\texttt{default<Oz>}}(b)}
+     {\text{runtime}(b,s)},
+\]
+so values above 1 indicate faster execution than \texttt{default<Oz>}. Tuning time is total wall-clock search time per benchmark-seed run, including compilation and evidence collection across all 18 evaluations for search methods.
+
+\subsection{Evidence Families}
+
+\paragraph{ProbeDelta.}
+This baseline only observes measured deltas from evaluated candidates: instruction-count change, basic-block change, loop-count change, and compile-time cost. It never inspects compiler-emitted semantic evidence.
+
+\paragraph{Compilation statistics.}
+The planned statistics baseline mirrors CITROEN's core evidence representation by consuming LLVM \texttt{-stats -stats-json} counters. In this pilot, the baseline is pre-registered but infeasible: the installed LLVM build advertises the flags but emits no usable counters for the searched passes. We therefore report the failure directly instead of introducing an unplanned replacement.
+
+\paragraph{Optimization remarks.}
+For each candidate we collect \texttt{-pass-remarks}, \texttt{-pass-remarks-missed}, and \texttt{-pass-remarks-analysis}. Raw remarks are normalized into symbolic records with fields such as consumer pass, outcome (\texttt{applied}, \texttt{missed}, or \texttt{analysis}), transformation family, blocker, scope, and an anchor string. The online search state aggregates active missed opportunities, applied transformation families, resolved blockers, coarse IR deltas, and cumulative compile-time cost.
+
+\subsection{Exact Search Procedures}
+
+All methods evaluate candidates without replacement from the full set of 1{,}554 sequences. Sequence enumeration is deterministic: all length-1 sequences are listed first, then length 2, length 3, and length 4, preserving the pass-vocabulary order inside each Cartesian product. Any sequence already evaluated is removed from the unexplored pool and cannot be revisited.
+
+Random uses the experiment seed to pseudo-randomly shuffle the candidate pool after removing the six single-pass sequences, then evaluates the first 18 shuffled candidates. ProbeDelta and \method{} instead follow a fixed $6+4+8$ schedule: six single-pass probes in vocabulary order, four length-2 candidates, and eight candidates of length 3 or 4.
+
+\paragraph{ProbeDelta.}
+After each evaluation, ProbeDelta records a four-dimensional feature row
+\[
+[\,\text{text size},\ \text{instruction count},\ \text{basic-block count},\ \text{compile time}\,].
+\]
+The observed rows are z-scored columnwise; any constant column is assigned unit variance. Each normalized row is then scored with the fixed coefficient vector $(-1.0,-0.25,-0.25,0.05)$. For each pass $p$, ProbeDelta averages the scores of all prior candidates containing $p$, producing a mean single-pass effect $\mu(p)$. An unexplored candidate $s=(p_1,\dots,p_k)$ receives score
+\[
+\hat{f}(s)=\frac{1}{k}\sum_{i=1}^{k}\mu(p_i).
+\]
+At each adaptive step, ProbeDelta selects the unexplored candidate with maximum $\hat{f}(s)$, breaking ties by lexicographic order on the comma-joined pass string.
+
+\paragraph{Remark-State.}
+The proposed \method{} shares the same 18-evaluation budget and schedule as ProbeDelta. It first identifies the current best observed candidate using the deterministic tuple
+\[
+(\text{text size},\ \text{instruction count},\ \text{compile time},\ \text{sequence length},\ \text{sequence string}),
+\]
+with lower values preferred. Only remarks from that current best candidate define the active state. From those normalized remarks, missed events are counted by keys $(\text{family},\text{blocker},\text{scope})$ and applied events are counted by transformation family.
+
+For an unexplored candidate $s=(p_1,\dots,p_k)$, the implemented ranking key is
+\[
+(\mathrm{resolved}(s),\ \mathrm{favored}(s),\ k,\ -|s|,\ \text{sequence string}),
+\]
+sorted in descending order. Here $\mathrm{resolved}(s)$ sums the counts of active missed-event keys whose family matches the family of some pass in $s$, plus the counts of active missed-event keys whose blocker is mapped to some pass in $s$; $\mathrm{favored}(s)$ counts positions whose family has already appeared as applied in the current best candidate; and the remaining terms provide a deterministic implementation fallback. In practice, the policy should be read as prioritizing blocker resolution first, applied-family history second, and then a fixed deterministic ordering among remaining ties. The implementation materializes the top 3 ranked candidates but evaluates only the first element, so beam width is not a causal search parameter in this pilot.
+
+\subsection{Remark-State Decision Rule}
+
+The effective ranking logic is a fixed lexicographic heuristic:
+\begin{enumerate}
+  \item maximize the number of newly resolved blockers;
+  \item break ties by candidate positions whose family already appeared as applied in the current best candidate;
+  \item break any remaining ties deterministically.
+\end{enumerate}
+No scoring weights are tuned. The design goal is not raw optimizer strength, but a transparent test of whether symbolic blocker state adds useful signal when the budget is tiny. The substantive ablations \texttt{NoBlocker}, \texttt{NoAppliedHistory}, and \texttt{NoPairProbe} remove blocker matching, remove applied-history bonuses, or skip the pair-probe phase and reallocate those four evaluations to the final phase. We also report \texttt{Beam2} and \texttt{Beam4} for transparency, but the current implementation still evaluates only the top-ranked candidate after truncation, so those rows should not be interpreted as causal beam-search ablations.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+The benchmark suite contains eight short-running kernels: six PolyBench/C programs (\texttt{2mm}, \texttt{3mm}, \texttt{atax}, \texttt{bicg}, \texttt{gemm}, \texttt{gemver}) \citep{pouchet2012polybench} and two local cBench-like substitutes (\texttt{crc32}, \texttt{dijkstra}) chosen to mimic the role of cBench-style integer workloads \citep{fursin2010cbench} because exact cBench programs were unavailable in this workspace. Canonical IR sizes range from 295 to 4{,}585 instructions. The runtime subset contains four benchmarks: \texttt{2mm}, \texttt{3mm}, \texttt{crc32}, and \texttt{dijkstra}.
+
+All adaptive methods use the same seeds $\{11,17,23\}$ and the same total budget of 18 \texttt{opt} evaluations per benchmark. Random receives 18 uniformly sampled candidates without replacement. ProbeDelta and \method{} use the same $6+4+8$ schedule described in Section~\ref{sec:method}. StatsGP is skipped because the environment emits no usable statistics counters. The normalization audit is also incomplete: parser coverage reaches 1.00, but family-level double annotation and Cohen's $\kappa$ were not completed, the \texttt{other} rate is 0.533, and 64 of 120 audited remarks remain unresolved.
+
+Unless otherwise stated, means and standard deviations in this section are population statistics over repeated benchmark-seed outcomes. Oracle-evaluation statistics are computed over the 18 non-flat benchmark-seed pairs (6 benchmarks $\times$ 3 seeds). Final text-size change, instruction-count change, and tuning time are computed over 24 benchmark-seed rows (8 benchmarks $\times$ 3 seeds). Runtime speedups are computed over 12 runtime benchmark-seed rows (4 benchmarks $\times$ 3 seeds). Fixed baselines are duplicated across the same seed labels for matched tabulation, but remain deterministic.
+
+\subsection{Precondition Study}
+
+Table~\ref{tab:precondition} summarizes the evidence-availability study. Five of the six passes satisfy the pilot's remark-reliability rule (coverage at least 0.75 and median normalized density at least 2.0). In contrast, statistics coverage is 0.00 for all six passes, which blocks the planned StatsGP comparison.
+
+\begin{table}[t]
+\caption{Precondition study for the six searched passes. Coverage is the fraction of the eight benchmarks emitting at least one normalized remark. Density is the median normalized-record count on emitting benchmarks. Remark-reliable means coverage $\ge 0.75$ and density $\ge 2.0$. Statistics are unusable on this LLVM 18.1.3 optimized build: all six passes have 0.00 statistics coverage and zero distinct nonzero counters.}
+\label{tab:precondition}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Pass & Remark cov. & Density & Dominant outcome & Reliable? \\
+\midrule
+\texttt{inline} & 1.00 & 23.0 & 100.0\% missed & Yes \\
+\texttt{loop-rotate} & 0.00 & 0.0 & none & No \\
+\texttt{licm} & 0.75 & 24.5 & 58.2\% applied & Yes \\
+\texttt{loop-unroll} & 1.00 & 2.0 & 100.0\% analysis & Yes \\
+\texttt{loop-vectorize} & 1.00 & 6.5 & 100.0\% missed & Yes \\
+\texttt{slp-vectorizer} & 1.00 & 3.5 & 100.0\% missed & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} reports both fixed baselines and search methods. The fixed baselines establish two facts. First, \texttt{default<Oz>} remains the strongest fixed compiler baseline in this workspace. Second, the matched-start control is not helping: \texttt{warmup+default<Oz>} is slightly worse on average than \texttt{default<Oz>} in both text size (-0.24\% $\pm$ 0.45) and instruction count (-0.32\% $\pm$ 0.56), although its runtime speedup on the runtime subset is 1.03 $\pm$ 0.26 relative to \texttt{default<Oz>}.
+
+The search headline is sharply constrained. On the six benchmarks whose text-size landscape is not flat, both ProbeDelta and \method{} reach the oracle in 1.00 $\pm$ 0.00 evaluations on average, whereas Random requires 2.33 $\pm$ 0.94 evaluations. \method{} never loses to Random in this anytime metric, winning 12 of 18 benchmark-seed pairs and tying the remaining 6. However, \method{} also ties ProbeDelta on all 18 benchmark-seed pairs. Final outcomes collapse even more strongly: all three executable search methods end with the same mean text-size change (4.81\% $\pm$ 1.99) and the same mean instruction-count change (-9.85\% $\pm$ 7.89) relative to \texttt{default<Oz>}.
+
+The runtime tradeoff is more cautionary. On the fixed runtime subset, every search method is slower than \texttt{default<Oz>}: mean speedups are 0.55 for Random, 0.96 for ProbeDelta, and 0.83 for \method{}. In other words, the search procedures find slightly smaller binaries, but they do not find pipelines that beat LLVM's built-in \texttt{-Oz} default on runtime. This means the evidence question has a negative answer in the current regime. Remark-derived state is useful enough to avoid Random's slower discovery, but it does not improve over a much simpler adaptive baseline that only observes measured deltas, and it does not offset the runtime regression relative to \texttt{default<Oz>}.
+
+\begin{table*}[t]
+\caption{Main results. Oracle evaluation is the mean first evaluation index that reaches the benchmark-specific oracle text size on the 18 non-flat benchmark-seed pairs; it is undefined for fixed baselines because they are not search procedures. Text-size change and instruction-count change are relative to \texttt{default<Oz>} and are aggregated over all 24 benchmark-seed rows. Runtime metric is speedup relative to \texttt{default<Oz>} on the 12 runtime benchmark-seed rows; values above 1 are faster. Tuning time is wall-clock search time per benchmark-seed run. Best executable search results are in \textbf{bold}; ties share boldface.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccccc}
+\toprule
+Method & Oracle eval. $\downarrow$ & Text-size change (\%) & Instr. change (\%) & Runtime metric $\uparrow$ & Tuning time (s) $\downarrow$ \\
+\midrule
+\texttt{default<Oz>} & -- & 0.00 $\pm$ 0.00 & 0.00 $\pm$ 0.00 & 1.00 $\pm$ 0.00 & 0.06 $\pm$ 0.06 \\
+\texttt{warmup+default<Oz>} & -- & -0.24 $\pm$ 0.45 & -0.32 $\pm$ 0.56 & 1.03 $\pm$ 0.26 & 0.06 $\pm$ 0.04 \\
+\midrule
+Random & 2.33 $\pm$ 0.94 & \textbf{4.81 $\pm$ 1.99} & \textbf{-9.85 $\pm$ 7.89} & 0.55 $\pm$ 0.36 & 2.20 $\pm$ 0.88 \\
+ProbeDelta & \textbf{1.00 $\pm$ 0.00} & \textbf{4.81 $\pm$ 1.99} & \textbf{-9.85 $\pm$ 7.89} & \textbf{0.96 $\pm$ 0.34} & \textbf{1.26 $\pm$ 0.32} \\
+\method{} & \textbf{1.00 $\pm$ 0.00} & \textbf{4.81 $\pm$ 1.99} & \textbf{-9.85 $\pm$ 7.89} & 0.83 $\pm$ 0.30 & 1.34 $\pm$ 0.25 \\
+StatsGP & \multicolumn{5}{c}{Skipped: LLVM 18.1.3 optimized build emitted no usable \texttt{-stats-json} counters} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Figure~\ref{fig:main} visualizes the same pattern. Adaptive search clearly improves oracle-hit sample efficiency relative to Random, but final objective values remain collapsed across executable methods.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/main_comparison_bars.pdf}
+\caption{Main comparison across methods. Bars summarize the same aggregates as Table~\ref{tab:main}: oracle-evaluation means over the 18 non-flat benchmark-seed pairs, final text-size changes over all 24 benchmark-seed rows, runtime speedups over the 12 runtime benchmark-seed rows, and tuning time over all 24 benchmark-seed rows. Adaptive search improves sample efficiency relative to Random, but final text-size outcomes collapse across executable methods.}
+\label{fig:main}
+\end{figure}
+
+\subsection{Ablations and Landscape Analysis}
+
+We evaluate five implementation variants on the four-program runtime subset. Three are substantive ablations: removing blocker tracking, removing applied-history tracking, and removing pair probes. Two more rows, \texttt{Beam2} and \texttt{Beam4}, are reported only as transparency checks on a non-causal implementation knob. In the current code, candidate ranking returns the top-$k$ candidates but the search always evaluates only index 0, so changing beam width does not intentionally alter the search trajectory and should not be interpreted causally. Table~\ref{tab:ablation} shows that all variants converge to the same final mean text size of 11{,}282.25 bytes on the subset. Among the substantive ablations, \texttt{NoAppliedHistory} is closest to runtime parity at 0.958 mean speedup and \texttt{NoPairProbe} is worst at 0.736; we do not draw scientific conclusions from the small \texttt{Beam2}/\texttt{Beam4} differences.
+
+\begin{table}[t]
+\caption{Implementation-variant results on the 12 runtime benchmark-seed rows from the four-program runtime subset (\texttt{2mm}, \texttt{3mm}, \texttt{crc32}, \texttt{dijkstra}). Runtime metric is speedup relative to \texttt{default<Oz>}, so values below 1 indicate slower execution than \texttt{default<Oz>}. All variants reach the same final mean text size, so the differences are in runtime regression and search overhead rather than final text-size quality. \texttt{Beam2} and \texttt{Beam4} are reported only for transparency: in the current implementation, beam width changes the truncated candidate list but the search still evaluates only its top-ranked element.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Variant & Mean text size & Runtime metric & Tuning time (s) $\downarrow$ \\
+\midrule
+\method{} & 11{,}282.25 & 0.828 & 1.47 \\
+NoBlocker & 11{,}282.25 & 0.899 & 1.46 \\
+NoAppliedHistory & 11{,}282.25 & \textbf{0.958} & 1.47 \\
+NoPairProbe & 11{,}282.25 & 0.736 & 1.78 \\
+Beam2 & 11{,}282.25 & 0.875 & 1.52 \\
+Beam4 & 11{,}282.25 & 0.908 & \textbf{1.30} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The exhaustive landscape analysis explains why final outcomes collapse. Every benchmark has exactly one unique final IR instruction count across all 1{,}554 candidate sequences, so instruction count is completely flat in this micro-search space. Text size is also flat for two of the eight benchmarks (\texttt{crc32} and \texttt{dijkstra}) and takes only two distinct values for each of the remaining six benchmarks. Figure~\ref{fig:precondition} shows evidence availability across passes, while Figure~\ref{fig:endpoints} shows that executable endpoints remain weakly separated even when search trajectories differ.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/precondition_heatmap.pdf}
+\caption{Pass-level evidence availability in the precondition study. Optimization remarks are present for five of the six searched passes, but \texttt{-stats-json} counters remain absent across the board, which blocks the planned statistics-driven baseline.}
+\label{fig:precondition}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/real_endpoints.pdf}
+\caption{Executable endpoint comparison on the pilot suite. The bars summarize final text-size changes over all 24 benchmark-seed rows and runtime speedups over the 12 runtime benchmark-seed rows. Final text-size and runtime endpoints show limited separation across methods, matching the table-level conclusion that the pilot is dominated by landscape flatness rather than by search-rule differences.}
+\label{fig:endpoints}
+\end{figure}
+
+\section{Reproducibility and Artifacts}
+\label{sec:repro}
+
+The workspace includes the full artifact trail used for this paper. Environment metadata live under \path{artifacts/env/}, including exact tool versions, the Python package lockfile, and hardware metadata. The benchmark manifest, build commands, and runtime inputs live under \path{artifacts/data/}. Canonicalized bitcode and LLVM IR live under \path{artifacts/ir/}. Search traces, fixed baselines, oracle-landscape enumeration, final chosen sequences, and aggregate statistical reports live under \path{artifacts/results/}. Normalization-audit files live under \path{artifacts/normalization/}. Table-level aggregates are auditable from the result files that actually produced them: the fixed-baseline rows in Table~\ref{tab:main} come from \path{exp/04_fixed_baselines/results.json}, the executable search rows and pairwise anytime summaries in Table~\ref{tab:main} come from \path{exp/08_evaluation/results.json} and the root \path{results.json}, and Table~\ref{tab:ablation} comes from \path{exp/07_ablations/results.json}.
+
+The run environment is a CPU-only machine with 2 visible CPU cores, 128\,GB RAM, and no GPUs. The toolchain is Ubuntu LLVM/Clang 18.1.3. All adaptive methods use seeds $\{11,17,23\}$. The two non-PolyBench programs are local cBench-like substitutes because exact cBench sources were absent in the workspace. StatsGP was skipped for a concrete environment reason rather than by choice: this LLVM 18.1.3 optimized build advertises \texttt{-stats/-stats-json}, but the statistics path requires an asserts-enabled build and therefore emitted no usable counters here. The normalization audit was also intentionally reported as incomplete because double annotation and Cohen's $\kappa$ were not possible in this single-operator rerun.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+This paper should be read as a controlled negative result, not as a failed positive paper. The negative result is informative because it isolates several reasons why remark-derived evidence may fail to translate into a measurable win in this regime.
+
+First, the environment blocks the most direct comparison target. StatsGP was pre-registered as a matched-budget reproduction of CITROEN's statistics-driven evidence idea, but the installed LLVM 18.1.3 optimized build produced no usable \texttt{-stats-json} counters. That makes this paper a feasibility study under a blocked statistics baseline rather than a full remarks-versus-statistics comparison.
+
+Second, the search landscape is unusually coarse. Final instruction count is completely flat on all eight benchmarks, and text size is binary on the six non-flat cases. When the oracle can often be reached after a single good probe, large differences between low-budget adaptive methods are structurally hard to expose.
+
+Third, the remark-normalization validation remains incomplete. Although parser coverage is 1.00, the unresolved count is 64 of 120 audited remarks, the \texttt{other} rate is 0.533, and inter-annotator agreement was not measured. We therefore treat interpretability as a design property of the ranking rule, not as a validated labeling claim.
+
+Fourth, the benchmark suite is small and partially substituted. The two non-PolyBench programs are local cBench-like stand-ins, and all claims are restricted to the six-pass, length-at-most-four micro-search space studied here.
+
+Fifth, the reported beam-width rows are not true beam-search ablations. The implementation truncates the ranked list to width $k$ and then always evaluates the first element, so changing $k$ should not be interpreted as changing search behavior. We keep those numbers only as transparent reruns of the same top-ranked policy.
+
+Sixth, the executable tradeoff is not uniformly favorable. Relative to \texttt{default<Oz>}, the search methods buy modest text-size improvements but generally lose on runtime: Table~\ref{tab:main} reports mean speedups below 1 for all executable search methods, and Table~\ref{tab:ablation} shows the same pattern for all substantive ablations. For a size-oriented workflow that also cares about runtime, this pilot therefore supports remarks only as an interpretable search baseline, not as a better overall operating point than LLVM's fixed \texttt{-Oz} pipeline.
+
+Taken together, these limitations sharply narrow the external claim. Unlike larger systems such as CITROEN, Protean, or ECCO \citep{zhao2025citroen,ashouri2026protean,pan2026ecco}, our result does not argue that richer evidence is unnecessary in general. It argues only that, on this CPU-only pilot and this restricted LLVM subspace, normalized remarks beat Random on anytime sample efficiency but do not outperform a simpler probe-based adaptive baseline.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper studied whether LLVM optimization remarks add useful online signal beyond simpler executable alternatives in low-budget LLVM micro-search. We compared Random, ProbeDelta, and a fixed-rule remark-state search in a six-pass, length-at-most-four space with an 18-evaluation budget, while explicitly reporting the planned statistics baseline as infeasible on the tested LLVM 18.1.3 build and reporting both fixed \texttt{-Oz} baselines.
+
+The results are mixed but clear. Optimization remarks are available often enough to support a pilot: 5 of the 6 searched passes satisfy the study's remark-reliability criterion. They are also useful enough to match adaptive probing in sample efficiency: both ProbeDelta and \method{} reach the oracle text size in 1.00 evaluations on average on the six non-flat benchmarks, compared with 2.33 for Random. But remarks do not translate into better final outcomes in this setting. All executable search methods end with the same mean text-size change of 4.81\% and the same mean instruction-count change of -9.85\% relative to \texttt{default<Oz>}, while \texttt{warmup+default<Oz>} slightly underperforms \texttt{default<Oz>} as a fixed control. More importantly for end users, the searched methods remain slower than \texttt{default<Oz>} on the runtime subset: mean speedups are 0.96 for ProbeDelta and 0.83 for \method{}, with all ablations also below 1.0.
+
+The practical implication is modest. Remark-derived blocker state may be worth retaining as an interpretable baseline, but this pilot provides no evidence that it adds value beyond simple probe deltas in a tiny LLVM search budget, and it does not improve the runtime-versus-\texttt{default<Oz>} tradeoff. Future work should revisit the comparison on an asserts-enabled LLVM build with functioning statistics counters, a less flat objective landscape, and a completed normalization audit.
+
+\appendix
+
+\section{Appendix: Commands, Enumeration, and Protocol Deviations}
+
+Every benchmark used deterministic build commands recorded in \path{artifacts/data/benchmark_commands.yaml}. PolyBench programs were linked with the local PolyBench utility harness, and all runtime inputs were empty argument lists as recorded in \path{artifacts/data/runtime_inputs.yaml}. Canonicalized inputs and LLVM IR snapshots are stored under \path{artifacts/ir/}.
+
+The search-space size is exactly 1{,}554 pipelines per benchmark because sequences have length 1 through 4 over a 6-pass vocabulary. The exhaustive oracle tables used in the paper are recorded in \path{artifacts/results/objective_landscape.csv} and \path{artifacts/results/objective_landscape_summary.csv}. Full search traces and selected final sequences are stored separately in \path{artifacts/results/search_traces.csv} and \path{artifacts/results/final_sequences.csv}.
+
+This rerun deviates from the original plan in five explicit ways, all of which are recorded in \path{artifacts/results/protocol_revision.json}. First, StatsGP was skipped rather than replaced because the environment emitted no usable \texttt{-stats-json} counters. Second, instruction count was demoted to a descriptive endpoint because it is flat over the entire search space here. Third, the main comparative metric became first-hit oracle evaluation on non-flat benchmarks. Fourth, the normalization audit remained single-annotator only, so the interpretability gate stayed unsatisfied. Fifth, the two cBench entries were replaced with local cBench-like stand-ins because exact cBench sources were unavailable.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{figures/quality_vs_cost.pdf}
+\caption{Quality-versus-cost view of the executed methods. The figure is included here because it summarizes the same pilot tradeoff discussed in the main text: adaptive search reduces search cost relative to Random, but final text-size quality collapses across executable methods.}
+\label{fig:qualitycost}
+\end{figure}
+
+\begin{thebibliography}{9}
+
+\bibitem[Ashouri et~al.(2018)Ashouri, Killian, Cavazos, Palermo, and Silvano]{ashouri2018survey}
+Amir H. Ashouri, William Killian, John Cavazos, Gianluca Palermo, and Cristina Silvano.
+\newblock A survey on compiler autotuning using machine learning.
+\newblock \emph{ACM Computing Surveys}, 51(5):1--42, 2018.
+\newblock doi: \url{https://doi.org/10.1145/3197978}.
+
+\bibitem[Ashouri et~al.(2026)Ashouri, Bagi, Satheeskumar, Srikanth, Zhao, Saidoun, Wang, Chan, and Czajkowski]{ashouri2026protean}
+Amir H. Ashouri, Shayan Shirahmad Gale Bagi, Kavin Satheeskumar, Tejas Srikanth, Jonathan Zhao, Ibrahim Saidoun, Ziwen Wang, Bryan Chan, and Tomasz S. Czajkowski.
+\newblock Protean Compiler: An agile framework to drive fine-grain phase ordering.
+\newblock \emph{arXiv preprint arXiv:2602.06142}, 2026.
+\newblock doi: \url{https://doi.org/10.48550/arXiv.2602.06142}.
+
+\bibitem[Burgstaller et~al.(2024)Burgstaller, Garber, Le, and Felfernig]{burgstaller2024osl}
+Tamim Burgstaller, Damian Garber, Viet-Man Le, and Alexander Felfernig.
+\newblock Optimization Space Learning: A lightweight, noniterative technique for compiler autotuning.
+\newblock In \emph{Proceedings of the 28th ACM International Systems and Software Product Line Conference}, 2024.
+\newblock doi: \url{https://doi.org/10.1145/3646548.3672588}.
+
+\bibitem[Agakov et~al.(2006)Agakov, Bonilla, Cavazos, Franke, Fursin, O'Boyle, Thomson, Toussaint, and Williams]{agakov2006focus}
+Felix Agakov, Edwin Bonilla, John Cavazos, Bj\"orn Franke, Grigori Fursin, Michael F.~P. O'Boyle, John Thomson, Michael Toussaint, and Christopher K.~I. Williams.
+\newblock Using machine learning to focus iterative optimization.
+\newblock In \emph{Proceedings of the International Symposium on Code Generation and Optimization}, pages 295--305, 2006.
+
+\bibitem[Cavazos et~al.(2007)Cavazos, Fursin, Agakov, Bonilla, O'Boyle, and Temam]{cavazos2007counters}
+John Cavazos, Grigori Fursin, Felix Agakov, Edwin Bonilla, Michael F.~P. O'Boyle, and Olivier Temam.
+\newblock Rapidly selecting good compiler optimizations using performance counters.
+\newblock In \emph{Proceedings of the International Symposium on Code Generation and Optimization}, pages 185--197, 2007.
+\newblock doi: \url{https://doi.org/10.1109/CGO.2007.32}.
+
+\bibitem[Liu et~al.(2024)Liu, Fang, Wang, Xie, Huang, and Wang]{liu2024dco}
+Jianfeng Liu, Jianbin Fang, Ting Wang, Jing Xie, Chun Huang, and Zheng Wang.
+\newblock Efficient compiler optimization by modeling passes dependence.
+\newblock \emph{CCF Transactions on High Performance Computing}, 6:588--607, 2024.
+\newblock doi: \url{https://doi.org/10.1007/s42514-024-00197-9}.
+
+\bibitem[Fursin et~al.(2011)Fursin, Kashnikov, Memon, Chamski, Temam, Namolaru, Yom-Tov, Mendelson, Zaks, Courtois, Bodin, Barnard, Ashton, Bonilla, Thomson, Williams, O'Boyle, and Gaydadjiev]{fursin2011milepost}
+Grigori Fursin, Yuri Kashnikov, Abdul Rashid Memon, Michael Chamski, Olivier Temam, Cristian C. Namolaru, Elad Yom-Tov, Bill Mendelson, Ayal Zaks, Edouard Courtois, Fran\c{c}ois Bodin, Phil Barnard, Elton Ashton, Edwin Bonilla, John Thomson, Christopher K.~I. Williams, Michael F.~P. O'Boyle, and Todor M. Gaydadjiev.
+\newblock MILEPOST {GCC}: machine learning enabled self-tuning compiler.
+\newblock \emph{International Journal of Parallel Programming}, 39(3):296--327, 2011.
+\newblock doi: \url{https://doi.org/10.1007/s10766-010-0161-2}.
+
+\bibitem[Pan et~al.(2025)Pan, Wei, Xing, Wu, and Zhao]{pan2025synergistic}
+Haolin Pan, Yuanyu Wei, Mingjie Xing, Yanjun Wu, and Chen Zhao.
+\newblock Towards efficient compiler auto-tuning: Leveraging synergistic search spaces.
+\newblock In \emph{Proceedings of the 23rd ACM/IEEE International Symposium on Code Generation and Optimization}, pages 614--627, 2025.
+\newblock doi: \url{https://doi.org/10.1145/3696443.3708961}.
+
+\bibitem[Pan et~al.(2026)Pan, Huang, Dong, Xing, and Wu]{pan2026ecco}
+Haolin Pan, Lianghong Huang, Jinyuan Dong, Mingjie Xing, and Yanjun Wu.
+\newblock ECCO: Evidence-driven causal reasoning for compiler optimization.
+\newblock \emph{arXiv preprint arXiv:2602.00087}, 2026.
+\newblock doi: \url{https://doi.org/10.48550/arXiv.2602.00087}.
+
+\bibitem[Zhao et~al.(2025)Zhao, Xia, and Wang]{zhao2025citroen}
+Jiayu Zhao, Chunwei Xia, and Zheng Wang.
+\newblock Leveraging compilation statistics for compiler phase ordering.
+\newblock In \emph{2025 IEEE International Parallel and Distributed Processing Symposium (IPDPS)}, pages 533--545, 2025.
+\newblock doi: \url{https://doi.org/10.1109/IPDPS64566.2025.00054}.
+
+\bibitem[Pouchet and Yuki(2012)]{pouchet2012polybench}
+Louis-No\"el Pouchet and Tomofumi Yuki.
+\newblock PolyBench/C benchmark suite.
+\newblock Software release, 2012.
+\newblock \url{https://sourceforge.net/projects/polybench/}.
+
+\bibitem[Fursin(2010)]{fursin2010cbench}
+Grigori Fursin.
+\newblock cBench: Collective benchmark.
+\newblock Software release, 2010.
+\newblock \url{https://ctuning.org/wiki/index.php?title=CTools:CBench}.
+
+\bibitem[Nemet(2016)]{nemet2016compilerassisted}
+Adam Nemet.
+\newblock Compiler-assisted performance analysis.
+\newblock LLVM Developers' Meeting talk, 2016.
+\newblock \url{https://llvm.org/devmtg/2016-11/Slides/Nemet-Compiler-assistedPerformanceAnalysis.pdf}.
+
+\bibitem[Mistrih(2019)]{mistrih2019remarksupdate}
+Francis Visoiu Mistrih.
+\newblock Optimization remarks update.
+\newblock LLVM Developers' Meeting talk, 2019.
+\newblock \url{https://llvm.org/devmtg/2019-10/slides/Mistrih-OptimizationRemarksUpdate.pdf}.
+
+\bibitem[LLVM Project(2026)]{llvmremarksdocs}
+LLVM Project.
+\newblock Remarks.
+\newblock LLVM documentation, accessed March 23, 2026.
+\newblock \url{https://llvm.org/docs/Remarks.html}.
+
+\end{thebibliography}
+
+\end{document}

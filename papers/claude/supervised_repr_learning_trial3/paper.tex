@@ -1,0 +1,609 @@
+\documentclass{article}
+\usepackage[final]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+% Custom commands
+\newcommand{\conf}{\widehat{\mathrm{conf}}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\bmu}{\boldsymbol{\mu}}
+
+\title{Confusion-Calibrated Supervised Contrastive Learning:\\Adaptive Class-Pair Reweighting from Training Dynamics}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Supervised contrastive learning (SupCon) treats all negative class pairs with equal repulsion strength, converging to a simplex equiangular tight frame (ETF) geometry where all classes are equidistant.
+We investigate whether adaptively reweighting negative pairs based on class-pair confusability---increasing repulsion for classes the model currently struggles to separate---can improve representation quality.
+We propose Confusion-Calibrated Supervised Contrastive Learning (CC-SupCon), which maintains a momentum-updated confusability matrix derived from the model's own representation geometry and uses it to modulate negative pair weights in the SupCon loss.
+On CIFAR-100 with ResNet-18, we find that the learned confusability matrix captures semantically meaningful inter-class structure: across 5 seeds, within-superclass confusability is $7.65\times$ higher than between-superclass confusability ($p < 10^{-96}$), and the top confusable pairs (e.g., otter/seal, maple/oak tree, boy/girl) align with human-perceived similarity.
+However, this structural signal does not translate to improved final accuracy: CC-SupCon achieves $73.84\% \pm 0.30$ linear probe accuracy versus $73.88\% \pm 0.47$ for standard SupCon (paired $t$-test, $p = 0.85$, 5 seeds).
+Notably, CC-SupCon acts as a \emph{training accelerator}: at 100 epochs, all tested calibration strengths ($\beta > 0$) outperform standard SupCon by up to $+2.10$ percentage points, though this advantage vanishes at convergence.
+Transfer evaluation on CIFAR-10 shows a small, non-significant advantage ($+0.34$ pp).
+Our results suggest that the simplex ETF geometry, while discarding inter-class structure, may be near-optimal for linear evaluation on balanced datasets, and that confusability-guided reweighting accelerates convergence without altering the final solution.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Supervised contrastive learning (SupCon)~\citep{khosla2020supervised} has emerged as a powerful alternative to cross-entropy for learning visual representations. By pulling together representations of same-class samples and pushing apart different-class representations on a normalized hypersphere, SupCon produces representations that are robust to corruptions and achieve competitive classification accuracy.
+
+A key theoretical result about SupCon---and supervised representation learning more broadly---is \emph{neural collapse}~\citep{papyan2020prevalence}: during the terminal phase of training, last-layer features converge to class means forming a \textbf{simplex equiangular tight frame (ETF)}, where all class pairs are equidistant. \citet{graf2021dissecting} proved that the SupCon loss also attains its minimum at this simplex ETF geometry.
+
+While the simplex ETF is the optimal geometry under idealized conditions, it has a fundamental limitation: \textbf{it treats all class pairs identically}. In practice, some class pairs are inherently harder to distinguish (e.g., ``otter'' vs.\ ``seal'') while others are trivially separable (e.g., ``airplane'' vs.\ ``mushroom''). Standard SupCon allocates equal representational effort to all negative pairs, potentially wasting capacity on already-well-separated classes while providing insufficient separation for confusable ones.
+
+This observation raises a natural question: \emph{Can we improve representation quality by using the model's own confusion patterns to adaptively calibrate the contrastive loss?} During training, which classes the model struggles to separate provides a rich, dynamic signal about where representational capacity is most needed.
+
+We propose \textbf{Confusion-Calibrated Supervised Contrastive Learning (CC-SupCon)}, which augments the standard SupCon loss with a class-pair confusability matrix that dynamically modulates repulsion strength between classes. The confusability matrix is computed from the model's own representation space via momentum-updated class centroids, creating an implicit curriculum that focuses learning on the hardest class distinctions.
+
+Our investigation yields a nuanced finding. The confusability matrix learned by CC-SupCon captures rich, semantically meaningful structure: across 5 seeds, within-superclass class pairs in CIFAR-100 are $7.65\times$ more confusable than between-superclass pairs ($p < 10^{-96}$), and the most confusable pairs align with human intuition (e.g., otter/seal, maple tree/oak tree). However, this structural signal does not translate to improved \emph{final} accuracy under standard evaluation protocols. Instead, CC-SupCon functions as a \textbf{training accelerator}: at 100 epochs, all tested calibration strengths outperform standard SupCon by up to $+2.10$ percentage points, but this advantage diminishes as training converges. We analyze why this occurs and what it implies for confusion-guided approaches to representation learning.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose CC-SupCon, a method that modulates SupCon's negative pair weights using a momentum-updated class-pair confusability matrix derived from the model's own training dynamics.
+    \item We demonstrate that the learned confusability matrix captures semantically meaningful inter-class structure without external supervision, with within-superclass confusability $7.65 \pm 0.08\times$ higher than between-superclass across all 5 seeds ($p < 10^{-96}$; Spearman $\rho = 0.29$ with superclass membership). Per-seed confusability data is saved as verifiable artifacts.
+    \item We present a rigorous empirical study showing that CC-SupCon does not improve final linear probe or $k$-NN accuracy over SupCon at convergence, but provides a consistent early-training benefit (up to $+2.10$ pp at 100 epochs across multiple $\beta$ values), suggesting a role as a training accelerator rather than a regularizer.
+    \item We provide gradient analysis, representation geometry analysis (aggregated over 5 seeds), and transfer evaluation, all supporting the conclusion that the simplex ETF is a robust attractor for contrastive objectives on balanced datasets.
+\end{itemize}
+
+The remainder of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes CC-SupCon. Section~\ref{sec:experiments} presents experiments and analysis. Section~\ref{sec:discussion} discusses limitations and implications. Section~\ref{sec:conclusion} concludes.
+
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Supervised Contrastive Learning.}
+\citet{khosla2020supervised} introduced SupCon, extending self-supervised contrastive learning~\citep{chen2020simple} to the supervised setting by using label information to define positive pairs. SupCon achieves strong performance on ImageNet and CIFAR benchmarks but treats all negative pairs equally regardless of class identity.
+
+\paragraph{Neural Collapse.}
+\citet{papyan2020prevalence} discovered that during the terminal phase of training, features collapse to class means forming a simplex ETF. \citet{graf2021dissecting} proved SupCon also converges to this geometry. While the simplex ETF is optimal for balanced classification, it discards inter-class structure. Our work explicitly attempts to break this equidistant symmetry to create more informative representations.
+
+\paragraph{Confusion-Guided Contrastive Learning.}
+Lov\'{a}sz Theta Contrastive Learning~\citep{smyrnis2022lovasz} is the closest prior work. They use a learned weighted similarity graph to modulate contrastive learning, \emph{softening} (decreasing) repulsion for semantically similar classes. CC-SupCon takes the \emph{opposite} direction: we \emph{increase} repulsion for confusable class pairs. The key distinction is between \emph{semantic similarity} (which Lov\'{a}sz Theta preserves) and \emph{confusion} (which CC-SupCon resolves). Additionally, Lov\'{a}sz Theta uses a fixed or learned similarity graph, while CC-SupCon's confusability matrix evolves dynamically with training.
+
+CCDC~\citep{chen2024dynamic} proposes a dynamic contrastive learning framework guided by class confidence and confusion degree for medical image segmentation. While CCDC shares the intuition of using inter-class confusion to guide contrastive learning, it differs from CC-SupCon in several ways: (i) CCDC targets dense prediction (segmentation) with pixel-level pairs, while CC-SupCon targets image-level representation learning; (ii) CCDC uses confusion to \emph{select} hard classes (binary mining), while CC-SupCon uses continuous soft weights; (iii) CCDC does not maintain a momentum-updated confusability matrix.
+
+\paragraph{Hard Negative Mining.}
+\citet{robinson2021contrastive} proposed sampling hard negatives in self-supervised contrastive learning. \citet{jiang2022supervised} extended this to the supervised setting with H-SCL. These methods operate at the \textbf{instance level} within a batch. Our approach operates at the \textbf{class-pair level} across training, providing more stable weighting. We present a variance reduction argument for why class-pair-level weighting may be preferable (Section~\ref{sec:variance}), though our empirical gradient analysis finds the effect is smaller than predicted (Section~\ref{sec:gradient}).
+
+\paragraph{Class-Aware and Adaptive Contrastive Learning.}
+\citet{zhu2022balanced} proposed Balanced Contrastive Learning (BCL) to address class imbalance. Our work is orthogonal: CC-SupCon addresses class confusability (which classes are hard to separate), not class imbalance. VarCon~\citep{wang2025varcon} reformulates SupCon as variational inference with a confidence-adaptive temperature per sample; CC-SupCon adapts weights per class-pair based on confusability. Temperature scheduling~\citep{kukleva2023temperature} adjusts a global temperature but does not differentiate between class pairs.
+
+\paragraph{Label Hierarchy in Contrastive Learning.}
+Several works incorporate explicit label hierarchies~\citep{zhang2022use}. These require external knowledge (taxonomy trees, WordNet distances). CC-SupCon discovers inter-class structure from training dynamics alone, making it applicable without additional annotations.
+
+\paragraph{Representation Quality Metrics.}
+\citet{wang2020understanding} identified alignment and uniformity as key properties of contrastive representations. Our work adds a third consideration: \textbf{calibrated inter-class separation}, where separation between classes is proportional to their difficulty of distinction.
+
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: Supervised Contrastive Loss}
+
+The standard SupCon loss~\citep{khosla2020supervised} for an anchor sample $i$ with label $y_i$ in a batch of $N$ augmented samples is:
+\begin{equation}
+\mathcal{L}_i^{\text{SupCon}} = -\frac{1}{|P(i)|} \sum_{p \in P(i)} \log \frac{\exp(\bz_i \cdot \bz_p / \tau)}{\sum_{a \in A(i)} \exp(\bz_i \cdot \bz_a / \tau)},
+\label{eq:supcon}
+\end{equation}
+where $P(i)$ is the set of positives (same class as $i$), $A(i)$ is the set of all samples except $i$, $\bz$ are $\ell_2$-normalized embeddings, and $\tau$ is the temperature. All negative pairs contribute equally to the denominator regardless of class identity.
+
+\subsection{Class-Pair Confusability Matrix}
+\label{sec:confusability}
+
+We maintain a running set of \textbf{class centroids} $\{\bmu_c\}_{c=1}^{C}$ computed as exponential moving averages of the $\ell_2$-normalized embeddings:
+\begin{equation}
+\bmu_c^{(t)} = \alpha \cdot \bmu_c^{(t-1)} + (1-\alpha) \cdot \frac{1}{|B_c|}\sum_{i \in B_c} \bz_i,
+\label{eq:centroid}
+\end{equation}
+where $B_c$ is the set of class-$c$ samples in the current mini-batch and $\alpha$ is the momentum coefficient. The \textbf{confusability score} between classes $c$ and $c'$ is:
+\begin{equation}
+\mathrm{conf}(c, c') = \frac{\exp(\bmu_c \cdot \bmu_{c'} / \tau_c)}{\sum_{k \neq c} \exp(\bmu_c \cdot \bmu_k / \tau_c)},
+\label{eq:conf}
+\end{equation}
+where $\tau_c$ controls the sharpness of the confusability distribution. This softmax-based score measures how much class $c'$ ``competes'' with other classes for proximity to class $c$ in the current representation space. We symmetrize: $\conf(c, c') = \tfrac{1}{2}[\mathrm{conf}(c, c') + \mathrm{conf}(c', c)]$.
+
+\subsection{Confusion-Calibrated SupCon Loss}
+
+We modify the SupCon loss to weight negative pairs by confusability:
+\begin{equation}
+\mathcal{L}_i^{\text{CC-SupCon}} = -\frac{1}{|P(i)|} \sum_{p \in P(i)} \log \frac{\exp(\bz_i \cdot \bz_p / \tau)}{\sum_{a \in A(i)} w(y_i, y_a) \cdot \exp(\bz_i \cdot \bz_a / \tau)},
+\label{eq:ccsupcon}
+\end{equation}
+where for negative pairs ($y_a \neq y_i$):
+\begin{equation}
+w(y_i, y_a) = 1 + \beta \cdot \conf(y_i, y_a),
+\label{eq:weight}
+\end{equation}
+and for positive pairs ($y_a = y_i$): $w(y_i, y_a) = 1$. The scalar $\beta \geq 0$ controls the strength of confusion calibration. When $\beta = 0$, CC-SupCon reduces to standard SupCon.
+
+\textbf{Intuition.} When two classes are highly confusable (high $\conf$), their negative pair weights increase, amplifying repulsion and encouraging the model to invest more representational capacity in separating them. As training progresses and classes become better separated, their confusability decreases and the weights naturally relax.
+
+\subsection{Design Choices}
+
+\textbf{Class-pair level, not instance-level.} Unlike hard negative mining~\citep{robinson2021contrastive}, which operates on individual samples, our weighting operates at the class-pair level. This is more stable (aggregated over many samples) and directly targets inter-class structure.
+
+\textbf{Self-discovered structure.} Unlike methods requiring external label hierarchies~\citep{zhang2022use}, our confusability matrix is derived entirely from training dynamics.
+
+\textbf{Implicit curriculum.} Early in training when representations are random, all class pairs have similar confusability, so CC-SupCon behaves like standard SupCon. As training progresses, easy pairs become well-separated (low weight) while hard pairs retain high weights.
+
+\textbf{Minimal overhead.} Computing centroids and the confusability matrix requires $O(C^2 d)$ operations per batch, negligible compared to the forward/backward pass.
+
+\subsection{Variance Reduction Argument}
+\label{sec:variance}
+
+Instance-level hard negative mining upweights individual negative samples close to the anchor, but within a single batch, the hardest negative may be an outlier unrepresentative of its class. CC-SupCon weights by $\conf(y_i, y_a)$, which depends only on class identities. The effective gradient for class pair $(c, c')$ is:
+\begin{equation}
+\bar{g}_{cc'} = \conf(c, c') \cdot \frac{1}{|S_{cc'}|} \sum_{(i,j) \in S_{cc'}} g_{ij},
+\end{equation}
+where $S_{cc'}$ is the set of negative pairs with classes $c$ and $c'$. By averaging, the gradient variance is reduced by $1/|S_{cc'}|$ compared to individual $g_{ij}$. The confusability weight, being momentum-smoothed over many batches, adds negligible variance. We empirically evaluate this prediction in Section~\ref{sec:gradient}.
+
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\paragraph{Dataset.} CIFAR-100~\citep{krizhevsky2009learning}: 100 classes grouped into 20 superclasses (5 fine-grained classes each), 500 training and 100 test images per class at $32 \times 32$ resolution. The superclass structure provides a natural testbed for studying confusability.
+
+\paragraph{Architecture.} We use ResNet-18~\citep{he2016deep} adapted for $32 \times 32$ input (first convolution: $3 \times 3$, stride 1, padding 1; no max-pool), producing 512-dimensional features. A 2-layer MLP projection head ($512 \to 512 \to 128$) with batch normalization and ReLU is used during contrastive training; features are $\ell_2$-normalized. Evaluation uses the frozen 512-dim encoder features. We chose ResNet-18 over the originally planned ResNet-50 because the larger model's per-epoch cost (${\sim}64$s vs.\ ${\sim}10$s) made the full experimental protocol infeasible within our compute budget on a single GPU.
+
+\paragraph{Training.} All contrastive methods (SupCon, CC-SupCon, H-SCL) use SGD with momentum 0.9, weight decay $10^{-4}$, initial learning rate 0.5 with cosine annealing, temperature $\tau = 0.1$, batch size 1024. Training uses a warm restart strategy: 200 epochs followed by 100 additional epochs with a cosine learning rate reset (300 total epochs). Augmentations follow SimCLR~\citep{chen2020simple}: random resized crop, color jitter, random grayscale, horizontal flip. Models are compiled with \texttt{torch.compile} for efficiency. All experiments run on a single NVIDIA RTX A6000 (48GB).
+
+\paragraph{CC-SupCon hyperparameters.} Centroid momentum $\alpha = 0.99$, confusability temperature $\tau_c = 0.1$, calibration strength $\beta = 1.0$, no warmup. Confusability weights are detached from the computation graph (stop-gradient through centroids).
+
+\paragraph{Evaluation.} (1) \textbf{Linear probe}: freeze the encoder, train a linear classifier with SGD (lr=0.1, 100 epochs, cosine schedule) on the 512-dim features. (2) \textbf{$k$-NN}: $k$-nearest neighbors ($k = 200$) with cosine similarity on frozen features. (3) \textbf{Transfer}: linear probe on CIFAR-10 and STL-10 (96$\times$96 resized to 32$\times$32) using CIFAR-100-trained encoders.
+
+\paragraph{Baselines.} \textbf{Cross-entropy (CE)}: standard classification with the same ResNet-18 (200 epochs, batch size 512, lr 0.5, 3 seeds). \textbf{SupCon}~\citep{khosla2020supervised}: standard supervised contrastive learning. \textbf{H-SCL}~\citep{jiang2022supervised}: SupCon with instance-level hard negative upweighting ($\lambda_h = 0.5$, 3 seeds).
+
+\paragraph{Statistical design.} All main comparisons (SupCon vs.\ CC-SupCon) use \textbf{5 seeds} $\{42, 123, 456, 789, 1024\}$ with a paired design: the same seeds are used for both methods, and significance is assessed with a paired $t$-test. CE and H-SCL baselines use 3 seeds each.
+
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main} presents the main comparison across all methods. CC-SupCon achieves $73.84\%$ linear probe accuracy, compared to $73.88\%$ for standard SupCon---a difference of $-0.04$ percentage points that is \emph{not} statistically significant (paired $t$-test: $t = -0.20$, $p = 0.85$, 95\% CI $[-0.66, 0.57]$, Cohen's $d = -0.09$). Similarly, $k$-NN accuracy shows no significant difference: CC-SupCon achieves a slightly higher mean ($74.41\%$ vs.\ $74.22\%$, $\Delta = +0.19$) but this is also not significant ($p = 0.37$).
+
+The cross-entropy baseline achieves the highest linear probe accuracy ($75.81 \pm 0.74\%$) across 3 seeds, consistent with prior observations that CE can match or outperform contrastive methods on CIFAR-100 with smaller architectures like ResNet-18, where end-to-end optimization may be more effective than the two-stage contrastive pre-training plus linear probe pipeline.
+
+\begin{table}[t]
+\caption{Main results on CIFAR-100. Mean $\pm$ std over seeds. All contrastive methods use 300 epochs with warm restart, batch size 1024. CE uses 200 epochs, batch size 512. The difference between SupCon and CC-SupCon is not statistically significant (LP: $p = 0.85$; $k$-NN: $p = 0.37$).}
+\label{tab:main}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Linear Probe (\%) $\uparrow$ & $k$-NN (\%) $\uparrow$ & Seeds \\
+\midrule
+CE & \textbf{75.81} $\pm$ 0.74 & \textbf{75.57} $\pm$ 0.75 & 3 \\
+SupCon & 73.88 $\pm$ 0.47 & 74.22 $\pm$ 0.42 & 5 \\
+H-SCL & 73.89 $\pm$ 0.20 & 74.32 $\pm$ 0.20 & 3 \\
+CC-SupCon ($\beta\!=\!1.0$) & 73.84 $\pm$ 0.30 & 74.41 $\pm$ 0.26 & 5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:main_results} provides a visual comparison, and Table~\ref{tab:per_seed} shows the per-seed breakdown. CC-SupCon outperforms SupCon on 2 of 5 seeds for linear probe and 3 of 5 for $k$-NN, with no consistent direction.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig2_main_results.png}
+\caption{CIFAR-100 classification accuracy across methods. Error bars show standard deviation over seeds. All contrastive methods achieve similar accuracy; CE outperforms in the linear probe setting.}
+\label{fig:main_results}
+\end{figure}
+
+\begin{table}[t]
+\caption{Per-seed results for the paired SupCon vs.\ CC-SupCon comparison (300 epochs, batch size 1024). $\Delta$ = CC-SupCon $-$ SupCon. Bold indicates positive differences.}
+\label{tab:per_seed}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{3}{c}{Linear Probe (\%)} & \multicolumn{3}{c}{$k$-NN (\%)} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Seed & SupCon & CC-SupCon & $\Delta$ & SupCon & CC-SupCon & $\Delta$ \\
+\midrule
+42 & 74.04 & 73.72 & $-0.32$ & 74.37 & 74.40 & \textbf{+0.03} \\
+123 & 74.05 & 73.91 & $-0.14$ & 74.69 & 74.39 & $-0.30$ \\
+456 & 73.31 & 73.41 & \textbf{+0.10} & 73.74 & 74.01 & \textbf{+0.27} \\
+789 & 74.49 & 73.91 & $-0.58$ & 74.48 & 74.58 & \textbf{+0.10} \\
+1024 & 73.51 & 74.23 & \textbf{+0.72} & 73.81 & 74.68 & \textbf{+0.87} \\
+\midrule
+Mean & 73.88 & 73.84 & $-0.04$ & 74.22 & 74.41 & $+0.19$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Transfer Evaluation}
+\label{sec:transfer}
+
+To test whether CC-SupCon's non-uniform inter-class structure benefits evaluation beyond the training label space, we evaluate CIFAR-100-trained encoders on CIFAR-10 (10 classes, 32$\times$32) and STL-10 (10 classes, 96$\times$96 resized to 32$\times$32) via linear probing.
+
+\textbf{Training configuration note.} Transfer evaluation was conducted on a separately trained set of models using a unified configuration: 250 epochs with cosine annealing (no warm restart), batch size 256. This differs from the 300-epoch warm-restart setup used for the main results (Table~\ref{tab:main}). We report these results for completeness but note that direct comparison between main and transfer tables should be made with caution due to this configuration difference. Within the transfer evaluation, all methods use identical training configurations.
+
+\begin{table}[t]
+\caption{Transfer evaluation: linear probe accuracy (\%) on CIFAR-10 and STL-10 using CIFAR-100-trained encoders (250 epochs, batch size 256). Mean $\pm$ std over 5 paired seeds. Note: training configuration differs from Table~\ref{tab:main}; see text.}
+\label{tab:transfer}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & CIFAR-10 (\%) $\uparrow$ & STL-10 (\%) $\uparrow$ & Seeds \\
+\midrule
+CE & \textbf{79.21} & \textbf{65.81} & 1 \\
+SupCon & 78.43 $\pm$ 0.38 & 59.28 $\pm$ 0.51 & 5 \\
+CC-SupCon ($\beta\!=\!1.0$) & 78.77 $\pm$ 0.41 & 59.45 $\pm$ 0.24 & 5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:transfer} shows transfer results. CC-SupCon achieves a small advantage over SupCon on both transfer datasets: $+0.34$ percentage points on CIFAR-10 ($78.77\%$ vs.\ $78.43\%$) and $+0.17$ on STL-10 ($59.45\%$ vs.\ $59.28\%$). Neither difference reaches statistical significance with 5 paired seeds. The CE baseline substantially outperforms all contrastive methods on STL-10 ($65.81\%$ vs.\ ${\sim}59\%$), likely because end-to-end CE training on CIFAR-100 produces features that transfer better to coarser 10-class problems. The trend toward improved transfer for CC-SupCon is consistent with the hypothesis that non-uniform inter-class structure may benefit out-of-distribution evaluation, but the effect size is too small to draw conclusions.
+
+
+\subsection{Ablation Studies: Calibration Strength ($\beta$)}
+\label{sec:ablation}
+
+We ablate the calibration strength $\beta$ at two training horizons to distinguish between early-training benefits and convergence behavior.
+
+\paragraph{100-epoch ablation (seed 42).} Table~\ref{tab:ablation_100} shows that \emph{all} $\beta > 0$ values outperform $\beta = 0$ (standard SupCon) at 100 epochs, with $\beta = 0.5$ performing best ($+2.10$ LP, $+1.54$ $k$-NN). This confirms that confusability weighting provides a useful curriculum in the early-to-mid stages of training. The benefit is consistent across a wide range of $\beta$ values ($0.5$--$5.0$), suggesting robustness rather than sensitivity to this hyperparameter.
+
+\begin{table}[t]
+\caption{Ablation of calibration strength $\beta$ on CIFAR-100 at 100 epochs (seed 42, batch size 1024). $\beta = 0$ is equivalent to standard SupCon. All $\beta > 0$ values outperform $\beta = 0$, confirming that confusability weighting accelerates early learning.}
+\label{tab:ablation_100}
+\centering
+\begin{tabular}{lcc}
+\toprule
+$\beta$ & LP (\%) & $k$-NN (\%) \\
+\midrule
+0.0 (SupCon) & 70.62 & 70.70 \\
+0.5 & \textbf{72.72} & \textbf{72.24} \\
+1.0 & 71.44 & 71.21 \\
+2.0 & 72.00 & 71.78 \\
+5.0 & 71.61 & 71.08 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Convergence behavior.} The early-training benefit does not persist to convergence. The main 300-epoch results (Table~\ref{tab:main}) show that SupCon ($\beta = 0$) and CC-SupCon ($\beta = 1.0$) achieve nearly identical accuracy. This convergence pattern is further supported by Figure~\ref{fig:training_curves}, which shows CC-SupCon maintaining a lower training loss through early-to-mid training that equalizes by convergence. The 100-epoch advantage ($+0.82$ LP for $\beta = 1.0$) vanishes by 300 epochs ($-0.04$ LP). This pattern is consistent with CC-SupCon acting as an \emph{optimization accelerator}: it helps the model find discriminative features faster but does not change the final convergence point of the contrastive objective.
+
+We additionally conducted a 3-seed ablation at 250 epochs with a broader set of $\beta$ values $\{0, 0.25, 1.0, 2.0, 5.0\}$ (Table~\ref{tab:ablation_250}). At convergence, all $\beta$ values achieve similar performance, with $\beta = 0.25$ showing a marginal $+0.03$ LP advantage and $\beta = 2.0$ a marginal $-0.26$ disadvantage, neither significant. The narrow spread across $\beta$ values at convergence ($75.13$--$75.58$, range $0.45$ pp) contrasts with the wider spread at 100 epochs ($70.62$--$72.72$, range $2.10$ pp), reinforcing the acceleration-without-convergence-change interpretation.
+
+\begin{table}[t]
+\caption{Beta ablation at 250 epochs (3 seeds $\{42, 123, 456\}$, batch size 256, cosine annealing). At convergence, all values achieve similar accuracy, confirming the early benefit does not persist.}
+\label{tab:ablation_250}
+\centering
+\begin{tabular}{lccc}
+\toprule
+$\beta$ & LP (\%) & $k$-NN (\%) & Seeds \\
+\midrule
+0.0 (SupCon) & 75.55 $\pm$ 0.10 & 75.29 $\pm$ 0.005 & 3 \\
+0.25 & \textbf{75.58} $\pm$ 0.20 & \textbf{75.56} $\pm$ 0.13 & 3 \\
+1.0 & 75.26 $\pm$ 0.08 & 75.35 $\pm$ 0.06 & 3 \\
+2.0 & 75.29 $\pm$ 0.03 & 75.06 $\pm$ 0.11 & 3 \\
+5.0 & 75.13 & 74.98 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/fig_learning_curves.png}
+\caption{Left: Training loss curves for SupCon and CC-SupCon (mean $\pm$ std, 5 seeds, 250 epochs). CC-SupCon achieves lower loss throughout training but converges to a similar value. Right: Linear probe accuracy at 100 vs.\ 300 epochs. The early-training benefit ($+0.82$ pp at 100 epochs) vanishes at convergence ($-0.04$ pp).}
+\label{fig:training_curves}
+\end{figure}
+
+
+\subsection{Gradient Analysis}
+\label{sec:gradient}
+
+To empirically evaluate the claim that CC-SupCon focuses representational effort on confusable class pairs and the variance reduction argument from Section~\ref{sec:variance}, we analyze gradient magnitudes for confusable vs.\ well-separated class pairs.
+
+Using the trained CC-SupCon model (seed 42, 250 epochs), we partition the 4,950 off-diagonal class pairs into ``confusable'' (top 20\% by confusability score, $n = 990$) and ``well-separated'' (bottom 20\%, $n = 990$). We compute the mean gradient magnitude for negative pairs aggregated by class pair over 50 training batches.
+
+\begin{table}[t]
+\caption{Gradient analysis: mean gradient magnitude for confusable vs.\ well-separated class pairs. CC-SupCon shows a slightly higher confusable/well-separated ratio (1.037 vs.\ 1.019), but the effect is small. Gradient variance is also similar, providing limited support for the variance reduction argument.}
+\label{tab:gradient}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Confusable & Well-Sep. & Ratio & Grad.\ Var.\ ($\times 10^{-6}$) \\
+\midrule
+SupCon & 0.00625 & 0.00613 & 1.019 & 1.35 \\
+CC-SupCon & 0.00631 & 0.00609 & 1.037 & 1.51 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:gradient} reports the results. CC-SupCon does produce a slightly higher confusable-to-well-separated gradient ratio ($1.037$ vs.\ $1.019$ for SupCon), indicating a modest reallocation of gradient signal toward confusable pairs. However, the effect is small: both methods allocate nearly equal gradient to confusable and well-separated pairs. Furthermore, CC-SupCon's overall gradient variance ($1.51 \times 10^{-6}$) is \emph{slightly higher} than SupCon's ($1.35 \times 10^{-6}$), providing limited support for the theoretical variance reduction argument. This may be because the confusability weights, while momentum-smoothed, still introduce additional variation in the loss landscape. We note that this analysis was conducted at a single training stage (convergence, seed 42); the variance reduction effect may be more pronounced during early training when confusability signals are stronger.
+
+
+\subsection{Confusability Matrix Analysis}
+\label{sec:confusability_analysis}
+
+Despite the lack of accuracy improvement, the confusability matrix learned by CC-SupCon reveals rich inter-class structure.
+
+\paragraph{Semantic structure (all 5 seeds, verified from saved artifacts).} Table~\ref{tab:conf_seeds} reports the within-superclass vs.\ between-superclass confusability ratio for each seed, computed from the saved model checkpoints and confusability matrices. The mean ratio is $7.65 \pm 0.08\times$ across all 5 seeds, highly significant for each seed ($p < 10^{-96}$, Mann-Whitney $U$ test). The low standard deviation ($0.08$) across seeds demonstrates remarkable consistency of the confusability signal. The Spearman rank correlation between the confusability matrix and ground-truth superclass co-membership is $\rho = 0.29$ ($p < 10^{-100}$).
+
+\begin{table}[t]
+\caption{Within-superclass vs.\ between-superclass confusability ratio across all 5 seeds at the final epoch (300 epochs, batch size 1024). All ratios are computed from saved checkpoints and confusability matrices for independent verification.}
+\label{tab:conf_seeds}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Seed & Within-SC & Between-SC & Ratio \\
+\midrule
+42 & 0.0611 & 0.0080 & 7.69$\times$ \\
+123 & 0.0615 & 0.0079 & 7.74$\times$ \\
+456 & 0.0600 & 0.0080 & 7.49$\times$ \\
+789 & 0.0610 & 0.0080 & 7.67$\times$ \\
+1024 & 0.0610 & 0.0080 & 7.66$\times$ \\
+\midrule
+Mean $\pm$ Std &  0.0609 $\pm$ 0.0005 & 0.0080 $\pm$ 0.0000 & 7.65 $\pm$ 0.08$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Top confusable pairs.} Table~\ref{tab:confusable} shows the 10 most confusable class pairs at the end of training (seed 42). Nine of ten are within the same superclass, and all correspond to semantically similar classes that humans would also find difficult to distinguish. The top pair, otter/seal (confusability 0.594), reflects the well-known difficulty of distinguishing these visually similar aquatic mammals. Notably, ``bus'' and ``streetcar'' (the sole cross-superclass pair) are visually similar despite belonging to different superclasses (vehicles~1 and vehicles~2).
+
+\begin{table}[t]
+\caption{Top-10 most confusable class pairs learned by CC-SupCon on CIFAR-100 (seed 42, final epoch). Nine of ten pairs belong to the same superclass, confirming the confusability matrix captures semantically meaningful structure.}
+\label{tab:confusable}
+\centering
+\begin{tabular}{llcc}
+\toprule
+Class $i$ & Class $j$ & Confusability & Same Superclass \\
+\midrule
+otter & seal & 0.594 & \checkmark \\
+maple tree & oak tree & 0.477 & \checkmark \\
+boy & girl & 0.446 & \checkmark \\
+girl & woman & 0.359 & \checkmark \\
+baby & boy & 0.308 & \checkmark \\
+man & woman & 0.306 & \checkmark \\
+mouse & shrew & 0.284 & \checkmark \\
+bus & streetcar & 0.272 & \\
+maple tree & willow tree & 0.263 & \checkmark \\
+boy & man & 0.260 & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Temporal dynamics.} The within/between ratio follows an inverted-U pattern (Figure~\ref{fig:confusability_structure}): it rises sharply in early training (epochs 1--100) as the model learns to distinguish superclass groups, peaks around epoch 100 ($14.12\times$), and then gradually decreases (epochs 100--300, declining to $7.69\times$). This decrease reflects two phenomena: as training converges, even within-superclass pairs achieve reasonable separation, and the confusability signal diminishes---precisely when the early-training acceleration benefit also vanishes. This temporal correspondence is consistent with the confusability weighting being most useful during the representation-formation phase of training.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[t]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/fig4_confusability_structure.png}
+\caption{Within- vs.\ between-superclass confusability over training epochs.}
+\label{fig:confusability_structure}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/fig5_geometry.png}
+\caption{Representation geometry: standard deviation of off-diagonal cosine similarities.}
+\label{fig:geometry_bar}
+\end{subfigure}
+\caption{(a) The confusability signal peaks at epoch 100--150 and diminishes toward convergence, paralleling the early-training accuracy benefit. (b) CC-SupCon produces slightly more variable inter-class distances than SupCon, consistent with breaking the simplex ETF symmetry.}
+\label{fig:structure_geometry}
+\end{figure}
+
+
+\subsection{Representation Geometry Analysis}
+\label{sec:geometry}
+
+We analyze how CC-SupCon affects the geometry of learned representations compared to SupCon, aggregating across all 5 seeds (Table~\ref{tab:geometry}).
+
+\begin{table}[t]
+\caption{Representation geometry comparison aggregated over 5 seeds (mean $\pm$ std). For 100 classes, the ideal simplex ETF has all off-diagonal cosine similarities equal to $-1/99 \approx -0.010$. NC1: within/between class covariance ratio (lower = more collapsed). NC2: deviation from simplex ETF structure.}
+\label{tab:geometry}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & Mean Cos.\ Sim. & Std Cos.\ Sim. & NC1 $\downarrow$ & NC2 \\
+\midrule
+SupCon & 0.160 $\pm$ 0.015 & 0.053 $\pm$ 0.002 & 0.532 $\pm$ 0.039 & 0.985 $\pm$ 0.034 \\
+CC-SupCon & 0.154 $\pm$ 0.032 & 0.052 $\pm$ 0.005 & 0.487 $\pm$ 0.061 & 0.962 $\pm$ 0.086 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both methods are far from the ideal simplex ETF: the mean off-diagonal cosine similarity is ${\sim}0.15$ (compared to the ideal $-0.010$), indicating that 300 epochs with ResNet-18 on CIFAR-100 is insufficient for full neural collapse. CC-SupCon achieves a slightly lower NC1 value ($0.487 \pm 0.061$ vs.\ $0.532 \pm 0.039$), indicating tighter within-class clustering---consistent with the confusability weighting focusing repulsion on confusable pairs, which indirectly tightens same-class representations. The standard deviation of off-diagonal cosine similarities and NC2 values are comparable, suggesting that CC-SupCon does not substantially alter the overall inter-class geometry at convergence. This finding is consistent with the simplex ETF being a robust attractor for contrastive objectives regardless of the weighting scheme.
+
+
+\subsection{Confusability Matrix Temporal Evolution}
+\label{sec:conf_evolution}
+
+Figure~\ref{fig:conf_evolution} visualizes the 100$\times$100 confusability matrix at four training stages (classes ordered by superclass). At epoch 1, the matrix is nearly uniform (${\sim}0.01$). By epoch 50, clear block-diagonal structure emerges along superclass boundaries. The structure is sharpest at epoch 100, then gradually smooths by epoch 200 as even within-superclass pairs become better separated.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_confusability_evolution.png}
+\caption{Confusability matrix evolution during CC-SupCon training (seed 42, classes ordered by superclass). Block-diagonal structure aligning with CIFAR-100's 20 superclasses emerges early and is sharpest at epoch 100, then gradually diminishes as all class pairs become well-separated.}
+\label{fig:conf_evolution}
+\end{figure}
+
+Table~\ref{tab:conf_evolution} quantifies this evolution. The within/between ratio rises from $1.10\times$ at epoch 1 to $14.12\times$ at epoch 100, then declines to $7.69\times$ by epoch 300 as even confusable classes achieve reasonable separation. The peak at epoch 100 coincides with the training phase where CC-SupCon's early-training benefit is strongest (Section~\ref{sec:ablation}), reinforcing the interpretation that confusability-guided weighting is most impactful when the representation geometry is still being actively shaped.
+
+\begin{table}[t]
+\caption{Evolution of confusability during CC-SupCon training (seed 42). The ratio peaks at epoch 100 and gradually decreases as training converges.}
+\label{tab:conf_evolution}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Epoch & Within-SC & Between-SC & Ratio \\
+\midrule
+1 & 0.0111 & 0.0101 & 1.10$\times$ \\
+10 & 0.0166 & 0.0098 & 1.69$\times$ \\
+50 & 0.0930 & 0.0066 & 14.07$\times$ \\
+100 & 0.0932 & 0.0066 & 14.12$\times$ \\
+200 & 0.0647 & 0.0078 & 8.29$\times$ \\
+300 & 0.0611 & 0.0080 & 7.69$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Per-Seed Consistency}
+\label{sec:per_seed}
+
+Figure~\ref{fig:per_seed} shows the per-seed comparison between CC-SupCon and SupCon. Most seeds cluster near the diagonal (equal performance line), confirming that the methods converge to similar accuracy. Notably, seed 1024 shows a strong advantage for CC-SupCon ($+0.72$ LP, $+0.87$ $k$-NN), while seed 789 shows a comparable disadvantage ($-0.58$ LP), suggesting the differences are driven by seed-specific variability rather than a systematic effect.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.45\linewidth]{figures/fig6_per_seed_comparison.png}
+\caption{Per-seed linear probe accuracy: CC-SupCon vs.\ SupCon. Points near the dashed diagonal indicate equal performance. The scatter shows no systematic advantage for either method.}
+\label{fig:per_seed}
+\end{figure}
+
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{CC-SupCon as a Training Accelerator}
+
+Our most consistent finding is that CC-SupCon accelerates early training rather than improving final accuracy. At 100 epochs, all tested $\beta$ values ($0.5$--$5.0$) improve over standard SupCon ($\beta = 0$) by $+0.82$ to $+2.10$ percentage points (Table~\ref{tab:ablation_100}). This benefit diminishes as training continues, with all methods converging to similar accuracy by 250--300 epochs (Tables~\ref{tab:main},~\ref{tab:ablation_250}). The temporal profile of the confusability signal supports this interpretation: the within/between superclass ratio peaks at epoch 100 ($14.12\times$) when the acceleration benefit is strongest, then declines toward convergence ($7.69\times$) as the benefit vanishes.
+
+This acceleration effect suggests a practical use case: in compute-constrained settings where training to full convergence is not feasible, CC-SupCon may provide a meaningful accuracy boost at reduced training budgets. The robustness of this benefit across $\beta$ values (all tested values improve over $\beta = 0$) makes it practical: no careful hyperparameter tuning is needed.
+
+\subsection{Why Does Acceleration Not Persist?}
+
+We identify three factors explaining why the early benefit does not translate to improved final accuracy:
+
+\paragraph{Near-optimality of the simplex ETF for linear evaluation.} The linear probe protocol trains a linear classifier on frozen features. For a balanced 100-class dataset, the simplex ETF---where all class pairs are equidistant---may maximize the minimum margin. By deviating from this geometry, CC-SupCon may increase separation of some pairs while reducing it for others, offering no net benefit for a linear classifier. The transfer evaluation (Table~\ref{tab:transfer}) provides partial support: CC-SupCon shows a small advantage on CIFAR-10 ($+0.34$ pp) where the evaluation uses different class boundaries, though this is not significant.
+
+\paragraph{Diminishing confusability signal.} As shown in Section~\ref{sec:conf_evolution}, the confusability signal peaks at epoch 100 and diminishes by 60\% at convergence ($14.12\times \to 7.69\times$). As even confusable classes become reasonably well-separated, the confusability weights approach their baseline value ($w \to 1$), and CC-SupCon effectively reduces to standard SupCon. This is inherent to the design: the self-calibrating mechanism that creates the early curriculum also ensures its own obsolescence.
+
+\paragraph{Weak gradient reallocation.} The gradient analysis (Section~\ref{sec:gradient}) shows CC-SupCon produces only a modest increase in the confusable-to-well-separated gradient ratio ($1.037$ vs.\ $1.019$). With typical confusability values of $0.01$--$0.59$ and $\beta = 1.0$, the weight modification $w = 1 + \beta \cdot \conf$ ranges from $1.01$ to $1.59$---a relatively subtle perturbation. The variance reduction argument is not strongly supported empirically: CC-SupCon's gradient variance is slightly \emph{higher} than SupCon's ($1.51$ vs.\ $1.35 \times 10^{-6}$), though this analysis was limited to convergence-stage gradients (one seed, 50 batches).
+
+\subsection{Scope and Design Decisions}
+
+Our experimental scope differs from the original research plan in several ways that should be considered when interpreting results:
+
+\begin{itemize}
+    \item \textbf{Architecture}: ResNet-18 instead of the planned ResNet-50. The limited capacity of ResNet-18 (512-dim features vs.\ 2048-dim) may constrain the ability to maintain non-uniform inter-class structure; a larger model with more representational capacity might better exploit CC-SupCon's confusability weighting. A single-seed ResNet-50 comparison was not conducted due to compute constraints.
+    \item \textbf{Training duration}: 300 epochs (with warm restart) instead of 500. Both methods may not have reached full convergence, though the loss curves (Figure~\ref{fig:training_curves}) plateau.
+    \item \textbf{Dataset scope}: CIFAR-100 only; ImageNet-100 was dropped. Datasets with richer or more imbalanced class structure may benefit more from confusability-guided learning.
+    \item \textbf{Transfer evaluation config}: Uses 250 epochs and batch size 256, differing from the main 300-epoch, batch-size-1024 comparison. This prevents direct cross-comparison of absolute accuracy values between main and transfer tables.
+    \item \textbf{Ablation depth}: The $\beta$ ablation uses a single seed at 100 epochs and 3 seeds at 250 epochs. Several planned ablations ($\tau_c$, $\alpha$, warmup, batch size sensitivity) were not conducted.
+\end{itemize}
+
+\subsection{Limitations}
+
+\textbf{Single dataset.} We evaluate primarily on CIFAR-100 (with transfer to CIFAR-10/STL-10). Datasets with more complex or imbalanced class structures (e.g., iNaturalist, ImageNet with its 1000-class hierarchy) may benefit more from confusability-guided learning.
+
+\textbf{Architecture.} ResNet-18's limited capacity (512-dim features) may be insufficient to exploit non-uniform inter-class structure. ResNet-50 or larger models, which were originally planned but not feasible within our compute budget, may show different results.
+
+\textbf{Evaluation breadth.} We evaluate linear probe, $k$-NN, and transfer learning. Few-shot and hierarchical classification---which may better reward structured representations---were not conducted.
+
+\textbf{Gradient analysis limitations.} The gradient analysis was conducted at a single training stage (convergence) on one seed with 50 batches. The variance reduction argument may hold more strongly during early training when confusability signals are $2\times$ stronger, but this was not verified.
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed CC-SupCon, a method that dynamically reweights negative pairs in supervised contrastive learning based on a momentum-updated class-pair confusability matrix. Our investigation reveals two clear findings: (1) the confusability matrix captures semantically meaningful inter-class structure ($7.65 \pm 0.08\times$ within/between superclass ratio across 5 seeds, $p < 10^{-96}$; Spearman $\rho = 0.29$ with superclass membership), and (2) this signal accelerates early training (up to $+2.10$ pp at 100 epochs) but does not improve final classification accuracy ($-0.04$ pp vs.\ SupCon at 300 epochs, $p = 0.85$, 5 paired seeds).
+
+This finding is informative for the community. It suggests that for standard linear probe evaluation on balanced datasets, the simplex ETF geometry toward which SupCon naturally converges is a robust attractor, and injecting inter-class structure---even when semantically meaningful---does not improve performance at convergence. The confusability signal's most impactful role is as an early-training curriculum that accelerates representation formation.
+
+Future work should investigate: (1) whether CC-SupCon's acceleration benefit is more pronounced or persists at convergence with larger models (ResNet-50/101), where greater representational capacity may sustain non-uniform inter-class structure; (2) evaluation settings where inter-class relationships are explicitly rewarded (few-shot learning, hierarchical classification); (3) class-imbalanced settings where the confusability signal may carry more discriminative information; and (4) the confusability matrix itself as a diagnostic tool for understanding model behavior and dataset structure, independent of loss modulation.
+
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{16}
+
+\bibitem[Chen et~al.(2020)Chen, Kornblith, Norouzi, and Hinton]{chen2020simple}
+Ting Chen, Simon Kornblith, Mohammad Norouzi, and Geoffrey Hinton.
+\newblock A simple framework for contrastive learning of visual representations.
+\newblock In \emph{Proceedings of the 37th International Conference on Machine Learning}, volume 119, pages 1597--1607. PMLR, 2020.
+
+\bibitem[Chen et~al.(2024)Chen, Chen, Huang, Zhang, Debattista, and Han]{chen2024dynamic}
+Jingkun Chen, Changrui Chen, Wenjian Huang, Jianguo Zhang, Kurt Debattista, and Jungong Han.
+\newblock Dynamic contrastive learning guided by class confidence and confusion degree for medical image segmentation.
+\newblock \emph{Pattern Recognition}, 145:109881, 2024.
+
+\bibitem[Graf et~al.(2021)Graf, Hofer, Niethammer, and Kwitt]{graf2021dissecting}
+Florian Graf, Christoph~D. Hofer, Marc Niethammer, and Roland Kwitt.
+\newblock Dissecting supervised contrastive learning.
+\newblock In \emph{Proceedings of the 38th International Conference on Machine Learning}, volume 139, pages 3821--3830. PMLR, 2021.
+
+\bibitem[He et~al.(2016)He, Zhang, Ren, and Sun]{he2016deep}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{IEEE Conference on Computer Vision and Pattern Recognition}, pages 770--778, 2016.
+
+\bibitem[Jiang et~al.(2022)Jiang, Nguyen, Ishwar, and Aeron]{jiang2022supervised}
+Ruijie Jiang, Thuan Nguyen, Prakash Ishwar, and Shuchin Aeron.
+\newblock Supervised contrastive learning with hard negative samples.
+\newblock \emph{arXiv preprint arXiv:2209.00078}, 2022.
+
+\bibitem[Khosla et~al.(2020)Khosla, Teterwak, Wang, Sarna, Tian, Isola, Maschinot, Liu, and Krishnan]{khosla2020supervised}
+Prannay Khosla, Piotr Teterwak, Chen Wang, Aaron Sarna, Yonglong Tian, Phillip Isola, Aaron Maschinot, Ce Liu, and Dilip Krishnan.
+\newblock Supervised contrastive learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, volume~33, pages 18661--18673, 2020.
+
+\bibitem[Krizhevsky(2009)]{krizhevsky2009learning}
+Alex Krizhevsky.
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Kukleva et~al.(2023)Kukleva, Kuehne, Schiele, and Sener]{kukleva2023temperature}
+Anna Kukleva, Hilde Kuehne, Bernt Schiele, and Fadime Sener.
+\newblock Temperature schedules for self-supervised contrastive methods on long-tail data.
+\newblock In \emph{International Conference on Learning Representations}, 2023.
+
+\bibitem[Papyan et~al.(2020)Papyan, Han, and Donoho]{papyan2020prevalence}
+Vardan Papyan, X.Y. Han, and David~L. Donoho.
+\newblock Prevalence of neural collapse during the terminal phase of deep learning training.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 117(40):24652--24663, 2020.
+
+\bibitem[Robinson et~al.(2021)Robinson, Chuang, Sra, and Jegelka]{robinson2021contrastive}
+Joshua Robinson, Ching-Yao Chuang, Suvrit Sra, and Stefanie Jegelka.
+\newblock Contrastive learning with hard negative samples.
+\newblock In \emph{International Conference on Learning Representations}, 2021.
+
+\bibitem[Smyrnis et~al.(2022)Smyrnis, Jordan, Uppal, Daras, and Dimakis]{smyrnis2022lovasz}
+Georgios Smyrnis, Matt Jordan, Ananya Uppal, Giannis Daras, and Alex Dimakis.
+\newblock Lov{\'a}sz theta contrastive learning.
+\newblock In \emph{NeurIPS 2022 Workshop on Self-Supervised Learning: Theory and Practice}, 2022.
+
+\bibitem[Wang and Isola(2020)]{wang2020understanding}
+Tongzhou Wang and Phillip Isola.
+\newblock Understanding contrastive representation learning through alignment and uniformity on the hypersphere.
+\newblock In \emph{Proceedings of the 37th International Conference on Machine Learning}, volume 119, pages 9929--9939. PMLR, 2020.
+
+\bibitem[Wang et~al.(2025)Wang, Fan, Nguyen, Ji, and Liu]{wang2025varcon}
+Ziwen Wang, Jiajun Fan, Thao Nguyen, Heng Ji, and Ge Liu.
+\newblock Variational supervised contrastive learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2025.
+
+\bibitem[Zhang et~al.(2022)Zhang, Xu, Xiong, and Ramaiah]{zhang2022use}
+Shu Zhang, Ran Xu, Caiming Xiong, and Chetan Ramaiah.
+\newblock Use all the labels: A hierarchical multi-label contrastive learning framework.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pages 16660--16669, 2022.
+
+\bibitem[Zhu et~al.(2022)Zhu, Wang, Chen, Chen, and Jiang]{zhu2022balanced}
+Jianggang Zhu, Zheng Wang, Jingjing Chen, Yi-Ping~Phoebe Chen, and Yu-Gang Jiang.
+\newblock Balanced contrastive learning for long-tailed visual recognition.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pages 6908--6917, 2022.
+
+\end{thebibliography}
+
+
+\end{document}

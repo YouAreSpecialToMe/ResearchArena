@@ -1,0 +1,320 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{textcomp}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,citecolor=blue,urlcolor=blue,linkcolor=blue]{hyperref}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{array}
+
+\urlstyle{same}
+\setlist[itemize]{leftmargin=*,topsep=2pt,itemsep=1pt}
+
+\title{\bf ParaDG: An Exploratory Negative Study of Disagreement-Gated Paraphrase Blending for Text-to-Image Diffusion}
+\author{Anonymous Authors}
+\date{}
+
+\newcommand{\method}{ParaDG}
+\DeclareRobustCommand{\artifact}[1]{\mbox{\textsf{\detokenize{#1}}}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Text-to-image diffusion models are sensitive to harmless prompt rewording: logically equivalent prompts can change attribute binding, relations, and object counts. We study whether this wording brittleness can be reduced at inference time by blending only checklist-audited paraphrases and increasing that blend only when the paraphrases disagree. Our method, \method{}, is a training-free specialization of multi-prompt blending for Stable Diffusion v1.5. The core hypothesis is tested only against implemented paraphrase-based baselines: vanilla SD1.5, static paraphrase consensus, and adaptive ungated paraphrase blending. We evaluate these methods on 60 held-out prompts from attribute binding, relations, and numeracy, plus a 24-prompt robustness subset with paraphrase variants, using three seeds and official T2I-CompBench-family category metrics. The main result is negative. On held-out faithfulness, \method{} is statistically indistinguishable from the implemented baselines: its highest mean category score is attribute binding $0.4677$ (95\% CI $[0.3629, 0.5723]$) versus vanilla SD1.5 at $0.4658$ (95\% CI $[0.3616, 0.5714]$). On the robustness subset, \method{} underperforms adaptive ungated paraphrase blending on paraphrase robustness score, reaching $0.5509$ (95\% CI $[0.5015, 0.5973]$) versus $0.6111$ (95\% CI $[0.5617, 0.6636]$), while preserving similar LPIPS diversity ($0.7650$ versus $0.7620$). The evidence therefore supports a narrower conclusion than the original proposal: paraphrase-conditioned consensus helps, but the present disagreement gate does not outperform simpler ungated blending under this evaluation setup. Because faithful AAPB reproduction, a strong single-prompt baseline, and human validation were not completed in this workspace, we present the paper as an exploratory negative-result study rather than a confirmatory method paper.
+\end{abstract}
+
+\section{Introduction}
+Text-to-image diffusion models can produce materially different images for prompts that mean the same thing. Benchmarks such as T2I-CompBench and T2I-CompBench++ expose failures in attribute binding, spatial relations, and numeracy \citep{huang2023t2icompbench,huang2025t2icompbenchpp}. Structured Semantic Alignment and MetaLogic show that the problem is not limited to a single benchmark phrasing: semantically equivalent prompt rewrites themselves reveal robustness failures \citep{feng2023ssa,shen2026metalogic}. If harmless wording changes alter the generated scene, prompt-faithful generation remains brittle.
+
+This paper tests one narrow hypothesis: \emph{if disagreement among verified paraphrases is a useful signal of wording sensitivity, then a disagreement-gated paraphrase blend should outperform the implemented paraphrase-based baselines on robustness metrics, without causing diversity collapse}. We operationalize that hypothesis with \method{}, a training-free extension of multi-prompt blending for Stable Diffusion v1.5. The method uses only audited paraphrases of the same prompt as auxiliary conditions and scales the consensus correction by the variance across paraphrase-conditioned predictions.
+
+The completed experiments support a negative answer. On the 60-prompt faithfulness split, \method{} is competitive but its small gains fall within overlapping 95\% confidence intervals. On the 24-prompt robustness subset, adaptive ungated paraphrase blending is stronger on paraphrase robustness score (PRS), DINO consistency, and CLIP image consistency. The same pattern appears in ablations: removing the gate does not hurt and slightly improves attribute binding on the matched analysis subset. Together, these results suggest that paraphrase-conditioned consensus is the helpful ingredient, while the current variance gate is not.
+
+Our contributions are:
+\begin{itemize}
+  \item We instantiate and test \method{}, a training-free paraphrase-restricted diffusion update that combines sparse multi-prompt consensus with a variance-based disagreement gate and slot-aware token redistribution.
+  \item We evaluate the method on a controlled prompt matrix with 72 prompts, 144 accepted paraphrases, official T2I-CompBench-family category metrics, and 95\% confidence intervals reported directly in the main tables.
+  \item We report an explicit negative result: under the available automatic evaluation pipeline and against the implemented paraphrase-based baselines, disagreement gating does not improve over simpler ungated paraphrase blending.
+  \item We audit and surface the incomplete parts of the original plan in the main paper so that the contribution is the negative finding itself, not an implicit claim of experimental completeness.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} defines \method{} and the tested hypothesis, Section~\ref{sec:experiments} presents the experiments, Section~\ref{sec:discussion} discusses what likely failed, and Appendix~\ref{sec:appendix} summarizes reproducibility artifacts and missing components.
+
+\section{Related Work}
+\label{sec:related}
+\textbf{Diffusion models and compositional evaluation.}
+Our experiments use Stable Diffusion v1.5, built on latent diffusion modeling \citep{rombach2022latent}. T2I-CompBench and T2I-CompBench++ provide the main compositional framing for attribute binding, relations, and numeracy \citep{huang2023t2icompbench,huang2025t2icompbenchpp}.
+
+\textbf{Prompt robustness evaluation.}
+Structured Semantic Alignment stresses text-to-image systems with controlled semantic perturbations \citep{feng2023ssa}. MetaLogic evaluates whether logically equivalent prompts produce semantically consistent images \citep{shen2026metalogic}. Our target is closest to these works, but we consume equivalent prompts at inference time rather than only as an evaluator.
+
+\textbf{Training-free guidance for prompt faithfulness.}
+Attend-and-Excite, A-STAR, MaskDiffusion, and Self-Coherence Guidance all improve alignment from a single prompt \citep{chefer2023attend,agarwal2023astar,zhou2023maskdiffusion,wang2025scg}. These methods already establish test-time semantic guidance, so our contribution is not a new guidance family.
+
+\textbf{Multi-prompt blending and prompt optimization.}
+The closest method is Adaptive Auxiliary Prompt Blending (AAPB), which derives an adaptive coefficient for blending a target prompt with an auxiliary prompt \citep{lee2026aapb}. \method{} differs in two ways: it restricts auxiliary prompts to audited paraphrases of the same scene, and it activates blending according to observed disagreement across those paraphrases. Prompt optimization systems such as NeuroPrompts seek stronger prompt wordings \citep{rosenman2024neuroprompts}; our goal is instead to make semantically equivalent wordings behave consistently.
+
+Unlike prior evaluation-only robustness work, \method{} turns equivalent-prompt disagreement into an inference-time signal. Unlike generic prompt blending, it asks whether that signal is scientifically useful beyond ungated paraphrase consensus.
+
+\section{Method}
+\label{sec:method}
+\subsection{Prompt Schema and Paraphrase Audit}
+Each original prompt $p_0$ is represented with a fixed slot schema
+\begin{equation}
+\begin{split}
+\{\text{count}_1,\text{object}_1,\text{attribute}_1,\text{relation},\\
+\text{count}_2,\text{object}_2,\text{attribute}_2\}.
+\end{split}
+\end{equation}
+where fields may be empty but every prompt must be representable with at most two objects. This deliberately narrows the study to categories where Stable Diffusion v1.5 commonly fails and where semantic equivalence can be audited with low ambiguity.
+
+Paraphrases are not generated freely. They are produced by controlled rewrite templates: attribute-order swaps, existential rewrites, clause-order rewrites, fronted-relation rewrites, and count-preserving digit rewrites. A candidate is accepted only if every populated slot is preserved exactly, no new object or relation is introduced, and directed relations remain unchanged.
+
+The completed audit artifact contains 72 prompts in total: 12 pilot prompts and 60 held-out prompts. It generated 148 candidate paraphrases, accepted 144, and rejected 4 for number-grammar mismatch. All 60 held-out prompts retained two approved paraphrases, giving full overlap coverage across attribute binding, relations, and numeracy. A 48-pair secondary audit reports Cohen's $\kappa = 1.0$, but this was an automatic-primary versus automatic-secondary check rather than the preregistered human double annotation, so we use it only as an internal consistency check.
+
+\subsection{Disagreement-Gated Paraphrase Blending}
+Let $P=\{p_0,p_1,\dots,p_m\}$ be the approved paraphrase set for an original prompt $p_0$. At a guided diffusion step $t$, the conditional denoiser prediction for prompt $p_j$ is $\epsilon_t(p_j)$. We form the paraphrase consensus
+\[
+\bar{\epsilon}_t=\frac{1}{|P|}\sum_{j=0}^{m}\epsilon_t(p_j)
+\]
+and update the original-prompt prediction as
+\[
+\epsilon_t^{\text{\method}}=\epsilon_t(p_0)+\alpha_t g_t\left(\bar{\epsilon}_t-\epsilon_t(p_0)\right).
+\]
+Here $\alpha_t$ is a fixed step-dependent blend schedule and $g_t$ is a disagreement gate,
+\[
+g_t=\min\left(1,\;c\left\lVert \mathrm{Var}_j[\epsilon_t(p_j)]\right\rVert_1\right).
+\]
+The final configuration, selected on the pilot by runtime among tied candidates, uses $c=0.5$, guided steps $[2,4,6,9,12,16,20,24]$, and $\alpha_t=[0.6,0.6,0.5,0.5,0.4,0.3,0.2,0.2]$.
+
+\subsection{Slot-Aware Redistribution}
+The correction term $\bar{\epsilon}_t-\epsilon_t(p_0)$ is redistributed over token groups aligned to the slot schema. For each populated slot, we aggregate cross-attention over the tokens that realize that slot in each paraphrase, estimate slot disagreement, and use the normalized disagreement weights to apportion the already-computed correction. This adds no learned parameters and no external parser.
+
+\subsection{Tested Hypothesis}
+The method is intentionally evaluated against a stronger null than vanilla generation. The scientific question is not whether paraphrase information helps at all, but whether \emph{disagreement gating} adds value beyond ungated paraphrase blending. The key hypothesis is:
+\begin{quote}
+If paraphrase disagreement tracks wording brittleness, then \method{} should outperform both static consensus and adaptive ungated blending on robustness metrics such as PRS and DINO consistency, without a severe LPIPS drop relative to vanilla SD1.5.
+\end{quote}
+The experiments below were designed to falsify that claim if paraphrase consensus alone explained the gains.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/gate_trace_1.png}
+\caption{Example gate trace for one held-out attribute-binding prompt. The gate is active only on the eight designated guided steps and zero elsewhere. Source data are stored in \artifact{figures/gate_trace_1.json}.}
+\label{fig:gate}
+\end{figure}
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+\textbf{Backbone and generation.}
+All methods use the \textsf{runwayml/stable-diffusion-v1-5} checkpoint with DDIM sampling, 30 denoising steps, CFG scale 7.5, resolution $512\times512$, and seeds $\{11,22,33\}$. The experiments ran in the recorded environment from \artifact{exp/environment_setup/run_manifest.json} on a single RTX A6000 48GB machine.
+
+\textbf{Prompt matrix.}
+The main faithfulness study uses 60 held-out prompts, evenly split across attribute binding, relations, and numeracy. The robustness study uses 24 overlap prompts with paraphrase variants. With three seeds, this yields 180 generations per method for faithfulness and 216 generations per method for robustness.
+
+\textbf{Methods.}
+We compare four implemented methods: vanilla SD1.5, static paraphrase consensus, adaptive ungated paraphrase blending, and \method{}. These are the only methods used to test the core hypothesis. The preregistered faithful AAPB reproduction, the preregistered single-prompt baseline, the human reliability subset, and the human double annotation were all formally revised to infeasible in this workspace, so we report them as missing constraints rather than silently replacing them.
+
+\textbf{Metrics.}
+Primary semantic metrics are the official T2I-CompBench-family category scores for attribute binding, relations, and numeracy. Robustness diagnostics additionally include PRS, CLIP image consistency, DINO consistency, robustness-split CLIPScore, LPIPS seed diversity, DINO seed dispersion, ImageReward, and latency. Because the human reliability subset was not completed, the robustness metrics remain automatic diagnostics rather than human-validated conclusions.
+
+\begin{table}[t]
+\caption{Artifact-status summary for the plan components that most affect interpretability. The table names the exact result files so the completed, revised, and skipped pieces are directly traceable from the paper text.}
+\label{tab:completeness}
+\centering
+\footnotesize
+\begin{tabular}{p{0.48\linewidth}p{0.24\linewidth}p{0.14\linewidth}}
+\toprule
+Artifact file & Role & Status \\
+\midrule
+\artifact{exp/data_preparation/results.json} & Prompt split and paraphrase audit & Completed \\
+\artifact{exp/pilot/results.json} & Pilot schedule selection & Completed \\
+\artifact{exp/official_compbench_eval/results.json} & Official metric backfill log & Completed \\
+\artifact{exp/metric_backfill/results.json} & Row-level metric propagation log & Completed \\
+\artifact{exp/aapb_reproduction/results.json} & AAPB reproduction attempt & Revised infeasible \\
+\artifact{exp/single_prompt_baseline/results.json} & Single-prompt baseline attempt & Revised infeasible \\
+\artifact{exp/human_reliability_subset/results.json} & Human robustness subset & Revised infeasible \\
+\artifact{exp/paraphrase_double_annotation/results.json} & Human double annotation & Revised infeasible \\
+\artifact{exp/plan_revision/results.json} & Formal revision record & Completed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Paraphrase Audit and Pilot}
+Table~\ref{tab:audit} summarizes the data preparation artifact. Table~\ref{tab:completeness} makes the paper's scope explicit by naming the revised and skipped result files directly: the completed study is substantial enough to support an audited exploratory result, but not enough to support the stronger confirmatory claims originally planned. The pilot selected the final setting among nine gate-schedule candidates; all nine tied on mean pilot category score at $0.2083$, so the final setting was chosen by runtime. The projected full-study cost was $1.3836$ GPU hours, and the reduced matrix was not activated.
+
+\begin{table}[t]
+\caption{Paraphrase-audit and pilot summary from \artifact{exp/data_preparation/results.json} and \artifact{exp/pilot/results.json}.}
+\label{tab:audit}
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Statistic & Value \\
+\midrule
+Total prompts & 72 \\
+Held-out prompts & 60 \\
+Overlap prompts with two paraphrases & 60 \\
+Candidate paraphrases & 148 \\
+Accepted paraphrases & 144 \\
+Rejected paraphrases & 4 \\
+Secondary audit pairs & 48 \\
+Secondary audit $\kappa$ & 1.0 \\
+Best gate constant $c$ & 0.5 \\
+Best schedule & early-heavy \\
+Projected GPU hours & 1.3836 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Faithfulness Results}
+Table~\ref{tab:faithfulness} reports the main held-out results with 95\% confidence intervals. The scientific signal is weak. \method{} has the highest mean on attribute binding, $0.4677$, but its interval almost exactly overlaps vanilla SD1.5 ($0.4658$) and static consensus ($0.4615$). Static consensus is best on relations and numeracy. Put differently, the largest faithfulness differences are small relative to uncertainty, so the faithfulness results do not support a claim that disagreement gating meaningfully helps.
+
+\begin{table*}[t]
+\caption{Held-out faithfulness results on 60 prompts and 180 generations per method. Values are mean [95\% CI]. Best means are in \textbf{bold}. The near-complete CI overlap indicates that the small deltas should be treated as within noise.}
+\label{tab:faithfulness}
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Method & Attr.\ bind.\ $\uparrow$ & Relations $\uparrow$ & Numeracy $\uparrow$ & CLIPScore $\uparrow$ & Latency (s) $\downarrow$ \\
+\midrule
+Vanilla SD1.5 & 0.4658 [0.3616, 0.5714] & 0.1622 [0.0802, 0.2567] & 0.5750 [0.5000, 0.6417] & 0.2632 [0.2582, 0.2685] & \textbf{1.9035} [1.8949, 1.9132] \\
+Static consensus & 0.4615 [0.3631, 0.5681] & \textbf{0.1850} [0.1024, 0.2818] & \textbf{0.6083} [0.5333, 0.6833] & 0.2649 [0.2595, 0.2701] & 2.7885 [2.7811, 2.7965] \\
+Adaptive ungated & 0.4515 [0.3491, 0.5566] & 0.1647 [0.0831, 0.2562] & 0.5833 [0.5167, 0.6500] & \textbf{0.2652} [0.2596, 0.2705] & 2.7938 [2.7873, 2.8009] \\
+\textbf{\method{}} & \textbf{0.4677} [0.3629, 0.5723] & 0.1757 [0.0928, 0.2730] & 0.5667 [0.4917, 0.6417] & 0.2631 [0.2581, 0.2683] & 3.2771 [3.2677, 3.2871] \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/category_scores.png}
+\caption{Category-wise faithfulness summary. \method{} has the highest mean on attribute binding, but static consensus is stronger on relations and numeracy. The source tables are in \artifact{figures/category_scores_source.json} and \artifact{figures/category_scores_source.csv}.}
+\label{fig:categories}
+\end{figure*}
+
+\subsection{Robustness Results}
+Table~\ref{tab:robustness} makes the main negative result explicit. Adaptive ungated blending is best on PRS, DINO consistency, and CLIP image consistency, while \method{} is only marginally higher than vanilla SD1.5 on PRS and essentially tied with vanilla on DINO consistency. \method{} does achieve the highest robustness-split CLIPScore, but the difference is small and does not translate into better robustness under equivalent prompt rewrites.
+
+The robustness table is also inconsistent with a diversity-collapse explanation. LPIPS remains in a narrow range from $0.7620$ to $0.7652$, and \method{} nearly matches vanilla SD1.5 on that metric. The more plausible interpretation is that paraphrase consensus helps, but the gate itself neither calibrates that signal well nor applies a sufficiently strong correction.
+
+\begin{table*}[t]
+\caption{Robustness results on the 24-prompt overlap subset and 216 generations per method. Values are mean [95\% CI]. Best means are in \textbf{bold}.}
+\label{tab:robustness}
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+Method & Attr.\ bind.\ $\uparrow$ & Relations $\uparrow$ & Numeracy $\uparrow$ & PRS $\uparrow$ & DINO cons.\ $\uparrow$ & CLIP img.\ cons.\ $\uparrow$ & CLIPScore $\uparrow$ & LPIPS $\uparrow$ & Latency (s) $\downarrow$ \\
+\midrule
+Vanilla SD1.5 & 0.5616 [0.4125, 0.7166] & 0.0682 [0.0000, 0.1780] & 0.6250 [0.5203, 0.7292] & 0.5370 [0.4876, 0.5849] & 0.6538 [0.6291, 0.6800] & 0.8202 [0.8063, 0.8333] & 0.2586 [0.2532, 0.2640] & \textbf{0.7652} [0.7452, 0.7866] & \textbf{1.8887} [1.8817, 1.8959] \\
+Static consensus & \textbf{0.5981} [0.4498, 0.7407] & \textbf{0.1336} [0.0249, 0.2671] & 0.6667 [0.5417, 0.7917] & 0.5741 [0.5216, 0.6296] & 0.6733 [0.6495, 0.6982] & 0.8300 [0.8165, 0.8427] & 0.2576 [0.2523, 0.2630] & 0.7640 [0.7443, 0.7852] & 2.7891 [2.7829, 2.7954] \\
+Adaptive ungated & 0.5862 [0.4408, 0.7265] & 0.0899 [0.0000, 0.2031] & \textbf{0.6875} [0.5833, 0.7917] & \textbf{0.6111} [0.5617, 0.6636] & \textbf{0.6875} [0.6632, 0.7124] & \textbf{0.8389} [0.8251, 0.8515] & 0.2577 [0.2523, 0.2630] & 0.7620 [0.7423, 0.7834] & 2.7998 [2.7920, 2.8098] \\
+\textbf{\method{}} & 0.5656 [0.4150, 0.7195] & 0.0685 [0.0000, 0.1785] & 0.6458 [0.5208, 0.7500] & 0.5509 [0.5015, 0.5973] & 0.6532 [0.6281, 0.6792] & 0.8206 [0.8067, 0.8338] & \textbf{0.2587} [0.2532, 0.2641] & 0.7650 [0.7450, 0.7862] & 3.2797 [3.2710, 3.2881] \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/prs_vs_latency.png}
+\caption{PRS versus latency on the robustness subset. Adaptive ungated blending offers the best automatic robustness among implemented methods, while vanilla SD1.5 remains cheapest. Source data are in \artifact{figures/prs_vs_latency_source.json} and \artifact{figures/prs_vs_latency_source.csv}.}
+\label{fig:prs_latency}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/prs_vs_lpips.png}
+\caption{PRS versus LPIPS seed diversity on the robustness subset. The methods occupy a narrow LPIPS band, so the lower PRS of \method{} is not obviously caused by diversity collapse. Source data are in \artifact{figures/prs_vs_lpips_source.json} and \artifact{figures/prs_vs_lpips_source.csv}.}
+\label{fig:prs_lpips}
+\end{figure}
+
+\subsection{Ablations and Failure Analysis}
+Table~\ref{tab:ablations} compares \method{} against matched ablations. The pattern is consistent with the main robustness table: removing the gate slightly raises the matched-slice attribute-binding mean from $0.5567$ to $0.5724$, and all confidence intervals overlap heavily. Removing slot redistribution or timestep adaptation barely changes the semantic scores. On the separate non-equivalent comparison, the matched \method{} slice reaches attribute binding $0.4870$ while the non-equivalent auxiliary-prompt ablation reaches $0.4774$, suggesting that semantic equivalence still matters even though the present gate does not.
+
+The gate traces in Figure~\ref{fig:gate} help explain why. The gate activates at the intended steps, but the released traces show magnitudes on the order of $10^{-3}$. Combined with the flat pilot, this suggests two likely failure modes: the disagreement statistic is too weak to separate useful from noisy paraphrase variance, and the resulting correction is too small relative to the already helpful ungated consensus term.
+
+\begin{table*}[t]
+\caption{Ablations on the 18-prompt matched analysis subset. Values are mean [95\% CI]. Best means are in \textbf{bold}.}
+\label{tab:ablations}
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Method & Attr.\ bind.\ $\uparrow$ & Relations $\uparrow$ & Numeracy $\uparrow$ & CLIPScore $\uparrow$ & Latency (s) $\downarrow$ \\
+\midrule
+\textbf{\method{}} (matched subset) & 0.5567 [0.4342, 0.6792] & 0.0913 [0.0036, 0.1790] & 0.6111 [0.5070, 0.7152] & 0.2691 [0.2617, 0.2765] & 3.2776 [3.2640, 3.2912] \\
+No gate & \textbf{0.5724} [0.4021, 0.7340] & 0.0908 [0.0000, 0.2370] & 0.6111 [0.4722, 0.7500] & 0.2694 [0.2587, 0.2796] & 3.2819 [3.2593, 3.3064] \\
+No slot redistribution & 0.5572 [0.3853, 0.7284] & 0.0906 [0.0000, 0.2367] & 0.6111 [0.4722, 0.7500] & \textbf{0.2696} [0.2594, 0.2795] & \textbf{2.7870} [2.7738, 2.8034] \\
+No timestep adaptation & 0.5506 [0.3770, 0.7225] & 0.0912 [0.0000, 0.2379] & 0.6111 [0.4722, 0.7500] & 0.2693 [0.2588, 0.2792] & 3.2699 [3.2501, 3.2938] \\
+One paraphrase only & 0.5630 [0.3987, 0.7282] & \textbf{0.0915} [0.0000, 0.2384] & 0.6111 [0.4722, 0.7500] & 0.2692 [0.2589, 0.2791] & 2.8148 [2.7978, 2.8338] \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table}[t]
+\caption{Non-equivalent auxiliary-prompt comparison on the 12-prompt analysis slice. The first row is the matched \method{} slice from \artifact{exp/paradg_nonequivalent_matched/results.json}; the second is the dedicated non-equivalent rerun from \artifact{exp/ablation_nonequivalent/results.json}. Values are mean [95\% CI].}
+\label{tab:nonequivalent}
+\centering
+\scriptsize
+\begin{tabular}{lccc}
+\toprule
+Method & Attr.\ bind.\ $\uparrow$ & Relations $\uparrow$ & Numeracy $\uparrow$ \\
+\midrule
+\textbf{\method{}} (equivalent prompts) & \textbf{0.4870} [0.3286, 0.6453] & \textbf{0.0538} [-0.0191, 0.1268] & 0.5417 [0.4109, 0.6725] \\
+Non-equivalent auxiliary prompt & 0.4774 [0.2598, 0.6810] & 0.0531 [0.0000, 0.1592] & 0.5417 [0.3750, 0.7083] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[height=0.76\textheight]{figures/qualitative_grid.png}
+\caption{Qualitative grid assembled automatically from the first eight robustness prompts encountered in \artifact{exp/paradg/generation_index.csv}: \texttt{attr\_005} through \texttt{attr\_012}. Each row is one original prompt at seed 11, and the four columns are Vanilla SD1.5, static consensus, adaptive ungated blending, and \method{}, in that order. Prompt IDs and method names are overlaid directly on the cells by the figure-generation script, so this is an uncurated attribute-binding slice rather than a balanced cross-category showcase. The figure manifest is stored in \artifact{figures/qualitative_grid_manifest.json}.}
+\label{fig:qualitative}
+\end{figure*}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The main scientific conclusion is narrower than the proposal: \emph{equivalent-prompt consensus helps, but the current disagreement gate does not}. The evidence for that statement is consistent across the paper. On faithfulness, the observed gains are tiny and within overlapping confidence intervals. On robustness, ungated blending is better than \method{} on the main automatic robustness metrics. On ablations, removing the gate does not hurt. And on diagnostics, the pilot is flat and the gate magnitudes are small.
+
+The likely reason is not that paraphrases are useless. In fact, the stronger implemented baseline is precisely the ungated paraphrase blend. A more plausible explanation is that the variance-only gate is a poor proxy for harmful wording sensitivity. It can be triggered by benign prompt-conditioned variance, and when it is triggered its correction remains weak relative to the baseline consensus update.
+
+\textbf{Compact error analysis.}
+The qualitative grid and matched ablations suggest three recurring failure patterns. First, relation prompts remain brittle across all methods, with robustness-split relations scores of only $0.0682$ for vanilla SD1.5, $0.0899$ for adaptive ungated blending, and $0.0685$ for \method{}, indicating that paraphrase consensus alone does not reliably repair directed spatial structure. Second, numeracy often improves under consensus-style methods, but \method{} does not preserve that gain: on the robustness subset adaptive ungated blending reaches $0.6875$ numeracy while \method{} reaches $0.6458$. Third, the gate traces show activation at the intended steps but with small magnitudes, which is consistent with a mechanism that perturbs the denoiser too weakly to alter difficult failure cases.
+
+Several limitations materially constrain the paper. First, the faithful AAPB reproduction and the strong single-prompt baseline were not completed, so this study cannot support a strong comparative claim against the closest alternative families. Second, the human reliability subset and human double annotation were skipped, so the robustness story remains exploratory rather than confirmatory. Third, numeracy uses the documented RS200 compatibility fallback because the originally referenced R50 checkpoint was unavailable. Finally, the slot schema is intentionally narrow and does not test broader natural-language prompt variation.
+
+Those limitations matter enough that, in its current state, this paper is better positioned as an exploratory negative-results submission than as a full confirmatory method paper. The next round of work should prioritize the missing strong baselines and human validation before introducing a more sophisticated gating mechanism.
+
+\section{Conclusion}
+We presented \method{}, a training-free paraphrase-restricted diffusion update that uses audited paraphrases and a variance-based disagreement gate to stabilize generation under equivalent prompt rewrites. Across 60 held-out prompts and a 24-prompt robustness subset, the results do not support the intended hypothesis. The best implemented robustness baseline is adaptive ungated blending, which reaches PRS $0.6111$ versus $0.5509$ for \method{}, while faithfulness differences remain within overlapping confidence intervals.
+
+This is still an informative result. It suggests that paraphrase-conditioned consensus is a real inference-time signal for text-to-image generation, but that the present disagreement gate is not the right way to exploit it. A stronger follow-up should first complete faithful AAPB and single-prompt baselines, plus human robustness validation, and only then revisit richer gating rules or learned paraphrase weighting.
+
+\appendix
+
+\section{Reproducibility Summary}
+\label{sec:appendix}
+Every reported number in the paper comes from the stored experiment summaries under \artifact{exp/}. The main result files are \artifact{exp/vanilla_sd15/results.json}, \artifact{exp/static_consensus/results.json}, \artifact{exp/adaptive_ungated/results.json}, and \artifact{exp/paradg/results.json}. The matched ablation summaries are \artifact{exp/paradg_matched_subset/results.json}, \artifact{exp/ablation_no_gate/results.json}, \artifact{exp/ablation_no_slot/results.json}, \artifact{exp/ablation_no_timestep/results.json}, \artifact{exp/ablation_reduced_paraphrase/results.json}, \artifact{exp/ablation_nonequivalent/results.json}, and \artifact{exp/paradg_nonequivalent_matched/results.json}. Figure source data are released under \artifact{figures/}.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

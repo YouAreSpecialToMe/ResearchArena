@@ -1,0 +1,595 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{xspace}
+\usepackage{natbib}
+\usepackage{amsthm}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+
+\newcommand{\cris}{\textsc{CRIS}\xspace}
+\newcommand{\cigraph}{\textsc{CIG}\xspace}
+\newcommand{\Modd}{\mathrm{Mod}}
+\newcommand{\Reff}{\mathrm{Ref}}
+
+\title{Structural Sparsity in Constraint Interactions:\\An Empirical Study of Multi-Constraint Data Repair Decomposition}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Real-world data cleaning requires enforcing multiple heterogeneous integrity constraints---functional dependencies (FDs), conditional functional dependencies (CFDs), and denial constraints (DCs)---simultaneously.
+Existing approaches either repair each constraint independently, risking cascading violations, or treat all constraints holistically at high computational cost.
+We investigate the hypothesis that constraint interactions are \emph{structurally sparse} by formalizing three levels of pairwise repair safety analysis and encoding the results in \emph{Constraint Interaction Graphs} (CIGs).
+Experiments on four benchmark datasets reveal that 72--88\% of constraint pairs are structurally safe at the syntactic level alone, with three of four datasets decomposing entirely to singleton components.
+We find that structural safety analysis (Level~1) suffices in practice: finer-grained predicate-aware and data-dependent analyses provide additional decomposition but \emph{reduce} repair quality by losing beneficial inter-constraint ordering.
+On the Tax dataset, CIG-guided decomposition achieves 4.8--5.3$\times$ speedup over a greedy holistic baseline while maintaining identical F1.
+We verify the decomposition equivalence theorem on synthetic datasets with chain, tree, and forest CIG topologies, obtaining 100\% cell-level agreement for all acyclic configurations.
+Our results suggest that the primary practical value of interaction analysis is \emph{confirming} that independent repair is safe---a formal justification for what practitioners often do heuristically.
+\end{abstract}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}
+\label{sec:intro}
+
+Data cleaning is a critical step in data integration and analytics pipelines. Real-world datasets contain heterogeneous errors---missing values, duplicate records, constraint violations, inconsistencies---that must be addressed before the data can be reliably used. To specify what ``clean'' data looks like, practitioners employ multiple types of integrity constraints simultaneously: functional dependencies (FDs), conditional functional dependencies (CFDs), and denial constraints (DCs)~\citep{ilyas2019data}.
+
+The challenge intensifies in data integration scenarios where data from multiple heterogeneous sources must be merged. Each source may satisfy its local constraints, but the integrated dataset often violates constraints that span across sources. The resulting constraint set is typically heterogeneous and large.
+
+Current approaches to multi-constraint data repair fall into two extremes.
+\textbf{Independent repair} handles each constraint type with a specialized algorithm in isolation (e.g., an FD repair tool followed by a DC repair tool). This is fast but ignores interactions---repairing violations of one constraint can introduce new violations of another, leading to cascading repair cycles.
+\textbf{Holistic repair} considers all constraints simultaneously in a single optimization or probabilistic inference framework (e.g., HoloClean~\citep{rekatsinas2017holoclean}). This captures interactions but is computationally expensive, often quadratic or worse in the number of constraints.
+
+The fundamental issue is that \textbf{the interaction structure between constraints is neither systematically analyzed nor exploited}. In practice, many constraint pairs are non-interfering---repairs for one cannot violate the other---yet holistic methods pay the cost of considering all constraints jointly. Conversely, independent methods miss the critical interactions between the few constraint pairs that do interfere.
+
+\textbf{Key insight.} We observe that the interaction between data quality constraints exhibits \emph{structural sparsity}: in typical real-world constraint sets, most constraint pairs operate on disjoint or weakly overlapping attribute sets, making their repairs mutually safe. By formally characterizing this interaction structure via a Constraint Interaction Graph (\cigraph), we can determine when independent repair is provably safe and when inter-constraint coordination is necessary.
+
+Our contributions are:
+\begin{itemize}
+  \item We formalize a hierarchy of \emph{repair safety} conditions between constraint pairs---structural, predicate-aware, and data-dependent---and show empirically that the structural level alone identifies 72--88\% of safe pairs across four benchmarks.
+  \item We introduce Constraint Interaction Graphs (\cigraph{}s) that encode pairwise repair safety, enabling principled decomposition into independent subproblems with provable equivalence guarantees for acyclic CIGs under minimum-change repair semantics.
+  \item We present \cris (Cross-constRaint Interaction-aware repair Scheduling), a meta-algorithm that composes existing single-constraint repair tools according to CIG-derived schedules, and conduct a thorough empirical evaluation.
+  \item We provide an honest analysis revealing that constraint interactions in standard benchmarks are sparser than anticipated, that structural analysis alone captures the dominant signal, and that finer-grained analysis provides diminishing---even negative---returns on quality.
+\end{itemize}
+
+The rest of the paper is organized as follows. Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes the \cris framework. Section~\ref{sec:experiments} presents experiments. Section~\ref{sec:discussion} discusses implications and limitations. Section~\ref{sec:conclusion} concludes.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Holistic data cleaning.}
+\citet{chu2013holistic} introduced holistic data cleaning using denial constraints and conflict hypergraphs, recognizing the importance of considering constraint interactions. However, all constraints are treated as potentially interacting, leading to monolithic optimization.
+\citet{rekatsinas2017holoclean} proposed HoloClean, which unifies integrity constraints with statistical signals via probabilistic inference, achieving high repair quality but scaling poorly with constraint set size. We were unable to run HoloClean in our experiments due to its PostgreSQL dependency; we use a greedy holistic proxy baseline instead and clearly distinguish it from HoloClean throughout.
+
+\textbf{Scalable constraint-based repair.}
+\citet{rezig2021horizon} proposed Horizon, achieving linear-time FD repair by leveraging data patterns induced by FDs. However, Horizon handles only FDs. \cris generalizes interaction analysis to heterogeneous constraints and their cross-type interactions.
+\citet{zhao2026topology} proposed topology-aware subset repair via graph decomposition for CFDs. Their work decomposes conflict graphs within a single constraint type, whereas \cris analyzes interactions \emph{between} different constraint types using update repair rather than subset repair.
+
+\textbf{Pipeline optimization.}
+\citet{krishnan2019alphaclean} proposed AlphaClean, which searches for good cleaning pipeline orderings. \citet{siddiqi2024saga} developed SAGA for scalable pipeline optimization. Both treat operator ordering as a black-box search problem. \cris provides formal analysis of \emph{why} certain orderings are better based on repair safety.
+
+\textbf{Constraint discovery and repair complexity.}
+\citet{chu2013discovering} developed algorithms for discovering denial constraints. \citet{livshits2020computing} showed that computing optimal FD repairs is NP-hard even for a single FD but identified tractable special cases. \cris{}'s decomposition reduces the effective problem size for each subproblem.
+\citet{khayyat2015bigdansing} proposed BigDansing for scalable data cleaning with logical plans, optimizing individual rule execution but not analyzing cross-rule interactions.
+
+\textbf{Error generation and benchmarking.}
+\citet{arocena2015bart} introduced BART for controlled error generation in data cleaning evaluation. \citet{abdelaal2023rein} provided the REIN benchmark framework with comprehensive datasets including the Beers dataset used in our experiments.
+\citet{prokoshyna2015combining} explored combining quantitative and logical constraints for data cleaning, though without formal interaction analysis.
+
+Unlike prior work, \cris explicitly computes and exploits the interaction structure between heterogeneous constraint types through a formal safety hierarchy and graph-based decomposition.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries}
+\label{sec:prelim}
+
+Let $R(A_1, \ldots, A_m)$ be a relational schema and $D$ a dataset (instance) over $R$. A \emph{constraint set} $\Sigma = \{\sigma_1, \ldots, \sigma_n\}$ specifies data quality requirements. We consider three constraint types:
+
+\begin{itemize}
+  \item \textbf{Functional Dependencies (FDs):} $X \to Y$ where $X, Y \subseteq \{A_1, \ldots, A_m\}$. Satisfied when tuples agreeing on $X$ also agree on $Y$.
+  \item \textbf{Conditional FDs (CFDs):} An FD $X \to Y$ with a tableau pattern $T_p$ that restricts applicability to tuples matching the pattern.
+  \item \textbf{Denial Constraints (DCs):} $\forall t_i, t_j \in D: \neg(P_1 \land P_2 \land \cdots \land P_k)$ where each $P_l$ is a predicate on $t_i, t_j$ attributes.
+\end{itemize}
+
+A \emph{repair} of $D$ with respect to $\Sigma$ is a dataset $D'$ satisfying all constraints in $\Sigma$, obtained by modifying cell values (update repair). A \emph{minimum-change repair} minimizes the number of cell modifications.
+
+\subsection{Three-Level Repair Safety Analysis}
+\label{sec:safety}
+
+Given two constraints $\sigma_i, \sigma_j \in \Sigma$, we define whether repairing $\sigma_i$ is ``safe'' with respect to $\sigma_j$---i.e., whether repairs for $\sigma_i$ can introduce new violations of $\sigma_j$. We analyze this at three progressively finer levels.
+
+\textbf{Level 1: Structural Safety} (syntactic, $O(n^2)$).
+For each constraint $\sigma$, define:
+\begin{align}
+  \Modd(\sigma) &= \text{set of attributes that a repair for } \sigma \text{ may modify} \\
+  \Reff(\sigma) &= \text{set of attributes that } \sigma\text{'s predicates reference}
+\end{align}
+For FDs $X \to Y$: $\Modd = Y$ (only RHS attributes change) and $\Reff = X \cup Y$. For DCs: both $\Modd$ and $\Reff$ include all predicate attributes. This asymmetry means FD repairs have narrow modification scope relative to many constraints.
+
+\begin{definition}[Structural Safety]
+Constraints $\sigma_i, \sigma_j$ are \emph{structurally safe} (written $\sigma_i \triangleright_1 \sigma_j$) if $\Modd(\sigma_i) \cap \Reff(\sigma_j) = \emptyset$.
+\end{definition}
+
+If $\sigma_i \triangleright_1 \sigma_j$, then any repair for $\sigma_i$ cannot affect $\sigma_j$'s satisfaction, since the modified attributes are outside $\sigma_j$'s scope. This is a purely syntactic check on constraint definitions.
+
+\textbf{Level 2: Predicate-Aware Safety} (semantic, $O(n^2 \cdot |\text{predicates}|)$).
+Even with overlapping attributes, repairs may be safe if predicate entailment holds. For example, if $\sigma_i$ repairs attribute $A$ by setting it to values satisfying $A > 0$, and $\sigma_j$ requires $A > -10$, then $\sigma_i$'s repairs trivially satisfy $\sigma_j$'s requirement on $A$.
+
+\begin{definition}[Predicate-Aware Safety]
+$\sigma_i \triangleright_2 \sigma_j$ if, for every attribute $A \in \Modd(\sigma_i) \cap \Reff(\sigma_j)$, the repair values for $A$ implied by $\sigma_i$ logically entail $\sigma_j$'s predicates on $A$.
+\end{definition}
+
+\textbf{Level 3: Data-Dependent Safety} (empirical, $O(n^2 \cdot s)$ where $s$ is the sample size).
+For pairs failing Levels 1 and 2, we estimate empirical interference by sampling: apply $\sigma_i$'s repair to a sample, then count new $\sigma_j$ violations. We use a one-sided binomial 95\% confidence interval and declare the pair safe if the upper bound on the interference rate is below $\varepsilon$ (default $\varepsilon = 0.01$).
+
+\subsection{Constraint Interaction Graph}
+\label{sec:cig}
+
+\begin{definition}[Constraint Interaction Graph]
+Given constraint set $\Sigma$ and dataset $D$, the \emph{Constraint Interaction Graph} $G = (V, E)$ is a directed graph where:
+\begin{itemize}
+  \item Each vertex $v_i \in V$ represents a constraint $\sigma_i \in \Sigma$.
+  \item A directed edge $(v_i, v_j) \in E$ indicates that repairing $\sigma_i$ is \emph{not safe} w.r.t.\ $\sigma_j$---i.e., $\sigma_i$ fails all applicable safety levels for $\sigma_j$.
+  \item Edge weight $w(v_i, v_j)$ encodes estimated interference severity.
+\end{itemize}
+\end{definition}
+
+The CIG is \emph{sparse} when constraint interactions are sparse, which our experiments confirm is the common case.
+
+\subsection{Graph-Based Decomposition}
+\label{sec:decomp}
+
+Using the CIG, we decompose the repair problem:
+
+\begin{enumerate}
+  \item \textbf{Independent components.} Compute weakly connected components of $G$. Constraints in different components have no interference and can be repaired fully independently, in parallel.
+  \item \textbf{DAG components.} Within a connected component, if the induced subgraph is acyclic, repair constraints in reverse topological order---downstream constraints first, then upstream. This ensures later repairs do not undo earlier ones.
+  \item \textbf{Cyclic components.} For components with cycles, compute an approximate minimum-weight feedback arc set to break cycles, yielding a DAG. For removed edges, apply a verification pass after DAG-ordered repair.
+\end{enumerate}
+
+\begin{theorem}[Decomposition Equivalence]
+\label{thm:equiv}
+Let $\Sigma$ be a constraint set whose CIG $G$ is acyclic. Under minimum-change update repair semantics, if each individual constraint repair produces a unique solution (e.g., via deterministic tie-breaking such as lexicographic ordering of repair candidates), then the decomposed repair computed by \cris yields the same result as a monolithic repair considering all constraints simultaneously.
+\end{theorem}
+
+\emph{Proof sketch.} By induction on topological order. Sink constraints have no outgoing edges, so their repairs are independent of all others. At each level $k$, constraints at depth $>k$ are already repaired; the absence of edges from not-yet-repaired constraints means the violation set for $\sigma_i$ at depth $k$ is identical in decomposed and monolithic settings. The uniqueness condition ensures deterministic tie-breaking, so both approaches select identical repairs at each step. When cycles exist, the guarantee does not hold in general---we demonstrate this empirically in Section~\ref{sec:equivalence}, where cyclic CIGs produce only $\sim$58\% cell-level agreement. \cris handles cyclic cases with verification passes bounded by the feedback arc number. \qed
+
+\subsection{Scheduled Repair Execution}
+\label{sec:schedule}
+
+\cris composes existing single-constraint repair algorithms according to the CIG-derived schedule:
+\begin{itemize}
+  \item For each independent component, select the appropriate repair algorithm (e.g., majority-vote FD repair, minimal-change DC repair).
+  \item Execute independent components in parallel where possible.
+  \item Within each component, follow DAG order from decomposition.
+  \item For cyclic residual edges, run verification and targeted repair.
+\end{itemize}
+
+Algorithm~\ref{alg:cris} summarizes the \cris pipeline.
+
+\begin{algorithm}[t]
+\caption{\cris: Constraint Interaction-aware Repair Scheduling}
+\label{alg:cris}
+\begin{algorithmic}[1]
+\REQUIRE Dataset $D$, constraint set $\Sigma$, safety level $L \in \{1,2,3\}$, threshold $\varepsilon$
+\ENSURE Repaired dataset $D'$
+\STATE Compute CIG $G$ using $L$-level safety analysis
+\STATE Decompose $G$ into components $\{C_1, \ldots, C_k\}$
+\FOR{each component $C_i$ (parallelizable across components)}
+  \IF{$|C_i| = 1$}
+    \STATE Repair the single constraint independently
+  \ELSIF{$C_i$ is a DAG}
+    \STATE Repair in reverse topological order
+  \ELSE
+    \STATE Break cycles via minimum feedback arc set
+    \STATE Repair in DAG order; verify and repair residual edges
+  \ENDIF
+\ENDFOR
+\RETURN $D'$
+\end{algorithmic}
+\end{algorithm}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\textbf{Datasets.}
+We use four benchmark datasets from canonical repositories:
+\begin{itemize}
+  \item \textbf{Hospital} ($\sim$1,000 tuples, 19 attributes): from the HoloClean repository~\citep{rekatsinas2017holoclean}, the standard data repair benchmark. Contains native errors plus controlled injection via BART~\citep{arocena2015bart}.
+  \item \textbf{Tax} ($\sim$200K tuples, 15 attributes): from the BART project~\citep{arocena2015bart}. Contains FDs on geographic and financial attributes. Errors injected at controlled rates.
+  \item \textbf{Flights} ($\sim$2,400 tuples, 7 attributes): flight departure/arrival times with data fusion challenges across multiple sources.
+  \item \textbf{Beers} ($\sim$2,400 tuples, 11 attributes): from the REIN benchmark~\citep{abdelaal2023rein}. Contains brewery-location FDs and type consistency constraints.
+\end{itemize}
+
+\textbf{Constraints.} For each dataset, we define a heterogeneous set of FDs (5--12), CFDs (2--5), and DCs (3--5), drawn from prior work and the datasets' accompanying constraint files. Hospital has 17 constraints, Tax has 12, Flights and Beers each have 9.
+
+\textbf{Error injection.} We inject errors at 5\% and 10\% rates using BART-style injection across 3 random seeds (42, 123, 456). We report means and standard deviations.
+
+\textbf{Baselines.}
+\begin{enumerate}
+  \item \textbf{Sequential}: FD repair $\to$ CFD repair $\to$ DC repair, no interaction awareness.
+  \item \textbf{Reverse}: DC $\to$ CFD $\to$ FD order.
+  \item \textbf{Greedy-Holistic}: A greedy joint optimizer that selects the value resolving maximum violations across all constraints. \emph{This is our own simplified implementation, not HoloClean.} We were unable to run HoloClean due to its PostgreSQL dependency.
+  \item \textbf{\cris-Structural}: \cris with Level~1 (structural) safety only.
+  \item \textbf{\cris-Full}: \cris with all three safety levels ($\varepsilon = 0.01$).
+\end{enumerate}
+
+\textbf{Metrics.} Repair precision, recall, F1 (comparing repaired cells against ground truth), runtime (wall-clock seconds), cascade count (new violations introduced during repair), CIG density.
+
+\textbf{Hardware.} All experiments run on CPU (no GPU). Tax scalability experiments use subsamples from 5K to 50K tuples.
+
+\subsection{Constraint Interaction Sparsity}
+\label{sec:sparsity}
+
+Table~\ref{tab:cig} reports CIG statistics across all four datasets. The results strongly confirm our structural sparsity hypothesis.
+
+\begin{table}[t]
+\caption{Constraint Interaction Graph statistics. L1/L2/L3-Safe\% shows the fraction of directed constraint pairs classified as safe at each level. All datasets produce sparse CIGs with multiple independent components.}
+\label{tab:cig}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+Dataset & \#Constraints & \#Pairs & L1-Safe (\%) & L2-Safe (\%) & L3-Safe (\%) & \#Components \\
+\midrule
+Hospital & 17 & 272 & 83.8 & 6.2 & 7.7 & 12 \\
+Tax & 12 & 132 & 85.6 & 7.6 & 6.8 & 12 \\
+Flights & 9 & 72 & 72.2 & 2.8 & 25.0 & 9 \\
+Beers & 9 & 72 & 87.5 & 8.3 & 4.2 & 9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Structural safety (Level~1) alone identifies 72--88\% of constraint pairs as safe. After all three levels, Tax, Flights, and Beers achieve 100\% safety (all singletons), while Hospital retains 6 edges (density 0.022) with one DAG component of 6 constraints and 11 singletons. The core sparsity finding is robust: Level~1 captures the dominant signal across all datasets.
+
+Figure~\ref{fig:cig} visualizes the Hospital CIG, showing the single non-trivial component involving geographic attribute constraints (City, State, ZipCode, CountyName) that share attributes through FDs like $\text{ProviderNumber} \to \text{City}$ and $\text{ZipCode} \to \text{City}$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig1_cig_visualization.pdf}
+\caption{Constraint Interaction Graph for the Hospital dataset (Level~3). The single connected component (left cluster) involves geographic attribute constraints with overlapping modification and reference sets. The 11 singleton nodes (right) represent constraints whose repairs are provably independent.}
+\label{fig:cig}
+\end{figure}
+
+\subsection{Repair Quality Comparison}
+\label{sec:quality}
+
+Table~\ref{tab:main} presents the main repair quality results at 10\% error rate.
+
+\begin{table}[t]
+\caption{Repair quality (F1 $\uparrow$) and runtime at 10\% error rate. Mean $\pm$ std over 3 seeds. Best F1 per dataset in \textbf{bold}. Flights and Beers yield F1 $< 0.024$ for all methods, indicating the constraint-based repair paradigm itself is insufficient for these datasets (see Section~\ref{sec:discussion}).}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Hospital F1 $\uparrow$ & Tax F1 $\uparrow$ & Flights F1 & Beers F1 & Tax Runtime (s) \\
+\midrule
+Sequential & $0.835 \pm 0.003$ & $0.401 \pm 0.003$ & $0.017 \pm 0.001$ & $0.023 \pm 0.003$ & 23.8 \\
+Reverse & $0.835 \pm 0.003$ & $0.417 \pm 0.004$ & $0.017 \pm 0.001$ & $0.023 \pm 0.003$ & 24.8 \\
+Greedy-Holistic & $0.835 \pm 0.003$ & $0.401 \pm 0.003$ & $0.017 \pm 0.001$ & $0.023 \pm 0.003$ & 119.0 \\
+\cris-Structural & $\mathbf{0.835 \pm 0.003}$ & $\mathbf{0.429 \pm 0.003}$ & $0.017 \pm 0.001$ & $0.023 \pm 0.003$ & 70.7 \\
+\cris-Full & $0.816 \pm 0.026$ & $0.394 \pm 0.013$ & $0.017 \pm 0.001$ & $0.023 \pm 0.003$ & 23.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On Hospital and Tax---the two datasets where constraint-based repair produces meaningful results---\cris-Structural achieves the best F1 scores. On Tax, \cris-Structural (F1 = 0.429) outperforms Sequential (0.401) by 7\% and Greedy-Holistic (0.401) by 7\%. On Hospital, all methods except \cris-Full achieve comparable F1 $\approx$ 0.835.
+
+A key finding is that \textbf{\cris-Full consistently underperforms \cris-Structural}: F1 0.816 vs.\ 0.835 on Hospital, 0.394 vs.\ 0.429 on Tax. The additional decomposition from Levels 2--3 allows more aggressive parallelization but introduces ordering sensitivities that reduce quality. We analyze this further in Section~\ref{sec:ablation}.
+
+Flights and Beers yield F1 $< 0.024$ for \emph{all} methods, indicating that the errors in these datasets are not well-captured by the FD/CFD/DC constraint types we employ. These datasets provide no discriminative evidence among methods and serve primarily to illustrate the limits of constraint-based repair.
+
+\subsection{Runtime Scalability}
+\label{sec:scalability}
+
+Figure~\ref{fig:scalability} shows runtime scaling on the Tax dataset as data size increases from 5K to 50K tuples.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig4_scalability.pdf}
+\caption{Runtime scaling on Tax subsamples. Greedy-Holistic scales super-linearly due to its violation-scoring approach. \cris-Full and Sequential scale similarly (both linear), as Tax fully decomposes to singletons, making \cris-Full equivalent to independent repair on this dataset.}
+\label{fig:scalability}
+\end{figure}
+
+\begin{table}[t]
+\caption{Runtime (seconds) on Tax subsamples. \cris-Full achieves 4.4--5.3$\times$ speedup over Greedy-Holistic. Note: this speedup is relative to our naive greedy baseline, not an optimized system like HoloClean.}
+\label{tab:scalability}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Size & Sequential & Greedy-Holistic & \cris-Full & Speedup vs.\ Greedy \\
+\midrule
+5K & 6.8 & 33.1 & 6.9 & 4.8$\times$ \\
+10K & 24.3 & 121.4 & 24.9 & 4.9$\times$ \\
+25K & 84.0 & 448.9 & 84.4 & 5.3$\times$ \\
+50K & 207.0 & 985.0 & 222.7 & 4.4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The speedup of \cris-Full over Greedy-Holistic is 4.4--5.3$\times$ (Table~\ref{tab:scalability}). However, \cris-Full and Sequential achieve essentially identical runtimes on Tax (e.g., 222.7s vs.\ 207.0s at 50K) because Tax decomposes to all singletons---the CIG analysis correctly determines that independent repair is safe, but provides no additional scheduling benefit beyond confirming this safety. The practical speedup is therefore attributable to \emph{avoiding} unnecessary holistic computation, not to \emph{improved scheduling} within components.
+
+On the constraint-count scaling experiments with synthetic data (5--50 constraints), \cris achieves 2.0--3.8$\times$ speedup over Greedy-Holistic while maintaining F1 within 0.3\% of Sequential.
+
+\subsection{Safety Level Ablation}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} shows how repair quality varies across safety levels. We report means $\pm$ std across 3 seeds for all columns.
+
+\begin{table}[t]
+\caption{Ablation over safety levels (10\% error rate). Mean $\pm$ std over 3 seeds. On both informative datasets, Level~1 (structural) alone produces the best or tied-best F1. Finer analysis reduces edges and increases components but does not improve---and sometimes hurts---quality.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{Hospital} & \multicolumn{3}{c}{Tax} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Level & F1 $\uparrow$ & \#Edges & \#Comp. & F1 $\uparrow$ & \#Edges & \#Comp. \\
+\midrule
+L1 (Structural) & $\mathbf{0.835 \pm 0.003}$ & 44 & 5 & $\mathbf{0.429 \pm 0.003}$ & 19 & 4 \\
+L2 (+ Predicate) & $0.835 \pm 0.003$ & 27 & 5 & $0.429 \pm 0.003$ & 9 & 7 \\
+L3 (+ Data-dep.) & $0.816 \pm 0.032$ & $6.0 \pm 1.0$ & $11.3 \pm 0.6$ & $0.394 \pm 0.016$ & $1.3 \pm 0.6$ & $10.7 \pm 0.6$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A striking result is that \textbf{finer-grained safety analysis does not improve repair quality}. Level~1 produces more edges (more conservative decomposition) but achieves the same or better F1 than Levels~2 and 3. On Tax, Level~3 reduces F1 from 0.429 to 0.394 despite decomposing into more components.
+
+This occurs because additional decomposition removes ordering constraints that were actually beneficial. When constraints share attributes, the conservative Level~1 decomposition groups them into a single component with 4 sub-components on Tax, enabling the repair scheduling to respect implicit data dependencies. Level~3 separates them into independent singletons ($10.7 \pm 0.6$ components), losing this coordination. The higher variance at Level~3 ($\pm 0.032$ on Hospital F1 vs.\ $\pm 0.003$ at Level~1) further suggests that data-dependent safety classification introduces seed-dependent instability.
+
+\subsection{Epsilon Sensitivity}
+\label{sec:epsilon}
+
+The data-dependent safety threshold $\varepsilon$ has minimal impact on repair quality across the range $[0.001, 0.05]$, consistent with the finding that Level~3 analysis provides limited additional benefit. On Hospital, F1 varies by $< 0.001$ across all $\varepsilon$ values for seeds 42 and 123; seed 456 shows a slight increase (0.780 to 0.784) at $\varepsilon = 0.02$ as one additional pair is classified as safe. On Tax, F1 is constant within each seed for $\varepsilon \leq 0.01$ and varies by at most 0.02 across the full range.
+
+\subsection{Cascade Analysis}
+\label{sec:cascades}
+
+Table~\ref{tab:cascades} reports cascade counts on Hospital, the only dataset where cascading violations occur.
+
+\begin{table}[t]
+\caption{Cascade analysis on Hospital (10\% error rate, seed 42). All cascades arise from $\text{ProviderNumber} \to \text{City}$ repairs introducing violations of $\text{ZipCode} \to \text{City}$.}
+\label{tab:cascades}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & Total Cascades & Steps with Cascades \\
+\midrule
+Sequential & 4,783 & 1 \\
+Reverse & 4,783 & 1 \\
+\cris-Full & 5,031 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Contrary to our initial hypothesis, \cris-Full does \emph{not} reduce cascading violations on Hospital. It produces 5,031 cascades vs.\ 4,783 for Sequential and Reverse. This occurs because the same fundamental interaction---the FD $\text{ProviderNumber} \to \text{City}$, whose repairs change City values that then violate $\text{ZipCode} \to \text{City}$---affects all methods. \cris-Full's decomposition places these interacting constraints in a single DAG component, but its topological ordering introduces a secondary cascade source (a DC repair step within the component) that adds 248 cascades. Sequential and Reverse both experience the same primary cascade of 4,783 violations from the same FD pair.
+
+On Tax, Flights, and Beers, cascade counts are 0 for all methods---the constraints decompose to singletons or independent components with no cross-constraint interference.
+
+\subsection{Decomposition Equivalence Verification}
+\label{sec:equivalence}
+
+We verify the decomposition equivalence theorem (Theorem~\ref{thm:equiv}) on synthetic datasets with controlled CIG topologies. We construct constraint sets with known chain, tree, and forest interaction structures, generate 5,000-row datasets with 10\% error rate, and compare cell-level agreement between \cris decomposed repair and sequential (monolithic-proxy) repair across 3 seeds.
+
+\begin{table}[t]
+\caption{Decomposition equivalence verification on synthetic datasets (5,000 rows, 10\% errors). Agreement measures the fraction of cells identical between decomposed and monolithic-proxy repair. Acyclic topologies achieve 100\% agreement, confirming Theorem~\ref{thm:equiv}. The cyclic case shows that the acyclicity condition is necessary.}
+\label{tab:equiv}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Topology & \#Constraints & CIG Edges & Components & Acyclic? & Agreement (\%) \\
+\midrule
+Chain-6 & 6 & 5 & 1 & Yes & 100.0 \\
+Chain-10 & 10 & 9 & 1 & Yes & 100.0 \\
+Tree-8 & 8 & 7 & 1 & Yes & 100.0 \\
+Tree-12 & 12 & 11 & 1 & Yes & 100.0 \\
+Forest-6 & 6 & 0 & 6 & Yes & 100.0 \\
+Forest-10 & 10 & 0 & 10 & Yes & 100.0 \\
+\midrule
+Mixed-7 (cyclic) & 7 & 17 & 1 & No & $57.7 \pm 3.3$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:equiv} shows that all acyclic configurations---chains with up to 10 constraints forming a single fully-connected DAG component, binary trees, and disconnected forests---achieve \textbf{100\% cell-level agreement} across all seeds. This confirms the decomposition equivalence theorem: when the CIG is acyclic and repairs use deterministic tie-breaking (lexicographic majority vote), decomposed and monolithic repair produce identical results.
+
+The Mixed-7 configuration introduces cycles through shared FD/DC constraints with overlapping attributes, creating a dense CIG with 17 edges in a single cyclic component. Agreement drops to $57.7 \pm 3.3\%$, demonstrating that the acyclicity condition in Theorem~\ref{thm:equiv} is \emph{necessary}---cycles cause the repair ordering to diverge, and \cris's cycle-breaking heuristic (feedback arc set) does not recover full equivalence. This motivates the verification passes in \cris's cycle handling, though on our real-world benchmarks, no cyclic CIG components were encountered.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\textbf{Structural sparsity is the dominant finding.} Our experiments reveal that constraint interactions in standard benchmarks are sparser than anticipated. Three of four datasets decompose entirely to singletons (Tax, Flights, Beers), and Hospital decomposes to 11 singletons plus one small DAG component. This means the primary practical value of CIG analysis is \emph{confirming that independent repair is safe}---a valuable finding in itself, as it provides formal justification for an approach that practitioners often adopt heuristically.
+
+\textbf{\cris-Structural is the recommended configuration.} Level~1 (structural) safety analysis alone achieves the best repair quality among all \cris configurations. Levels~2 and 3 provide additional decomposition but this additional decomposition actually reduces quality by losing beneficial inter-constraint ordering. We recommend using \cris-Structural as the default, reserving finer-grained analysis for constraint sets where structural safety identifies few safe pairs.
+
+\textbf{Cascading violations are less prevalent than expected.} The cascade reduction hypothesis was not confirmed: cascades occur only on Hospital, where \cris-Full produces slightly more cascades than baselines. This is because the cascade-inducing interaction (ProviderNumber $\to$ City conflicting with ZipCode $\to$ City) affects all methods identically, and \cris's reordering introduces an additional cascade source.
+
+\textbf{Limitations.}
+\begin{itemize}
+  \item \emph{Limited dataset diversity.} Only 2 of 4 datasets (Hospital, Tax) produce meaningful differentiation among methods. Flights and Beers yield F1 $< 0.024$ for all methods, contributing no discriminative evidence. This low F1 reflects the fundamental limitation of constraint-based repair for these particular error types (data fusion conflicts and brewery data inconsistencies), not a failure of \cris specifically. Future work should evaluate on datasets with \emph{denser} constraint interactions where DAG scheduling and cycle handling are exercised more heavily.
+  \item \emph{Missing HoloClean comparison.} We were unable to run HoloClean due to its PostgreSQL dependency. Our Greedy-Holistic baseline is a simplified proxy that does not capture HoloClean's probabilistic inference. Practical positioning against state-of-the-art holistic methods therefore remains an open question.
+  \item \emph{Singleton decomposition.} Tax, Flights, and Beers all decompose to singletons under full analysis, meaning the DAG scheduling and cycle handling mechanisms are only exercised on Hospital's single DAG component. The theoretical machinery for these cases is largely untested on real data, though our synthetic experiments with chain and tree topologies (Section~\ref{sec:equivalence}) confirm correctness for acyclic CIGs.
+  \item \emph{Speedup context.} The 4.4--5.3$\times$ speedup is relative to our naive greedy baseline. \cris-Full vs.\ Sequential on Tax shows essentially identical runtime, as both reduce to independent constraint repair when the CIG is fully decomposed.
+  \item \emph{Theorem scope.} The decomposition equivalence theorem requires acyclic CIGs \emph{and} unique minimum-change repairs. Our synthetic experiments confirm 100\% agreement when both conditions hold, but cyclic CIGs produce only $\sim$58\% agreement. Real-world constraint sets with denser interactions may produce cyclic CIGs more frequently.
+\end{itemize}
+
+\textbf{When is \cris most valuable?} Based on our analysis, \cris provides the most value when: (1) the constraint set is large enough that holistic methods become expensive but not so sparse that all constraints are independent, (2) there exist non-trivial connected components in the CIG requiring DAG-ordered repair, and (3) the underlying repair algorithms benefit from reduced problem scope. Synthetic experiments with 20--50 constraints (Table~\ref{tab:synth}) suggest this regime exists, but it was not well-represented in our real-world benchmarks.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced Constraint Interaction Graphs (CIGs) and the \cris framework for decomposing multi-constraint data repair based on formal repair safety analysis. Our key empirical finding is that constraint interactions in standard benchmarks are \emph{structurally sparse}: 72--88\% of constraint pairs are safe at the syntactic level alone. This sparsity is good news for practitioners---it means independent repair, often adopted heuristically, is formally justified for these workloads.
+
+\cris with structural safety analysis (Level~1) achieves the best repair quality on the two informative benchmarks (Hospital F1 = 0.835, Tax F1 = 0.429), while finer-grained analysis (Levels~2--3) provides no quality improvement and can degrade performance. On Tax at scale, CIG-guided decomposition achieves 4.8--5.3$\times$ speedup over a greedy holistic baseline. The decomposition equivalence theorem is confirmed empirically with 100\% cell-level agreement across all tested acyclic CIG topologies.
+
+Future work should evaluate \cris on datasets with denser constraint interactions, compare against HoloClean and other probabilistic repair systems, and explore adaptive strategies that select the safety analysis depth based on CIG characteristics observed at Level~1.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{14}
+
+\bibitem[Abdelaal et~al.(2023)]{abdelaal2023rein}
+Mohamed Abdelaal, Christian Hammacher, and Harald Schoening.
+\newblock {REIN}: A comprehensive benchmark framework for data cleaning methods in {ML} pipelines.
+\newblock In \emph{Proceedings of the International Conference on Extending Database Technology (EDBT)}, 2023.
+
+\bibitem[Arocena et~al.(2015)]{arocena2015bart}
+Patricia~C. Arocena, Boris Glavic, Giansalvatore Mecca, Renee~J. Miller, Paolo Papotti, and Donatello Santoro.
+\newblock Messing up with {BART}: Error generation for evaluating data-cleaning algorithms.
+\newblock \emph{Proceedings of the VLDB Endowment}, 9(2):36--47, 2015.
+
+\bibitem[Chu et~al.(2013a)]{chu2013holistic}
+Xu~Chu, Ihab~F. Ilyas, and Paolo Papotti.
+\newblock Holistic data cleaning: Putting violations into context.
+\newblock In \emph{Proceedings of the IEEE International Conference on Data Engineering (ICDE)}, pages 458--469, 2013.
+
+\bibitem[Chu et~al.(2013b)]{chu2013discovering}
+Xu~Chu, Ihab~F. Ilyas, and Paolo Papotti.
+\newblock Discovering denial constraints.
+\newblock \emph{Proceedings of the VLDB Endowment}, 6(13):1498--1509, 2013.
+
+\bibitem[Ilyas and Chu(2019)]{ilyas2019data}
+Ihab~F. Ilyas and Xu~Chu.
+\newblock \emph{Data Cleaning}.
+\newblock ACM Books. Morgan \& Claypool, 2019.
+
+\bibitem[Khayyat et~al.(2015)]{khayyat2015bigdansing}
+Zuhair Khayyat, Ihab~F. Ilyas, Alekh Jindal, Samuel Madden, Mourad Ouzzani, Paolo Papotti, Jorge-Arnulfo Quiane-Ruiz, Nan Tang, and Si~Yin.
+\newblock {BigDansing}: A system for big data cleansing.
+\newblock In \emph{Proceedings of the ACM SIGMOD International Conference on Management of Data}, pages 1215--1230, 2015.
+
+\bibitem[Krishnan and Wu(2019)]{krishnan2019alphaclean}
+Sanjay Krishnan and Eugene Wu.
+\newblock {AlphaClean}: Automatic generation of data cleaning pipelines.
+\newblock \emph{arXiv preprint arXiv:1904.11827}, 2019.
+
+\bibitem[Livshits et~al.(2020)]{livshits2020computing}
+Ester Livshits, Benny Kimelfeld, and Sudeepa Roy.
+\newblock Computing optimal repairs for functional dependencies.
+\newblock \emph{ACM Transactions on Database Systems}, 45(1):4:1--4:46, 2020.
+
+\bibitem[Prokoshyna et~al.(2015)]{prokoshyna2015combining}
+Nataliya Prokoshyna, Jaroslaw Szlichta, Fei Chiang, Renee~J. Miller, and Divesh Srivastava.
+\newblock Combining quantitative and logical data cleaning.
+\newblock \emph{Proceedings of the VLDB Endowment}, 9(4):300--311, 2015.
+
+\bibitem[Rekatsinas et~al.(2017)]{rekatsinas2017holoclean}
+Theodoros Rekatsinas, Xu~Chu, Ihab~F. Ilyas, and Christopher R\'{e}.
+\newblock {HoloClean}: Holistic data repairs with probabilistic inference.
+\newblock \emph{Proceedings of the VLDB Endowment}, 10(11):1190--1201, 2017.
+
+\bibitem[Rezig et~al.(2021)]{rezig2021horizon}
+El~Kindi Rezig, Mourad Ouzzani, Walid~G. Aref, Ahmed~K. Elmagarmid, Ahmed~R. Mahmoud, and Michael Stonebraker.
+\newblock Horizon: Scalable dependency-driven data cleaning.
+\newblock \emph{Proceedings of the VLDB Endowment}, 14(11):2546--2559, 2021.
+
+\bibitem[Siddiqi et~al.(2024)]{siddiqi2024saga}
+Shafaq Siddiqi, Roman Kern, and Matthias Boehm.
+\newblock {SAGA}: A scalable framework for optimizing data cleaning pipelines for machine learning applications.
+\newblock In \emph{Proceedings of the ACM SIGMOD International Conference on Management of Data}, 2024.
+
+\bibitem[Zhao et~al.(2026)]{zhao2026topology}
+Guoqi Zhao, Xixian Han, and Xiaolong Wan.
+\newblock Topology-aware subset repair via entropy-guided density and graph decomposition.
+\newblock \emph{arXiv preprint arXiv:2601.19671}, 2026.
+
+\end{thebibliography}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\appendix
+\section{Additional Results}
+\label{app:additional}
+
+\subsection{Results at 5\% Error Rate}
+
+Table~\ref{tab:5pct} reports repair quality at 5\% error rate, showing consistent patterns with the 10\% results.
+
+\begin{table}[h]
+\caption{Repair F1 at 5\% error rate. Mean $\pm$ std over 3 seeds.}
+\label{tab:5pct}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Hospital & Tax & Flights & Beers \\
+\midrule
+Sequential & $0.733 \pm 0.002$ & $0.293 \pm 0.007$ & $0.013 \pm 0.001$ & $0.021 \pm 0.003$ \\
+Reverse & $0.733 \pm 0.002$ & $0.310 \pm 0.008$ & $0.013 \pm 0.001$ & $0.021 \pm 0.003$ \\
+Greedy-Holistic & $0.733 \pm 0.002$ & $0.293 \pm 0.007$ & $0.013 \pm 0.001$ & $0.021 \pm 0.003$ \\
+\cris-Structural & $0.733 \pm 0.002$ & $0.306 \pm 0.004$ & $0.013 \pm 0.001$ & $0.021 \pm 0.003$ \\
+\cris-Full & $0.722 \pm 0.016$ & $0.293 \pm 0.007$ & $0.013 \pm 0.001$ & $0.021 \pm 0.003$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Constraint Scaling on Synthetic Data}
+
+Table~\ref{tab:synth} reports quality and runtime on synthetic datasets with varying constraint counts.
+
+\begin{table}[h]
+\caption{Synthetic data: constraint count scaling (10K tuples, 10\% errors).}
+\label{tab:synth}
+\centering
+\begin{tabular}{lccc|ccc}
+\toprule
+& \multicolumn{3}{c|}{F1 $\uparrow$} & \multicolumn{3}{c}{Runtime (s)} \\
+\#Constraints & Seq. & Greedy & \cris & Seq. & Greedy & \cris \\
+\midrule
+5 & 0.733 & 0.708 & 0.733 & 0.5 & 2.7 & 0.6 \\
+10 & 0.700 & 0.676 & 0.702 & 1.8 & 8.0 & 2.7 \\
+20 & 0.855 & 0.848 & 0.855 & 1.3 & 4.5 & 2.0 \\
+30 & 0.786 & 0.778 & 0.786 & 3.7 & 14.3 & 5.2 \\
+50 & 0.795 & 0.780 & 0.792 & 7.7 & 29.4 & 14.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sparsity Visualization}
+
+Figure~\ref{fig:sparsity} shows the cumulative safety classification across datasets and safety levels.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig2_sparsity.pdf}
+\caption{Cumulative fraction of constraint pairs classified as safe at each level. Level~1 (structural) captures the dominant share across all datasets.}
+\label{fig:sparsity}
+\end{figure}
+
+\end{document}

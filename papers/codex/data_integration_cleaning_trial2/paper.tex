@@ -1,0 +1,351 @@
+\documentclass{article}
+
+\usepackage[final]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{tabularx}
+
+\title{CanopyER: A Short Systems Note on Budgeted Rewrite-vs-Match Scheduling for Progressive Entity Matching}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\method}{CanopyER}
+\newcommand{\nauc}{normalized AUC}
+\newcommand{\matcha}{\texttt{match}}
+\newcommand{\cleana}{\texttt{clean}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Progressive entity matching usually assumes that the candidate graph is fixed once execution begins, while cleaning-aware entity resolution systems improve dirty representations without explicitly deciding whether a local rewrite is worth more than another batch of pair evaluations. We study the narrower systems question of whether representation-changing actions can be made cheap enough to compete online with ordinary progressive matching. \method{} exposes two budgeted actions under one wall-clock budget: \matcha{}, which evaluates the next batch of visible pairs, and \cleana{}, which applies deterministic canopy-local canonicalization followed by incremental blocker maintenance. The paper is intentionally scoped as a short systems note and reports only the fair, paper-facing snapshot stored in \texttt{exp/paper\_snapshot/results.json}: Abt-Buy aggregated over seeds $\{13,29,47\}$ and Amazon-Google aggregated over the common seeds $\{13,29\}$ shared by every main-comparison method. On those settings, \method{} improves over RawPEM in \nauc{} from $0.000940$ to $0.000969$ on Abt-Buy and from $0.022298$ to $0.025869$ on Amazon-Google, while keeping overhead low at $0.003033$ and $0.031884$. However, paired tests on the two included settings are not significant ($p=0.503748$ against every reported baseline), HybridStatic, LocalHeuristic, and MutableGreedy remain stronger schedulers, and the available estimator diagnostics show zero ranking signal. The current evidence therefore supports a narrow feasibility claim about mutable-action progressive matching, but not a stronger claim about the effectiveness of the present learned scheduler.
+\end{abstract}
+
+\section{Introduction}
+
+Progressive entity matching (EM) asks how to spend limited runtime so that useful matches appear early. Prior progressive schedulers improve early utility over a fixed candidate graph \citep{altowim2018progresser,sun2022costbenefit,maciejewski2025progressive}. Cleaning-aware ER systems show that repairing dirty representations can improve downstream matching quality \citep{buoncristiano2024detective,ao2019effective}. What is still missing is a narrower systems question: under one runtime budget, when should the next unit of work evaluate the current frontier, and when should it rewrite the representation so that the frontier itself changes?
+
+This paper studies that question through \method{}, a deliberately modest integration of progressive scheduling, local deterministic canonicalization, and incremental blocker maintenance. The system alternates between two action types:
+\begin{itemize}
+  \item \matcha{}: evaluate the next batch of currently visible candidate pairs;
+  \item \cleana{}: rewrite one blocker-local canopy and refresh only the touched blocker state.
+\end{itemize}
+The contribution is not a new blocker, a new matcher, or a new cleaning operator family. The contribution is the action space: representation change becomes a schedulable operation under the same measured budget as pair evaluation.
+
+The paper is also intentionally narrow in scope. The active artifact does not yet contain the full five-setting campaign or the planned ablation suite. To keep the paper-to-artifact contract exact, we report only the two settings whose active runs admit fair aggregation across all seven main-comparison methods: Abt-Buy with seeds $\{13,29,47\}$ and Amazon-Google with common seeds $\{13,29\}$. All reported tables and figures trace back to one authoritative paper snapshot, \texttt{exp/paper\_snapshot/results.json}.
+
+Our contributions are:
+\begin{itemize}
+  \item We formulate progressive EM as budgeted competition between comparison work and blocker-local canonicalization on a mutable candidate graph.
+  \item We describe a deterministic implementation with canopy-local rewrites, incremental blocker maintenance, and online rewrite-vs-match scoring under one measured budget.
+  \item We provide a paper-facing artifact snapshot that fixes the aggregation inconsistency in the earlier draft by using one explicit common-seed rule for every reported number.
+  \item We report a negative but useful empirical result: mutable actions are cheap enough to study online, but the present learned clean-action estimator shows no measurable ranking signal and does not outperform stronger static or heuristic schedulers.
+\end{itemize}
+
+Section~\ref{sec:related} positions the work, Section~\ref{sec:method} defines the mutable-action formulation and implementation, Section~\ref{sec:experiments} reports the paper-facing evidence, Section~\ref{sec:limitations} discusses what the current evidence does and does not support, and Section~\ref{sec:conclusion} concludes. Appendix~\ref{sec:appendix-repro} makes the artifact contract explicit.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Progressive entity matching.}
+ProgressER \citep{altowim2018progresser}, Progressive Entity Matching via Cost Benefit Analysis \citep{sun2022costbenefit}, and the design-space study of \citet{maciejewski2025progressive} optimize early utility under a budget, but they assume that the representation and candidate graph are fixed while execution proceeds. These systems are our most direct baselines because they isolate the value of scheduling over a static frontier.
+
+\paragraph{Mutable candidate spaces for other reasons.}
+Prior work has studied mutable candidate spaces, but not as a rewrite-vs-match decision problem on fixed input data. Iterative Blocking \citep{whang2009iterative} propagates block evidence iteratively. Progressive ER over Incremental Data \citep{gazzarri2023incremental} changes the comparison space because new records arrive. Incremental Entity Blocking over Heterogeneous Streaming Data \citep{araujo2022incremental} focuses on efficient blocking updates under streaming arrivals. These papers show that mutable candidate spaces are viable, but not that local graph mutation should compete directly against pair evaluation under one runtime budget.
+
+\paragraph{Cleaning-aware ER and pipeline configuration.}
+Detective Gadget \citep{buoncristiano2024detective} is the closest conceptual neighbor because it interleaves repair and matching on dirty data. Effective and Efficient Data Cleaning for Entity Matching \citep{ao2019effective} similarly motivates downstream-aware cleaning. Self-configured Entity Resolution with pyJedAI \citep{efthymiou2023pyjedai} broadens the view to automatic pipeline configuration. Unlike these systems, \method{} makes the narrower operational claim that the next unit of budget may be better spent on either a local rewrite or immediate comparisons, and that this decision should be made online.
+
+\paragraph{Blocking substrate and integration context.}
+We intentionally assume a strong lexical blocking substrate rather than claiming gains from a weak blocker, following Sparkly \citep{paulsen2023sparkly}. More broadly, Gen-T \citep{fan2024gent} and LakeBench \citep{deng2024lakebench} show growing interest in robust data integration over imperfect tables. \method{} targets a lower layer of that stack: exposing entity-level correspondences earlier under tight CPU budgets.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem formulation}
+
+Given two input tables, a deterministic blocker, a deterministic pair scorer, a fixed decision threshold, and a wall-clock budget, \method{} maintains a mutable state
+\[
+\mathcal{S}_t = (V_t, I_t, G_t, F_t, H_t),
+\]
+where $V_t$ is the current canonicalized record representation, $I_t$ is the blocker index, $G_t$ is the visible candidate graph, $F_t$ is the frontier of unevaluated candidate pairs, and $H_t$ is the action history. At each decision point the scheduler chooses one legal action from two families.
+
+\paragraph{\matcha{} actions.}
+A \matcha{} action evaluates the next batch of candidate pairs from the current frontier $F_t$.
+
+\paragraph{\cleana{} actions.}
+A \cleana{} action applies one deterministic operator to one canopy-local subset of records, updates only the touched blocker state, and refreshes only the affected candidate neighborhoods.
+
+The primary objective is duplicate yield over time, summarized by \nauc{}. Final $F_1$ serves as a guardrail on end-of-budget quality.
+
+\subsection{Canopies and deterministic operators}
+
+A \emph{canopy} is a blocker-local neighborhood defined by an attribute and a nearby token region in the blocker. The implementation keeps canopies small so that rewriting them can plausibly compete with one matching batch. The operator library is deterministic and lightweight:
+\begin{itemize}
+  \item case folding and Unicode normalization;
+  \item punctuation and whitespace normalization;
+  \item token sorting for title-like fields;
+  \item numeric, date, and unit normalization;
+  \item abbreviation expansion;
+  \item canopy-local typo consolidation.
+\end{itemize}
+
+Abbreviation rules are fully materialized in artifact CSV files. They combine a small seed lexicon with deterministic corpus mining from patterns such as \texttt{long form (abbr)} and \texttt{abbr = long form}. A candidate mapping is retained only when it has repeated support and a unique majority expansion. Typo consolidation is also deterministic: variants must stay inside one canopy, have edit distance one, share the same first character, and differ by at most one token; the canonical form is the most frequent local variant. The novelty is not the operator family itself, but allowing these rewrites to compete online against ordinary pair evaluation.
+
+\subsection{Action scoring}
+
+For a clean action $a$, \method{} estimates expected unlocked gain, expected precision risk, and measured cost, and scores the action as
+\[
+S_{\text{clean}}(a)=\frac{\widehat{\mathrm{gain}}(a)-\lambda \widehat{\mathrm{risk}}(a)}{\widehat{\mathrm{cost}}(a)}.
+\]
+For a match batch $m$, it estimates near-term duplicate yield and measured batch cost, and scores the batch as
+\[
+S_{\text{match}}(m)=\frac{\widehat{\mathrm{yield}}(m)}{\widehat{\mathrm{cost}}(m)}.
+\]
+The scheduler executes the currently highest-scoring legal action.
+
+The clean-action estimators are intentionally simple. The gain model uses only blocker-local features that are available online: near-miss density in the canopy, token-entropy reduction after hypothetical rewriting, the number of records likely to move into already promising neighboring blocks, the fraction of records currently stuck in candidate-starved blocks, and a micro-simulation estimate that applies the rewrite to a sample and refreshes only sampled postings. The risk model uses conservative collision and weak-agreement features. Both models are linear with non-negative coefficients, and the gain prediction is isotonic-calibrated after fitting.
+
+\subsection{Fitting protocol and implementation details}
+
+To avoid leakage, each dataset-setting uses estimator weights fitted on pilot action logs from the other settings only. Those pilot logs are generated by a fixed heuristic scheduler rather than by \method{} itself, and the fitted weights are frozen before evaluation on the target setting. Thus, when the paper evaluates Abt-Buy or Amazon-Google, no labels from that same setting influence the estimator weights or calibration.
+
+The implementation is deterministic once the input setting and seed are fixed. All methods share the same blocker, the same pair scorer, the same budget, and the same decision threshold. The active workspace records the resulting per-run metrics in \texttt{runs/<setting>/<method>/<seed>/metrics.json}; trace-level yield curves come from the corresponding \texttt{trace.csv} files. This shared stack is important because the paper's claim is about scheduling and local graph mutation, not about a stronger matcher.
+
+\subsection{Incremental blocker maintenance}
+
+Incrementality is what makes \cleana{} actions budget-competitive. After a local rewrite, \method{} removes only the touched records from their current postings, reinserts only their updated signatures, and recomputes candidate pairs only for touched blocks and neighboring blocks. Untouched postings, untouched blocks, and already evaluated pairs remain fixed. This is the central systems claim of the paper: local canonicalization can be cheap enough to enter the progressive budget calculation, whereas rebuilding the full blocker after every rewrite would make cleaning actions uncompetitive by construction.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Paper-facing setup}
+
+\paragraph{Authoritative artifact.}
+The authoritative paper snapshot is \texttt{exp/paper\_snapshot/results.json}. Its aggregation rule is stated once and used everywhere in the paper: for each setting, aggregate only over the seeds shared by every main-comparison method. In the active artifact that yields Abt-Buy seeds $\{13,29,47\}$ and Amazon-Google seeds $\{13,29\}$. Tables~\ref{tab:datasets}--\ref{tab:diagnostics} and Figures~\ref{fig:main_auc}--\ref{fig:yield} all point to that snapshot; Appendix~\ref{sec:appendix-repro} lists the exact mapping.
+
+\paragraph{Datasets and scope.}
+The original plan targeted five settings, but the active artifact only supports a fair paper narrative for two. Table~\ref{tab:datasets} reports the two included settings as recorded in the paper snapshot. We explicitly exclude Amazon-Google corrupted, DBLP-ACM, and DBLP-ACM corrupted from the manuscript because their active main-comparison runs are incomplete.
+
+\begin{table}[t]
+\caption{Paper-facing settings from the authoritative snapshot. Candidate counts are the initial blocker graph sizes before any cleaning.}
+\label{tab:datasets}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Setting & Left & Right & Positives & Initial candidates \\
+\midrule
+Abt-Buy & 1081 & 1092 & 1097 & 35397 \\
+Amazon-Google & 1363 & 3226 & 1300 & 87850 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Exact protocol.}
+All methods run under one strict $360$-second wall-clock budget on $2$ CPU workers with no GPU. The shared blocker tokenizes the primary attribute into lowercase word tokens plus character $3$-grams, builds sparse TF-IDF vectors, retrieves top-$25$ neighbors per record by cosine similarity, and forms the candidate graph as the union of directional top-$25$ lists. The shared matcher score is
+\[
+\begin{aligned}
+&0.50 \cdot \text{primary TF-IDF cosine} + 0.20 \cdot \text{token Jaccard} \\
+&+ 0.15 \cdot \text{RapidFuzz ratio} + 0.10 \cdot \text{secondary-attribute agreement} \\
+&+ 0.05 \cdot \text{numeric/year agreement},
+\end{aligned}
+\]
+with one frozen threshold of $0.78$, selected from $\{0.78, 0.80, 0.82, 0.84\}$ by leave-one-setting-out validation on source settings only. Every \matcha{} action evaluates a batch of $250$ candidate pairs. Every \cleana{} action is canopy-local: the scheduler ranks up to $24$ legal rewrite candidates obtained from the top $6$ supported canopies, discards actions touching more than $80$ records or more than $1500$ estimated postings updates, and scores each remaining action with $\lambda=0.5$ in the clean-action objective above. Figures and tables use the common-seed aggregation rule stated above; within each setting, we average only over the seeds shared by every main-comparison method.
+
+\paragraph{Methods and metrics.}
+We compare \method{} against RawPEM, HybridStatic, FullClean+PEM, LocalHeuristic, MutableGreedy, and MutableRandom. Our primary metric is \nauc{}. We also report recall at the mid-budget checkpoint, final $F_1$, overhead fraction, and frontier-exhaustion time. The overhead fraction includes scheduler scoring, cleaning, and blocker maintenance; omitting that cost would make rewrite actions artificially favorable.
+
+\subsection{Main comparison}
+
+Table~\ref{tab:main} reports the paper-facing comparison. On Abt-Buy, \method{} improves over RawPEM from $0.000940$ to $0.000969$ in \nauc{}, but it remains behind HybridStatic ($0.001222$), LocalHeuristic ($0.001349$), and MutableGreedy ($0.001364$). On Amazon-Google, the fair common-seed comparison shows a larger gain over RawPEM, from $0.022298$ to $0.025869$, but \method{} again trails HybridStatic ($0.034073$), LocalHeuristic ($0.032549$), MutableRandom ($0.031627$), and MutableGreedy ($0.029246$).
+
+The main conclusion is therefore narrow. Allowing rewrite actions can improve over a raw fixed-representation progressive baseline, but the present learned scheduler does not beat the strongest static or heuristic baselines. Figure~\ref{fig:main_auc} visualizes the same ranking with the same seed policy and the same paper snapshot.
+
+\begin{table*}[t]
+\caption{Main comparison from the authoritative paper snapshot. Abt-Buy uses seeds $\{13,29,47\}$; Amazon-Google uses the fair common-seed subset $\{13,29\}$. Higher is better for \nauc{}, recall, and $F_1$; lower is better for overhead and exhaustion time. Best \nauc{} per setting is in \textbf{bold}.}
+\label{tab:main}
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccccc|ccccc}
+\toprule
+& \multicolumn{5}{c|}{Abt-Buy (3 seeds)} & \multicolumn{5}{c}{Amazon-Google (2 common seeds)} \\
+\cmidrule(lr){2-6}\cmidrule(lr){7-11}
+Method & \nauc{} & R@180 & Final $F_1$ & Overhead & Exhaustion (s) & \nauc{} & R@180 & Final $F_1$ & Overhead & Exhaustion (s) \\
+\midrule
+RawPEM & 0.000940 & 0.030372 & 0.058415 & 0.000000 & 18.655233 & 0.022298 & 0.146153 & 0.226527 & 0.000000 & 62.466850 \\
+HybridStatic & 0.001222 & 0.030372 & 0.058415 & 0.093362 & 22.033533 & \textbf{0.034073} & 0.146153 & 0.226527 & 0.165352 & 91.523750 \\
+FullClean+PEM & 0.000734 & 0.022779 & 0.044248 & 0.901922 & 108.089467 & 0.009761 & 0.000000 & 0.141578 & 0.926563 & 360.000000 \\
+LocalHeuristic & 0.001349 & 0.030372 & 0.058415 & 0.229469 & 23.552867 & 0.032549 & 0.142788 & 0.222139 & 0.465355 & 106.015900 \\
+MutableGreedy & \textbf{0.001364} & 0.030372 & 0.058415 & 0.225532 & 23.698300 & 0.029246 & 0.146153 & 0.226527 & 0.159741 & 79.581350 \\
+MutableRandom & 0.001108 & 0.030372 & 0.058415 & 0.072266 & 20.657867 & 0.031627 & 0.145673 & 0.225866 & 0.238866 & 86.050300 \\
+\method{} & 0.000969 & 0.030372 & 0.058415 & 0.003033 & 19.045333 & 0.025869 & 0.146153 & 0.226527 & 0.031884 & 71.265050 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{table}[t]
+\caption{Compact paired permutation tests from the authoritative paper snapshot. Each delta is the per-setting mean \nauc{} difference \method{} minus the named baseline, averaged over the settings included in the short note.}
+\label{tab:paired}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Baseline & Mean $\Delta$AUC & Std. & $p$-value \\
+\midrule
+RawPEM & 0.001800 & 0.001771 & 0.503748 \\
+HybridStatic & -0.004229 & 0.003976 & 0.503748 \\
+LocalHeuristic & -0.003530 & 0.003150 & 0.503748 \\
+MutableGreedy & -0.001886 & 0.001491 & 0.503748 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/main_auc_comparison.png}
+\caption{Paper-facing \nauc{} comparison for RawPEM, HybridStatic, LocalHeuristic, MutableGreedy, and \method{}. Bars show means from the authoritative paper snapshot; error bars are the stored 95\% confidence intervals over the paper seeds.}
+\label{fig:main_auc}
+\end{figure}
+
+\subsection{Runtime behavior and frontier exhaustion}
+
+The clearest positive result is systems behavior rather than ranking quality. \method{} adds almost no overhead on Abt-Buy ($0.003033$) and remains light on Amazon-Google ($0.031884$), in contrast to FullClean+PEM, which spends more than $0.90$ of runtime on overhead in both settings. This supports the core feasibility claim: local mutation is cheap enough to enter the online budget calculation.
+
+Frontier-exhaustion times also explain why later checkpoints add little information. On Abt-Buy, every method except FullClean+PEM exhausts the frontier within about $24$ seconds. On Amazon-Google, the main frontiers exhaust within about $62$--$106$ seconds for every method except FullClean+PEM. Figure~\ref{fig:yield} shows that most separation happens early; after frontier exhaustion, the curves flatten and later checkpoints mostly confirm saturation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/yield_over_time_panel.png}
+\caption{Duplicate-yield traces for RawPEM, HybridStatic, LocalHeuristic, MutableGreedy, and \method{} using the paper seed sets. Each point uses the most recent recorded trace row at or before the checkpoint; when no trace row exists before $15$ seconds, the plotted value is the run's initial zero state. The first point is therefore a lower-bound carry-forward convention, not an exact instantaneous measurement at $15$ seconds. Uncertainty is omitted because only two or three seeds are available per setting.}
+\label{fig:yield}
+\end{figure*}
+
+\subsection{Estimator diagnostics}
+
+The estimator evidence is negative. Table~\ref{tab:diagnostics} summarizes the available diagnostics from the authoritative paper snapshot. In both Amazon-Google seeds, the Spearman correlation between predicted gain and realized gain is $0.0$, the top-decile minus median-decile realized gain is $0.0$, and the risk model is marked as collapsed. Combined with the main table, this is the key reason the paper must stop at a systems-feasibility claim rather than an estimator-effectiveness claim.
+
+\begin{table}[t]
+\caption{Available estimator diagnostics from the authoritative paper snapshot. Higher would be better for Spearman correlation and top-minus-median gain.}
+\label{tab:diagnostics}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Setting / seed & Spearman & Top gain & Median gain & Risk collapsed \\
+\midrule
+Amazon-Google / 13 & 0.0 & 0.0 & 0.0 & True \\
+Amazon-Google / 29 & 0.0 & 0.0 & 0.0 & True \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:paired} shows that the paper-facing evidence is also statistically weak. On the two included settings, \method{} is directionally better than RawPEM but worse than HybridStatic, LocalHeuristic, and MutableGreedy on mean \nauc{} difference, and none of the paired permutation tests is significant. Combined with Table~\ref{tab:diagnostics}, this makes the correct interpretation negative but useful: mutable actions are feasible online, but the current estimator is not yet an effective ranking mechanism.
+
+\subsection{Failure analysis}
+
+The snapshot contains only two executed \method{} clean actions, both on Amazon-Google, so the failure analysis is necessarily compact. Under the pre-registered definitions, neither action is \emph{harmful} nor \emph{wasteful}: Table~\ref{tab:failure} shows harmful rate $0.0$, wasteful rate $0.0$, and count $2$ for the only observed operator/canopy bucket combination. That said, the case-study logs still reveal a useful qualitative failure mode. In both seeds, an abbreviation rewrite on the \texttt{iris|irispen} canopy touched $7$ records, updated $175$ postings, created $37$ candidate pairs, and yielded $0$ new true matches. The operator did not breach the paper's harmful/wasteful thresholds because it finished in under one second and local precision recovered quickly, but it was still a mis-ranked action from the standpoint of duplicate yield.
+
+\begin{table}[t]
+\caption{Compact failure summary from the authoritative paper snapshot. The only observed \method{} clean actions were abbreviation rewrites on small canopies in Amazon-Google.}
+\label{tab:failure}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Operator & Canopy bucket & Harmful rate & Wasteful rate \\
+\midrule
+\texttt{abbr} & $(0,10]$ & 0.0 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation status}
+
+The active paper snapshot contains no completed ablations: \texttt{exp/paper\_snapshot/results.json::ablation\_results} is empty. We therefore do not report ablation numbers, and we do not claim that the current artifact supports component-level conclusions about the risk term, micro-simulation, or incremental maintenance versus full reblocking. This is a substantive limitation, not a rhetorical omission, and it is the main reason we position the current manuscript as a short systems note rather than as a full empirical study.
+
+\section{Discussion and Limitations}
+\label{sec:limitations}
+
+The current evidence supports a narrow claim and excludes several stronger interpretations.
+
+First, coverage is incomplete. The original plan targeted five settings, but only Abt-Buy is complete and only a common-seed subset of Amazon-Google can be compared fairly across all methods. The remaining three settings are absent from the active paper snapshot and are intentionally excluded from the manuscript.
+
+Second, the estimator story is weak. The available diagnostics show zero rank correlation and zero top-decile advantage, and the main comparison does not show a win over strong static or heuristic baselines. The honest reading is that the learned action-value model has not yet demonstrated value.
+
+Third, the benchmark is short-horizon. Most frontiers exhaust far before the end of the shared budget. That makes the evidence mainly about early frontier access and low-overhead execution, not about sustained long-horizon gains.
+
+Fourth, the ablation story is currently absent in the active artifact. Without the planned \texttt{NoRisk}, \texttt{NoMicroSim}, \texttt{FormatOnly}, and \texttt{FullReblock} runs, the paper cannot cleanly separate the value of local action choice from the value of cheap blocker mutation.
+
+Fifth, the plotting convention is conservative at the earliest checkpoint. Figure~\ref{fig:yield} uses the latest trace row at or before each fixed checkpoint, so a run whose first trace lands slightly after $15$ seconds is plotted as zero at that checkpoint. We make that convention explicit in the caption rather than silently treating the first point as an exact real-time measurement.
+
+Taken together, these limitations motivate a restrained conclusion. The paper establishes that blocker-local rewrite actions can be integrated into progressive EM at very low overhead and can outperform RawPEM on the two fair settings in the active snapshot. It does not establish that the current learned scheduler is strong, robust, or competitive with the best available baselines.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \method{}, a system that casts progressive entity matching as budgeted competition between evaluating the current candidate frontier and applying blocker-local rewrites that mutate that frontier. The main positive result is systems feasibility: local canonicalization plus incremental blocker maintenance can execute within the online budget at very low overhead, and can improve over RawPEM on the two settings for which the active artifact supports fair comparison. The main negative result is equally important: the present estimator does not outperform strong static or heuristic mutable baselines, and its diagnostic signal is effectively zero.
+
+The next step is not broader framing but more evidence: complete the missing settings in the active workspace, regenerate the planned ablations, and revisit the estimator only if those experiments show real ranking signal. Until then, the defensible claim is narrow but useful: mutable-action progressive matching is a practical systems regime worth studying further.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\clearpage
+\appendix
+
+\section{Reproducibility Appendix}
+\label{sec:appendix-repro}
+
+\subsection{Single authoritative artifact}
+
+The paper uses one authoritative paper-facing artifact:
+\begin{itemize}
+  \item \texttt{exp/paper\_snapshot/results.json}
+\end{itemize}
+That file stores the aggregation rule, the included seed sets, the paper-facing dataset summary, the main comparison, the estimator diagnostics, the frontier-exhaustion summary, the checkpoint curves used for Figure~\ref{fig:yield}, and an explicit artifact map. The synchronized copies in \texttt{results.json} and \texttt{exp/run\_suite/results.json} are byte-equivalent mirrors for convenience.
+
+\subsection{Datasets, seeds, and aggregation rule}
+
+The paper-facing snapshot uses exactly two settings:
+\begin{itemize}
+  \item Abt-Buy with seeds $\{13,29,47\}$.
+  \item Amazon-Google with the common seeds $\{13,29\}$ shared by RawPEM, HybridStatic, FullClean+PEM, LocalHeuristic, MutableGreedy, MutableRandom, and \method{}.
+\end{itemize}
+The aggregation rule is fixed once for the whole manuscript: within each reported setting, aggregate only over seeds shared by every main-comparison method. Per-run summary numbers come from \texttt{runs/<setting>/<method>/<seed>/metrics.json}; curve traces come from \texttt{runs/<setting>/<method>/<seed>/trace.csv}. The paper snapshot is rebuilt from those raw files by \texttt{exp/paper\_snapshot/build\_snapshot.py}.
+
+\subsection{Table and figure provenance}
+
+\begin{table}[h]
+\caption{Mapping from paper objects to exact artifact locations.}
+\label{tab:artifact-map}
+\centering
+\small
+\begin{tabularx}{\linewidth}{lX}
+\toprule
+Paper object & Artifact location(s) \\
+\midrule
+Table~\ref{tab:datasets} & \texttt{exp/paper\_snapshot/results.json::paper\_datasets} \\
+Table~\ref{tab:main} & \texttt{exp/paper\_snapshot/results.json::main\_results} \\
+Table~\ref{tab:diagnostics} & \texttt{exp/paper\_snapshot/results.json::estimator\_diagnostics} \\
+Figure~\ref{fig:main_auc} & \texttt{exp/paper\_snapshot/results.json::main\_results}, rendered to \texttt{figures/main\_auc\_comparison.png} \\
+Figure~\ref{fig:yield} & \texttt{exp/paper\_snapshot/results.json::paper\_curve\_points}, rendered to \texttt{figures/yield\_over\_time\_panel.png} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{What is intentionally absent}
+
+The active paper snapshot records \texttt{ablation\_results} as an empty list. This manuscript therefore makes no component-level quantitative claims about \texttt{NoRisk}, \texttt{NoMicroSim}, \texttt{FormatOnly}, or \texttt{FullReblock}. The paper is intentionally positioned as a short systems note until those runs are present in the active artifact.
+
+\end{document}

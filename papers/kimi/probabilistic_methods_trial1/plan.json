@@ -1,0 +1,274 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated virtual environment and install required packages for D-HLL implementation and experiments",
+    "steps": {
+      "1": "Create virtual environment: python3 -m venv .venv",
+      "2": "Activate environment: source .venv/bin/activate",
+      "3": "Install core dependencies: pip install numpy scipy pandas matplotlib seaborn tabulate mmh3",
+      "4": "Install dev dependencies: pip install pytest pytest-benchmark",
+      "5": "Verify installation: python -c 'import numpy; import mmh3; print(\"OK\")'",
+      "6": "Create directory structure: mkdir -p src/ data/ results/ figures/ logs/"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Synthetic Datasets",
+    "description": "Create synthetic data streams with known properties for controlled evaluation",
+    "steps": {
+      "1": "Generate uniform random stream: 10M unique elements, timestamps 0-10000, save as data/uniform_10m.jsonl (format: {id, timestamp})",
+      "2": "Generate Zipfian stream: 10M elements, skew=1.5, timestamps 0-10000, save as data/zipfian_10m.jsonl",
+      "3": "Generate bursty stream: 5M baseline elements + 3 bursts of 1M each at t=2500, 5000, 7500, save as data/bursty_10m.jsonl",
+      "4": "Generate varying cardinality stream: Linear growth from 1K to 100K unique elements over 10000 timesteps, save as data/varying_100k.jsonl",
+      "5": "Create ground truth files: For each dataset, compute exact decayed cardinality at intervals for lambda values [0.001, 0.01, 0.05, 0.1], save as data/*_truth_lambda-{value}.csv",
+      "6": "Compute dataset statistics: element counts, unique counts per time window, distribution histograms, save to data/statistics.json"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Real-World Datasets",
+    "description": "Obtain real network trace data for realistic evaluation",
+    "steps": {
+      "1": "Download CAIDA trace sample: wget -O data/caida_sample.csv.gz 'https://data.caida.org/datasets/passive-2018/equinix-chicago/20180419-130000.UTC/anonymized.traces.gz' (or use synthetic network trace if unavailable)",
+      "2": "Extract and parse: gunzip and extract (src_ip, dst_ip, timestamp) tuples, limit to 5M packets",
+      "3": "Preprocess: Convert to element ID using hash of flow key (src_ip, dst_ip, protocol), timestamp in milliseconds",
+      "4": "Generate ground truth: Compute exact flow cardinality with exponential decay at regular intervals",
+      "5": "Create synthetic network trace fallback: If CAIDA unavailable, generate realistic network traffic with diurnal patterns and bursts"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate Standard HLL (Landmark Model)",
+    "description": "Baseline 1: Standard HyperLogLog treating all history equally",
+    "steps": {
+      "1": "Implement standard HLL with precision p=11 (m=2048 registers) in src/hll.py",
+      "2": "Implement HyperLogLog++ bias correction and 64-bit hash using mmh3",
+      "3": "Run on uniform stream: 3 random seeds [42, 123, 999], record relative error at t=1000, 3000, 5000, 7000, 10000",
+      "4": "Run on Zipfian stream: same seeds and timestamps, record relative error",
+      "5": "Run on bursty stream: same seeds, focus on recovery periods after bursts",
+      "6": "Measure throughput: elements/second using timeit with 1M elements",
+      "7": "Save results to results/baseline_hll.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate Sliding Window HLL",
+    "description": "Baseline 2: Sliding HyperLogLog with landmark windows",
+    "steps": {
+      "1": "Implement Sliding HLL with fixed-size landmark windows in src/sliding_hll.py",
+      "2": "Maintain multiple HLL sketches for different time windows (window_size = 1000 timesteps)",
+      "3": "Run on uniform stream with 3 seeds, measure relative error at query points",
+      "4": "Run on Zipfian stream with 3 seeds",
+      "5": "Run on bursty stream, measure accuracy during and after bursts",
+      "6": "Measure memory usage: total bytes for all active windows",
+      "7": "Measure throughput: elements/second",
+      "8": "Save results to results/baseline_sliding_hll.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement Decaying HyperLogLog (D-HLL)",
+    "description": "Core implementation of the proposed D-HLL algorithm",
+    "steps": {
+      "1": "Implement D-HLL class in src/dhll.py with: registers array (float32), timestamps array (uint32), decay rate lambda",
+      "2": "Implement lazy decay: M[j] = M[j] * exp(-lambda * (t_now - T[j])) on register access",
+      "3": "Implement update: compute decayed rank, update register if new value > current",
+      "4": "Implement cardinality estimate: alpha_m * m^2 / sum(2^(-M[j])) using decayed register values",
+      "5": "Implement merge: synchronize timestamps, take max of decayed values, preserve mergeability",
+      "6": "Add quantized timestamp option: store timestamps at 100ms granularity to reduce space",
+      "7": "Unit tests: verify correctness against ground truth for small examples"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "D-HLL Accuracy vs Decay Rate",
+    "description": "Evaluate accuracy across different decay rates",
+    "steps": {
+      "1": "Configure D-HLL with p=11 (m=2048), varying lambda in [0.001, 0.01, 0.05, 0.1]",
+      "2": "For each lambda, run on uniform stream with 3 seeds [42, 123, 999]",
+      "3": "Query at t=1000, 3000, 5000, 7000, 10000, record relative error |estimate - truth| / truth",
+      "4": "Repeat for Zipfian stream",
+      "5": "Compute mean and std of relative error across seeds and query points",
+      "6": "Verify: relative error < 2% for all lambda values",
+      "7": "Save detailed results to results/dhll_accuracy_lambda.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "D-HLL Throughput and Memory Evaluation",
+    "description": "Measure computational performance of D-HLL",
+    "steps": {
+      "1": "Measure throughput: Process 10M elements, record time, compute elements/second",
+      "2": "Run 5 trials with different seeds, report mean and std",
+      "3": "Target: > 1M elements/second on single CPU core",
+      "4": "Measure memory: sizeof(registers) + sizeof(timestamps) in bytes",
+      "5": "Compare: D-HLL vs standard HLL vs sliding HLL memory usage",
+      "6": "Test with quantized timestamps (100ms granularity): measure space savings vs accuracy tradeoff",
+      "7": "Save results to results/dhll_performance.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "D-HLL Mergeability Evaluation",
+    "description": "Verify distributed computation correctness",
+    "steps": {
+      "1": "Split uniform stream into 10 shards by timestamp modulo 10",
+      "2": "Create 10 D-HLL sketches, one per shard, with same lambda=0.01",
+      "3": "Merge all 10 sketches into one combined sketch",
+      "4": "Compare merged estimate vs centralized estimate (single sketch on full stream)",
+      "5": "Compute merge error: |merged - centralized| / centralized",
+      "6": "Repeat with 3 different random seeds for stream generation",
+      "7": "Verify: merge error < 10% for all cases",
+      "8": "Test with different lambda values: 0.001, 0.05, 0.1",
+      "9": "Save results to results/dhll_mergeability.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Adaptivity to Concept Drift",
+    "description": "Test response to sudden cardinality changes",
+    "steps": {
+      "1": "Run D-HLL with lambda=0.02 on bursty stream",
+      "2": "Record estimates every 50 timesteps throughout stream",
+      "3": "Compare against sliding HLL (window=500) and standard HLL",
+      "4": "Measure: time to converge to new cardinality after each burst ends",
+      "5": "Compute average absolute error during recovery periods",
+      "6": "Verify: D-HLL adapts faster (lower convergence time) than sliding window",
+      "7": "Save time series and results to results/adaptivity_burst.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Lazy vs Eager Decay",
+    "description": "Verify lazy decay does not significantly impact accuracy",
+    "steps": {
+      "1": "Implement eager decay variant: decay all registers at each query point",
+      "2": "Run both variants on uniform stream with lambda=0.01, 3 seeds",
+      "3": "Query at 100 points throughout stream, compare relative errors",
+      "4": "Compute mean absolute difference in relative error between lazy and eager",
+      "5": "Verify: difference < 1% (lazy decay is accurate enough)",
+      "6": "Measure throughput difference: lazy should be >10x faster",
+      "7": "Save results to results/ablation_lazy_decay.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Timestamp Quantization",
+    "description": "Evaluate space-accuracy tradeoff of timestamp quantization",
+    "steps": {
+      "1": "Test quantization levels: 1ms (no quantization), 10ms, 100ms, 1s",
+      "2": "For each level, run on uniform stream with lambda=0.01, 3 seeds",
+      "3": "Measure: memory usage (bytes) and relative error",
+      "4": "Verify: 100ms quantization provides >30% space savings with <0.5% accuracy loss",
+      "5": "Repeat for Zipfian stream",
+      "6": "Save results to results/ablation_quantization.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Register Count (m) Scaling",
+    "description": "Verify error scales as O(1/√m)",
+    "steps": {
+      "1": "Test register counts: m ∈ [256, 512, 1024, 2048, 4096] (p ∈ [8, 9, 10, 11, 12])",
+      "2": "For each m, run D-HLL on uniform stream with lambda=0.01, 3 seeds",
+      "3": "Compute relative standard error across multiple query points",
+      "4": "Fit: error = c/√m, estimate constant c",
+      "5": "Verify: R² > 0.95 for O(1/√m) fit",
+      "6": "Verify: c ≈ 1.04 (matching standard HLL constant)",
+      "7": "Save results to results/ablation_register_scaling.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Sensitivity Analysis: Hash Function Quality",
+    "description": "Verify robustness to hash function choice",
+    "steps": {
+      "1": "Test hash functions: mmh3 (default), SHA256 truncated, simple multiplicative hash",
+      "2": "For each hash, run D-HLL on uniform stream, 3 seeds",
+      "3": "Measure relative error distribution",
+      "4": "Verify: all hash functions achieve < 3% relative error",
+      "5": "Note any significant accuracy differences",
+      "6": "Save results to results/sensitivity_hash.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Verify improvements are statistically significant",
+    "steps": {
+      "1": "Collect all relative error measurements from main experiments",
+      "2": "Perform paired t-test: D-HLL vs Sliding HLL on same datasets",
+      "3": "Perform paired t-test: D-HLL vs Standard HLL (on decayed ground truth)",
+      "4": "Report p-values and effect sizes (Cohen's d)",
+      "5": "Verify: p < 0.05 for significant differences where expected",
+      "6": "Save statistical summary to results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Check all success criteria from proposal",
+    "steps": {
+      "1": "Check: Relative bias < 5% across lambda ∈ [0.001, 0.1] → PASS/FAIL",
+      "2": "Check: Relative standard error < 2% for m=2048 → PASS/FAIL",
+      "3": "Check: Merge error < 10% → PASS/FAIL",
+      "4": "Check: Throughput > 1M elements/second → PASS/FAIL",
+      "5": "Check: Error scales as O(1/√m) → PASS/FAIL",
+      "6": "Generate summary report: results/success_criteria.json with all criteria and PASS/FAIL status",
+      "7": "If any FAIL: document reasons and implications"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Accuracy Comparison Figures",
+    "description": "Create figures for paper showing accuracy results",
+    "steps": {
+      "1": "Figure 1: Relative error vs decay rate (lambda) for D-HLL, bars showing std across seeds",
+      "2": "Figure 2: Accuracy comparison across methods (D-HLL, Sliding HLL, Standard HLL) on uniform and Zipfian",
+      "3": "Figure 3: Error distribution histograms for D-HLL at different lambdas",
+      "4": "Figure 4: Time series of estimates vs ground truth on bursty stream",
+      "5": "Save all figures to figures/ as PDF (vector) and PNG (300 DPI)",
+      "6": "Use consistent style: seaborn whitegrid, readable fonts, clear labels"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Performance and Scaling Figures",
+    "description": "Create figures for performance characteristics",
+    "steps": {
+      "1": "Figure 5: Throughput comparison (bar chart) across methods",
+      "2": "Figure 6: Memory usage comparison (bar chart), breakdown by component",
+      "3": "Figure 7: Error vs 1/√m (scatter + fit line) verifying O(1/√m) scaling",
+      "4": "Figure 8: Space-accuracy tradeoff for timestamp quantization",
+      "5": "Figure 9: Merge error across number of merged sketches",
+      "6": "Save all figures to figures/ as PDF and PNG"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Tables",
+    "description": "Create tables for paper with key results",
+    "steps": {
+      "1": "Table 1: Method comparison (accuracy, throughput, memory) with mean ± std",
+      "2": "Table 2: D-HLL accuracy across decay rates lambda",
+      "3": "Table 3: Ablation study results (lazy vs eager, quantization levels)",
+      "4": "Table 4: Success criteria checklist with achieved values",
+      "5": "Generate LaTeX tables for easy inclusion in paper",
+      "6": "Save tables to results/tables.txt and results/tables.tex"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Report Generation",
+    "description": "Compile all results into comprehensive report",
+    "steps": {
+      "1": "Load all result JSON files from results/",
+      "2": "Generate markdown report: results/EXPERIMENTS.md",
+      "3": "Include: experiment summaries, key findings, success criteria status",
+      "4": "Include: figures with captions, tables with interpretations",
+      "5": "Document any deviations from plan and reasons",
+      "6": "Provide data availability statement: all data in data/, all code in src/"
+    }
+  }
+]

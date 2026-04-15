@@ -1,0 +1,199 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for training, unlearning, and MIA evaluation.",
+    "steps": {
+      "step1": "Install core packages: pip install torch torchvision numpy scipy scikit-learn matplotlib seaborn tqdm pandas",
+      "step2": "Verify GPU: run torch.cuda.is_available(), print device name (expect RTX A6000), print total VRAM (expect 48GB)",
+      "step3": "Create directory structure under exp/: data/, models/original/, models/retrain/, models/reference/, models/unlearned/{ft,ga,rl,scrub,neggrad,ga_dau,scrub_dau,ft_dau,rl_dau,neggrad_dau,ga_rum,scrub_rum}/, results/, figures/",
+      "step4": "Create exp/shared/ with __init__.py and placeholder files: config.py, models.py, utils.py, metrics.py, mia.py, unlearning.py, dau.py",
+      "step5": "In config.py define constants: DEVICE='cuda', SEEDS=[42,123,456], REF_SEEDS=[100,101,102,103], BATCH_SIZE=256, NUM_WORKERS=4, DEFAULT_ALPHA=1.0, CIFAR10_MEAN/STD, CIFAR100_MEAN/STD"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Runtime budget and execution plan",
+    "description": "Detailed time budget for 1x A6000 GPU with 8-hour wall clock limit. All phases are sequential on a single GPU.",
+    "steps": {
+      "step1": "Phase 1 — Data preparation: ~5 min. Download CIFAR-10/100, generate Purchase-100 proxy, create all splits.",
+      "step2": "Phase 2 — Train reference models (K=4 per dataset): 12 models total. CIFAR-10/100 ResNet-18 ~8 min each (100 epochs), Purchase MLP ~4 min (50 epochs). Total: 8×8 + 4×4 = ~80 min.",
+      "step3": "Phase 3 — Compute difficulty scores: ~5 min (forward pass only through 4 models per dataset).",
+      "step4": "Phase 4 — Train original + retrain models: 3 seeds × 3 datasets × 2 (original + retrain) = 18 models. ~8 min CIFAR, ~4 min Purchase. Total: 12×8 + 6×4 = ~120 min.",
+      "step5": "Phase 5 — Run 5 unlearning baselines: 5 methods × 3 datasets × 3 seeds = 45 runs. Unlearning runs are fast (5-10 epochs of fine-tuning): ~1.5 min each. Total: ~68 min.",
+      "step6": "Phase 6 — MIA evaluation on all baselines + retrain: 54 models × inference + metric computation. ~0.5 min each. Total: ~27 min.",
+      "step7": "Phase 7 — DAU defense: 5 methods × 3 datasets × 3 seeds = 45 runs at ~1.5 min = ~68 min. RUM baseline: 2 methods × 3 datasets × 3 seeds = 18 runs at ~2 min = ~36 min. Total: ~104 min.",
+      "step8": "Phase 8 — MIA evaluation on DAU/RUM models: 63 models × ~0.5 min = ~32 min.",
+      "step9": "Phase 9 — Ablation experiments: K ablation (train 4 extra ref models + eval) ~40 min. Alpha ablation ~15 min. Strata ablation ~5 min. Forget size ablation ~20 min. Random-weight control ~5 min. Total: ~85 min.",
+      "step10": "Phase 10 — Statistical analysis + visualization: ~15 min.",
+      "step11": "GRAND TOTAL: 5 + 80 + 5 + 120 + 68 + 27 + 104 + 32 + 85 + 15 = ~541 min ≈ 9.0 hours. MITIGATION if over budget: (a) reduce original/retrain training to 80 epochs (saves ~20 min), (b) run forget-size ablation for 1 seed only (saves ~10 min), (c) drop NegGrad+KD from DAU (saves ~15 min). With mitigations: ~496 min ≈ 8.3 hours. Further fallback: reduce to 2 seeds for ablations."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare datasets with forget/retain splits",
+    "description": "Prepare CIFAR-10, CIFAR-100, and Purchase-100 datasets with standardized splits. Purchase-100 resolved: use sklearn synthetic proxy matching Shokri et al. (2017) specifications (600 binary features, 100 classes) since the raw Kaggle data requires competition access. The proxy preserves the key property — difficulty variation across samples — while being deterministically reproducible.",
+    "steps": {
+      "step1": "Download CIFAR-10 and CIFAR-100 via torchvision.datasets with standard normalization. CIFAR-10: mean=(0.4914,0.4822,0.4465), std=(0.2023,0.1994,0.2010). CIFAR-100: mean=(0.5071,0.4867,0.4408), std=(0.2675,0.2565,0.2761). Training augmentation: RandomCrop(32,padding=4), RandomHorizontalFlip. No augmentation for eval.",
+      "step2": "Generate Purchase-100 proxy dataset: use sklearn.datasets.make_classification(n_samples=50000, n_features=600, n_informative=200, n_classes=100, n_clusters_per_class=2, random_state=0). Binarize features at median threshold to match Shokri et al.'s binary purchase vectors. Split: 40000 train / 10000 test. Save to exp/data/purchase100.npz.",
+      "step3": "For each dataset and each seed in [42, 123, 456], create forget/retain splits: randomly sample |D_f|=1000 from the training set. Remaining = D_r. Save indices to exp/data/splits_{dataset}_seed{s}.json with keys: forget_indices, retain_indices.",
+      "step4": "Create reference model pool: For each dataset, hold out a fixed 10000-sample subset (indices 0-9999 from training set, deterministic) as reference_pool. Reference models train on random 80% subsets of the NON-reference-pool training data. Forget sets are drawn from the non-reference-pool portion to guarantee disjointness. Save to exp/data/ref_pool_{dataset}.json.",
+      "step5": "Log dataset statistics to exp/results/data_stats.json: {dataset: {n_train, n_test, n_forget, n_retain, n_ref_pool, n_classes, n_features, class_distribution_forget, class_distribution_retain}}."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Train reference models and compute difficulty scores",
+    "description": "Train K=4 reference models per dataset for difficulty calibration (Watson et al., 2022). These serve dual purpose: (1) computing per-sample difficulty scores for stratification and DAU weighting, (2) enabling LiRA-style MIA evaluation. K=4 is the default; K=8 tested in ablation. Estimated: ~80 min on 1x A6000.",
+    "steps": {
+      "step1": "Implement model architectures in exp/shared/models.py: (a) ResNet-18 for CIFAR — use torchvision.models.resnet18 but replace conv1 with Conv2d(3,64,3,1,1) and remove maxpool (standard for 32×32 images), set num_classes appropriately. (b) PurchaseMLP: Sequential(Linear(600,512), ReLU, Dropout(0.2), Linear(512,256), ReLU, Dropout(0.2), Linear(256,128), ReLU, Dropout(0.2), Linear(128,100)).",
+      "step2": "Train K=4 reference models per dataset using ref_seeds [100,101,102,103]. Each trains on a random 80% subset of non-reference-pool training data (different subset per seed). CIFAR hyperparams: SGD, lr=0.1, momentum=0.9, weight_decay=5e-4, CosineAnnealingLR, 100 epochs, batch_size=256. Purchase: Adam, lr=0.001, weight_decay=1e-4, 50 epochs, batch_size=512. Save to exp/models/reference/{dataset}_ref{k}.pt.",
+      "step3": "Verify reference model quality: compute test accuracy for each. Expected: CIFAR-10 >92%, CIFAR-100 >72%, Purchase >75%. Log to exp/results/reference_model_quality.json.",
+      "step4": "Compute per-sample difficulty scores: For every training sample x, compute d(x) = (1/K) * Σ_k CE_loss(ref_model_k, x). Save as exp/results/difficulty_{dataset}.npy (shape [N_train]). Also compute on test set for non-member difficulty matching.",
+      "step5": "Assign difficulty quintiles: Q1 (0-20th percentile, easiest) through Q5 (80-100th, hardest) based on percentile ranks of d(x). Save quintile labels to exp/results/quintiles_{dataset}.npy. Log per-quintile stats: mean difficulty, mean original-model accuracy, class distribution.",
+      "step6": "Validate difficulty scores: Verify that Q5 samples have significantly lower reference-model accuracy than Q1 samples (expected: Q1 >95%, Q5 <70%). This confirms the scores capture meaningful difficulty variation."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train original and retrain models",
+    "description": "Train the target models (which will undergo unlearning) and gold-standard retrain baselines. Estimated: ~120 min.",
+    "steps": {
+      "step1": "For each dataset × seed (9 configurations), train an 'original' model on the full training set (excluding reference pool). Same architectures and hyperparams as reference models. Save to exp/models/original/{dataset}_seed{s}.pt. Log final train/test accuracy.",
+      "step2": "For each dataset × seed (9 configurations), train a 'retrain' model from scratch on D_retain only. Same architecture, same hyperparams, same number of epochs. Save to exp/models/retrain/{dataset}_seed{s}.pt. Log accuracy.",
+      "step3": "Verify: retrain models should have similar test accuracy to originals (forget set is only 1000/40000 = 2.5% of data). Record per-sample losses on forget set for both original and retrain models — these are needed for MIA ground truth.",
+      "step4": "Save all training metadata to exp/results/model_training_log.json: {model_id, dataset, seed, type, epochs, final_train_acc, final_test_acc, training_time_sec}."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run standard unlearning algorithms",
+    "description": "Apply 5 approximate unlearning methods to each original model. These are the methods whose per-sample privacy gaps we diagnose and defend. Estimated: ~68 min.",
+    "steps": {
+      "step1": "Implement all methods in exp/shared/unlearning.py with a common interface: unlearn(original_model, forget_loader, retain_loader, method, **kwargs) → unlearned_model. Methods: (a) Fine-Tune (FT): train on D_retain for 5 epochs, lr=0.001, SGD for CIFAR / Adam for Purchase. (b) Gradient Ascent (GA): maximize CE loss on D_forget for 5 epochs, lr=0.0001, grad clip norm=1.0. (c) Random Labels (RL): train on D_forget with uniformly random labels + D_retain with true labels for 5 epochs, lr=0.001. (d) SCRUB (Kurmanji et al., 2023): teacher=original, student init=original, alternate: 1 step maximize KL(student||uniform) on D_forget (lr=0.0001), 3 steps minimize KL(student||teacher) on D_retain (lr=0.001), for 3 full passes. (e) NegGrad+KD: L = -0.5*CE(f,D_forget) + 0.5*KL(f||f_orig, D_retain), 5 epochs, lr=0.001.",
+      "step2": "Run all 5 methods × 3 datasets × 3 seeds = 45 runs. Save unlearned models to exp/models/unlearned/{method}/{dataset}_seed{s}.pt.",
+      "step3": "Evaluate each unlearned model: compute Retain Accuracy (RA), Test Accuracy (TA), Forget Accuracy (FA). Good unlearning: FA ≈ random chance (10% CIFAR-10, 1% CIFAR-100, 1% Purchase), RA and TA close to original.",
+      "step4": "Save results to exp/results/unlearning_baselines.json: {method, dataset, seed, retain_acc, test_acc, forget_acc}. Compute mean ± std across seeds."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Aggregate MIA evaluation (standard protocol)",
+    "description": "Run membership inference attacks on all models using standard aggregate metrics. This establishes the baseline evaluation that we will show is misleadingly optimistic.",
+    "steps": {
+      "step1": "Implement MIA methods in exp/shared/mia.py: (a) Loss-threshold attack: score(x) = -CE_loss(model, x). Members have lower loss (higher score). (b) LiRA attack (Carlini et al., 2022): For each sample, compute loss under unlearned model. Estimate p(loss|member) and p(loss|non-member) using Gaussian fits to reference model losses on training vs. non-training data. Score = log-likelihood ratio. (c) Calibrated attack (Watson et al., 2022): score(x) = -(loss_unlearned(x) - mean_ref_loss(x)), subtracting difficulty baseline.",
+      "step2": "For each unlearned model (45 models + 9 retrain baselines = 54 total): compute MIA-AUC using all three attacks. Members = D_forget samples. Non-members = equal-sized random subset of test set. Retrain models should yield AUC ≈ 0.5 (no leakage).",
+      "step3": "Save to exp/results/mia_aggregate.json: {model_id, method, dataset, seed, loss_auc, lira_auc, calibrated_auc, retain_acc, test_acc}.",
+      "step4": "Create summary: for each method × dataset, report mean ± std of best-attack AUC across seeds. This is the 'standard evaluation' that looks reassuring."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "DCUA stratified evaluation (per-quintile MIA)",
+    "description": "Core diagnostic contribution. Evaluate MIA per difficulty quintile to expose the hidden per-sample privacy gap masked by aggregate metrics. This bridges Watson et al.'s calibration into unlearning evaluation — a connection not made by Hayes et al. (2025) or Zhao et al. (2024).",
+    "steps": {
+      "step1": "For each unlearned model, partition D_forget into quintiles Q1-Q5 using pre-computed difficulty scores. Each quintile: ~200 samples.",
+      "step2": "Construct difficulty-matched non-member sets: for each quintile Qi, select test-set samples whose difficulty score falls in the same percentile range. This ensures fair within-stratum MIA comparison (avoids confounding difficulty with membership).",
+      "step3": "Compute per-quintile MIA-AUC using all three attack methods. For each model, record AUC(Q1)...AUC(Q5).",
+      "step4": "Compute DCUA metrics: (a) WQ-AUC = AUC(Q5) — privacy of the most vulnerable samples. (b) Difficulty Gap DG = AUC(Q5) - AUC(Q1) — how much privacy varies with difficulty. (c) Max-stratum AUC spread = max(AUC_Qi) - min(AUC_Qi).",
+      "step5": "Key diagnostic: compute Overestimation = WQ-AUC - Aggregate_AUC for each model. Hypothesis predicts Overestimation > 0.05 for most approximate unlearning methods.",
+      "step6": "Implement simplified Hayes et al. (2025) per-example U-MIA comparison: For a random subset of 100 forget samples, compute per-example MIA scores using leave-one-out reference model groupings. Compare the per-example AUC distribution with our quintile-stratified AUCs. This directly demonstrates that stratification captures similar signal at lower cost.",
+      "step7": "Statistical tests: Paired t-test on WQ-AUC vs. Aggregate AUC (across seeds). One-sample t-test on DG ≠ 0. Wilcoxon signed-rank as nonparametric backup. Bonferroni correction for multiple methods. Save to exp/results/dcua_results.json and exp/results/dcua_statistical_tests.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Difficulty-Aware Unlearning (DAU) defense",
+    "description": "Primary novel contribution. Apply difficulty-aware reweighting to all unlearning methods, then evaluate whether it closes the per-stratum privacy gap. Also compare against RUM (Zhao et al., 2024) as the closest defense baseline.",
+    "steps": {
+      "step1": "Implement DAU in exp/shared/dau.py: compute_dau_weights(difficulty_scores, alpha) returns w(x) = 1 + alpha * (d(x) - d_mean) / d_std, clamped to [0.1, 10.0]. For GA/RL/NegGrad+KD: multiply per-sample loss by w(x). For FT: upweight retain-set samples near hard forget samples (proxy: upweight retain samples in same class as hard forget samples). For SCRUB: apply w(x) to the forget-step KL divergence only.",
+      "step2": "Run DAU with alpha=1.0 for all 5 methods × 3 datasets × 3 seeds = 45 runs. Same unlearning hyperparams as baselines. Save to exp/models/unlearned/{method}_dau/{dataset}_seed{s}.pt.",
+      "step3": "Implement RUM baseline (Zhao et al., 2024): Partition forget set into 3 difficulty-based groups (easy/medium/hard using terciles). Apply unlearning separately per group: easy=3 epochs, medium=5 epochs, hard=8 epochs (more effort for harder samples). Run for GA and SCRUB × 3 datasets × 3 seeds = 18 runs. Save to exp/models/unlearned/{method}_rum/.",
+      "step4": "Evaluate all DAU and RUM models using the same stratified MIA pipeline. Compute per-quintile AUC, WQ-AUC, DG, and utility metrics (RA, TA).",
+      "step5": "Compute improvement deltas: For each method, dataset, seed: (a) Δ_WQ = WQ_AUC(standard) - WQ_AUC(DAU) — WQ-AUC reduction (positive = improvement). (b) Δ_DG = DG(standard) - DG(DAU) — gap reduction. (c) Δ_RA = RA(DAU) - RA(standard) — utility change (should be > -1%). (d) Compare DAU vs. RUM on same metrics.",
+      "step6": "Save all results to exp/results/dau_results.json and exp/results/dau_vs_rum.json. Summary table: method × dataset → {WQ_AUC_std, WQ_AUC_dau, WQ_AUC_rum, DG_std, DG_dau, DG_rum, RA_std, RA_dau, RA_rum}."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Number of reference models K",
+    "description": "Test how K (number of reference models) affects difficulty estimation quality and downstream metrics. Run on CIFAR-10 seed 42.",
+    "steps": {
+      "step1": "For K=8 ablation: train 4 additional reference models (ref_seeds [104,105,106,107]) on CIFAR-10. ~32 min. For K=2 and K=4, use subsets of existing models.",
+      "step2": "For each K ∈ {2, 4, 8}: recompute difficulty scores d_K(x) = (1/K) Σ_k loss_k(x). Compute Spearman rank correlation between d_K and d_8 (treating K=8 as ground truth).",
+      "step3": "For each K: recompute quintile assignments. Measure quintile stability: fraction of samples that remain in the same quintile as K=8.",
+      "step4": "For each K: recompute DCUA metrics (WQ-AUC, DG) on the GA and SCRUB unlearned models. Also run GA-DAU with these difficulty scores and measure WQ-AUC.",
+      "step5": "Save to exp/results/ablation_K.json. Expected: K=4 yields Spearman ρ > 0.95 with K=8; K=2 is noisier (ρ ~ 0.85-0.90) but still captures the main difficulty signal."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: DAU strength alpha",
+    "description": "Sensitivity analysis of the reweighting strength α, showing the tradeoff between privacy improvement and utility preservation.",
+    "steps": {
+      "step1": "Run GA-DAU and SCRUB-DAU with alpha ∈ {0.0, 0.5, 1.0, 2.0, 5.0} on CIFAR-10 and CIFAR-100, all 3 seeds. alpha=0.0 is the standard unlearning baseline (uniform weights). Total: 2 methods × 5 alphas × 2 datasets × 3 seeds = 60 runs at ~1.5 min = ~90 min. Optimize by skipping alpha=0.0 (already have baselines). Actual: 48 new runs = ~72 min.",
+      "step2": "For each run: compute WQ-AUC, DG, RA, TA using the stratified MIA pipeline.",
+      "step3": "Plot tradeoff curves: x-axis = RA drop from original, y-axis = WQ-AUC. Each alpha is a point on the curve. Identify the Pareto-optimal alpha.",
+      "step4": "Save to exp/results/ablation_alpha.json. Expected: WQ-AUC improves monotonically up to alpha ≈ 2.0, then RA drops sharply. Optimal alpha in [1.0, 2.0]."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Stratification granularity",
+    "description": "Compare terciles (3 strata), quintiles (5, default), and deciles (10) to test robustness of the evaluation framework.",
+    "steps": {
+      "step1": "On CIFAR-10 seed 42, recompute stratified MIA for all unlearned models (5 methods + retrain) using terciles, quintiles, and deciles.",
+      "step2": "For each granularity: compute worst-stratum AUC, difficulty gap (max - min stratum AUC), and per-stratum AUC standard error (to assess statistical reliability per stratum).",
+      "step3": "Save to exp/results/ablation_strata.json. Expected: quintiles balance granularity and per-stratum sample size (~200 samples). Deciles have ~100 samples per stratum — still viable but higher variance."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: Forget set size",
+    "description": "Test how the difficulty gap and DAU improvement scale with forget set size.",
+    "steps": {
+      "step1": "Create additional forget sets of size 500 and 2500 for CIFAR-10 and CIFAR-100 (seed 42 only). Size 1000 already exists.",
+      "step2": "Run GA and SCRUB (with and without DAU, alpha=1.0) for each forget size: 2 methods × 2 variants × 2 datasets × 3 sizes = 24 runs. Also retrain for each size: 2 datasets × 3 sizes = 6 retrains. Total: 30 runs at ~2 min = ~60 min.",
+      "step3": "Evaluate all with DCUA. Plot: forget set size vs. DG, forget set size vs. DAU improvement (Δ_WQ).",
+      "step4": "Save to exp/results/ablation_forget_size.json. Expected: larger forget sets may have a larger absolute gap (more hard samples included) but DAU improvement should be consistent."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 5: Random-weight control (DAU specificity)",
+    "description": "Verify that DAU's improvement comes specifically from difficulty-aware weighting, not from arbitrary non-uniform weighting.",
+    "steps": {
+      "step1": "Run GA-DAU with randomly permuted difficulty scores (shuffled d(x) values, preserving the distribution but breaking the sample-difficulty correspondence). CIFAR-10, all 3 seeds. 3 runs at ~1.5 min = ~5 min.",
+      "step2": "Evaluate with DCUA. Compare WQ-AUC: DAU(true difficulty) vs. DAU(random weights) vs. standard GA.",
+      "step3": "Save to exp/results/ablation_random_weights.json. Expected: random weights provide no systematic improvement over standard GA, confirming that DAU's benefit is specifically from difficulty-aware allocation."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical analysis and success criteria verification",
+    "description": "Rigorous statistical evaluation of all success criteria. Report effect sizes, confidence intervals, and p-values with multiple-comparison correction.",
+    "steps": {
+      "step1": "Success criterion 1 — WQ-AUC > Aggregate AUC: For each of 5 methods × 3 datasets = 15 configurations, compute paired difference (WQ_AUC - Aggregate_AUC) across 3 seeds. One-sided paired t-test H0: difference ≤ 0. Report p-values with Bonferroni correction (15 tests). Count configurations with significant difference > 0.05. Target: ≥ 9/15 (3 methods × 3 datasets).",
+      "step2": "Success criterion 2 — Difficulty Gap significance: For each method × dataset, one-sample t-test H0: DG = 0 across 3 seeds. Report p-values (Bonferroni-corrected). Cohen's d effect size. Target: p < 0.05 for all approximate methods.",
+      "step3": "Success criterion 3 — DAU defense effectiveness: For GA and SCRUB (primary), paired comparison of WQ-AUC(standard) vs WQ-AUC(DAU) across seeds × datasets. Report Δ_WQ with 95% CI. Also compare DAU vs RUM. Verify RA degradation < 1% (one-sided test).",
+      "step4": "Success criterion 4 — Cross-dataset consistency: For each criterion above, verify the effect direction (WQ > Agg, DG > 0, DAU improves WQ) is consistent across all 3 datasets. Report fraction of dataset-method pairs meeting each criterion.",
+      "step5": "If 3 seeds yield insufficient power, report effect sizes and note the limitation. Use bootstrap (1000 resamples) for confidence intervals as a nonparametric alternative.",
+      "step6": "Save comprehensive results to exp/results/success_criteria.json: {criterion, method, dataset, effect_size, p_value, ci_lower, ci_upper, met: bool}."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate publication-quality figures and tables",
+    "description": "Create all figures for the paper using matplotlib/seaborn. Style: seaborn 'whitegrid', colorblind-friendly palette, font size 12 (labels) / 10 (ticks). Save as PDF + PNG (300 DPI).",
+    "steps": {
+      "step1": "Figure 1 — The difficulty-dependent privacy gap (main motivation): Grouped bar chart. X-axis: difficulty quintiles Q1-Q5. Y-axis: MIA-AUC. Bars grouped by unlearning method (FT, GA, RL, SCRUB, NegGrad+KD) + Retrain reference. Dashed line at AUC=0.5 (perfect unlearning). One subplot per dataset (3 panels). Error bars = std across 3 seeds. This is the paper's key visual: shows AUC climbing steeply from Q1 to Q5, revealing the hidden gap. Save as figures/figure1_stratified_mia.pdf.",
+      "step2": "Figure 2 — Aggregate vs. worst-quintile scatter: Scatter plot, x=Aggregate AUC, y=WQ-AUC. Each point = one (method, dataset, seed). Diagonal y=x line. Points above diagonal = aggregate overestimates privacy. Color by method, marker by dataset. Annotate mean overestimation per method. Save as figures/figure2_aggregate_vs_wq.pdf.",
+      "step3": "Figure 3 — DAU defense effectiveness: Grouped bar chart comparing WQ-AUC for Standard vs. DAU vs. RUM, for GA and SCRUB on each dataset. Include DG reduction as secondary grouped bars. Error bars from 3 seeds. Annotate significant improvements with asterisks. Save as figures/figure3_dau_defense.pdf.",
+      "step4": "Figure 4 — Alpha sensitivity tradeoff: Line plot. X-axis: alpha. Left y-axis: WQ-AUC (lower=better). Right y-axis: Retain Accuracy (higher=better). Lines for GA-DAU and SCRUB-DAU on CIFAR-10 and CIFAR-100. Shaded bands = std across seeds. Vertical dashed line at recommended alpha=1.0. Save as figures/figure4_alpha_sensitivity.pdf.",
+      "step5": "Figure 5 — Ablation summary: 2×2 panel. (a) K vs. Spearman correlation / WQ-AUC. (b) Strata granularity vs. worst-stratum AUC. (c) Forget set size vs. DG. (d) DAU vs. random-weight control bar chart. Save as figures/figure5_ablations.pdf.",
+      "step6": "Figure 6 — Difficulty distribution: Violin/histogram of difficulty scores per dataset, colored by quintile. Overlay kernel density. Show that difficulty varies meaningfully and quintiles capture distinct populations. Save as figures/figure6_difficulty_distribution.pdf.",
+      "step7": "Table 1 — Main results (LaTeX): Columns: Method | Agg AUC | WQ-AUC | DG | RA | TA. Rows: Retrain, FT, GA, RL, SCRUB, NegGrad+KD, GA-DAU, SCRUB-DAU, GA-RUM, SCRUB-RUM. One table per dataset (or combined with dataset as column group). Mean±std across seeds. Bold best WQ-AUC and DG. Save as figures/table1_main_results.tex.",
+      "step8": "Table 2 — Ablation summary (LaTeX): K sensitivity, strata granularity, alpha sensitivity, forget size, random-weight control. Compact format. Save as figures/table2_ablations.tex."
+    }
+  }
+]

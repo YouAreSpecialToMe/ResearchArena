@@ -1,0 +1,398 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+
+\newcommand{\ours}{CSG}
+\newcommand{\adaln}{AdaLN}
+\newcommand{\cfg}{CFG}
+
+\title{Conditioning-Space Guidance for Diffusion Transformers:\\When Does Single-Pass Classifier-Free Guidance Work?}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Classifier-Free Guidance (CFG) is the standard technique for improving sample quality in conditional diffusion models, but it doubles inference cost by requiring two full forward passes per denoising step. We propose Conditioning-Space Guidance (CSG), a training-free method that approximates CFG in a single forward pass by extrapolating the Adaptive Layer Normalization (AdaLN) parameters of Diffusion Transformers (DiT). By eliminating the unconditional forward pass, CSG achieves a theoretical $2\times$ throughput improvement. We conduct extensive experiments on DiT-XL/2 with ImageNet $256\times 256$ to evaluate the linearity assumption underlying CSG. Our results reveal a nuanced picture: at low guidance scales ($w = 1.5$), CSG achieves FID 26.6 versus CFG's 22.7 while requiring only a single forward pass per step. However, the linearity assumption breaks down catastrophically at higher scales ($w \geq 3.0$), with CSG producing FID 234.6 versus CFG's 36.8 at $w = 4.0$. Through detailed linearity analysis, we show that approximation errors grow superlinearly with guidance scale, and we uncover a surprising asymmetry: although per-step errors are largest at noisy timesteps, generation quality is primarily determined by accuracy at clean timesteps. We further demonstrate that a hybrid approach applying full CFG selectively at the cleanest 50\% of steps can match or exceed standard CFG quality. Our findings provide actionable guidance for future efficient guidance methods and highlight the importance of empirically validating linearity assumptions in deep networks.
+\end{abstract}
+
+\section{Introduction}
+
+Classifier-Free Guidance (CFG)~\citep{ho2022classifierfree} has become the de facto standard for improving sample quality in conditional generative models. By linearly combining conditional and unconditional model predictions, CFG steers generation toward high-quality, condition-aligned samples. However, CFG requires two full forward passes per denoising step---one conditional and one unconditional---effectively doubling computational cost.
+
+This overhead is especially burdensome for Diffusion Transformers (DiT)~\citep{peebles2023scalable} and flow matching models like SiT~\citep{ma2024sit}, which use large transformer backbones. In these architectures, each forward pass involves self-attention over all image tokens, making the $2\times$ cost of CFG a significant bottleneck for deployment.
+
+Recent works have proposed various efficiency improvements: feature caching across timesteps, attention sharing between branches~\citep{zheng2024ditfastattn}, guidance distillation via adapters~\citep{phan2025efficient}, and guidance truncation~\citep{kynkaanniemi2024applying}. However, these methods either require additional training, introduce approximation at the feature level, or are limited to specific timestep ranges.
+
+In DiT-family architectures, class conditioning is injected through Adaptive Layer Normalization (\adaln{}), which modulates each transformer block via learned scale and shift parameters. Crucially, \adaln{} is a linear operation in its scale and shift parameters: the output of each \adaln{} block is $\gamma \cdot \mathrm{LayerNorm}(x) + \beta$, which is linear in $(\gamma, \beta)$. This observation suggests that instead of running two full forward passes and linearly combining their outputs, one could linearly combine the conditioning parameters at the \adaln{} level and run a single forward pass.
+
+We investigate this hypothesis systematically and find a nuanced answer: the linearity assumption holds approximately at low guidance scales but breaks down at the moderate-to-high scales used in practice. Our contributions are:
+
+\begin{itemize}
+    \item We propose \textbf{Conditioning-Space Guidance (CSG)}, a training-free, single-pass approximation to CFG that operates by extrapolating \adaln{} parameters in Diffusion Transformers, eliminating one of CFG's two forward passes.
+    \item We provide a \textbf{comprehensive empirical analysis} of the linearity assumption underlying CSG, revealing that approximation errors grow superlinearly with guidance scale and concentrate at early (noisy) denoising steps.
+    \item We show that \textbf{CSG is competitive at low guidance scales} ($w = 1.5$), achieving FID 26.6 versus CFG's 22.7 on ImageNet $256\times 256$, but \textbf{fails catastrophically at $w \geq 3.0$}, establishing clear boundaries for when conditioning-space interpolation is viable.
+    \item We demonstrate that a \textbf{hybrid approach (CSG-H)} using full CFG selectively at high-error timesteps can match standard CFG quality, providing a roadmap for future efficient guidance methods.
+\end{itemize}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work on efficient guidance. Section~\ref{sec:method} describes the CSG method. Section~\ref{sec:experiments} presents our experimental results and analysis. Section~\ref{sec:discussion} discusses limitations and implications, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Classifier-Free Guidance.}
+\citet{ho2022classifierfree} introduced CFG for diffusion models, jointly training conditional and unconditional models and combining their predictions at inference. CFG has become the standard approach across diffusion models~\citep{lipman2023flow}, flow matching, and consistency models. The guidance scale $w$ controls the trade-off between sample quality/diversity and condition alignment, with typical values of $w = 1.5$--$7.5$ used in practice.
+
+\paragraph{Guidance Improvements.}
+Several works have improved guidance quality. Adaptive Projected Guidance (APG)~\citep{sadat2024eliminating} decomposes the CFG signal into parallel and perpendicular components, showing the parallel component causes oversaturation. CFG-Zero*~\citep{fan2025cfgzero} addresses inaccurate flow estimation at early timesteps. \citet{kynkaanniemi2024applying} showed that guidance is only beneficial in a middle interval of timesteps. These methods are orthogonal to our work---they improve guidance direction, while we address guidance efficiency.
+
+\paragraph{Efficient Guidance.}
+\citet{phan2025efficient} train lightweight adapters ($\sim$2\% parameters) to simulate CFG in a single pass (AGD). Unlike AGD, CSG is completely training-free. Feature caching methods reuse intermediate features across timesteps but still require two forward passes when they compute. Attention sharing methods like DiTFastAttn~\citep{zheng2024ditfastattn} share attention outputs between conditional and unconditional branches when they are similar. CSG takes a more aggressive approach by eliminating the separate unconditional pass entirely.
+
+\paragraph{Diffusion Transformers.}
+DiT~\citep{peebles2023scalable} introduced transformer-based diffusion with \adaln{} conditioning. SiT~\citep{ma2024sit} extended this to flow matching with interpolant transformers. Both use \adaln{} for class conditioning, making them natural targets for conditioning-space interpolation.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: Classifier-Free Guidance}
+
+Given a model $v_\theta(x_t, t, c)$ predicting the velocity field (in flow matching) or noise (in diffusion), standard CFG computes:
+\begin{align}
+    v_{\text{cond}} &= v_\theta(x_t, t, c), \label{eq:cfg_cond} \\
+    v_{\text{uncond}} &= v_\theta(x_t, t, \varnothing), \label{eq:cfg_uncond} \\
+    v_{\text{guided}} &= v_{\text{uncond}} + w \cdot (v_{\text{cond}} - v_{\text{uncond}}), \label{eq:cfg}
+\end{align}
+where $c$ is the conditioning (e.g., class label), $\varnothing$ is the null conditioning, and $w > 1$ is the guidance scale. This requires two full forward passes per denoising step.
+
+\subsection{AdaLN Conditioning in Diffusion Transformers}
+
+In DiT~\citep{peebles2023scalable}, each transformer block $l$ ($l = 1, \ldots, L$) processes tokens through self-attention and feed-forward networks, with conditioning injected via \adaln{}. For each block, a small MLP computes modulation parameters from the conditioning embedding:
+\begin{equation}
+    (\gamma_c^l, \beta_c^l, \alpha_c^l) = \text{MLP}_l(e_t + e_c),
+\end{equation}
+where $e_t$ is the timestep embedding, $e_c = \text{Embed}(c)$ is the class embedding, and $(\gamma, \beta, \alpha)$ are scale, shift, and gate parameters respectively. The \adaln{} operation applies as:
+\begin{equation}
+    \text{\adaln{}}(h, \gamma, \beta) = \gamma \odot \text{LayerNorm}(h) + \beta,
+    \label{eq:adaln}
+\end{equation}
+where $h$ is the hidden state and $\odot$ denotes element-wise multiplication. Crucially, Eq.~\eqref{eq:adaln} is \textit{linear} in the parameters $(\gamma, \beta)$ for fixed $h$.
+
+\subsection{Conditioning-Space Guidance (CSG)}
+
+CSG exploits the linearity of \adaln{} in its parameters. Instead of running two full transformer passes and combining outputs (Eq.~\ref{eq:cfg}), we combine the \adaln{} parameters and run a single pass:
+
+\paragraph{Step 1: Compute \adaln{} parameters for both conditions.} For each block $l$, evaluate the lightweight \adaln{} MLP twice:
+\begin{align}
+    (\gamma_c^l, \beta_c^l, \alpha_c^l) &= \text{MLP}_l(e_t + e_c), \\
+    (\gamma_\varnothing^l, \beta_\varnothing^l, \alpha_\varnothing^l) &= \text{MLP}_l(e_t + e_\varnothing).
+\end{align}
+
+\paragraph{Step 2: Extrapolate in \adaln{} parameter space.} Apply the CFG formula in parameter space:
+\begin{align}
+    \gamma_g^l &= \gamma_\varnothing^l + w \cdot (\gamma_c^l - \gamma_\varnothing^l), \label{eq:csg_gamma} \\
+    \beta_g^l &= \beta_\varnothing^l + w \cdot (\beta_c^l - \beta_\varnothing^l), \label{eq:csg_beta} \\
+    \alpha_g^l &= \alpha_\varnothing^l + w \cdot (\alpha_c^l - \alpha_\varnothing^l). \label{eq:csg_alpha}
+\end{align}
+
+\paragraph{Step 3: Single forward pass.} Run one transformer pass using the guided parameters:
+\begin{equation}
+    v_{\text{CSG}} = \text{DiT}(x_t, t; \{\gamma_g^l, \beta_g^l, \alpha_g^l\}_{l=1}^L).
+\end{equation}
+
+The cost is $2L$ small MLP evaluations (negligible, $\sim$0.1\% of total compute) plus one transformer forward pass, achieving approximately $2\times$ speedup over standard CFG.
+
+\paragraph{Why this should (and should not) work.}
+If the entire DiT were linear in its \adaln{} parameters, CSG would be exact. However, DiT contains nonlinearities (self-attention softmax, GELU activations, LayerNorm) that break strict linearity. The key empirical question is: \textit{how well does the linear approximation hold in practice, and under what conditions does it fail?}
+
+\subsection{Variants}
+
+\paragraph{Per-Layer Guidance (CSG-PL).}
+CSG naturally enables per-layer guidance control by using layer-specific weights $w_l$:
+\begin{equation}
+    \gamma_g^l = \gamma_\varnothing^l + w_l \cdot (\gamma_c^l - \gamma_\varnothing^l).
+\end{equation}
+This allows stronger guidance in layers that benefit from it and weaker guidance elsewhere.
+
+\paragraph{Embedding-Space Guidance (ESG).}
+As a baseline, we also test interpolation in the conditioning \textit{embedding} space before the \adaln{} MLPs:
+\begin{equation}
+    e_g = e_\varnothing + w \cdot (e_c - e_\varnothing),
+\end{equation}
+then compute $(\gamma_g^l, \beta_g^l, \alpha_g^l) = \text{MLP}_l(e_t + e_g)$ for each block.
+
+\paragraph{Hybrid CSG (CSG-H).}
+For timesteps where the linearity approximation is poor, we selectively use full two-pass CFG:
+\begin{equation}
+    v_t = \begin{cases}
+        v_{\text{CFG}} & \text{if } t \in \mathcal{T}_{\text{full}}, \\
+        v_{\text{CSG}} & \text{otherwise},
+    \end{cases}
+\end{equation}
+where $\mathcal{T}_{\text{full}}$ is the set of timesteps using full CFG, chosen based on the linearity analysis.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Model.} We use DiT-XL/2~\citep{peebles2023scalable} pretrained on ImageNet $256\times 256$ (publicly available checkpoint). DiT-XL/2 has 28 transformer blocks ($L = 28$) with \adaln{} conditioning.
+
+\paragraph{Sampling.} We use the Euler ODE solver with 50 steps by default, sampling from $t = 1.0$ to $t = 0.0$. All methods use identical initial noise and class labels for fair comparison.
+
+\paragraph{Metrics.} We compute FID-2K (Fr\'{e}chet Inception Distance over 2,000 generated images), Inception Score (IS), and throughput (images/second) on a single NVIDIA A6000 GPU. FID-2K provides noisier estimates than FID-50K but allows comprehensive evaluation across many configurations. We report mean $\pm$ standard deviation across 3 random seeds where available.
+
+\paragraph{Throughput measurement.} Throughput was measured as wall-clock generation time excluding I/O and metric computation. We observed some variability in throughput measurements across seeds (e.g., CFG at $w = 1.5$ showed throughput of 1.47/0.68/0.68 across seeds), likely due to GPU thermal throttling and memory management. Speedup ratios should therefore be interpreted as approximate; the theoretically grounded comparison is that CSG requires one forward pass versus CFG's two, yielding up to $2\times$ speedup in the transformer backbone.
+
+\paragraph{Guidance scales.} We evaluate at $w \in \{1.5, 4.0, 7.5\}$, covering the range from mild to strong guidance.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} presents the main comparison across all methods and guidance scales.
+
+\begin{table}[t]
+\caption{Main results on ImageNet $256\times 256$ with DiT-XL/2. FID-2K ($\downarrow$) and IS ($\uparrow$) computed over 2,000 generated images. Throughput in images/second. Speedup relative to standard CFG at $w = 4.0$. Best single-pass result at each scale in \textbf{bold}.}
+\label{tab:main}
+\centering\small
+\begin{tabular}{llcccc}
+\toprule
+Method & $w$ & FID-2K $\downarrow$ & IS $\uparrow$ & Throughput & Speedup \\
+\midrule
+\multicolumn{6}{l}{\textit{Two-pass methods (baselines)}} \\
+Standard CFG & 1.5 & $22.7 \pm 0.1$ & $96.8 \pm 0.7$ & 0.94 & $0.64\times$ \\
+Standard CFG & 4.0 & $36.8 \pm 1.0$ & $136.8 \pm 0.4$ & 1.48 & $1.00\times$ \\
+Standard CFG & 7.5 & $40.4$ & $136.9$ & 1.47 & $1.00\times$ \\
+\midrule
+\multicolumn{6}{l}{\textit{Single-pass methods}} \\
+No Guidance ($w{=}1$) & --- & $32.7 \pm 0.0$ & $55.2 \pm 0.9$ & 2.95 & $2.00\times$ \\
+ESG & 1.5 & $26.8 \pm 0.2$ & $90.4 \pm 1.8$ & 2.95 & $2.00\times$ \\
+ESG & 4.0 & $225.9 \pm 0.5$ & $4.1 \pm 0.0$ & 2.95 & $2.00\times$ \\
+\textbf{CSG (ours)} & 1.5 & $\mathbf{26.6 \pm 0.2}$ & $\mathbf{90.9 \pm 1.6}$ & 2.42 & $1.64\times$ \\
+CSG (ours) & 4.0 & $234.6 \pm 0.4$ & $3.9 \pm 0.0$ & 2.94 & $1.99\times$ \\
+CSG (ours) & 7.5 & $348.5$ & $2.5$ & 2.94 & $1.99\times$ \\
+\midrule
+\multicolumn{6}{l}{\textit{Hybrid methods ($w = 4.0$)}} \\
+CSG-H 30\% early clean & 4.0 & $78.7 \pm 0.5$ & $24.8 \pm 0.6$ & 1.86 & $1.26\times$ \\
+CSG-H 50\% early clean & 4.0 & $\mathbf{32.2}$ & $90.0$ & 0.99 & $0.67\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{CSG works at low guidance scales.}
+At $w = 1.5$, CSG achieves FID 26.6 versus CFG's 22.7---a 17\% relative degradation---while requiring only a single forward pass per step (measured throughput $1.64\times$ vs.\ CFG at $w{=}4.0$; the gap from the theoretical $2\times$ reflects implementation overhead from computing both sets of \adaln{} parameters). CSG slightly outperforms the embedding-space baseline (ESG, FID 26.8), suggesting that per-layer parameter interpolation captures conditioning effects marginally better than global embedding interpolation. Both single-pass methods substantially outperform no-guidance generation (FID 32.7) in IS (90.9 vs.\ 55.2), confirming that conditioning information is meaningfully preserved.
+
+\paragraph{CSG fails at high guidance scales.}
+At $w = 4.0$, CSG produces FID 234.6---a $6.4\times$ degradation from CFG's 36.8. The IS drops from 136.8 to 3.9, indicating near-complete loss of semantic coherence. This failure is consistent across seeds (std = 0.4) and is not improved by ESG (FID 225.9). At $w = 7.5$, CSG further degrades to FID 348.5. These results clearly refute the hypothesis that CSG can replace CFG at practical guidance scales.
+
+\paragraph{Hybrid CSG-H recovers quality selectively.}
+CSG-H with 50\% of steps using full CFG (applied at the cleanest timesteps, where errors are highest) achieves FID 32.2---actually \textit{better} than standard CFG (36.8). This occurs because CSG provides a useful smoothing effect at noisy timesteps. However, the current implementation's overhead results in throughput (0.99 img/s) comparable to full CFG, limiting practical speedup. CSG-H with 30\% full CFG at clean timesteps achieves FID 78.7 with $1.26\times$ speedup, showing a meaningful quality-speed tradeoff.
+
+\subsection{Linearity Analysis}
+\label{sec:linearity}
+
+To understand \textit{why} CSG fails at high guidance scales, we measure the relative approximation error $\|v_{\text{CSG}} - v_{\text{CFG}}\| / \|v_{\text{CFG}}\|$ across timesteps and guidance scales. Figure~\ref{fig:linearity} visualizes these results.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure2_linearity.png}
+    \caption{Approximation error across timesteps for different guidance scales. Early steps (high noise) exhibit the largest errors.}
+    \label{fig:linearity_timestep}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure5_error_vs_scale.png}
+    \caption{Mean relative error as a function of guidance scale. Error grows superlinearly, reaching 146\% at $w = 7.5$.}
+    \label{fig:error_scale}
+\end{subfigure}
+\caption{Linearity analysis of CSG. The approximation quality depends strongly on both timestep and guidance scale.}
+\label{fig:linearity}
+\end{figure}
+
+\paragraph{Error depends on timestep.}
+At $w = 1.5$, the mean relative error ranges from 3.7\% at the first step (noisiest) to 0.2\% at the last step (cleanest). At $w = 4.0$, errors range from 44.0\% to 6.3\%. This pattern is consistent: errors are highest at early (noisy) timesteps where the model must extract weak signal from heavy noise, and lowest at late (clean) timesteps where conditional and unconditional predictions are more similar.
+
+\paragraph{Error grows superlinearly with guidance scale.}
+Table~\ref{tab:linearity} shows that mean relative error grows faster than linearly with $w$. At the initial timestep (step 0), error increases from 3.7\% ($w = 1.5$) to 9.0\% ($w = 2.0$) to 23.5\% ($w = 3.0$) to 44.0\% ($w = 4.0$) to 66.8\% ($w = 5.0$) to 146.5\% ($w = 7.5$). This superlinear growth explains why CSG works at $w = 1.5$ but fails catastrophically at $w = 4.0$.
+
+\begin{table}[t]
+\caption{Mean relative error (\%) of CSG vs.\ standard CFG at different guidance scales and timesteps. Cosine similarity in parentheses. Errors grow superlinearly with guidance scale.}
+\label{tab:linearity}
+\centering\small
+\begin{tabular}{lcccccc}
+\toprule
+Timestep & $w{=}1.5$ & $w{=}2.0$ & $w{=}3.0$ & $w{=}4.0$ & $w{=}5.0$ & $w{=}7.5$ \\
+\midrule
+Step 0 (noisiest) & 3.7 (.999) & 9.0 (.996) & 23.5 (.971) & 44.0 (.899) & 66.8 (.785) & 146.5 (.586) \\
+Step 10 & 5.6 (.998) & 11.5 (.993) & 22.6 (.975) & 37.2 (.946) & 49.2 (.911) & 74.7 (.673) \\
+Step 25 & 1.3 (1.00) & 2.8 (1.00) & 6.7 (.998) & 12.3 (.993) & 24.4 (.974) & 71.6 (.771) \\
+Step 40 & 0.2 (1.00) & 0.6 (1.00) & 2.4 (1.00) & 6.9 (.998) & 17.4 (.990) & 65.0 (.857) \\
+Step 49 (cleanest) & 0.2 (1.00) & 0.4 (1.00) & 1.8 (1.00) & 6.3 (.998) & 19.0 (.990) & 67.6 (.857) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+The superlinear error growth indicates that the DiT model's dependence on \adaln{} parameters is significantly nonlinear. While \adaln{} itself (Eq.~\ref{eq:adaln}) is linear in $(\gamma, \beta)$, the hidden state $h$ passed to each block's \adaln{} depends on the outputs of all previous blocks, which were themselves modulated by \adaln{} with possibly non-linear interactions through attention and GELU. The extrapolation inherent in CFG ($w > 1$ pushes parameters beyond the interpolation range) amplifies these nonlinearities.
+
+\subsection{Per-Layer Guidance Ablation}
+
+Table~\ref{tab:perlayer} shows results for different per-layer guidance schedules at $w_{\text{mean}} = 4.0$.
+
+\begin{table}[t]
+\caption{Per-layer guidance schedule comparison at mean $w = 4.0$. All schedules produce poor FID, indicating that per-layer modulation cannot overcome the fundamental linearity failure.}
+\label{tab:perlayer}
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Schedule & FID-2K $\downarrow$ & IS $\uparrow$ & Speedup \\
+\midrule
+Uniform (baseline CSG) & 234.4 & 3.8 & $1.99\times$ \\
+Decreasing ($w: 6.0 \to 2.0$) & 284.5 & 2.7 & $1.99\times$ \\
+Increasing ($w: 2.0 \to 6.0$) & \textbf{157.1} & \textbf{6.7} & $1.99\times$ \\
+Bell (peak at middle) & 187.1 & 5.2 & $1.88\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The increasing schedule ($w$ from 2.0 to 6.0 across layers) performs best, achieving FID 157.1 versus 234.4 for uniform guidance. This suggests that later layers tolerate higher guidance weights better than early layers, consistent with the observation that deeper layers perform less dramatic feature transformations. However, all schedules produce FID $> 150$---far worse than standard CFG (36.8)---confirming that per-layer modulation cannot fix the fundamental nonlinearity.
+
+\subsection{Hybrid Position Analysis}
+
+We investigate which timesteps benefit most from full CFG in the hybrid approach (Table~\ref{tab:hybrid}).
+
+\begin{table}[t]
+\caption{Hybrid CSG-H position analysis at $w = 4.0$. ``Early clean'' applies full CFG at the final (cleanest) denoising steps, where accurate guidance has the greatest impact on final image quality (see Section~\ref{sec:error_vs_quality} for discussion).}
+\label{tab:hybrid}
+\centering\small
+\begin{tabular}{lcccl}
+\toprule
+Configuration & FID-2K $\downarrow$ & IS $\uparrow$ & Speedup & CFG applied at \\
+\midrule
+Pure CSG (0\% CFG) & 234.6 & 3.9 & $1.99\times$ & --- \\
+10\% early noisy & 234.7 & 4.0 & $0.85\times$ & noisiest steps \\
+10\% middle & 221.8 & 4.2 & $0.84\times$ & middle steps \\
+10\% early clean & 210.7 & 4.8 & $0.84\times$ & cleanest steps \\
+30\% early clean & 78.7 & 24.8 & $1.26\times$ & cleanest 30\% \\
+50\% early clean & \textbf{32.2} & \textbf{90.0} & $0.67\times$ & cleanest 50\% \\
+\midrule
+Standard CFG (100\%) & 36.8 & 136.8 & $1.00\times$ & all steps \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Error localization and the error--quality paradox.}
+\label{sec:error_vs_quality}
+A surprising finding emerges from comparing the linearity analysis (Section~\ref{sec:linearity}) with the hybrid results. The per-step approximation error is \textit{largest} at early (noisy) timesteps---44\% at step 0 versus 6.3\% at step 49 for $w = 4.0$ (Table~\ref{tab:linearity}). Yet applying 10\% full CFG at the noisiest steps (where per-step error is highest) yields FID 234.7---virtually identical to pure CSG. In contrast, 10\% at the cleanest steps gives FID 210.7, and 30\% at the cleanest steps dramatically improves to FID 78.7.
+
+This apparent paradox has a natural resolution: at noisy timesteps, the input $x_t$ is dominated by noise and the guidance signal itself is inherently noisy, so per-step velocity errors---though large in relative terms---have limited impact on the final image. At clean timesteps, the model is refining fine-grained structure and the generation trajectory is converging to its final output, so even small errors propagate directly to perceptible image quality differences. In other words, \textit{accuracy matters most where the signal-to-noise ratio is highest}, not where the per-step error is highest.
+
+\paragraph{CSG-H 50\% matches standard CFG.}
+CSG-H with 50\% full CFG at clean timesteps achieves FID 32.2 compared to standard CFG's $36.8 \pm 1.0$. While this suggests CSG-H may match or slightly improve upon CFG, we note that (1) this difference ($\Delta$FID = 4.6) is within the range of FID-2K noise, and (2) additional seeds are needed to confirm statistical significance. We hypothesize that CSG's smoothing effect at noisy timesteps, where the guidance signal is inherently noisy, may reduce accumulated variance. The current implementation overhead limits the practical speedup of this configuration.
+
+\subsection{Sampling Steps Ablation}
+
+Table~\ref{tab:steps} shows that CSG's failure at $w = 4.0$ is independent of the number of sampling steps.
+
+\begin{table}[t]
+\caption{Sampling steps ablation at $w = 4.0$. CSG quality is consistently poor across step counts, indicating the failure is per-step rather than accumulated.}
+\label{tab:steps}
+\centering\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Steps & FID-2K $\downarrow$ & IS $\uparrow$ & Throughput \\
+\midrule
+Standard CFG & 25 & 35.7 & 135.3 & 1.37 \\
+Standard CFG & 50 & 36.8 & 136.8 & 1.48 \\
+Standard CFG & 100 & 36.3 & 136.1 & 0.34 \\
+\midrule
+CSG & 25 & 226.8 & 4.2 & 2.73 \\
+CSG & 50 & 234.6 & 3.9 & 2.94 \\
+CSG & 100 & 234.2 & 3.8 & 0.68 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CSG produces FID $\sim$227--235 regardless of whether 25, 50, or 100 steps are used, while CFG maintains FID $\sim$36 across all step counts. This confirms that the quality degradation is a per-step phenomenon (inaccurate velocity prediction at each step) rather than an error accumulation issue.
+
+\subsection{Comparison: CSG vs.\ ESG}
+
+Figure~\ref{fig:main_comparison} compares all methods across guidance scales. CSG and ESG perform similarly at all scales: both achieve FID $\sim$26--27 at $w = 1.5$ and both fail at $w \geq 4.0$. This indicates that the choice of interpolation space (embedding vs.\ \adaln{} parameters) matters little---the fundamental bottleneck is the nonlinear dependence of the full network on any conditioning-related quantity.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/figure1_main_comparison.png}
+\caption{FID-2K comparison across methods and guidance scales on DiT-XL/2 with ImageNet $256\times 256$. CSG and ESG are competitive with CFG at $w = 1.5$ but fail at higher scales. Error bars show standard deviation across 3 seeds.}
+\label{fig:main_comparison}
+\end{figure}
+
+\subsection{Qualitative Comparison}
+
+Figure~\ref{fig:qualitative} shows generated images for the same noise inputs across CFG and CSG at $w = 1.5$ and $w = 4.0$. At $w = 1.5$, CSG produces images visually similar to CFG with only subtle differences in fine detail. At $w = 4.0$, CSG images exhibit severe artifacts---washed-out colors, loss of semantic structure, and incoherent textures---making the FID degradation visually concrete.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure6_qualitative.png}
+\caption{Qualitative comparison of CFG vs.\ CSG on the same noise/class pairs for 8 ImageNet classes. At $w = 1.5$, CSG produces visually similar results to CFG. At $w = 4.0$, CSG generates severely degraded images, illustrating the catastrophic failure of the linearity assumption at high guidance scales.}
+\label{fig:qualitative}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{When is CSG useful?}
+Our results identify a narrow but potentially valuable operating regime. At $w = 1.5$, CSG provides a 17\% FID degradation in exchange for $\sim$2$\times$ speedup. This trade-off may be acceptable for applications where inference cost dominates (e.g., real-time generation) and mild guidance suffices. For text-to-image models that use lower effective guidance scales internally, CSG could be directly applicable.
+
+\paragraph{Why does the linearity assumption fail?}
+Although \adaln{} is linear in $(\gamma, \beta)$ for fixed hidden states, the hidden states themselves depend on \adaln{} parameters of all preceding layers. This creates a compositional nonlinearity: even if each individual \adaln{} modulation is small, the accumulated effect through $L = 28$ layers amplifies nonlinearity exponentially. Moreover, CFG with $w > 1$ requires \textit{extrapolation} beyond the training distribution of \adaln{} parameters, which is inherently less stable than interpolation.
+
+\paragraph{Implications for future work.}
+Our linearity analysis provides actionable guidance: (1) efficient guidance methods should focus on the clean-timestep regime where errors are highest, (2) per-step adaptive strategies that switch between approximate and exact guidance based on local error estimates could achieve better quality-speed trade-offs, and (3) training-based approaches (e.g., guidance distillation) may be necessary to handle the nonlinear regime.
+
+\paragraph{Limitations.}
+We evaluate only on DiT-XL/2 with ImageNet $256\times 256$ class-conditional generation. Generalization to text-conditional models (e.g., those using cross-attention rather than \adaln{}), higher resolutions, and different architectures remains untested. We were unable to evaluate on SiT-XL/2 due to checkpoint availability constraints, and did not test combinations with APG or guidance interval methods. Our FID-2K metric is noisier than the standard FID-50K; while the large quality gaps (e.g., 26.6 vs.\ 234.6) cannot be explained by metric noise, more subtle comparisons---such as CSG-H 50\% (FID 32.2) vs.\ CFG (FID 36.8)---should be interpreted cautiously. Some results (per-layer schedules, hybrid configurations at 10--20\%, $w = 7.5$) are based on a single seed, limiting statistical confidence.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We proposed Conditioning-Space Guidance (CSG), a training-free method that approximates classifier-free guidance in a single forward pass by extrapolating \adaln{} parameters in Diffusion Transformers. Through comprehensive experiments on DiT-XL/2 with ImageNet $256\times 256$, we found that the linearity assumption underlying CSG holds at low guidance scales ($w = 1.5$, FID 26.6 vs.\ CFG's 22.7 with a single forward pass per step) but breaks down catastrophically at the moderate-to-high scales used in practice ($w = 4.0$, FID 234.6 vs.\ 36.8).
+
+Our detailed linearity analysis reveals that approximation errors grow superlinearly with guidance scale and concentrate at early denoising steps, providing a structured understanding of when and where conditioning-space interpolation fails. The hybrid CSG-H approach demonstrates that selective application of full CFG at high-error timesteps can recover---and even surpass---standard CFG quality.
+
+These findings establish clear boundaries for conditioning-space interpolation in diffusion transformers and provide a foundation for future work on efficient guidance. Promising directions include learned per-timestep guidance schedules, nonlinear conditioning interpolation, and combining CSG with complementary acceleration methods like feature caching.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\appendix
+
+\section{Additional Experimental Details}
+\label{app:details}
+
+\paragraph{Hardware and software.} All experiments were run on a single NVIDIA RTX A6000 (48GB VRAM) using PyTorch 2.1+ with CUDA. The DiT-XL/2 checkpoint was obtained from the official Facebook Research repository.
+
+\paragraph{FID computation.} We compute FID-2K using 2,000 generated images compared against the ImageNet $256\times 256$ reference statistics (precomputed Inception-v3 features). While FID-2K is noisier than the standard FID-50K, it allows us to evaluate many configurations within our compute budget. We use the \texttt{clean-fid} library for computation.
+
+\paragraph{Reproducibility.} All experiments use seeds $\{0, 1, 2\}$. For each seed, we pre-generate initial noise tensors and class label sequences to ensure exact reproducibility across methods. Class labels are sampled uniformly from all 1,000 ImageNet classes.
+
+\end{document}

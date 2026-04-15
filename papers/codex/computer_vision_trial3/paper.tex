@@ -1,0 +1,349 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\title{Object Units or Pixels? A Negative Proxy Feasibility Study for Online Segmentation Adaptation}
+
+\author{Anonymous Author(s)}
+
+\newcommand{\method}{\textsc{clip\_verified}}
+\newcommand{\topb}{\textsc{topb\_pixel}}
+\newcommand{\rawmask}{\textsc{raw\_mask}}
+\newcommand{\miou}{mIoU}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We study a pre-registered question about online open-vocabulary semantic segmentation adaptation: under a matched update budget, are CLIP-verified object units a better pseudo-supervision substrate than pixels or ungated masks? The intended CAT-Seg, Cityscapes, ACDC, and MLMP benchmark could not be executed in this workspace because those assets were unavailable, so we report an explicitly reframed proxy feasibility study instead. The executed protocol uses Pascal VOC 2012, a DeepLabV3-ResNet50 proxy backbone, a rank-4 logit adapter, six synthetic domain blocks, and a frozen calibration split that sets the acceptance thresholds and shared support budget once for all methods. Across the 144-image main proxy stream, \method{} reaches $0.5386 \pm 0.0083$ foreground \miou, while \topb{} reaches $0.54333 \pm 0.00002$, \rawmask{} reaches $0.54332 \pm 0.00001$, and the frozen baseline reaches $0.54330$. Paired Wilcoxon signed-rank tests show no significant advantage for \method{} over \topb{} ($p=0.6334$ on order A, $p=0.8145$ on order B) or over \rawmask{} ($p=0.5060$ on order A, $p=0.7301$ on order B). The result is therefore negative proxy evidence: in this executable closed-vocabulary setting, CLIP verification does not reliably improve online adaptation and instead adds variance and runtime.
+\end{abstract}
+
+\section{Introduction}
+Online test-time adaptation for semantic segmentation is now well established in both closed-vocabulary and open-vocabulary settings \citep{das2023transadapt,sojka2023continuous,noori2025ttavlm,desilva2025tto}. In parallel, recent open-vocabulary semantic segmentation (OVSS) systems show that mask-level or object-level reasoning is often useful at inference time \citep{liang2023ovseg,xu2023san,shan2024ebseg,lee2024escnet,kim2024dsg}. What remains less clear is whether object-like units are the right \emph{adaptation substrate} when the backbone, optimizer, and update budget are all held fixed.
+
+The registered intent for this project was to answer that question on CAT-Seg with Cityscapes, Cityscapes-C, ACDC, and MLMP as contextual comparison. A workspace-wide compatibility check found none of those assets, so that benchmark was not runnable. Rather than presenting an unexecuted plan as evidence, we report only the study that was actually run: a Pascal VOC 2012 proxy benchmark with synthetic domain shifts, a shared one-step-per-image adaptation recipe, and four matched substrates.
+
+The executed study compares four methods: a frozen baseline, top-confidence pixels (\topb{}), ungated proposal regions (\rawmask{}), and CLIP-verified proposal regions (\method{}). Calibration is performed once on a disjoint 24-image split, fixing $\tau_{\text{ovss}}=1.0$, $\tau_{\text{clip}}=1.0$, a margin threshold of $0.9996290683746338$, an entropy threshold of $0.0020806991495192053$, an agreement threshold of $0.9819277108433735$, and a shared budget $B=0.0283355712890625$ of image area.
+
+Our contributions are:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item We present a fully executed proxy protocol that isolates the substrate question under matched adaptation settings when the registered OVSS benchmark is unavailable.
+  \item We provide a calibrated comparison across pixels, ungated masks, and CLIP-verified masks over two six-domain stream orders with fixed seeds $\{13,17,23\}$.
+  \item We report a negative result: CLIP-verified object units do not outperform the simpler proxy baselines and exhibit higher variance, larger transition drops, and similar or worse runtime.
+\end{itemize}
+
+Section~\ref{sec:related} reviews prior work, Section~\ref{sec:method} describes the proxy protocol, Section~\ref{sec:experiments} presents the experiments, Section~\ref{sec:discussion} discusses implications and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+Our study sits at the intersection of OVSS, test-time adaptation, and region-based supervision.
+
+\paragraph{Open-vocabulary semantic segmentation.}
+Recent OVSS models already establish strong mask-aware inference pipelines. Mask-adapted CLIP \citep{liang2023ovseg} and Side Adapter Network \citep{xu2023san} showed that masked regions and side adapters are effective for open-vocabulary prediction. Later work continued this trend by improving image embedding balance \citep{shan2024ebseg}, combining SAM with OVSS decoders \citep{lee2024escnet,chen2025sammi}, and distilling object-context structure \citep{kim2024dsg}. These papers motivate comparing object-like support units, but they do not isolate whether such units are helpful for \emph{online adaptation} under a shared update recipe.
+
+\paragraph{Test-time and source-free adaptation.}
+Online adaptation for segmentation has been studied for continual domain shifts \citep{das2023transadapt,sojka2023continuous,lee2025instanceaware}. In OVSS, recent work explores vision-language model adaptation \citep{noori2025ttavlm}, test-time optimization \citep{desilva2025tto}, vocabulary alignment \citep{mazzucco2025vocalign}, and semantic library adaptation \citep{qorbani2025semla}. These papers confirm that adaptation itself is viable, but they optimize broader pipelines rather than asking whether pixels, superpixels, raw masks, or verified masks are the best adaptation substrate once the rest of the scaffold is fixed.
+
+\paragraph{Regionization and foundation models.}
+Our proxy study uses proposal regions and a CLIP-based agreement check, following the broader observation that segmentation quality can benefit from high-quality region proposals and vision-language verification \citep{radford2021clip,kirillov2023sam}. We also include a SLIC superpixel control on the reduced slice, motivated by classic regionization work \citep{achanta2012slic}. Unlike prior work, our goal is not to introduce a stronger architecture, but to audit whether richer support units help under matched online updates.
+
+\section{Method}
+\label{sec:method}
+\subsection{Executed Scope}
+The registered CAT-Seg benchmark was infeasible in this workspace. The executed study is therefore a \emph{proxy feasibility study} with a narrower claim: whether CLIP-verified object-like regions outperform matched proxy baselines under the same online adaptation scaffold. All conclusions in this paper are restricted to that proxy setting.
+
+\subsection{Proxy Benchmark}
+The proxy backbone is \texttt{torchvision} DeepLabV3-ResNet50 \citep{chen2017deeplabv3} operating on the Pascal VOC 2012 label space \citep{everingham2015voc}. The only trainable component is a rank-4 logit adapter, following the same low-rank-update intent across all adaptive methods \citep{hu2022lora}. Inputs are resized to $256 \times 256$, batch size is $1$, and each image receives exactly one online update step.
+
+We evaluate six domains: clean, fog, gaussian noise, snow, dusk, and night. The calibration split contains $24$ clean images. The main benchmark contains $144$ validation images with $24$ images per domain. The reduced ablation slice contains $72$ images with $12$ per domain. Two stream orders are used:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item Order A: clean $\rightarrow$ fog $\rightarrow$ gaussian\_noise $\rightarrow$ snow $\rightarrow$ dusk $\rightarrow$ night.
+  \item Order B: night $\rightarrow$ dusk $\rightarrow$ snow $\rightarrow$ gaussian\_noise $\rightarrow$ fog $\rightarrow$ clean.
+\end{itemize}
+
+\subsection{Compared Substrates}
+The methods differ only in how they choose support for the single online update:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item \textbf{Frozen}: no adaptation.
+  \item \textbf{\topb{}}: use the top-confidence pixels up to the shared area budget $B$.
+  \item \textbf{\rawmask{}}: use cached proposal regions without CLIP verification.
+  \item \textbf{\method{}}: use cached proposal regions that satisfy CLIP-agreement checks.
+\end{itemize}
+
+This matched setup is the central design choice: backbone, optimizer, trainable parameterization, one-step schedule, and budget accounting remain fixed, while the support substrate changes.
+
+\subsection{Calibration}
+Thresholds are frozen from the calibration split and never fit on the target stream. The executed calibration produces $\tau_{\text{ovss}}=1.0$, $\tau_{\text{clip}}=1.0$, margin threshold $0.9996290683746338$, entropy threshold $0.0020806991495192053$, agreement threshold $0.9819277108433735$, and shared budget $B=0.0283355712890625$. Among $323$ eligible masks, the calibration means are $0.9159$ for the fused margin, $0.1067$ for entropy, and $0.7935$ for agreement. The accepted-area mean is $0.0299$ over the $24$ calibration images. Calibration also records $25$ rejections from disjoint top-3 predictions and $36$ rejections where the fused label is not in both top-3 sets.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/calibration_thresholds.pdf}
+\caption{Calibration diagnostics on the $24$-image held-out split. The thresholds used in all later runs are frozen after this stage: margin $0.9996290683746338$, entropy $0.0020806991495192053$, agreement $0.9819277108433735$, and budget $B=0.0283355712890625$.}
+\label{fig:calibration}
+\end{figure}
+
+\subsection{Metrics}
+The primary metric is dataset-level foreground \miou{} computed from the confusion matrix over the $20$ non-background Pascal VOC classes. Per-image \miou{} is computed only over foreground classes present in that image. Older zero-filled per-image diagnostics are retained only as diagnostics and are not used for aggregate reporting.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+All runs use Python $3.10.12$ on a machine with one NVIDIA RTX A6000 ($49140$ MiB) and $4$ CPU cores. Cache construction confirms $168$ proposal caches, $168$ SLIC caches, and one CLIP text-feature cache for the unique benchmark samples. A dry run on $12$ images estimates $0.14956569656108817$ projected GPU hours for the full executed matrix, with per-image timing components of $0.007636378674457471$ seconds for inference, $0.046041400637477636$ seconds for support selection, and $0.09065962902137212$ seconds for the update step. Adaptive methods use seeds $13$, $17$, and $23$; the frozen baseline is deterministic and run once per order.
+
+\subsection{Main Results}
+Table~\ref{tab:main} and Figure~\ref{fig:main_results} summarize the main comparison. The central outcome is negative: \method{} does not improve over the simpler substrates. Its mean foreground \miou{} is $0.5385898991422345$, substantially below \topb{} at $0.5433288613242264$, \rawmask{} at $0.5433192550427369$, and even the frozen baseline at $0.543300277035063$.
+
+\begin{table}[t]
+\caption{Main proxy comparison on the $144$-image benchmark. Metrics are aggregated exactly from \texttt{results.json}. Higher is better for \miou{} and lower is better for runtime and transition drop.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Method & Foreground \miou{} $\uparrow$ & Runtime / image (s) $\downarrow$ & Skip ratio $\downarrow$ & Avg.\ transition drop $\downarrow$ \\
+\midrule
+Frozen & 0.54330 & 0.00753 & 0.000 & 0.00000 \\
+\topb{} & \textbf{0.54333 $\pm$ 0.00002} & 0.09047 & \textbf{0.000} & 0.00001 \\
+\rawmask{} & 0.54332 $\pm$ 0.00001 & \textbf{0.05529} & 0.875 & \textbf{0.00000} \\
+\method{} & 0.53859 $\pm$ 0.00830 & 0.09120 & 0.374 & 0.01386 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/main_error_bars.pdf}
+\caption{Main comparison with error bars over seeds $\{13,17,23\}$. The object-unit method \method{} has the lowest mean and by far the largest variance among the adaptive methods.}
+\label{fig:main_results}
+\end{figure}
+
+The per-domain means tell the same story. For \method{}, the clean-domain mean is only $0.5443230588407804$, versus $0.5539553930468121$ for \topb{}, $0.5539649992975086$ for \rawmask{}, and $0.5539636611350314$ for Frozen. Across fog, gaussian noise, snow, dusk, and night, \method{} remains close to the baselines but never recovers the clean-domain deficit enough to offset that loss.
+
+Statistical testing also fails to support the original hypothesis. Paired Wilcoxon signed-rank tests over the paired per-image trajectories give $p=0.6334355322075388$ and $p=0.814461435845842$ for \method{} versus \topb{} on orders A and B, and $p=0.5060364728194691$ and $p=0.7301047145288457$ for \method{} versus \rawmask{}. In this proxy benchmark, CLIP verification does not produce a statistically credible gain.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.48\linewidth]{figures/trajectory_order_A.pdf}
+\includegraphics[width=0.48\linewidth]{figures/trajectory_order_B.pdf}
+\caption{Per-domain trajectories for the two stream orders. The order reversal changes domain exposure, but it does not change the qualitative conclusion: the verified-region method does not open a stable margin over the matched baselines.}
+\label{fig:trajectories}
+\end{figure}
+
+\subsection{Ablations}
+The reduced $72$-image slice probes whether the negative result is caused by a poor threshold or budget choice. Table~\ref{tab:ablations}, Figure~\ref{fig:budget}, and Figure~\ref{fig:threshold} show that the answer is no.
+
+\begin{table}[t]
+\caption{Reduced-slice ablations on order A. Values are aggregated over seeds $\{13,17,23\}$. The calibrated \method{} setting is \texttt{threshold\_+0.00} and \texttt{clip\_verified\_budget\_1.0}.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Ablation & Foreground \miou{} $\uparrow$ & Runtime / image (s) $\downarrow$ & Skip ratio $\downarrow$ \\
+\midrule
+\method{} ($1.0B$) & 0.46884 $\pm$ 0.00002 & 0.09108 & 0.319 \\
+\method{} ($0.8B$) & 0.46884 $\pm$ 0.00002 & 0.08606 & 0.403 \\
+\method{} ($1.2B$) & 0.46884 $\pm$ 0.00003 & 0.09236 & 0.306 \\
+\method{} ($-0.05$ margin offset) & 0.46885 $\pm$ 0.00002 & 0.09071 & 0.315 \\
+\method{} ($+0.05$ margin offset) & 0.46884 $\pm$ 0.00001 & 0.04751 & 1.000 \\
+No CLIP & 0.46884 $\pm$ 0.00001 & 0.05250 & 0.917 \\
+No consistency & 0.46885 $\pm$ 0.00002 & 0.09219 & 0.319 \\
+SLIC & 0.46884 $\pm$ 0.00001 & \textbf{0.03957} & 1.000 \\
+\topb{} ($1.0B$) & \textbf{0.46886 $\pm$ 0.00002} & 0.09009 & \textbf{0.000} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three observations are consistent across the ablations. First, changing the verified-mask budget from $0.8B$ to $1.2B$ barely changes \miou{}: the means are $0.46883589864144054$, $0.468844746782759$, and $0.46884258689505803$. Second, relaxing the threshold by $-0.05$ or tightening it by $+0.05$ also has negligible effect on accuracy, while the strict $+0.05$ setting collapses into total skipping with skip ratio $1.0$. Third, removing CLIP verification (\texttt{no\_clip}) or removing the consistency term (\texttt{no\_consistency}) leaves the reduced-slice result essentially unchanged. The simplest interpretation is that, in this proxy implementation, the support substrate is not the performance bottleneck.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/budget_sensitivity.pdf}
+\caption{Budget sensitivity on the reduced slice. The verified-mask variant remains flat from $0.8B$ to $1.2B$, while \topb{} remains slightly better throughout.}
+\label{fig:budget}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/threshold_sensitivity.pdf}
+\caption{Threshold sensitivity for \method{}. Accuracy is nearly unchanged across the tested offsets, and the strictest threshold drives the method into full skipping rather than improved precision.}
+\label{fig:threshold}
+\end{figure}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The most important result is methodological: a controlled comparison can still be informative when it yields a negative answer. In the executed proxy benchmark, CLIP verification does not improve online adaptation relative to confidence-ranked pixels or ungated masks. It instead introduces larger variance ($0.00830142308439634$ versus $2.2690363616157517\times 10^{-5}$ for \topb{}), a larger average transition drop ($0.013863096178038967$ versus $1.2876245677018288\times 10^{-5}$), and runtime comparable to the pixel baseline.
+
+This does \emph{not} refute the original OVSS hypothesis. The study is limited in several ways. First, it is a closed-vocabulary proxy on Pascal VOC rather than the intended CAT-Seg benchmark on Cityscapes, Cityscapes-C, and ACDC. Second, MLMP was not run because the required assets were unavailable, so the comparison is internal rather than benchmark-complete. Third, the reduced-slice SLIC result should be read only as an ablation control, because SLIC was not executed on the full $144$-image matrix. Fourth, the adaptation scaffold is intentionally simple: one step per image and a rank-4 logit adapter may underuse the potential of object-level support.
+
+Even with those limitations, the negative result is useful. It suggests that simply replacing pixels with verified regions is not enough, by itself, to obtain a robust advantage under strict budget matching. Future work should revisit the question only in the originally intended OVSS setting, or test whether object units become helpful when paired with stronger objectives, richer memory, or adaptation rules that explicitly model domain transitions.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We set out to test whether CLIP-verified object units are a better online adaptation substrate than pixels or ungated masks under matched budgets. The registered OVSS benchmark was unavailable, so we executed and report only a Pascal VOC proxy feasibility study with fixed calibration, two stream orders, and matched update rules.
+
+The resulting evidence is negative. On the main $144$-image proxy stream, \method{} achieves $0.5385898991422345$ foreground \miou{}, below \topb{} at $0.5433288613242264$, \rawmask{} at $0.5433192550427369$, and Frozen at $0.543300277035063$, with no significant paired advantage over either adaptive baseline. Reduced-slice ablations remain flat across threshold and budget changes. Within this executable proxy setting, CLIP verification does not provide a reliable adaptation benefit.
+
+The broader implication is simple: object-like support units should not be assumed to help online adaptation merely because they help inference-time segmentation. The substrate question remains open for the originally intended OVSS benchmark, but this workspace supports only the narrower conclusion reported here.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{18}
+
+\bibitem[Achanta et~al.(2012)Achanta, Shaji, Smith, Lucchi, Fua, and
+  S{\"u}sstrunk]{achanta2012slic}
+Radhakrishna Achanta, Appu Shaji, Kevin Smith, Aurelien Lucchi, Pascal Fua,
+  and Sabine S{\"u}sstrunk.
+\newblock SLIC superpixels compared to state-of-the-art superpixel methods.
+\newblock {\em IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  34\penalty0 (11):\penalty0 2274--2282, 2012.
+
+\bibitem[Chen et~al.(2017)Chen, Papandreou, Schroff, and
+  Adam]{chen2017deeplabv3}
+Liang-Chieh Chen, George Papandreou, Florian Schroff, and Hartwig Adam.
+\newblock Rethinking atrous convolution for semantic image segmentation.
+\newblock {\em arXiv preprint arXiv:1706.05587}, 2017.
+
+\bibitem[Chen et~al.(2025)Chen, Zhu, Yang, Niu, Ding, and
+  Xiang]{chen2025sammi}
+Lin Chen, Yingjian Zhu, Qi Yang, Xin Niu, Kun Ding, and Shiming Xiang.
+\newblock SAM-MI: A mask-injected framework for enhancing open-vocabulary
+  semantic segmentation with SAM.
+\newblock {\em arXiv preprint arXiv:2511.20027}, 2025.
+
+\bibitem[Das et~al.(2023)Das, Borse, Park, Azarian, Cai, Garrepalli, and
+  Porikli]{das2023transadapt}
+Debasmit Das, Shubhankar Borse, Hyojin Park, Kambiz Azarian, Hong Cai, Risheek
+  Garrepalli, and Fatih Porikli.
+\newblock TransAdapt: A transformative framework for online test time adaptive
+  semantic segmentation.
+\newblock In {\em ICASSP}, 2023.
+
+\bibitem[De~Silva et~al.(2025)De~Silva, Samaraweera, Wanigathunga,
+  Kariyawasam, Ranasinghe, Naseer, and Rodrigo]{desilva2025tto}
+Ulindu De~Silva, Didula Samaraweera, Sasini Wanigathunga, Kavindu
+  Kariyawasam, Kanchana Ranasinghe, Muzammal Naseer, and Ranga Rodrigo.
+\newblock Test-time optimization for domain adaptive open vocabulary
+  segmentation.
+\newblock {\em arXiv preprint arXiv:2501.04696}, 2025.
+
+\bibitem[Everingham et~al.(2015)Everingham, Eslami, Van~Gool, Williams, Winn,
+  and Zisserman]{everingham2015voc}
+Mark Everingham, S.~M. Ali Eslami, Luc Van~Gool, Christopher K.~I. Williams,
+  John Winn, and Andrew Zisserman.
+\newblock The Pascal Visual Object Classes Challenge: A retrospective.
+\newblock {\em International Journal of Computer Vision}, 111\penalty0
+  (1):\penalty0 98--136, 2015.
+
+\bibitem[Hu et~al.(2022)Hu, Shen, Wallis, Allen-Zhu, Li, Wang, Wang, and
+  Chen]{hu2022lora}
+Edward~J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li,
+  Shean Wang, Lu~Wang, and Weizhu Chen.
+\newblock LoRA: Low-rank adaptation of large language models.
+\newblock In {\em ICLR}, 2022.
+
+\bibitem[Kim et~al.(2024)Kim, Ju, Han, Yang, and Hwang]{kim2024dsg}
+Chanyoung Kim, Dayun Ju, Woojung Han, Ming-Hsuan Yang, and Seong~Jae Hwang.
+\newblock Distilling spectral graph for object-context aware open-vocabulary
+  semantic segmentation.
+\newblock {\em arXiv preprint arXiv:2411.17150}, 2024.
+
+\bibitem[Kirillov et~al.(2023)Kirillov, Mintun, Ravi, Mao, Rolland, Gustafson,
+  Xiao, Whitehead, Berg, Lo, Doll{\'a}r, and Girshick]{kirillov2023sam}
+Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland,
+  Laura Gustafson, Tete Xiao, Spencer Whitehead, Alexander~C. Berg, Wan-Yen
+  Lo, Piotr Doll{\'a}r, and Ross Girshick.
+\newblock Segment anything.
+\newblock In {\em ICCV}, 2023.
+
+\bibitem[Lee et~al.(2024)Lee, Cho, Lee, Yang, Choi, Kim, and
+  Lee]{lee2024escnet}
+Minhyeok Lee, Suhwan Cho, Jungho Lee, Sunghun Yang, Heeseung Choi, Ig-Jae Kim,
+  and Sangyoun Lee.
+\newblock Effective SAM combination for open-vocabulary semantic segmentation.
+\newblock {\em arXiv preprint arXiv:2411.14723}, 2024.
+
+\bibitem[Lee et~al.(2025)Lee, Jung, Lee, Park, and Hong]{lee2025instanceaware}
+Seunghwan Lee, Inyoung Jung, Hojoon Lee, Eunil Park, and Sungeun Hong.
+\newblock Instance-aware test-time segmentation for continual domain shifts.
+\newblock {\em arXiv preprint arXiv:2512.08569}, 2025.
+
+\bibitem[Liang et~al.(2023)Liang, Wu, Dai, Li, Zhao, Zhang, Zhang, Vajda, and
+  Marculescu]{liang2023ovseg}
+Feng Liang, Bichen Wu, Xiaoliang Dai, Kunpeng Li, Yinan Zhao, Hang Zhang,
+  Peizhao Zhang, Peter Vajda, and Diana Marculescu.
+\newblock Open-vocabulary semantic segmentation with mask-adapted CLIP.
+\newblock In {\em CVPR}, 2023.
+
+\bibitem[Mazzucco et~al.(2025)Mazzucco, Persson, Segu, Dovesi, Tombari,
+  Van~Gool, and Poggi]{mazzucco2025vocalign}
+Silvio Mazzucco, Carl Persson, Mattia Segu, Pier~Luigi Dovesi, Federico
+  Tombari, Luc Van~Gool, and Matteo Poggi.
+\newblock Lost in translation? Vocabulary alignment for source-free adaptation
+  in open-vocabulary semantic segmentation.
+\newblock In {\em BMVC}, 2025.
+
+\bibitem[Noori et~al.(2025)Noori, Osowiechi, Hakim, Bahri, Yazdanpanah,
+  Dastani, Beizaee, Ben~Ayed, and Desrosiers]{noori2025ttavlm}
+Mehrdad Noori, David Osowiechi, Gustavo~Adolfo Vargas~Hakim, Ali Bahri, Moslem
+  Yazdanpanah, Sahar Dastani, Farzad Beizaee, Ismail Ben~Ayed, and Christian
+  Desrosiers.
+\newblock Test-time adaptation of vision-language models for open-vocabulary
+  semantic segmentation.
+\newblock {\em arXiv preprint arXiv:2505.21844}, 2025.
+
+\bibitem[Qorbani et~al.(2025)Qorbani, Villani, Panagiotakopoulos, Botet
+  Colomer, Harenstam-Nielsen, Segu, Dovesi, Karlgren, Cremers, and
+  Poggi]{qorbani2025semla}
+Reza Qorbani, Gianluca Villani, Theodoros Panagiotakopoulos, Marc Botet
+  Colomer, Linus Harenstam-Nielsen, Mattia Segu, Pier~Luigi Dovesi, Jussi
+  Karlgren, Daniel Cremers, and Matteo Poggi.
+\newblock Semantic library adaptation: LoRA retrieval and fusion for
+  open-vocabulary semantic segmentation.
+\newblock In {\em CVPR}, 2025.
+
+\bibitem[Radford et~al.(2021)Radford, Kim, Hallacy, Ramesh, Goh, Agarwal,
+  Sastry, Askell, Mishkin, Clark, Krueger, and Sutskever]{radford2021clip}
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh,
+  Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark,
+  Gretchen Krueger, and Ilya Sutskever.
+\newblock Learning transferable visual models from natural language
+  supervision.
+\newblock In {\em ICML}, 2021.
+
+\bibitem[Shan et~al.(2024)Shan, Wu, Zhu, Shao, Sang, and
+  Gao]{shan2024ebseg}
+Xiangheng Shan, Dongyue Wu, Guilin Zhu, Yuanjie Shao, Nong Sang, and Changxin
+  Gao.
+\newblock Open-vocabulary semantic segmentation with image embedding
+  balancing.
+\newblock In {\em CVPR}, 2024.
+
+\bibitem[Sojka et~al.(2023)Sojka, Liu, Goswami, Cygert, Twardowski, and
+  van~de Weijer]{sojka2023continuous}
+Damian Sojka, Yuyang Liu, Dipam Goswami, Sebastian Cygert, Bartlomiej
+  Twardowski, and Joost van~de Weijer.
+\newblock Technical report for ICCV 2023 visual continual learning challenge:
+  continuous test-time adaptation for semantic segmentation.
+\newblock {\em arXiv preprint arXiv:2310.13533}, 2023.
+
+\bibitem[Xu et~al.(2023)Xu, Zhang, Wei, Hu, and Bai]{xu2023san}
+Mengde Xu, Zheng Zhang, Fangyun Wei, Han Hu, and Xiang Bai.
+\newblock Side adapter network for open-vocabulary semantic segmentation.
+\newblock In {\em CVPR}, 2023.
+
+\end{thebibliography}
+
+\end{document}

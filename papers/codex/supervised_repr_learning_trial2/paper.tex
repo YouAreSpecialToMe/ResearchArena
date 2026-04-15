@@ -1,0 +1,275 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{url}
+\usepackage{xspace}
+\usepackage[colorlinks=true,citecolor=blue,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage[round,authoryear]{natbib}
+
+\setlength{\columnsep}{0.25in}
+\setlength{\parskip}{0.25em}
+\setlength{\parindent}{1em}
+
+\title{Adaptive Prototype Granularity in Frozen-Feature Contrastive Adaptation}
+\author{Anonymous Authors}
+\date{}
+
+\newcommand{\method}{Adaptive vMF\xspace}
+\input{results/report_numbers.tex}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Frozen-feature adaptation is attractive when compute or labels are limited, but it remains unclear whether a lightweight head should model each class with one prototype, a fixed number of prototypes, or an adaptively selected number. We study this question in a controlled CLIP ViT-B/16 regime with shared cached features, matched adapter architectures, and fixed seeds $\{11,22,33\}$. Our adaptive method uses the same prototype parameterization as fixed-$K$ baselines, but updates per-class prototype counts using conservative split/merge proposals scored by a penalized von Mises-Fisher surrogate on normalized validation embeddings. The result is mixed rather than uniformly positive. On Waterbirds, \method raises worst-group accuracy from \WbContrastiveWorst{} for a class-level contrastive adapter to \WbAdaptiveWorst{} while keeping average accuracy similar (\WbContrastiveAcc{} versus \WbAdaptiveAcc{}). However, adaptive selection does not beat the strongest fixed-$K$ or matched no-adapt baselines overall: fixed-$K$ contrastive prototypes reach \CubFixedKAcc{} CUB accuracy, and the no-adapt ablation reaches \CubNoAdaptAcc{}. Diagnostics explain why. Adaptivity is weakly active on Waterbirds and collapses back to one active prototype per class on CUB after many split--merge reversals. In this limited two-dataset, three-seed frozen-feature study, adaptive prototype granularity is better viewed as a targeted robustness heuristic than as a strong default.
+\end{abstract}
+
+\section{Introduction}
+Supervised contrastive learning can improve class separation, but nearby work argues that transfer and robustness also depend on preserving within-class structure rather than only widening class margins \citep{khosla2020Supervised,ji2023The,chen2022Perfectly}. At the same time, frozen foundation-model features make lightweight adaptation increasingly practical: once a backbone is cached, many heads can be compared under tightly controlled compute \citep{radford2021Learning,zhang2022Contrastive}. Prototype-based heads are natural in this regime because normalized CLIP features already live on a sphere, where cosine classifiers and hyperspherical prototypes are geometrically well matched \citep{mettes2019Hyperspherical,wang2022Towards,snell2017Prototypical}. The open question is not whether prototypes can work, but whether \emph{adaptive} prototype granularity helps enough to justify extra structure-search machinery.
+
+We study that question as a narrow empirical comparison, not as a claim of a fundamentally new learning algorithm. We freeze a CLIP ViT-B/16 encoder, cache features once, and vary only the trainable head. The comparison includes a linear probe, a cross-entropy adapter, a class-level contrastive adapter, fixed-$K$ prototype heads, a spread-preserving comparator inspired by Perfectly Balanced \citep{chen2022Perfectly}, and an adaptive prototype head that uses split/merge updates scored by a penalized vMF surrogate. The aim is modest: determine whether adaptive per-class prototype counts are materially better than simpler alternatives under matched frozen features, comparable head capacity, and fixed budget.
+
+The answer is mixed, and the negative part is important. On Waterbirds, adaptive prototypes improve worst-group accuracy and slightly improve macro-F1 relative to the class-level contrastive adapter, reaching \WbAdaptiveWorst{} worst-group accuracy and \WbAdaptiveMacroFOne{} macro-F1 versus \WbContrastiveWorst{} and \WbContrastiveMacroFOne{}. But they do not reliably outperform the strongest fixed-$K$ or no-adapt prototype baselines, and on CUB the best fixed-$K$ and no-adapt models remain stronger at \CubFixedKAcc{} and \CubNoAdaptAcc{} accuracy. Mechanism diagnostics further show that adaptivity is barely used on Waterbirds and effectively inactive at convergence on CUB.
+
+Our contributions are:
+\begin{itemize}[leftmargin=1.5em]
+  \item We present a controlled frozen-feature comparison of class-level contrastive heads, fixed-$K$ prototype heads, and adaptive prototype-count selection under a shared CLIP backbone, shared cached features, and matched optimization settings.
+  \item We instantiate adaptive prototype selection with conservative split/merge proposals on unit-normalized embeddings and a held-out penalized vMF surrogate aligned with cosine geometry.
+  \item We show that the resulting gains are limited and dataset-dependent: adaptive selection helps Waterbirds worst-group robustness, but it does not beat the strongest fixed-structure baselines overall and does not satisfy the pre-registered primary success criteria.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work, Section~\ref{sec:method} describes the model and adaptive rule, Section~\ref{sec:experiments} presents results, Section~\ref{sec:repro} summarizes reproducibility details, Section~\ref{sec:discussion} discusses scope and limitations, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Frozen-feature adaptation.}
+Frozen-backbone adaptation is attractive because it isolates head design from expensive encoder finetuning. \citet{zhang2022Contrastive} are the closest baseline in our setting: they study class-level contrastive adapters on frozen CLIP features for group robustness. \citet{kirichenko2022last} show that simple last-layer retraining can already recover substantial robustness under spurious correlations. Our study stays in this lightweight regime, but replaces class-level heads with fixed or adaptive prototype sets to test whether modeling same-class multimodality matters under the same cached features.
+
+\paragraph{Latent subclass preservation and prototype adaptation.}
+\citet{chen2022Perfectly} argue that preserving latent subclass structure can improve transfer and robustness, but they do so in end-to-end supervised contrastive training rather than frozen-feature head adaptation. Prototype methods provide a compact representation of multimodal classes \citep{snell2017Prototypical,mettes2019Hyperspherical}, and more recent work studies prototype-image mismatch in transfer settings \citep{tian2024Mind}. Subclass-aware learning for long-tailed recognition also points in the same direction \citep{hou2023Subclass}. Unlike these lines of work, we isolate a narrower question: adaptive versus fixed prototype granularity inside a frozen CLIP adaptation pipeline with matched compute.
+
+\paragraph{Robustness under spurious correlations.}
+Waterbirds is a standard test bed for subgroup robustness, originating in group-shift work by \citet{sagawa2020distributionally} and later included in WILDS \citep{koh2021wilds}. The broader literature includes group-DRO style optimization \citep{sagawa2020distributionally}, failure-based debiasing \citep{nam2020learning}, and other spurious-correlation mitigation strategies. Our paper is not a general robustness method. It asks whether a representation-side change in the head, namely explicit same-class prototype structure, helps in the frozen-feature regime.
+
+\paragraph{Hyperspherical modeling.}
+Normalized embeddings are naturally modeled on the unit sphere. Prior work on hyperspherical prototypes and vMF-style classification already establishes this modeling choice \citep{mettes2019Hyperspherical,wang2022Towards}. In our study, spherical modeling is not the contribution; it is the appropriate geometric tool for comparing fixed and adaptive prototype counts on cosine-normalized features.
+
+\paragraph{Datasets and positioning.}
+We evaluate on Waterbirds and CUB-200-2011 \citep{koh2021wilds,wah2011caltech}. Waterbirds exposes robustness failures under strong spurious correlations, whereas CUB tests fine-grained recognition without explicit group labels. This pairing lets us separate ``adaptive prototypes help a robustness benchmark'' from the stronger claim that they are broadly preferable across frozen-feature adaptation tasks.
+
+\section{Method}
+\label{sec:method}
+\subsection{Frozen-feature adaptation setup}
+Each image is embedded once by a frozen CLIP ViT-B/16 encoder \citep{radford2021Learning}, producing a $512$-dimensional normalized feature $h_i$. A trainable adapter maps cached features to a $128$-dimensional normalized embedding
+\begin{equation}
+z_i = \mathrm{normalize}(g(h_i)),
+\end{equation}
+where $g$ is a two-layer multilayer perceptron with dimensions $512 \rightarrow 512 \rightarrow 128$, LayerNorm, GELU, and dropout $0.1$.
+
+We compare three head families built on the same adapter:
+\begin{enumerate}[leftmargin=1.5em]
+  \item a cosine classifier for the cross-entropy and class-level contrastive adapters;
+  \item a fixed-$K$ prototype head with shared prototype parameterization across classes;
+  \item an adaptive prototype head that starts from one prototype per class and updates $K_c$ with split/merge proposals.
+\end{enumerate}
+
+\subsection{Prototype head}
+For class $c$, the prototype head maintains $K_c$ unit-norm prototypes $\{p_{c,1},\dots,p_{c,K_c}\}$. Given an embedding $z$, the class logit is
+\begin{equation}
+s_c(z) = \log \sum_{k=1}^{K_c} \exp \left(\frac{z^\top p_{c,k}}{\tau_p}\right),
+\end{equation}
+with prototype temperature $\tau_p = 0.07$. Within the true class, the model forms soft assignments
+\begin{equation}
+q_{i,k} =
+\frac{\exp(z_i^\top p_{y_i,k}/\tau_p)}
+{\sum_{m=1}^{K_{y_i}} \exp(z_i^\top p_{y_i,m}/\tau_p)}.
+\end{equation}
+
+\subsection{Training objectives}
+All non-linear heads are trained with cross-entropy. The contrastive variants also use supervised contrastive loss on two cached augmented views:
+\begin{equation}
+\mathcal{L}_{\mathrm{supcon}} =
+- \frac{1}{2B} \sum_{i=1}^{2B}
+\frac{1}{|P(i)|}
+\sum_{p \in P(i)}
+\log \frac{\exp(z_i^\top z_p / \tau)}
+{\sum_{a \neq i} \exp(z_i^\top z_a / \tau)},
+\end{equation}
+where $\tau = 0.07$ and positives $P(i)$ share the class label.
+
+For prototype heads we additionally use alignment and occupancy terms:
+\begin{align}
+\mathcal{L}_{\mathrm{align}} &= \frac{1}{B}\sum_i \sum_{k=1}^{K_{y_i}} q_{i,k}(1 - z_i^\top p_{y_i,k}), \\
+\mathcal{L}_{\mathrm{occ}} &= \frac{1}{|\mathcal{C}_B|}\sum_{c \in \mathcal{C}_B}
+\left\| \bar{q}_c - \frac{1}{K_c}\mathbf{1}\right\|_2^2,
+\end{align}
+where $\bar{q}_c$ is the mean prototype assignment for class $c$ in the batch. The adaptive and fixed-$K$ contrastive prototype heads use
+\begin{equation}
+\mathcal{L} =
+\mathcal{L}_{\mathrm{ce}}
++ 0.5\,\mathcal{L}_{\mathrm{supcon}}
++ 0.25\,\mathcal{L}_{\mathrm{align}}
++ 0.05\,\mathcal{L}_{\mathrm{occ}}.
+\end{equation}
+The non-contrastive prototype baseline removes $\mathcal{L}_{\mathrm{supcon}}$. The PB-inspired comparator uses
+\begin{equation}
+\mathcal{L} =
+\mathcal{L}_{\mathrm{ce}}
++ 0.5\,\mathcal{L}_{\mathrm{supcon}}
++ 0.1\,\mathcal{L}_{\mathrm{spread}},
+\end{equation}
+where $\mathcal{L}_{\mathrm{spread}}$ matches each class trace in the adapter space to the corresponding trace of the frozen CLIP features.
+
+\subsection{Adaptive prototype-count updates}
+The adaptive head starts with $K_c = 1$ for all classes. Every $5$ epochs after a $5$-epoch warmup, it considers at most one split proposal per class. For the currently most dispersed prototype, spherical $k$-means initializes two children and a short vMF-style refinement updates their directions. The proposal is scored on held-out validation embeddings with the penalized surrogate
+\begin{equation}
+\mathrm{score}(Z, M) =
+\sum_{z \in Z} \log \sum_{m=1}^{M} \exp(\kappa_c z^\top \mu_m)
+- \frac{1}{2} M d \log |Z|,
+\end{equation}
+where $d = 128$, $\mu_m$ are normalized component centers, and $\kappa_c$ is a class-shared concentration estimate clipped to $[5, 200]$.
+
+For Waterbirds, the cap is $K_c \leq 2$ and the minimum child occupancy is $\max(10, 0.10n_c)$. For CUB, the cap is $K_c \leq 3$ and the minimum child occupancy is $\max(12, 0.08n_c)$. A split is accepted when the penalized score improves and both children satisfy the occupancy floor. If a Waterbirds class has fewer than $40$ validation examples, the method falls back to $5$ grouped bootstrap resamples of the training class and accepts the split only when the mean per-example gain is positive and at least $4$ of the $5$ resamples agree. Sensitivity runs replace the zero threshold with stricter margins of $0.0025$ and $0.005$. After split proposals, the method checks the closest same-class prototype pair for a possible merge. A merge is accepted when it improves the same penalized score or when either component violates the occupancy floor after reassignment.
+
+\section{Experiments}
+\label{sec:experiments}
+\subsection{Setup}
+We evaluate on two tasks chosen to stress different kinds of within-class variation. Waterbirds follows the standard train/validation/test split with $4795/1199/5794$ examples and retained group labels \citep{sagawa2020distributionally,koh2021wilds}. The four test groups are landbird-on-land, landbird-on-water, waterbird-on-land, and waterbird-on-water. The primary metric is worst-group accuracy; average accuracy and macro-F1 are secondary metrics. CUB-200-2011 follows the official split \citep{wah2011caltech}, and we carve out a fixed stratified validation subset equal to $10\%$ of the original training set using split seed $123$, yielding $5394/600/5794$ train/validation/test examples with exactly $3$ validation images per class. The primary CUB metric is top-1 accuracy, with balanced accuracy and macro-F1 as secondary metrics.
+
+All methods use frozen CLIP ViT-B/16 features with one deterministic cached view per example. Contrastive methods additionally use two cached augmented views built from random resized crop, horizontal flip, and color jitter. The seed set is fixed to $\{11,22,33\}$ for every main method and ablation.
+
+Optimization is shared as closely as possible across methods: AdamW with weight decay $10^{-4}$, cosine learning-rate decay, maximum $50$ epochs for non-linear heads, and early stopping patience $8$. Linear probes use learning rate $10^{-3}$, batch size $512$, and at most $60$ epochs. Cosine-classifier adapters use batch size $512$ and learning rate $3\times 10^{-4}$. Prototype heads use learning rate $3\times 10^{-4}$ for the adapter and $10^{-3}$ for prototype parameters; fixed-$K$ baselines use batch size $512$ and adaptive runs use batch size $256$. Waterbirds checkpoints are selected by validation worst-group accuracy; CUB checkpoints are selected by validation top-1 accuracy.
+
+All experiments ran on a single NVIDIA RTX A6000 GPU with CUDA $12.8$, Python $3.12.7$, and the package set recorded in \texttt{results/env.txt}. Hardware details from \texttt{results/hardware.txt} report $503$\,GiB host memory and $4$ CPU cores. The optional CelebA extension was not run, so all claims rely only on Waterbirds and CUB.
+
+\subsection{Main results}
+Table~\ref{tab:main} and Figure~\ref{fig:main} summarize the main comparison. The adaptive method clearly helps relative to the simpler class-level contrastive adapter on Waterbirds: worst-group accuracy rises from \WbContrastiveWorst{} to \WbAdaptiveWorst{}, with a bootstrap $95\%$ confidence interval of \WbAdaptiveVsContrastiveCI{} percentage points for the difference. Waterbirds macro-F1 is nearly unchanged but slightly higher for the adaptive model (\WbAdaptiveMacroFOne{} versus \WbContrastiveMacroFOne{}). The PB-inspired spread baseline also trails the adaptive method on both Waterbirds worst-group accuracy and macro-F1.
+
+However, the broader claim does not hold. On Waterbirds, the fixed-$K$ contrastive prototype baseline reaches \WbFixedKWorst{} worst-group accuracy, and the adaptive-minus-fixed-$K$ confidence interval \WbAdaptiveVsFixedKCI{} includes zero. On CUB, adaptive selection improves over the class-level contrastive adapter but does not beat the strongest fixed-$K$ baseline, which reaches \CubFixedKAcc{} accuracy and \CubFixedKMacroFOne{} macro-F1. The adaptive-minus-fixed-$K$ CUB accuracy interval \CubAdaptiveVsFixedKCI{} likewise spans zero. The main result is therefore not ``adaptive is best,'' but ``adaptive helps one robustness benchmark relative to simpler class-level heads while failing to beat stronger fixed-structure baselines overall.''
+
+The Waterbirds group breakdown clarifies where the gain comes from. The hardest group, waterbird-on-land, improves from \WbContrastiveGroupTwo{} for the class-level contrastive adapter to \WbAdaptiveGroupTwo{} for the adaptive model. Yet the matched no-adapt ablation is similarly strong on that group at \WbNoAdaptGroupTwo{}, which again weakens the case that the adaptive structure search itself is essential.
+
+One anomalous baseline deserves comment. The Waterbirds linear probe attains $77.8 \pm 0.0$ average accuracy but $0.0 \pm 0.0$ worst-group accuracy and $43.8 \pm 0.0$ macro-F1 because it predicts the majority-aligned groups almost perfectly while completely failing on both minority groups. The same behavior appears on the validation selection metric, so this pattern is consistent with severe reliance on background-correlated signal in frozen features rather than an evaluation bug.
+
+Efficiency differences are modest in absolute terms but still relevant for a head-only comparison. On Waterbirds, average per-seed training time rises from \WbContrastiveTime{} minutes for the class-level contrastive adapter to \WbAdaptiveTime{} for the adaptive method. On CUB, the increase is larger: \CubContrastiveTime{} minutes for the contrastive adapter, \CubFixedKTime{} for fixed-$K$ contrastive prototypes, and \CubAdaptiveTime{} for the adaptive method.
+
+\begin{table*}[t]
+\caption{Main comparison on Waterbirds and CUB. Metrics are mean $\pm$ standard deviation over seeds $\{11,22,33\}$. Best results in each column are in \textbf{bold}. Higher is better for all reported metrics.}
+\label{tab:main}
+\centering
+\small
+\resizebox{\textwidth}{!}{\input{results/main_table.tex}}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure1_main_comparison.pdf}
+\caption{Main comparison across datasets. Bars plot Waterbirds worst-group accuracy and CUB top-1 accuracy for all seven methods; error bars are standard deviations over seeds $\{11,22,33\}$. Adaptive prototypes help Waterbirds worst-group robustness over class-level contrastive adaptation, while the strongest fixed-$K$ prototype baseline remains best on CUB.}
+\label{fig:main}
+\end{figure}
+
+\subsection{Ablations}
+Table~\ref{tab:ablation} compares the full adaptive method against three pre-registered variants: no adaptivity, no vMF-based selection rule, and no occupancy regularizer. Adding macro-F1 to the ablation table makes the main conclusion sharper. The matched no-adapt variant is at least as strong as the full adaptive method on both datasets and stronger on every reported ablation metric: Waterbirds worst-group accuracy improves from \WbAdaptiveWorst{} to \WbNoAdaptWorst{}, Waterbirds macro-F1 from \WbAdaptiveMacroFOne{} to \WbNoAdaptMacroFOne{}, CUB accuracy from \CubAdaptiveAcc{} to \CubNoAdaptAcc{}, and CUB macro-F1 from \CubAdaptiveMacroFOne{} to \CubNoAdaptMacroFOne{}.
+
+The remaining ablations show that the adaptive mechanism is effectively inert under this budget. On Waterbirds, replacing the vMF selection rule with deterministic growth and removing the occupancy regularizer both produce the same means as the full adaptive model. On CUB, the no-occupancy variant is again identical to the full model, while the no-vMF variant is slightly worse but still ends with no active classes above one prototype on average. Figure~\ref{fig:ablations} visualizes the primary-metric view of the same pattern.
+
+\begin{table}[t]
+\caption{Ablations of the adaptive prototype head. Metrics are mean $\pm$ standard deviation over seeds $\{11,22,33\}$. Higher is better for every column. The CUB no-adapt accuracy is \textbf{79.2 $\pm$ 1.0}, matching the raw per-seed accuracies $[79.1, 78.2, 80.2]$ after standard one-decimal rounding.}
+\label{tab:ablation}
+\centering
+\small
+\resizebox{\columnwidth}{!}{\input{results/ablation_table.tex}}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure2_ablations.pdf}
+\caption{Ablation comparison for the adaptive prototype family. Bars plot Waterbirds worst-group accuracy and CUB top-1 accuracy; error bars are standard deviations over seeds $\{11,22,33\}$. Removing adaptivity slightly improves both benchmarks, while removing the occupancy term leaves the measured outcomes unchanged.}
+\label{fig:ablations}
+\end{figure}
+
+\subsection{Mechanism analysis}
+Figure~\ref{fig:kdist} shows that the adaptive mechanism is active only weakly on Waterbirds and effectively inactive at convergence on CUB. On Waterbirds, the average number of classes with $K_c > 1$ is \WbAdaptiveSplitClasses{} out of $2$, and only one seed splits both classes. The subclass--group normalized mutual information is \WbAdaptiveNMI{}, indicating partial but inconsistent recovery of observed subgroup structure rather than clean discovery of robust subgroups.
+
+On CUB, the diagnostics are more revealing. The adaptive method accepts \CubAdaptiveAcceptedSplits{} splits and \CubAdaptiveAcceptedMerges{} merges on average, but the final number of classes with $K_c > 1$ is \CubAdaptiveActiveClasses{}. In other words, the adaptive search repeatedly explores extra structure and then removes it. The final occupancy entropy is also $0.0 \pm 0.0$, confirming complete collapse back to one active prototype per class. This explains why adaptive selection does not improve over fixed-$K$: under the measured validation criterion, the frozen CUB features do not support a stable multi-prototype decomposition.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure3_k_distribution.pdf}
+\caption{Adaptive-structure diagnostics. The left panels plot the distribution of final selected prototype counts per class on Waterbirds and CUB, and the right panels plot prototype-occupancy statistics for the same runs. Waterbirds shows occasional splitting, whereas CUB collapses to one active prototype per class despite many accepted split and merge operations during training.}
+\label{fig:kdist}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure4_waterbirds_groups.pdf}
+\caption{Waterbirds group analysis. Bars plot per-group test accuracy for the class-level contrastive adapter, fixed-$K$ contrastive prototypes, the PB-inspired spread baseline, and \method; error bars are standard deviations over seeds $\{11,22,33\}$. The adaptive method mainly helps the hardest minority group, waterbird-on-land, while the side panel reports normalized mutual information between adaptive subclass assignments and observed group labels.}
+\label{fig:groups}
+\end{figure}
+
+\subsection{Sensitivity of the Waterbirds fallback}
+The Waterbirds fallback sensitivity analysis is intentionally simple: the primary rule uses a zero mean-improvement threshold in the bootstrap acceptance test, while the alternatives require margins of $0.0025$ and $0.005$. Figure~\ref{fig:sensitivity} shows that the outcomes are identical across all three settings. Worst-group accuracy remains $71.8 \pm 3.4$, the average number of accepted split classes remains $0.7 \pm 1.2$, and the same seed is the only one that activates multiple prototypes. This stability is useful because it shows that the Waterbirds result does not depend on a bespoke threshold choice.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/figure5_waterbirds_sensitivity.pdf}
+\caption{Waterbirds fallback sensitivity. The figure plots worst-group accuracy and splitting activity for the primary threshold-free bootstrap rule and the stricter mean-improvement margins $0.0025$ and $0.005$; error bars are standard deviations over seeds $\{11,22,33\}$. All three settings produce the same measured outcomes, indicating that the Waterbirds conclusion is insensitive to this fallback variation.}
+\label{fig:sensitivity}
+\end{figure}
+
+\section{Reproducibility Details}
+\label{sec:repro}
+All run artifacts are stored in the workspace used for this paper. Per-run configurations, metrics, runtimes, logs, checkpoints, predictions, and adaptive-structure diagnostics live under \path{exp/<dataset>/<method>/seed_<seed>/}. A single aggregation script, \path{exp/aggregate/run.py}, regenerates the manuscript-facing summary files in \path{results/}, including the tables imported directly into this draft, the plotting CSVs, and the macro file \path{results/report_numbers.tex} used for headline numeric claims.
+
+The exact data splits are fixed and shared across methods. Waterbirds uses the standard split with $4795$ train, $1199$ validation, and $5794$ test examples; split metadata and checksum hashes are recorded in \path{cache/features/waterbirds/stats.json}. CUB uses $5394$ train, $600$ validation, and $5794$ test examples, with the validation set defined by the $600$ image ids in \path{cache/splits/cub_val_ids.json}; split checksums and class counts are recorded in \path{cache/features/cub/stats.json}.
+
+Checkpoint selection follows the same rule everywhere within a dataset: Waterbirds selects the checkpoint with highest validation worst-group accuracy, and CUB selects the checkpoint with highest validation top-1 accuracy. Training stops after patience-$8$ early stopping relative to that validation metric, and \path{runtime.json} stores \path{epochs_completed}, \path{selected_epoch}, \path{selected_val_metric}, and wall-clock time for every run.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+The empirical message is narrower than the proposal's positive hypothesis. Adaptive prototype selection is not a generally superior replacement for simpler frozen-feature heads. Its most defensible benefit in this study is targeted robustness on Waterbirds, where it improves the hardest group without sacrificing average accuracy. But the same mechanism does not produce a stable multi-prototype solution on CUB, and a matched no-adapt ablation slightly outperforms it on both datasets.
+
+The diagnostics suggest one interpretation. Frozen CLIP features may already encode enough global class structure that a small adaptive head rarely finds validation-supported evidence for persistent subclass splitting. On Waterbirds, limited same-class heterogeneity aligned with the hardest minority group may exist, so occasional splitting is useful. On CUB, the search procedure repeatedly opens and closes extra components, which is consistent with weak or noisy evidence for stable subclasses under the chosen validation surrogate.
+
+Several limitations matter. First, the study is intentionally small in scope: one frozen backbone, two main datasets, and three seeds. Second, the adaptive rule is conservative and inexpensive by design; more aggressive structure search or end-to-end finetuning could behave differently, but that would be a different regime from the one tested here. Third, the optional external robustness check on CelebA was not run, so practical claims should be restricted to Waterbirds and CUB. Finally, the resource measurements come from cached-feature training and should not be extrapolated to full-model finetuning.
+
+\section{Conclusion}
+\label{sec:conclusion}
+This paper asked a narrow question: in frozen-feature contrastive adaptation, is adaptive per-class prototype-count selection better than simpler alternatives under matched features and comparable head capacity? The answer is mixed. Adaptive prototypes substantially improve Waterbirds worst-group accuracy over class-level contrastive adaptation, reaching \WbAdaptiveWorst{} versus \WbContrastiveWorst{}, and they also improve Waterbirds macro-F1 slightly. But they do not beat the strongest fixed-$K$ or no-adapt alternatives overall: the fixed-$K$ contrastive prototype head is best on CUB at \CubFixedKAcc{}, and the matched no-adapt ablation reaches \CubNoAdaptAcc{}.
+
+The practical implication is therefore limited. In this frozen CLIP regime, adaptive prototype granularity is not a strong default choice. It may be useful when worst-group robustness is the main objective and the data support occasional same-class splits, but the broader evidence here suggests that simpler fixed-structure prototype heads capture most of the attainable benefit under this budget. Future work should test whether the conclusion changes with stronger backbones, encoder finetuning, or structure objectives that target subgroup recovery more directly.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+
+\section{Exact Per-Seed Results}
+\label{sec:appendix-seeds}
+Tables~\ref{tab:seed-wb} and~\ref{tab:seed-cub} report exact per-seed metrics for the main negative-result comparisons. Including these seed-level values makes the limited value of adaptivity explicit: the same qualitative pattern appears seed by seed, not only after averaging.
+
+\begin{table*}[t]
+\caption{Exact per-seed Waterbirds results for the strongest comparison points. Metrics are reported as percentages.}
+\label{tab:seed-wb}
+\centering
+\small
+\input{results/appendix_seed_waterbirds.tex}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Exact per-seed CUB results for the strongest comparison points. Metrics are reported as percentages.}
+\label{tab:seed-cub}
+\centering
+\small
+\input{results/appendix_seed_cub.tex}
+\end{table*}
+
+\end{document}

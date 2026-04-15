@@ -1,0 +1,200 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Install dependencies and verify GPU",
+    "description": "Set up the Python environment with all required packages for training, pruning, per-sample gradient computation, differential privacy, and MIA evaluation.",
+    "steps": {
+      "step1": "Install core packages: torch (>=2.0), torchvision, numpy, scipy, scikit-learn, matplotlib, seaborn, pandas, tqdm.",
+      "step2": "Install opacus (>=1.4, for DP-SGD). Verify torch.func (vmap, grad) is available (included in PyTorch >=2.0 for per-sample gradients).",
+      "step3": "Verify CUDA availability and GPU memory: expect 1x NVIDIA RTX A6000 (48GB VRAM). Run: torch.cuda.is_available(), torch.cuda.get_device_properties(0). Log GPU name, total memory, CUDA version.",
+      "step4": "Create the experiment directory structure: exp/shared/ for common code (models.py, data_loader.py, pruning.py, mia.py, gds.py, utils.py), exp/<experiment_name>/run.py for each experiment, figures/ and tables/ for outputs.",
+      "step5": "Set global random seeds: [42, 43, 44] for 3-seed reproducibility. Define a seed_everything(seed) utility that sets torch, numpy, random, and CUDA seeds. Set torch.backends.cudnn.deterministic=True."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and prepare CIFAR-10, CIFAR-100, and ImageNet-100",
+    "description": "Prepare all three datasets with train/test splits and member/non-member partitions for MIA evaluation. ImageNet-100 is a 100-class subset of ImageNet for demonstrating practical relevance at larger scale.",
+    "steps": {
+      "step1": "Download CIFAR-10 (50K train, 10K test) and CIFAR-100 (50K train, 10K test) using torchvision.datasets with download=True.",
+      "step2": "Apply standard preprocessing. CIFAR-10: normalize with mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]. CIFAR-100: mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761]. Training augmentation: RandomCrop(32, padding=4), RandomHorizontalFlip().",
+      "step3": "ImageNet-100: Select 100 classes from ImageNet (use the first 100 classes sorted by WordNet ID for reproducibility). If ImageNet is not locally available, download a pre-selected ImageNet-100 subset or use torchvision ImageNet with class filtering. Apply standard ImageNet preprocessing: resize to 256, center-crop to 224, normalize with mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]. Training augmentation: RandomResizedCrop(224), RandomHorizontalFlip(). Expected: ~130K train, ~5K test.",
+      "step4": "For MIA evaluation: split each training set into 'member' (50%) used for actual training and 'non-member' (50%) used as negative examples for MIA. CIFAR: 25K/25K. ImageNet-100: ~65K/65K. Use fixed split seed=0 for consistency across experiment seeds. Ensure class-balanced splits.",
+      "step5": "For LiRA shadow model training (CIFAR-10 only): create 8 additional random 50/50 splits of the full 50K training set (seeds 100-107). Each shadow model trains on its own 25K subset. Record per-sample in/out status for each shadow model.",
+      "step6": "Create DataLoaders with batch_size=128 for training, batch_size=256 for evaluation. Log dataset statistics: sizes, class distributions."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train dense base models (no pruning)",
+    "description": "Train unpruned ResNet-18 and VGG-16 models on all datasets. These serve as starting checkpoints for pruning and as the 'Dense' baseline. Estimated runtime: ~130 min total.",
+    "steps": {
+      "step1": "Train ResNet-18 on CIFAR-10 member set (25K) for 100 epochs. Optimizer: SGD, momentum=0.9, weight_decay=5e-4, initial lr=0.1 with cosine annealing to 1e-4. Seeds [42, 43, 44]. Save best (by val loss on non-member set) and final checkpoints. Expected test accuracy: ~93-95%. Estimated: 3 x 12 min = 36 min.",
+      "step2": "Train ResNet-18 on CIFAR-100 member set (25K) for 100 epochs with same optimizer settings. Seed 42 only (generalization check, not primary). Expected test accuracy: ~74-78%. Estimated: 15 min.",
+      "step3": "Train VGG-16 (with batch norm) on CIFAR-10 member set (25K) for 100 epochs, same optimizer settings. Seed 42 only. Expected test accuracy: ~92-94%. Estimated: 20 min.",
+      "step4": "Train ResNet-18 on ImageNet-100 member set (~65K) for 50 epochs (reduced from 100 to fit budget). Same optimizer but lr=0.1, batch_size=128. Seed 42 only. Expected test accuracy: ~78-82%. Estimated: 40 min.",
+      "step5": "Train canary model: ResNet-18 on CIFAR-10 with 10% of labels randomly flipped (5000 canary samples with known indices). Train for 100 epochs, same settings. Seed 42 only. Record which samples are canaries. Estimated: 12 min.",
+      "step6": "Evaluate all dense models: record test accuracy, member training accuracy, non-member training accuracy, generalization gap. Run baseline MIA evaluation (loss-based and metric-based). Log to results.json."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute Gradient Dispersion Scores (GDS) with memory profiling",
+    "description": "Compute per-weight GDS for each trained dense model. For VGG-16, include explicit memory profiling to verify feasibility within 48GB VRAM. Estimated runtime: ~45 min total.",
+    "steps": {
+      "step1": "VGG-16 memory profiling (run first): Before full GDS computation, profile peak GPU memory usage for VGG-16 per-sample gradients with micro-batch sizes B_micro in {4, 8, 16, 32}. For each B_micro: compute per-sample gradients for one micro-batch using torch.func.vmap(torch.func.grad(loss_fn)), record torch.cuda.max_memory_allocated(). Expected: B_micro=16 uses ~10GB (14.7M params x 4 bytes x 16 samples = 940MB for gradients + ~6GB for model/activations + overhead). Select the largest B_micro that stays under 40GB (leaving 8GB headroom). Log memory usage for each B_micro to results.json under 'memory_profiling'.",
+      "step2": "For each dense model checkpoint, sample M=5000 examples from the member training set. Use fixed sampling seed=0 for consistency.",
+      "step3": "Compute per-sample gradients using torch.func.grad and torch.func.vmap. Process in micro-batches of B_micro samples (from step1 for VGG-16; default B_micro=32 for ResNet-18). Use Welford's online algorithm for streaming variance: maintain running mean and M2 accumulators, update per micro-batch. This avoids storing all M per-sample gradient vectors.",
+      "step4": "Apply layer-wise z-score normalization: GDS_norm(w_j) = (GDS(w_j) - mu_l) / (sigma_l + 1e-8), where mu_l, sigma_l are the mean and std of GDS values within layer l.",
+      "step5": "Save per-weight GDS tensors for each model checkpoint. Log per-layer GDS statistics: mean, std, min, max, median, 99th percentile. Record computation time per model.",
+      "step6": "Sanity check: compute Pearson correlation between per-weight GDS and weight magnitude for each layer. Expect moderate correlation (r~0.3-0.6). If r > 0.9, GDS may not add novel signal beyond magnitude."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Primary comparison: pruning methods on ResNet-18/CIFAR-10",
+    "description": "Apply all pruning methods to ResNet-18 on CIFAR-10 across sparsity levels [50%, 70%, 90%, 95%] with 3 seeds each. Fine-tune 20 epochs after pruning. This is the core comparison. Estimated runtime: ~120 min.",
+    "steps": {
+      "step1": "Random Pruning baseline (simple baseline): For each sparsity in [0.5, 0.7, 0.9, 0.95], randomly zero out the corresponding fraction of weights (global unstructured, uniform random mask). Fine-tune for 20 epochs with lr=0.01, cosine annealing, SGD momentum=0.9, weight_decay=5e-4. Seeds [42, 43, 44].",
+      "step2": "Magnitude Pruning baseline (strong baseline): For each sparsity, remove weights with smallest absolute magnitude (global unstructured pruning across all layers except batch norm and bias). Fine-tune 20 epochs, same settings. Seeds [42, 43, 44].",
+      "step3": "Gradient Sensitivity Pruning baseline: For each sparsity, compute |weight * gradient| as importance score using the member training set gradient, remove lowest-scoring weights (global unstructured). Fine-tune 20 epochs. Seeds [42, 43, 44].",
+      "step4": "MemPrune (our method): For each sparsity, remove weights with HIGHEST layer-normalized GDS (global unstructured pruning across all layers except batch norm and bias). Fine-tune 20 epochs, same settings. Seeds [42, 43, 44].",
+      "step5": "For all pruned+fine-tuned models (4 methods x 4 sparsities x 3 seeds = 48 models): evaluate test accuracy, member train accuracy, non-member train accuracy, generalization gap.",
+      "step6": "Run MIA evaluation (loss-based and metric-based) on all 48 models. Save results with structure: {method, sparsity, seed, test_acc, train_acc_member, train_acc_nonmember, mia_loss_auc, mia_conf_auc, mia_entropy_auc, mia_mentropy_auc}."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "LiRA membership inference evaluation (8 shadow models)",
+    "description": "Train 8 shadow models for LiRA evaluation on key configurations: Dense, Magnitude@90%, and MemPrune@90% on ResNet-18/CIFAR-10. Estimated runtime: ~55 min (shadow training) + ~10 min (evaluation).",
+    "steps": {
+      "step1": "Train 8 shadow models: ResNet-18 on CIFAR-10, each on a different random 25K subset (splits from Data Preparation step5). Train for 50 epochs (reduced from 100) with same hyperparameters as base models. Use seeds 100-107. Save all 8 checkpoints. Estimated: 8 x 6 min = 48 min.",
+      "step2": "For each target model (Dense seed=42, Magnitude@90% seed=42, MemPrune@90% seed=42): for each evaluation sample (1000 members + 1000 non-members, randomly selected with fixed seed), compute cross-entropy loss under each shadow model. Group shadow models into 'in' (sample in their training set) and 'out' (sample not in their training set). Fit Gaussian to in-model losses and out-model losses. Compute per-sample log-likelihood ratio.",
+      "step3": "Compute LiRA AUC-ROC, TPR@FPR=1%, TPR@FPR=0.1% for each target model.",
+      "step4": "Report results with 8 shadow models. Note that 8 shadows (vs. standard 64-256) may underestimate attack power for the strongest LiRA variant, but should be sufficient to show relative ordering of methods. State as limitation if gap with full LiRA is unknown.",
+      "step5": "Save all LiRA results to results.json under 'lira_evaluation' key."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "GDS validation via label-noise canary injection",
+    "description": "Validate that GDS captures memorization using ground-truth memorized samples. This is the critical experiment: train on CIFAR-10 with 10% randomly flipped labels (canaries), compute GDS, and verify high-GDS weights disproportionately serve canary samples. Estimated runtime: ~25 min (canary model already trained in base models step).",
+    "steps": {
+      "step1": "Using the canary model (ResNet-18/CIFAR-10 with 10% label noise, trained in base models step), compute per-weight GDS on the full noisy training set (25K member samples, 2500 of which are canaries). Use M=5000 sample subset for GDS estimation, including proportional canary representation.",
+      "step2": "Compute per-weight Canary Contribution Ratio (CCR): for each weight w_j, compute CCR(w_j) = E_canary[|g_j|] / E_clean[|g_j|], where g_j is the per-sample gradient. Process canary samples (2500) and a random subset of clean samples (2500) separately to compute mean absolute gradient per weight for each group.",
+      "step3": "Correlation analysis: compute Spearman rank correlation between per-weight GDS and CCR. Success criterion: rho > 0.3 with p < 0.001. If GDS captures memorization, high-GDS weights should have high CCR (they disproportionately serve memorized canary samples).",
+      "step4": "Stratified analysis: divide weights into GDS quartiles (Q1=lowest to Q4=highest). Compute mean CCR per quartile. Expect monotonically increasing CCR from Q1 to Q4. Report Q4/Q1 CCR ratio as the 'memorization concentration factor'.",
+      "step5": "Pruning validation on canary model: apply Magnitude pruning, MemPrune (high-GDS), and Random pruning at 90% sparsity. Fine-tune 20 epochs. Evaluate: (a) overall test accuracy, (b) MIA AUC on the full evaluation set, (c) accuracy on clean-label test samples only, (d) accuracy on canary samples (should drop most for MemPrune, validating it removes memorization). Seed 42 only.",
+      "step6": "Save all validation results to results.json under 'canary_validation' key: GDS-CCR correlation, per-quartile CCR, pruning validation results."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "DP-SGD combination experiments",
+    "description": "Compare MemPrune+DP-SGD vs Magnitude+DP-SGD at 90% sparsity on CIFAR-10/ResNet-18. Tests whether memorization-aware pruning is complementary with formal DP. Estimated runtime: ~60 min.",
+    "steps": {
+      "step1": "Magnitude Pruning + DP-SGD: Prune ResNet-18/CIFAR-10 to 90% sparsity using magnitude, then fine-tune with DP-SGD for 20 epochs. Use Opacus: max_grad_norm=1.0, target delta=1e-5, calibrate noise_multiplier to achieve target epsilon in {1, 4, 8} over 20 epochs. Batch_size=256 (larger batch helps with DP utility). Seeds [42, 43, 44]. Estimated: 9 runs x 3 min = 27 min.",
+      "step2": "MemPrune + DP-SGD: Prune to 90% sparsity using GDS criterion, then fine-tune with DP-SGD using identical settings. Seeds [42, 43, 44]. Estimated: 9 runs x 3 min = 27 min.",
+      "step3": "Dense + DP-SGD reference: Fine-tune the dense ResNet-18/CIFAR-10 checkpoint for 20 epochs with DP-SGD at same epsilon values. Seed 42 only (reference point). Estimated: 3 runs x 3 min = 9 min.",
+      "step4": "Evaluate test accuracy and MIA metrics (loss-based, metric-based) for all DP-trained models.",
+      "step5": "For each epsilon, compute accuracy gap: MemPrune-DP accuracy minus Magnitude+DP accuracy. Report mean +/- std across seeds. Expected: MemPrune-DP achieves higher accuracy because GDS pruning pre-removes memorization, reducing the privacy burden on DP-SGD."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Generalization: CIFAR-100, VGG-16, and ImageNet-100",
+    "description": "Verify MemPrune generalizes across datasets and architectures. Run at 90% sparsity with 3 key methods (Dense, Magnitude, MemPrune). Estimated runtime: ~55 min.",
+    "steps": {
+      "step1": "ResNet-18 on CIFAR-100 at 90% sparsity: Apply Magnitude and MemPrune pruning. Fine-tune 20 epochs. Seed 42 only. Evaluate test accuracy, MIA metrics, and per-class accuracy for all 100 classes. Estimated: 2 runs x 5 min = 10 min.",
+      "step2": "VGG-16 on CIFAR-10 at 90% sparsity: Apply Magnitude and MemPrune pruning (using GDS computed with profiled B_micro from GDS step). Fine-tune 20 epochs. Seed 42 only. Evaluate test accuracy and MIA metrics. Estimated: 2 runs x 5 min = 10 min.",
+      "step3": "ResNet-18 on ImageNet-100 at 70% and 90% sparsity: Apply Magnitude and MemPrune pruning. Fine-tune 10 epochs (shorter due to larger dataset). Seed 42 only. Evaluate test accuracy and MIA metrics. Estimated: 4 runs x 8 min = 32 min.",
+      "step4": "Compare MemPrune vs Magnitude across all dataset-architecture pairs. Check if MIA reduction and accuracy preservation hold consistently. Tabulate: {dataset, architecture, sparsity, method, test_acc, mia_loss_auc}."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Per-class fairness analysis (Feldman long-tail concern)",
+    "description": "Evaluate whether MemPrune disproportionately harms rare/hard classes on CIFAR-100. Addresses the Feldman (2020) concern that some memorization is necessary for rare subpopulations. Estimated runtime: ~10 min (evaluation only, models already trained).",
+    "steps": {
+      "step1": "For Dense, Magnitude@90%, and MemPrune@90% on CIFAR-100/ResNet-18 (seed 42): compute per-class test accuracy for all 100 classes.",
+      "step2": "Identify bottom-10 classes (by Dense model accuracy — the 'hardest' classes). Compare their accuracy under Magnitude vs MemPrune. Success criterion: MemPrune does NOT cause >2% additional degradation on bottom-10 classes vs Magnitude.",
+      "step3": "Compute class-level statistics: mean accuracy, min accuracy, std of per-class accuracy, accuracy at 10th percentile. Compare distributions between Magnitude and MemPrune.",
+      "step4": "Compute per-class MIA AUC (loss-based) for all 100 classes. Check whether privacy improvements from MemPrune are uniform across classes or concentrated in well-represented classes.",
+      "step5": "Statistical test: paired t-test on per-class accuracy difference (MemPrune - Magnitude) across 100 classes. Report mean difference and p-value."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation studies",
+    "description": "Ablate each design choice in MemPrune using ResNet-18/CIFAR-10 at 90% sparsity. Use seed=42 only (ablations measure relative effects). Estimated runtime: ~40 min.",
+    "steps": {
+      "step1": "GDS estimation subset size M: Test M in {500, 1000, 2000, 5000, 10000}. For each M, recompute GDS on that subset, prune to 90%, fine-tune 20 epochs, evaluate test accuracy and MIA AUC. Question: does GDS stabilize at small M? Estimated: 5 runs x 5 min = 25 min (includes GDS recomputation).",
+      "step2": "Normalization scheme: Compare (a) layer-wise z-score normalization (default), (b) global z-score normalization, (c) no normalization (raw GDS). Prune to 90%, fine-tune 20 epochs, evaluate. Estimated: 3 runs x 3 min = 9 min.",
+      "step3": "Fine-tuning epochs T_ft: Test T_ft in {5, 10, 20, 40}. Evaluate accuracy and MIA AUC. Question: does longer fine-tuning re-introduce memorization? Estimated: 4 runs x varies = 12 min average.",
+      "step4": "Reverse-GDS ablation: Prune weights with LOWEST GDS (opposite of MemPrune — removes generalization weights). Fine-tune 20 epochs. Evaluate. This demonstrates direction matters. Estimated: 3 min.",
+      "step5": "Hybrid criterion (single ablation point): PruningScore = 0.5 * GDS_norm + 0.5 * (-|w|_norm). Prune to 90%, fine-tune 20 epochs. Compare against pure GDS (MemPrune) and pure magnitude. This tests whether combining signals helps, kept as a simple ablation, not a primary contribution. Estimated: 3 min.",
+      "step6": "Save all ablation results to results.json under 'ablation' key."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "MIA evaluation protocol (shared across all experiments)",
+    "description": "Defines the membership inference attack evaluation protocol applied to all trained models. Uses three attack methods of increasing sophistication.",
+    "steps": {
+      "step1": "Loss-based MIA (Yeom et al., 2018): Use per-sample cross-entropy loss as membership signal (members have lower loss). Evaluate on balanced set of members and non-members. Compute AUC-ROC (primary), TPR@FPR=1%, TPR@FPR=0.1%.",
+      "step2": "Metric-based MIA: Three signals: (a) max softmax probability (confidence), (b) prediction entropy = -sum p_c log p_c, (c) modified prediction entropy = -(1-p_true)log(p_true) - sum_{c!=true} p_c log(1-p_c). For each, compute AUC-ROC.",
+      "step3": "LiRA (Carlini et al., 2022): Applied to key configurations only (Dense, Magnitude@90%, MemPrune@90% on ResNet-18/CIFAR-10 seed=42). Uses 8 shadow models. Compute per-sample log-likelihood ratio and AUC-ROC, TPR@FPR=1%, TPR@FPR=0.1%.",
+      "step4": "For all MIA methods: report AUC-ROC (primary), TPR@FPR=1%, TPR@FPR=0.1%, balanced accuracy at optimal threshold.",
+      "step5": "Aggregate results with mean and standard deviation across 3 seeds where applicable. Use the same member/non-member split across seeds."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical analysis and success criteria evaluation",
+    "description": "Aggregate all results, compute statistical significance, and evaluate against each defined success criterion from idea.json.",
+    "steps": {
+      "step1": "Primary criterion 1 — MIA reduction: At 90% sparsity on ResNet-18/CIFAR-10, compute mean MIA AUC (loss-based) for MemPrune vs Magnitude across 3 seeds. Run paired t-test. Success: MemPrune reduces MIA AUC by >= 3pp while maintaining within 1% test accuracy.",
+      "step2": "Primary criterion 2 — DP-SGD advantage: For each epsilon in {1, 4, 8}, compare test accuracy of MemPrune-DP vs Magnitude+DP across 3 seeds. Run paired t-test. Success: MemPrune-DP achieves higher accuracy at same epsilon.",
+      "step3": "Primary criterion 3 — GDS validates memorization: Report Spearman rho between GDS and CCR from canary experiment. Success: rho > 0.3 with p < 0.001.",
+      "step4": "Primary criterion 4 — Fairness: On CIFAR-100 bottom-10 classes, compare MemPrune vs Magnitude accuracy. Success: MemPrune does NOT cause >2% additional degradation on bottom-10 classes.",
+      "step5": "Secondary criteria: (a) Does MemPrune@90% achieve MIA resistance comparable to Dense+DP-SGD at epsilon=8? (b) Consistent improvement on ImageNet-100 (practical relevance)?",
+      "step6": "Refutation check (report honestly): (a) GDS uncorrelated with CCR (rho < 0.1)? (b) Magnitude pruning already achieves MIA AUC < 0.55 at 90%? (c) MemPrune causes >3% accuracy drop vs Magnitude? (d) MemPrune >5% accuracy drop on CIFAR-100 bottom-10 classes?",
+      "step7": "Create summary table: rows = {Dense, Random, Magnitude, GradSens, MemPrune, MemPrune-DP} x sparsity, columns = {test_acc, mia_loss_auc, mia_conf_auc, tpr@fpr1%, lira_auc}. Include mean +/- std."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper figures and tables",
+    "description": "Create publication-quality figures for the paper. All figures saved as PDF and PNG at 300 DPI. Consistent color scheme: MemPrune=blue, Magnitude=red, Random=gray, GradSens=green, Dense=black, MemPrune-DP=purple.",
+    "steps": {
+      "step1": "Figure 1 — Privacy-utility tradeoff: Scatter plot with X=test accuracy, Y=MIA AUC-ROC. Each point is a (method, sparsity) pair on CIFAR-10/ResNet-18. Color by method, marker shape by sparsity. Show error bars from 3 seeds. Annotate Pareto frontier. Save as figures/figure1_privacy_utility_tradeoff.{pdf,png}.",
+      "step2": "Figure 2 — Sparsity sweep: Two-panel plot. Left: Test accuracy vs sparsity for each method. Right: MIA AUC vs sparsity for each method. Include Dense baseline as horizontal dashed line. Error bars from 3 seeds. Save as figures/figure2_sparsity_sweep.{pdf,png}.",
+      "step3": "Figure 3 — GDS and canary validation: Three panels. (a) Per-layer mean GDS bar chart. (b) Scatter plot: per-weight CCR vs GDS with Spearman rho annotated (subsample weights for readability). (c) Bar chart: mean CCR per GDS quartile (Q1-Q4) showing monotonic increase. Save as figures/figure3_gds_canary_validation.{pdf,png}.",
+      "step4": "Figure 4 — Ablation results: Three subplots showing MIA AUC and test accuracy vs (a) GDS subset size M, (b) normalization scheme, (c) fine-tuning epochs T_ft. Dual y-axes: MIA AUC left, accuracy right. Save as figures/figure4_ablation.{pdf,png}.",
+      "step5": "Figure 5 — Per-class fairness on CIFAR-100: (a) Per-class accuracy difference (MemPrune - Magnitude) sorted by class, bottom-10 highlighted in red. (b) Per-class MIA AUC comparison. Save as figures/figure5_per_class_fairness.{pdf,png}.",
+      "step6": "Table 1 — Main results (CIFAR-10/ResNet-18): LaTeX table. Rows: methods x sparsity levels. Columns: Test Acc (%), MIA AUC (loss), MIA AUC (conf), TPR@1%FPR. Bold best per-sparsity. Save as tables/table1_main_results.{tex,csv}.",
+      "step7": "Table 2 — DP-SGD comparison: LaTeX table. Rows: {Magnitude+DP, MemPrune-DP, Dense+DP} x epsilon. Columns: Test Acc, MIA AUC. Save as tables/table2_dp_comparison.{tex,csv}.",
+      "step8": "Table 3 — Generalization across datasets/architectures: LaTeX table. Rows: {Dense, Magnitude, MemPrune} x {CIFAR-100/ResNet-18, CIFAR-10/VGG-16, ImageNet-100/ResNet-18}. Columns: Test Acc, MIA AUC. Save as tables/table3_generalization.{tex,csv}.",
+      "step9": "Table 4 — Canary validation + LiRA: LaTeX table. Part A: GDS-CCR correlation stats. Part B: LiRA results for Dense/Magnitude/MemPrune. Save as tables/table4_validation.{tex,csv}."
+    }
+  },
+  {
+    "category": "Runtime Estimation",
+    "title": "Estimated total compute budget",
+    "description": "Conservative runtime breakdown for all experiments on 1x A6000 GPU. Total estimated: ~7.5 hours. Buffer strategies if over budget.",
+    "steps": {
+      "step1": "Environment setup + data preparation: ~15 min (includes ImageNet-100 download/filtering)",
+      "step2": "Dense model training: ResNet-18/CIFAR-10 x3 seeds (36 min) + ResNet-18/CIFAR-100 x1 (15 min) + VGG-16/CIFAR-10 x1 (20 min) + ResNet-18/ImageNet-100 x1 (40 min) + canary model x1 (12 min) = ~125 min",
+      "step3": "GDS computation with memory profiling: ~45 min (includes VGG-16 profiling)",
+      "step4": "Primary pruning comparison (CIFAR-10/ResNet-18): 4 methods x 4 sparsities x 3 seeds = 48 runs x ~2.5 min = ~120 min",
+      "step5": "LiRA shadow models: 8 models x 6 min = ~48 min + evaluation ~10 min = ~58 min",
+      "step6": "Canary validation (GDS + CCR + pruning): ~25 min",
+      "step7": "DP-SGD experiments: 21 runs x ~3 min = ~63 min",
+      "step8": "Generalization (CIFAR-100 + VGG-16 + ImageNet-100): ~55 min",
+      "step9": "Per-class fairness analysis: ~10 min (eval only)",
+      "step10": "Ablation studies: ~40 min (single seed)",
+      "step11": "MIA evaluation overhead + visualization: ~20 min",
+      "step12": "Total: ~576 min = ~9.6 hours sequential. BUDGET STRATEGY: (1) Run fine-tuning experiments sequentially while MIA evaluation runs in parallel on CPU, saving ~30 min. (2) If over budget, reduce primary comparison from 4 to 3 sparsity levels (drop 50%), saving ~30 min. (3) If still over, reduce ImageNet-100 fine-tuning to 5 epochs, saving ~15 min. (4) Worst case: drop VGG-16 generalization (saves 30 min). Target: 7.5-8 hours."
+    }
+  }
+]

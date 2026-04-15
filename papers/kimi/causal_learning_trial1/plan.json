@@ -1,0 +1,172 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated Python environment and install all required packages for AIT-LCD implementation and baseline comparisons",
+    "steps": {
+      "step1": "Create virtual environment: python3 -m venv .venv && source .venv/bin/activate",
+      "step2": "Install core scientific packages: pip install numpy scipy scikit-learn pandas",
+      "step3": "Install causal discovery libraries: pip install causal-learn pgmpy",
+      "step4": "Install visualization and utilities: pip install matplotlib seaborn tqdm",
+      "step5": "Verify installations: python -c 'from causallearn.search.ConstraintBased.PC import PC; from pgmpy.utils import get_example_model'",
+      "step6": "Create directory structure: mkdir -p experiments/data experiments/results experiments/figures experiments/logs"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate and Verify Benchmark Datasets",
+    "description": "Generate synthetic data from verified Bayesian networks available in pgmpy. Only use networks confirmed to be available.",
+    "steps": {
+      "step1": "Verify network availability in pgmpy: Test Asia, Alarm, Child, Insurance, Hailfinder using get_example_model()",
+      "step2": "Load each network and extract ground truth: PC sets, MB sets, and local structures for each target variable",
+      "step3": "Generate synthetic datasets for each network with sample sizes: [100, 200, 500, 1000, 5000]",
+      "step4": "For each (network, sample_size) combination, generate 10 independent datasets with random seeds [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]",
+      "step5": "Save datasets to experiments/data/{network}/n{sample_size}/seed{seed}.csv",
+      "step6": "Generate ground truth metadata: experiments/data/{network}/ground_truth.json containing PC sets, MB sets for all variables",
+      "step7": "Document dataset statistics: number of nodes, edges, average degree, max MB size"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline Algorithm Wrappers",
+    "description": "Create standardized wrappers for 4 core baseline methods using causal-learn library",
+    "steps": {
+      "step1": "Implement IAMB wrapper: from causallearn.search.FCMBased import IAMB. Use default alpha=0.05, ci_test='g2' for discrete data",
+      "step2": "Implement HITON-MB wrapper: from causallearn.search.FCMBased import HITONMB. Use default alpha=0.05",
+      "step3": "Implement PCMB wrapper: from causallearn.search.FCMBased import PCMB. Use default alpha=0.05",
+      "step4": "Implement EAMB-inspired baseline: Use IAMB with adaptive alpha based on sample size (n^-0.5 scaling as a simple baseline)",
+      "step5": "Create unified interface: def learn_mb(data, target, algorithm, alpha, **kwargs) -> (MB_set, PC_set, runtime)",
+      "step6": "Test all baselines on Asia network with n=500 to verify correct implementation",
+      "step7": "Log baseline test results to experiments/logs/baseline_test.log"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement Core AIT-LCD Algorithm",
+    "description": "Implement the complete AIT-LCD algorithm with all three phases: MB discovery, PC identification, and edge orientation",
+    "steps": {
+      "step1": "Implement Miller-Madow bias correction: compute I_MM(X;Y) = I(X;Y) + (|X|-1)(|Y|-1)/(2N)",
+      "step2": "Implement conditional MI with bias correction: I_MM(X;Y|Z) using empirical entropy estimates",
+      "step3": "Implement adaptive threshold function: tau(n, k, alpha, beta) = alpha * sqrt(k/n) * log(1 + n/(k*beta))",
+      "step4": "Implement Phase 1 - AIT-MB: Grow-shrink strategy with adaptive thresholding",
+      "step5": "Implement Phase 2 - AIT-PC: Identify PC set from MB using conditional independence with adaptive thresholds",
+      "step6": "Implement Phase 3 - AIT-Orient: Information-theoretic orientation score I(X;T) - lambda * H(T|X)",
+      "step7": "Create main interface: ait_lcd_learn(data, target, alpha=0.1, beta=10, lambda=0.5) -> (MB_set, PC_set, parents, children)",
+      "step8": "Unit test on Asia network: verify each phase produces expected output format"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Phase 0: Pilot Study for Parameter Calibration",
+    "description": "Grid search to calibrate alpha and beta parameters for the adaptive threshold function on small networks",
+    "steps": {
+      "step1": "Define parameter grid: alpha ∈ [0.05, 0.1, 0.15, 0.2], beta ∈ [5, 10, 20, 50] → 16 combinations",
+      "step2": "Use pilot networks only: Asia (8 nodes) and Child (20 nodes) with sample sizes [100, 200, 500]",
+      "step3": "For each (alpha, beta, network, sample_size) combination: run AIT-LCD on 5 random seeds",
+      "step4": "Compute PC F1 score for each run and average across seeds",
+      "step5": "Select optimal (alpha, beta) pair that maximizes average PC F1 across Asia and Child",
+      "step6": "Save calibration results: experiments/results/pilot_calibration.json with F1 scores for all parameter combinations",
+      "step7": "Time estimate: 16 params × 2 networks × 3 sample sizes × 3 seeds = 432 runs, ~10-20s each = ~1.2 hours",
+      "step8": "Document selected parameters in experiments/results/selected_parameters.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Main Comparative Evaluation",
+    "description": "Run all algorithms on all benchmark networks with the calibrated parameters",
+    "steps": {
+      "step1": "Networks: Asia, Child, Insurance, Alarm, Hailfinder (all verified available in pgmpy)",
+      "step2": "Sample sizes: [100, 200, 500, 1000] (focus on small-to-medium samples where AIT-LCD's advantages matter most)",
+      "step3": "Random seeds: [1, 2, 3] (3 independent runs per configuration)",
+      "step4": "Algorithms: AIT-LCD (with calibrated alpha, beta), IAMB, HITON-MB, PCMB, EAMB-inspired adaptive baseline",
+      "step5": "For each (network, sample_size, seed, algorithm) combination:",
+      "step6": "  - Load data from experiments/data/{network}/n{sample_size}/seed{seed}.csv",
+      "step7": "  - For each target variable in network (or subset if > 10 variables):",
+      "step8": "    - Run algorithm to learn MB and PC sets",
+      "step9": "    - Record: runtime, number of CI tests performed",
+      "step10": "    - Compare to ground truth: compute MB Precision, MB Recall, MB F1, PC Precision, PC Recall, PC F1, SHD",
+      "step11": "  - Average metrics across all target variables",
+      "step12": "Save detailed results: experiments/results/main_experiment.json",
+      "step13": "Time estimate: 5 networks × 4 sample sizes × 3 seeds × 5 algorithms = 300 configurations",
+      "step14": "  - Asia/Child: ~10-20s each = ~1 hour",
+      "step15": "  - Insurance/Alarm: ~30-60s each = ~1.5 hours",
+      "step16": "  - Hailfinder: ~2-3min each = ~0.75 hour",
+      "step17": "Total: ~3.25 hours"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Studies",
+    "description": "Systematically remove each novel component to measure its contribution",
+    "steps": {
+      "step1": "Define ablation variants:",
+      "step2": "  - Full AIT-LCD: All components enabled (baseline for ablations)",
+      "step3": "  - AIT-LCD - No Bias Correction: Use standard MI estimates without Miller-Madow correction",
+      "step4": "  - AIT-LCD - Fixed Threshold: Use constant alpha=0.05 instead of adaptive tau(n,k)",
+      "step5": "  - AIT-LCD - No Orientation: Skip Phase 3 (edge orientation)",
+      "step6": "Use subset of configurations for ablation: Asia, Child, Insurance networks with n ∈ [100, 200, 500]",
+      "step7": "Run each ablation variant with 3 random seeds",
+      "step8": "Measure impact on PC F1 and MB F1 scores",
+      "step9": "Save ablation results: experiments/results/ablation_study.json",
+      "step10": "Time estimate: 4 variants × 3 networks × 3 sample sizes × 3 seeds = 108 runs, ~30s each = ~1 hour"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform rigorous statistical tests to validate performance differences",
+    "steps": {
+      "step1": "Load main experiment results from experiments/results/main_experiment.json",
+      "step2": "For each (network, sample_size) pair:",
+      "step3": "  - Extract PC F1 scores across 3 seeds for each algorithm",
+      "step4": "  - Perform paired Wilcoxon signed-rank test: AIT-LCD vs each baseline",
+      "step5": "  - Record p-values and effect sizes",
+      "step6": "Test H1 (Sample Efficiency): Compare at n ≤ 500, check if AIT-LCD significantly outperforms ≥3 of 4 baselines on ≥4 of 5 networks",
+      "step7": "Test H2 (Bias Correction): Compare Full AIT-LCD vs No Bias Correction at n ≤ 300",
+      "step8": "Test H3 (Orientation): Compare parent/child F1 between AIT-LCD and IAMB/HITON-MB",
+      "step9": "Save statistical test results: experiments/results/statistical_tests.json",
+      "step10": "Generate summary table: experiments/results/hypothesis_validation.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute Efficiency Analysis",
+    "description": "Analyze computational costs and sample efficiency metrics",
+    "steps": {
+      "step1": "Compare number of CI tests performed by each algorithm",
+      "step2": "Compare wall-clock runtime across algorithms",
+      "step3": "Compute sample efficiency: minimum samples needed to achieve 90% PC F1 for each algorithm",
+      "step4": "Analyze how runtime scales with network size (number of nodes)",
+      "step5": "Generate efficiency report: experiments/results/efficiency_analysis.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the paper",
+    "steps": {
+      "step1": "Figure 1 - Performance vs Sample Size: Line plot showing PC F1 vs n for each algorithm, averaged across all networks",
+      "step2": "Figure 2 - Network-wise Comparison: Grouped bar chart showing PC F1 for each algorithm on each network (n=500)",
+      "step3": "Figure 3 - Ablation Study Impact: Bar chart showing F1 scores for Full AIT-LCD and each ablation variant",
+      "step4": "Figure 4 - Runtime Comparison: Box plot comparing runtime distribution across algorithms",
+      "step5": "Figure 5 - Threshold Adaptation: Visualize how tau(n,k) varies with n and k for selected parameters",
+      "step6": "Table 1 - Main Results: Comprehensive results table with mean ± std for all metrics",
+      "step7": "Table 2 - Statistical Significance: Matrix of p-values from pairwise comparisons",
+      "step8": "Save all figures to experiments/figures/ in PDF and PNG formats",
+      "step9": "Save tables to experiments/results/ in CSV and LaTeX formats"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Validation",
+    "description": "Final check against success criteria and hypothesis confirmation/refutation",
+    "steps": {
+      "step1": "Evaluate H1: Check if AIT-LCD achieves significantly lower SHD than ≥3 of 4 baselines at n ≤ 500 on ≥4 of 5 networks",
+      "step2": "Evaluate H2: Check if bias correction improves performance at n ≤ 300 in ablation study",
+      "step3": "Evaluate H3: Check if AIT-LCD achieves higher parent/child F1 than IAMB and HITON-MB",
+      "step4": "If any hypothesis not confirmed: Document investigation into alternative parameterizations or bias corrections",
+      "step5": "Generate final report: experiments/results/success_criteria_report.md",
+      "step6": "Summarize all findings with supporting evidence from experiments"
+    }
+  }
+]

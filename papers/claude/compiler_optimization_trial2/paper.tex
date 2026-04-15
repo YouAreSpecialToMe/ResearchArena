@@ -1,0 +1,434 @@
+\documentclass{article}
+
+% NeurIPS 2025 style
+\usepackage[final]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{natbib}
+
+\newcommand{\sv}{\phi}
+\newcommand{\sii}{I}
+\newcommand{\coal}{S}
+\newcommand{\passes}{N}
+\newcommand{\val}{v}
+
+\title{ShapleyPass: Game-Theoretic Attribution and Interaction Analysis of Compiler Optimization Passes}
+
+\author{
+  Anonymous Author(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Understanding why certain compiler optimization pass combinations outperform others remains an open problem despite decades of research on phase ordering. We propose \textsc{ShapleyPass}, a framework that applies Shapley values and Shapley interaction indices from cooperative game theory to provide principled, axiomatic attribution of optimization contributions to individual LLVM compiler passes and their pairwise interactions. We model pass selection as a cooperative game where each pass is a player and the coalition value is the resulting code size reduction. Using Monte Carlo permutation sampling across 20 benchmark programs with 20 LLVM passes, we find that 81.1\% of pass pairs exhibit statistically significant interactions. The interaction landscape reveals strong antagonisms (e.g., \texttt{mem2reg}$|$\texttt{sroa}: $-0.249$) and synergies (e.g., \texttt{gvn}$|$\texttt{dse}: $+0.053$) that simple ablation studies cannot detect. We leverage this interaction landscape to build \textsc{ShapleyPass-Select}, a greedy pass selector that achieves 108.3\% of full-pipeline code size reduction using only 10 of 20 passes, outperforming random selection by 29.9\% (0.508 vs.\ 0.391). Our ablation study confirms that incorporating interaction information ($\lambda=0.5$) significantly improves selection quality over individual Shapley values alone ($p < 0.001$).
+\end{abstract}
+
+\section{Introduction}
+
+Modern optimizing compilers such as LLVM and GCC apply dozens of transformation passes---dead code elimination, loop unrolling, constant propagation, function inlining, and many more---in carefully orchestrated pipelines. The standard optimization levels (e.g., LLVM's \texttt{-O2} with ${\sim}70$ passes and \texttt{-O3} with ${\sim}100$ passes) represent decades of hand-tuned heuristics for pass ordering. Yet it is well known that these fixed pipelines are suboptimal: different programs benefit from different pass combinations, and the interactions between passes are complex and poorly understood~\citep{whitfield1997approach}.
+
+The \emph{phase-ordering problem}---finding the optimal sequence of compiler optimization passes for a given program---has been studied for over four decades. Recent approaches have applied reinforcement learning~\citep{deng2025compilerdream}, evolutionary strategies~\citep{brownlee2022optimizing}, and machine learning on pass sub-sequences~\citep{jantz2017micomp, mammadli2024efficient}. While these methods achieve significant speedups over default pipelines, they treat the pass pipeline as a \emph{black box}: they search for good sequences without providing insight into \emph{why} certain pass combinations work and others do not.
+
+Despite extensive work on phase ordering, a fundamental question remains largely unanswered: \textbf{What is the individual contribution of each optimization pass, and how do passes interact with each other?} Current approaches to understanding pass contributions are limited to ad-hoc ablation (remove one pass, measure the change) which ignores interaction effects, source-code dependency analysis~\citep{mammadli2024efficient} which captures structural but not performance relationships, and pairwise co-occurrence statistics which miss higher-order interactions.
+
+We observe that a set of compiler optimization passes applied to a program constitutes a \emph{cooperative game}: each pass is a ``player,'' the ``coalition'' is the subset of passes applied, and the ``value'' of a coalition is the resulting code size reduction. This framing immediately suggests the use of \emph{Shapley values}~\citep{shapley1953value}---the unique attribution method satisfying efficiency, symmetry, additivity, and the dummy player property. Beyond individual attribution, \emph{Shapley interaction indices}~\citep{grabisch1999axiomatic} extend this framework to quantify pairwise synergies and antagonisms between passes.
+
+Our contributions are:
+\begin{itemize}
+    \item We propose \textsc{ShapleyPass}, the first application of Shapley values and Shapley interaction indices to compiler optimization pass attribution, providing axiomatic, game-theoretically grounded analysis of pass contributions.
+    \item We demonstrate that 81.1\% of pass pairs exhibit statistically significant interactions, with the interaction landscape revealing structured patterns---strong antagonisms between functionally redundant passes and synergies between complementary passes---that leave-one-out ablation cannot detect (LOO--Shapley rank correlation: $\rho = 0.40$).
+    \item We show that \textsc{ShapleyPass-Select}, an interaction-guided greedy pass selector, achieves 108.3\% of full-pipeline performance with only 50\% of passes and outperforms random selection by 29.9\%.
+\end{itemize}
+
+Section~\ref{sec:related} reviews related work. Section~\ref{sec:method} describes our framework. Section~\ref{sec:experiments} presents experiments and Section~\ref{sec:discussion} discusses results and limitations. Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Phase ordering and pass selection.}
+The phase ordering problem dates to the 1980s~\citep{whitfield1997approach}. \citet{kulkarni2012mitigating} applied neuro-evolution (NEAT) to learn pass orderings, demonstrating that ML could outperform fixed orderings. MiCOMP~\citep{jantz2017micomp} introduced optimization sub-sequences, clustering related passes and using ML to select sub-sequence combinations. DCO~\citep{mammadli2024efficient} modeled pass dependencies via source-code and performance dependence graphs. Our work differs fundamentally: rather than searching for good pass sequences, we \emph{explain} why certain combinations work via axiomatic attribution.
+
+\paragraph{ML and RL for compiler optimization.}
+MLGO~\citep{trofin2021mlgo} integrated ML into LLVM for inlining decisions. CompilerGym~\citep{cummins2022compilergym} provided RL environments for compiler optimization. CompilerDream~\citep{deng2025compilerdream} learned a world model of compiler passes for RL-based optimization. These methods optimize pass sequences but do not explain pass contributions. \textsc{ShapleyPass} is complementary: our interaction analysis could inform reward shaping and state representation of RL approaches.
+
+\paragraph{Theoretical foundations of phase ordering.}
+\citet{wang2024beyond} proved that solving the phase ordering problem is not equivalent to generating globally optimal code, introducing IIBO (infinitive iterative bi-directional optimization). Their work motivates our approach: if phase ordering alone is insufficient, understanding \emph{why} passes interact is essential for progress.
+
+\paragraph{Shapley values and interaction indices.}
+The Shapley value~\citep{shapley1953value} is the cornerstone of cooperative game theory attribution. SHAP~\citep{lundberg2017unified} popularized Shapley values for ML feature attribution. The Shapley interaction index~\citep{grabisch1999axiomatic} and Shapley-Taylor interaction index~\citep{sundararajan2020shapley} extended attribution to interactions. KernelSHAP-IQ~\citep{fumagalli2024kernelshap} and the \texttt{shapiq} library~\citep{muschalik2024shapiq} made higher-order interaction computation practical. Our work is the first to apply this game-theoretic framework to compiler optimization.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Compiler Pass Selection as a Cooperative Game}
+
+For a program $P$ and a set of $n$ optimization passes $\passes = \{p_1, p_2, \ldots, p_n\}$, we define a characteristic function $\val: 2^{\passes} \to \mathbb{R}$ where $\val(\coal)$ is the fractional code size reduction achieved by applying the passes in $\coal$ to $P$:
+\begin{equation}
+    \val(\coal) = \frac{|\text{IR}(P)| - |\text{IR}(P, \coal)|}{|\text{IR}(P)|}
+\end{equation}
+where $|\text{IR}(P)|$ is the LLVM IR instruction count of the unoptimized program and $|\text{IR}(P, \coal)|$ is the count after applying the passes in $\coal$ in canonical order (the order in which they appear in LLVM's \texttt{-O3} pipeline). By definition, $\val(\emptyset) = 0$. Using a fixed canonical ordering isolates pass \emph{selection} from pass \emph{ordering}, reducing combinatorial complexity while capturing core interaction effects.
+
+\subsection{Shapley Value Attribution}
+
+The Shapley value of pass $p_i$ is:
+\begin{equation}
+    \sv_i = \sum_{\coal \subseteq \passes \setminus \{p_i\}} \frac{|\coal|!(n-|\coal|-1)!}{n!} \left[\val(\coal \cup \{p_i\}) - \val(\coal)\right]
+\label{eq:shapley}
+\end{equation}
+
+This is the unique attribution satisfying four axioms: \emph{efficiency} ($\sum_i \sv_i = \val(\passes) - \val(\emptyset)$), \emph{symmetry} (interchangeable passes receive equal value), \emph{additivity}, and the \emph{null player} property (passes with zero marginal contribution receive $\sv_i = 0$).
+
+Since exact computation requires $2^n$ coalition evaluations, we employ Monte Carlo permutation sampling~\citep{castro2009polynomial}: sample $M$ random permutations of passes, and for each permutation compute the marginal contribution of each pass when added in permutation order. The Shapley value is estimated as the average marginal contribution over all $M$ permutations.
+
+\subsection{Shapley Interaction Indices}
+
+For passes $p_i$ and $p_j$, the \emph{Shapley interaction index} (SII)~\citep{grabisch1999axiomatic} is:
+\begin{equation}
+    \sii_{ij} = \sum_{\coal \subseteq \passes \setminus \{p_i, p_j\}} \frac{|\coal|!(n-|\coal|-2)!}{(n-1)!} \Delta_{ij}(\coal)
+\label{eq:sii}
+\end{equation}
+where $\Delta_{ij}(\coal) = \val(\coal \cup \{p_i, p_j\}) - \val(\coal \cup \{p_i\}) - \val(\coal \cup \{p_j\}) + \val(\coal)$ is the interaction delta. A positive $\sii_{ij}$ indicates \emph{synergy} (passes are more valuable together than the sum of their individual contributions), while a negative $\sii_{ij}$ indicates \emph{antagonism} (passes interfere with each other).
+
+We estimate $\sii_{ij}$ from the same Monte Carlo permutations used for Shapley values by tracking the interaction deltas across sampled coalitions.
+
+\subsection{ShapleyPass-Select: Interaction-Guided Pass Selection}
+
+We propose a greedy forward-selection algorithm that uses both Shapley values and interaction indices to select passes (Algorithm~\ref{alg:select}).
+
+\begin{algorithm}[t]
+\caption{\textsc{ShapleyPass-Select}}
+\label{alg:select}
+\begin{algorithmic}[1]
+\REQUIRE Pass set $\passes$, Shapley values $\{\sv_i\}$, interaction indices $\{\sii_{ij}\}$, weight $\lambda$
+\STATE $\coal \leftarrow \emptyset$
+\FOR{$k = 1$ to $|\passes|$}
+    \FOR{each $p_i \in \passes \setminus \coal$}
+        \STATE $\text{score}(p_i) \leftarrow \sv_i + \lambda \sum_{p_j \in \coal} \sii_{ij}$
+    \ENDFOR
+    \STATE $p^* \leftarrow \arg\max_{p_i \in \passes \setminus \coal} \text{score}(p_i)$
+    \STATE $\coal \leftarrow \coal \cup \{p^*\}$
+\ENDFOR
+\RETURN sequence of selected passes and cumulative performance at each step
+\end{algorithmic}
+\end{algorithm}
+
+The hyperparameter $\lambda$ controls the influence of interaction information. When $\lambda = 0$, the algorithm reduces to simple top-$k$ Shapley selection. When $\lambda > 0$, the algorithm preferentially selects passes that synergize with the already-selected set.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Compiler and passes.} We use LLVM 14 via the \texttt{opt} tool for IR-level optimization. We study $n = 20$ transform passes spanning five categories: memory (\texttt{mem2reg}, \texttt{sroa}, \texttt{dse}), peephole (\texttt{gvn}, \texttt{instcombine}, \texttt{early-cse}, \texttt{sccp}, \texttt{aggressive-inst\-combine}), control flow (\texttt{simplifycfg}, \texttt{jump-threading}, \texttt{correlated-propagation}), loop (\texttt{loop-rotate}, \texttt{indvars}, \texttt{licm}, \texttt{loop-deletion}, \texttt{reassociate}), and inter\-procedural (\texttt{ipsccp}, \texttt{globalopt}, \texttt{deadargelim}, \texttt{adce}).
+
+\paragraph{Benchmarks.} We evaluate on 20 programs: 10 PolyBench/C 4.2 kernels~\citep{pouchet2012polybench} (linear algebra, stencils, datamining) and 10 small programs covering sorting, search, string processing, recursion, matrix operations, and data structures. All programs are compiled to unoptimized LLVM IR (\texttt{clang -O0 -emit-llvm}).
+
+\paragraph{Metric.} We use fractional LLVM IR instruction count reduction as the characteristic function $\val(\coal)$. This metric is deterministic, fast to compute, and commonly used in compiler optimization research~\citep{cummins2022compilergym}.
+
+\paragraph{Shapley estimation.} We use $M = 500$ Monte Carlo permutations per program with 3 random seeds (42, 123, 456) and report mean and standard deviation across seeds.
+
+\subsection{Experiment 1: Shapley Value Attribution}
+
+\begin{table}[t]
+\caption{Top-10 passes by average Shapley value across 20 benchmark programs. LOO Rank shows the leave-one-out ablation ranking for comparison. Passes with high Shapley value but low LOO rank (e.g., \texttt{mem2reg}, \texttt{sroa}, \texttt{gvn}) have their contributions masked by redundancies in the full pipeline.}
+\label{tab:top_passes}
+\centering
+\begin{tabular}{clccccc}
+\toprule
+Rank & Pass & Category & Shapley Value & Std & LOO Rank & LOO Value \\
+\midrule
+1 & \texttt{mem2reg} & memory & \textbf{0.1527} & 0.0226 & 9 & 0.0000 \\
+2 & \texttt{sroa} & memory & 0.1456 & 0.0218 & 8 & 0.0000 \\
+3 & \texttt{gvn} & peephole & 0.0985 & 0.0172 & 19 & $-$0.0004 \\
+4 & \texttt{instcombine} & peephole & 0.0380 & 0.0239 & 1 & 0.0110 \\
+5 & \texttt{early-cse} & peephole & 0.0314 & 0.0148 & 6 & 0.0004 \\
+6 & \texttt{jump-threading} & control flow & 0.0184 & 0.0088 & 3 & 0.0025 \\
+7 & \texttt{dse} & memory & 0.0160 & 0.0063 & 7 & 0.0001 \\
+8 & \texttt{simplifycfg} & control flow & 0.0142 & 0.0048 & 5 & 0.0009 \\
+9 & \texttt{indvars} & loop & 0.0028 & 0.0152 & 2 & 0.0030 \\
+10 & \texttt{ipsccp} & interprocedural & 0.0020 & 0.0021 & 4 & 0.0016 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:top_passes} shows the top-10 passes by average Shapley value. The results reveal striking differences from leave-one-out (LOO) attribution. \texttt{mem2reg} and \texttt{sroa}---which promote memory to registers and perform scalar replacement of aggregates---rank 1st and 2nd by Shapley value (0.153 and 0.146 respectively) but only 9th and 8th by LOO. This is because both passes perform similar transformations: when both are present, removing either has little effect (LOO near zero), but their individual contributions averaged over all coalitions are large. Conversely, \texttt{instcombine} ranks 1st by LOO but 4th by Shapley, because its LOO contribution is inflated by interactions---it benefits from transformations performed by other passes.
+
+The Spearman rank correlation between LOO and Shapley attributions averages $\rho = 0.40 \pm 0.15$ across programs, confirming that LOO substantially misrepresents pass importance.
+
+Five passes consistently receive near-zero or negative Shapley values across all programs: \texttt{globalopt} (0.000), \texttt{aggressive-instcombine} (0.000), \texttt{correlated-propagation} ($-$0.000), \texttt{loop-deletion} ($-$0.001), and \texttt{loop-rotate} ($-$0.040). Notably, \texttt{loop-rotate} has the most negative average Shapley value, suggesting it actively harms code size optimization on these benchmarks by restructuring loops in ways that impede subsequent optimizations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig1_shapley_values.png}
+\caption{Average Shapley values for all 20 optimization passes across 20 benchmark programs. Error bars show standard deviation across programs. Passes are colored by category: memory (blue), peephole (green), control flow (orange), loop (red), interprocedural (purple). \texttt{mem2reg} and \texttt{sroa} dominate, while \texttt{loop-rotate} has a strongly negative contribution.}
+\label{fig:shapley_values}
+\end{figure}
+
+\subsection{Experiment 2: Interaction Landscape}
+
+\begin{table}[t]
+\caption{Top-5 synergistic and top-5 antagonistic pass pairs by average Shapley interaction index across 20 programs. Std is the standard deviation across programs.}
+\label{tab:interactions}
+\centering
+\begin{tabular}{llcrrl}
+\toprule
+& Pass 1 & Pass 2 & Interaction & Std & Type \\
+\midrule
+1 & \texttt{gvn} & \texttt{dse} & \textbf{+0.0533} & 0.0213 & synergy \\
+2 & \texttt{early-cse} & \texttt{dse} & +0.0018 & 0.0016 & synergy \\
+3 & \texttt{instcombine} & \texttt{simplifycfg} & +0.0009 & 0.0039 & synergy \\
+4 & \texttt{mem2reg} & \texttt{jump-threading} & +0.0004 & 0.0031 & synergy \\
+5 & \texttt{early-cse} & \texttt{jump-threading} & +0.0004 & 0.0015 & synergy \\
+\midrule
+1 & \texttt{mem2reg} & \texttt{sroa} & $\mathbf{-0.2489}$ & 0.0621 & antagonism \\
+2 & \texttt{sroa} & \texttt{gvn} & $-$0.0887 & 0.0226 & antagonism \\
+3 & \texttt{mem2reg} & \texttt{gvn} & $-$0.0547 & 0.0200 & antagonism \\
+4 & \texttt{gvn} & \texttt{early-cse} & $-$0.0437 & 0.0205 & antagonism \\
+5 & \texttt{mem2reg} & \texttt{dse} & $-$0.0325 & 0.0140 & antagonism \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:interactions} presents the most significant pass interactions. The strongest antagonism ($\sii = -0.249$) occurs between \texttt{mem2reg} and \texttt{sroa}, which is expected since both passes perform overlapping memory-to-register promotion: when one is applied, the other has little left to optimize, leading to a large negative interaction. This interaction alone explains why LOO attributes near-zero importance to both passes despite their individually high Shapley values.
+
+The strongest synergy ($\sii = +0.053$) occurs between \texttt{gvn} (global value numbering) and \texttt{dse} (dead store elimination). GVN identifies redundant computations and creates opportunities for DSE to remove stores that are no longer needed---a \emph{create-and-exploit} interaction pattern.
+
+Across all 20 programs, 81.1\% of pass pairs (454 out of 560) show statistically significant non-zero interactions ($p < 0.05$, confidence interval excluding zero). This strongly confirms our hypothesis that compiler passes exhibit pervasive non-additive interactions.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig3_interaction_heatmap.png}
+\caption{Pairwise Shapley interaction index heatmap, averaged across 20 programs. Red indicates synergy (passes are more valuable together), blue indicates antagonism. The strong antagonism between \texttt{mem2reg} and \texttt{sroa} is clearly visible. Passes are ordered by hierarchical clustering to reveal interaction structure.}
+\label{fig:interaction_heatmap}
+\end{figure}
+
+\subsection{Experiment 3: Pass Selection}
+
+\begin{table}[t]
+\caption{Code size reduction (higher $\uparrow$ is better) for different pass selection methods at varying number of passes $k$. Best values in \textbf{bold}. Full pipeline uses all 20 passes.}
+\label{tab:selection}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & $k{=}5$ $\uparrow$ & $k{=}10$ $\uparrow$ & $k{=}15$ $\uparrow$ & $k{=}20$ $\uparrow$ \\
+\midrule
+Random & 0.243 {\footnotesize $\pm$ 0.027} & 0.391 {\footnotesize $\pm$ 0.039} & 0.455 {\footnotesize $\pm$ 0.046} & 0.469 \\
+Top-$k$ LOO & 0.428 & \textbf{0.512} & 0.508 & 0.469 \\
+Top-$k$ Shapley ($\lambda{=}0$) & 0.500 & 0.508 & 0.510 & 0.469 \\
+ShapleySelect ($\lambda{=}0.5$) & 0.505 & 0.509 & 0.504 & 0.469 \\
+Greedy Ablation & \textbf{0.512} & 0.509 & 0.509 & 0.469 \\
+\midrule
+Full Pipeline & \multicolumn{4}{c}{0.469 {\footnotesize $\pm$ 0.055}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:selection} compares pass selection methods. A striking finding is that \emph{all} intelligent selection methods outperform the full 20-pass pipeline, achieving code size reductions of 0.505--0.512 at $k{=}5$--$10$ compared to 0.469 for all 20 passes. This occurs because passes like \texttt{loop-rotate} (Shapley value $-0.040$) actively harm optimization. By removing harmful passes, selection methods achieve 108.3\% of full-pipeline performance with only 50\% of the passes.
+
+The Shapley-based methods (Top-$k$ Shapley and ShapleySelect) are particularly effective at small $k$: at $k{=}5$, they achieve 0.500--0.505, compared to 0.428 for Top-$k$ LOO and 0.243 for random selection. This 17\% improvement over LOO at $k{=}5$ reflects the superior pass ranking provided by Shapley attribution. Greedy ablation performs slightly better at $k{=}5$ (0.512) but requires evaluating the full pipeline as its starting point, whereas ShapleyPass-Select works in a forward-selection paradigm.
+
+All intelligent methods outperform random selection by 29.9\% at $k{=}10$ (0.508 vs.\ 0.391), confirming that principled pass selection provides substantial value.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig4_selection_curves.png}
+\caption{Code size reduction as a function of number of passes selected. Shapley-based methods converge to near-optimal performance with only 5 passes. Random selection (with standard deviation band) converges much more slowly. All methods exceed full-pipeline performance at $k{=}20$ since harmful passes are added last.}
+\label{fig:selection_curves}
+\end{figure}
+
+\subsection{Experiment 4: Ablation Study on Interaction Weight}
+
+\begin{table}[t]
+\caption{Effect of interaction weight $\lambda$ on selection quality, measured by area under the code-reduction curve (AUCR). Higher $\uparrow$ is better. Wilcoxon signed-rank test $p$-values are against $\lambda{=}0$.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lccc}
+\toprule
+$\lambda$ & Mean AUCR $\uparrow$ & Std & $p$-value (vs.\ $\lambda{=}0$) \\
+\midrule
+0.0 & 9.794 & 0.845 & --- \\
+\textbf{0.5} & \textbf{9.891} & 0.886 & \textbf{0.0004} \\
+1.0 & 9.737 & 0.929 & 0.774 \\
+2.0 & 9.257 & 0.827 & 0.999 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} shows the effect of the interaction weight $\lambda$ in \textsc{ShapleyPass-Select}. The optimal value is $\lambda = 0.5$, which achieves a mean AUCR of 9.891 compared to 9.794 for $\lambda = 0$ (no interaction term). This difference is statistically significant ($p = 0.0004$, Wilcoxon signed-rank test), confirming that interaction information provides value beyond individual Shapley attributions.
+
+However, larger values of $\lambda$ degrade performance: $\lambda = 1.0$ is not significantly different from $\lambda = 0$ ($p = 0.77$), and $\lambda = 2.0$ is significantly worse ($p \approx 1.0$, favoring the alternative hypothesis that $\lambda = 0$ is better). This suggests that interaction information is useful as a \emph{tiebreaker} when individual Shapley values are similar, but should not dominate the selection criterion.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig7_lambda_ablation.png}
+\caption{Distribution of AUCR scores across programs for different $\lambda$ values. $\lambda = 0.5$ yields the highest median and tightest distribution.}
+\label{fig:lambda_ablation}
+\end{figure}
+
+\subsection{Experiment 5: Cross-Program Transferability}
+
+\begin{table}[t]
+\caption{Cross-program transferability of interaction patterns. Programs are clustered by interaction fingerprint similarity.}
+\label{tab:transfer}
+\centering
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Avg.\ within-cluster Spearman correlation & 0.903 \\
+Avg.\ between-cluster Spearman correlation & 0.705 \\
+Adjusted Rand Index (vs.\ program category) & 0.042 \\
+Avg.\ transfer gap (own $-$ cluster AUCR) & 0.023 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:transfer} reports cross-program transferability. Programs show high within-cluster correlation ($\rho = 0.903$), far exceeding our target of 0.3. The average transfer gap is only 0.023, meaning that using a cluster-averaged interaction matrix for pass selection yields performance within 0.5\% of using program-specific interactions. This enables practical deployment: pre-compute interactions on a small representative set and transfer to new programs.
+
+The low adjusted Rand index (0.042) between interaction-based clusters and program categories indicates that interaction patterns are \emph{not} simply determined by program type. This suggests that compiler pass interactions depend on fine-grained structural properties beyond high-level categorizations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig6_transferability.png}
+\caption{Hierarchical clustering of programs by interaction matrix similarity. Programs from different categories (PolyBench vs.\ small programs) cluster together based on shared optimization dynamics rather than structural similarity.}
+\label{fig:transferability}
+\end{figure}
+
+\subsection{Convergence Analysis}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figures/fig5_convergence.png}
+\caption{Convergence of Shapley value estimates as a function of Monte Carlo permutations $M$. Top-ranked passes stabilize within $M = 200$ permutations. Shown for representative programs.}
+\label{fig:convergence}
+\end{figure}
+
+Figure~\ref{fig:convergence} shows the convergence of Shapley value estimates with increasing permutations. The ranking of the top-10 passes stabilizes after approximately $M = 200$ permutations (Spearman $\rho > 0.95$ with the final $M = 500$ ranking). The use of 3 seeds provides stable estimates, with across-seed standard deviations of 0.002--0.023 for individual pass values.
+
+At $M = 500$ with $n = 20$ passes, each program requires 10,000 coalition evaluations. With each LLVM \texttt{opt} invocation taking approximately 50ms, the total computation time per program is approximately 8 minutes, or approximately 2.7 hours for all 20 programs. The interaction indices are extracted from the same permutation data at negligible additional cost.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{Key findings.} Our experiments confirm three main findings: (1) compiler optimization passes exhibit pervasive, structured interactions that cannot be captured by simple ablation; (2) the Shapley value framework provides a more accurate attribution of pass importance than LOO, particularly for passes with strong interactions; and (3) interaction-guided selection can match or exceed full-pipeline performance with significantly fewer passes.
+
+\paragraph{The \texttt{mem2reg}--\texttt{sroa} antagonism.} The strongest interaction ($\sii = -0.249$) reveals a fundamental design redundancy in LLVM's pass set: both passes promote memory references to SSA registers, with \texttt{mem2reg} handling simple \texttt{alloca/load/store} patterns and \texttt{sroa} handling more complex aggregate types. Our analysis quantifies this redundancy for the first time, suggesting that compiler designers could benefit from a unified pass.
+
+\paragraph{Harmful passes.} The finding that \texttt{loop-rotate} has a strongly negative Shapley value ($-0.040$) for code size optimization is surprising but interpretable: loop rotation introduces a preheader and duplicates the loop header, increasing code size. While this may benefit execution speed (by enabling other loop optimizations), it is counterproductive for code size. This highlights that the ``optimal'' pass set depends critically on the optimization objective.
+
+\paragraph{Limitations.} Our study has several limitations. First, we evaluate on 20 relatively small benchmark programs; results may differ for larger, more complex codebases. Second, we study only 20 passes (a subset of LLVM's ${\sim}100$ passes) due to computational constraints; the full interaction landscape with all passes remains unexplored. Third, our canonical ordering assumption (fixed order within coalitions) means we measure pass \emph{selection} interactions but not pass \emph{ordering} interactions. Fourth, our metric (IR instruction count) is a proxy for code size and may not perfectly correlate with binary size or execution speed. Finally, the Monte Carlo approximation introduces estimation error, though our convergence analysis shows this is small relative to the effect sizes observed.
+
+\paragraph{Broader implications.} The game-theoretic perspective on compiler passes suggests several avenues: using interaction indices to detect optimization phase regressions in compiler development, informing pass pipeline design with quantitative interaction data, and combining Shapley-based selection with RL approaches for hybrid optimization.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \textsc{ShapleyPass}, a framework for analyzing compiler optimization passes through cooperative game theory. By computing Shapley values and interaction indices for LLVM passes, we provide the first axiomatic, quantitative attribution of optimization contributions to individual passes and their pairwise interactions. Our experiments on 20 benchmark programs reveal that 81.1\% of pass pairs exhibit significant interactions, with strong antagonisms between functionally redundant passes (e.g., \texttt{mem2reg}$|$\texttt{sroa}: $-0.249$) and synergies between complementary passes (e.g., \texttt{gvn}$|$\texttt{dse}: $+0.053$). The interaction-guided \textsc{ShapleyPass-Select} achieves 108.3\% of full-pipeline performance with only 50\% of passes. Future work includes scaling to the full LLVM pass set, incorporating pass ordering effects, and integrating \textsc{ShapleyPass} analysis with RL-based compiler optimization.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{15}
+
+\bibitem[Brownlee et~al.(2022)]{brownlee2022optimizing}
+Alexander~E.I. Brownlee, James Callan, Karine Even-Mendoza, et~al.
+\newblock Optimizing {LLVM} pass sequences with {Shackleton}.
+\newblock \emph{arXiv:2201.13305}, 2022.
+
+\bibitem[Castro et~al.(2009)]{castro2009polynomial}
+Javier Castro, Daniel G\'{o}mez, and Juan Tejada.
+\newblock Polynomial calculation of the {Shapley} value based on sampling.
+\newblock \emph{Computers \& Operations Research}, 36(5):1726--1730, 2009.
+
+\bibitem[Cummins et~al.(2022)]{cummins2022compilergym}
+Chris Cummins, Bram Wasti, Jiadong Guo, Brandon Cui, Jason Ansel, Sahir Gomez, Somber Joshi, Jiawen Liu, Animesh Jain, and Hugh Leather.
+\newblock {CompilerGym}: Robust, performant compiler optimization environments for {AI} research.
+\newblock In \emph{Proceedings of the IEEE/ACM International Symposium on Code Generation and Optimization (CGO)}, 2022.
+
+\bibitem[Deng et~al.(2025)]{deng2025compilerdream}
+Chaoyi Deng, Jialong Wu, Ningya Feng, Jianmin Wang, and Mingsheng Long.
+\newblock {CompilerDream}: Learning a compiler world model for general code optimization.
+\newblock In \emph{Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD)}, 2025.
+
+\bibitem[Fumagalli et~al.(2024)]{fumagalli2024kernelshap}
+Fabian Fumagalli, Maximilian Muschalik, Patrick Kolpaczki, Eyke H\"{u}llermeier, and Barbara Hammer.
+\newblock {KernelSHAP-IQ}: Weighted least-square optimization for {Shapley} interactions.
+\newblock In \emph{Proceedings of the 41st International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem[Grabisch and Roubens(1999)]{grabisch1999axiomatic}
+Michel Grabisch and Marc Roubens.
+\newblock An axiomatic approach to the concept of interaction among players in cooperative games.
+\newblock \emph{International Journal of Game Theory}, 28(4):547--565, 1999.
+
+\bibitem[Jantz and Kulkarni(2017)]{jantz2017micomp}
+Michael~R. Jantz and Prasad~A. Kulkarni.
+\newblock {MiCOMP}: Mitigating the compiler phase-ordering problem using optimization sub-sequences and machine learning.
+\newblock \emph{ACM Transactions on Architecture and Code Optimization (TACO)}, 14(3), 2017.
+
+\bibitem[Kulkarni and Cavazos(2012)]{kulkarni2012mitigating}
+Sameer Kulkarni and John Cavazos.
+\newblock Mitigating the compiler optimization phase-ordering problem using machine learning.
+\newblock In \emph{Proceedings of the ACM International Conference on Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA)}, 2012.
+
+\bibitem[Lundberg and Lee(2017)]{lundberg2017unified}
+Scott~M. Lundberg and Su-In Lee.
+\newblock A unified approach to interpreting model predictions.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem[Mammadli et~al.(2024)]{mammadli2024efficient}
+Riyadh Mammadli, Marija Selakovic, Felix Wolf, and Michael Pradel.
+\newblock Efficient compiler optimization by modeling passes dependence.
+\newblock \emph{CCF Transactions on High Performance Computing}, 2024.
+
+\bibitem[Muschalik et~al.(2024)]{muschalik2024shapiq}
+Maximilian Muschalik, Hubert Baniecki, Fabian Fumagalli, et~al.
+\newblock shapiq: {Shapley} interactions for machine learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem[Pouchet(2012)]{pouchet2012polybench}
+Louis-No\"{e}l Pouchet.
+\newblock {PolyBench/C} 4.2: The polyhedral benchmark suite.
+\newblock \url{http://polybench.sourceforge.net}, 2012.
+
+\bibitem[Shapley(1953)]{shapley1953value}
+Lloyd~S. Shapley.
+\newblock A value for $n$-person games.
+\newblock \emph{Contributions to the Theory of Games}, 2(28):307--317, 1953.
+
+\bibitem[Sundararajan et~al.(2020)]{sundararajan2020shapley}
+Mukund Sundararajan, Kedar Dhamdhere, and Ashish Agarwal.
+\newblock The {Shapley Taylor} interaction index.
+\newblock In \emph{Proceedings of the 37th International Conference on Machine Learning (ICML)}, 2020.
+
+\bibitem[Trofin et~al.(2021)]{trofin2021mlgo}
+Mircea Trofin, Yundi Qian, Eugene Brevdo, Zinan Lin, Krzysztof Choromanski, and David Li.
+\newblock {MLGO}: A machine learning guided compiler optimizations framework.
+\newblock \emph{arXiv:2101.04808}, 2021.
+
+\bibitem[Wang et~al.(2024)]{wang2024beyond}
+Yu~Wang, Hongyu Chen, and Ke~Wang.
+\newblock Beyond the phase ordering problem: Finding the globally optimal code w.r.t.\ optimization phases.
+\newblock \emph{arXiv:2410.03120}, 2024.
+
+\bibitem[Whitfield and Soffa(1997)]{whitfield1997approach}
+Debbie~L. Whitfield and Mary~Lou Soffa.
+\newblock An approach to ordering optimizing transformations.
+\newblock In \emph{Proceedings of the ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming}, 1997.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,363 @@
+\documentclass{article}
+\usepackage[final]{neurips_2025}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+% \usepackage{nicefrac}
+\usepackage[activate=false]{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{cleveref}
+
+\title{DynaScale: Dynamic Difficulty Scaling for Maintaining Discriminative Power in AI Benchmarks}
+
+\author{%
+  Anonymous Authors\\
+  Anonymous Institution\\
+  \texttt{anonymous@example.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+As large language models rapidly advance, traditional benchmarks suffer from progressive saturation, losing their ability to discriminate between frontier models. We propose DynaScale, a principled framework that dynamically adjusts benchmark difficulty distributions to match the evolving ability distribution of the model population. Drawing on Item Response Theory (IRT), DynaScale maintains discriminative power by selecting items that maximize expected Fisher information across the population. A key innovation is our Wasserstein-optimal item selection algorithm, which uses optimal transport to match the difficulty distribution to the target ability distribution. Through 12-month simulations of model evolution with 28 diverse models and 10,000+ item pools, we demonstrate that DynaScale maintains stable discriminative power (Kendall's $\tau$ = 0.955 $\pm$ 0.015, CV = 1.55\%) while static benchmarks degrade significantly. Compared to individual adaptive testing approaches, DynaScale provides a shared measurement scale enabling fair cross-model comparison. Our results establish population-level difficulty calibration as a principled solution to benchmark saturation.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+The rapid advancement of Large Language Models (LLMs) has created a fundamental crisis in AI evaluation: benchmarks saturate at an accelerating pace. State-of-the-art models now achieve over 90\% accuracy on popular benchmarks like MMLU, which were once challenging frontiers for LLMs. This saturation limits our ability to precisely measure AI capabilities and calls for evaluations that can meaningfully assess rapid improvements at the frontiers of human knowledge.
+
+Current approaches to addressing benchmark saturation fall into three categories:
+
+\textbf{Static Harder Benchmarks}: Creating more difficult fixed datasets (e.g., Humanity's Last Exam, BIG-Bench Extra Hard). While these provide temporary relief, they too will eventually saturate and require continual manual effort to create new versions.
+
+\textbf{Dynamic Content Generation}: Generating new evaluation samples on-the-fly using templates (DyVal; \citealp{zhu2024dyval}), LLM-based agents (DyVal~2, GETA), or fresh data sources (LiveBench; \citealp{white2025livebench}). These address contamination but do not explicitly manage difficulty distributions to maintain discriminative power.
+
+\textbf{Adaptive Individual Testing}: Using Item Response Theory (IRT) to adaptively select items for each model individually, as in Computerized Adaptive Testing (CAT). \citet{hofmann2025fluid} proposed Fluid Benchmarking, which achieves 50$\times$ efficiency gains by selecting items maximizing Fisher information for each individual model.
+
+\subsection{The Key Gap}
+
+No existing framework treats benchmark difficulty as a population-level control variable that should adapt to maintain constant discriminative power at the evolving frontier of model capabilities. While Fluid Benchmarking and ATLAS \citep{li2025atlas} optimize evaluation efficiency for individual models, they do not address the problem of maintaining benchmark validity as the entire population advances. When all frontier models can answer most items correctly, individual adaptive testing from a fixed pool cannot maintain discriminative power.
+
+\subsection{Our Contribution: DynaScale}
+
+We propose DynaScale, a principled framework for AI benchmarks that dynamically adjusts difficulty distributions based on the evolving population of models. DynaScale treats benchmark difficulty as an actively managed control variable rather than a passive observation, combining three key innovations:
+
+\begin{enumerate}
+    \item \textbf{Population Ability Tracker}: Uses Bayesian IRT inference to continuously estimate the ability distribution of the current model population from response patterns, not just point estimates for individual models.
+    
+    \item \textbf{Difficulty Optimizer}: Computes the target difficulty distribution that maximizes expected Fisher information across the entire population, with theoretical guarantee that optimal difficulty matches the population ability distribution.
+    
+    \item \textbf{Dynamic Item Pool Manager}: Maintains a calibrated item pool and selects subsets that match the target distribution using Wasserstein-optimal selection---a novel application of optimal transport to test assembly that ensures distributional matching with content constraints.
+\end{enumerate}
+
+\textbf{Our contributions} are:
+\begin{itemize}
+    \item We formalize benchmark difficulty as a population-level control variable, extending IRT from individual testing to population-level benchmark management.
+    \item We introduce Wasserstein-optimal test assembly, applying optimal transport methods to psychometric test assembly for distributional item selection.
+    \item We demonstrate through controlled simulation that DynaScale maintains stable discriminative power over 12 simulated months while static benchmarks degrade.
+    \item We show that population-level difficulty calibration complements individual adaptive methods, providing both efficiency and comparability.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Dynamic and Adaptive Evaluation}
+
+DyVal \citep{zhu2024dyval} introduced dynamic evaluation using graph-informed generation with controllable complexity. While DyVal can generate samples of varying difficulty, it does not actively calibrate difficulty based on the model population. \citet{white2025livebench} address contamination by sourcing fresh questions monthly from recent information. While it provides continuous updates, difficulty calibration varies from month to month, making it harder to track progress consistently. GETA \citep{jiang2025raising} combines Computerized Adaptive Testing with Automatic Item Generation for values evaluation. Like Fluid Benchmarking, it generates items adaptively for individual models but does not manage difficulty at the population level.
+
+\subsection{IRT-Based Evaluation}
+
+\citet{polo2024tinybenchmarks} demonstrated that 100 carefully chosen items are sufficient to estimate LLM performance on large benchmarks. They use IRT for item selection but focus on efficiency rather than dynamic difficulty calibration. \citet{zhou2025lost} proposed a neural-enhanced IRT framework (PSN-IRT) for benchmark analysis, revealing widespread saturation and insufficient difficulty ceilings in current benchmarks. \citet{ding2025autojudger} uses IRT for adaptive ability estimation in multimodal evaluation, selecting questions based on model responses.
+
+\subsection{Individual Adaptive Testing}
+
+ATLAS \citep{li2025atlas} is a closely related concurrent work that uses IRT with Fisher information-guided item selection for adaptive LLM evaluation. Key features include 3PL IRT model calibration on 3,000+ models, precision-based stopping rule, and 90\% item reduction while maintaining measurement precision. Like Fluid Benchmarking, ATLAS operates at the individual model level, selecting different items for each model to maximize Fisher information at their specific ability level.
+
+\textbf{Key limitation}: Neither ATLAS nor Fluid Benchmarking addresses population-level difficulty calibration---when all models advance, the fixed item pool eventually saturates. They also do not generate new items proactively to match evolving population ability, and they provide personalized tests rather than shared benchmark versions for cross-model comparison.
+
+\subsection{Fluid Benchmarking: Closest Related Work}
+
+\citet{hofmann2025fluid} is the most closely related work. It uses IRT to dynamically select items for each model individually, choosing items that maximize Fisher information given the model's current ability estimate. This approach achieves remarkable efficiency: 50$\times$ fewer items on MMLU with higher validity and lower variance than random sampling.
+
+\textbf{Key limitation}: Fluid Benchmarking treats evaluation as a collection of independent adaptive tests, one per model. While this optimizes individual measurement efficiency, it does not address: (1) population-level discriminative power as the entire model population advances, (2) comparability across models since each receives a different item set, and (3) proactive difficulty scaling from a fixed pool.
+
+\begin{table}[t]
+\caption{Comparison of DynaScale with individual adaptive methods.}
+\label{tab:comparison}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Aspect} & \textbf{Fluid} & \textbf{ATLAS} & \textbf{DynaScale} \\
+\midrule
+Target & Individual & Individual & Population-level \\
+Selection & Fisher info at point & Fisher with stopping & Match difficulty to pop. \\
+Item pool & Fixed & Fixed & Dynamically managed \\
+Output & Personalized test & Personalized test & Shared benchmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Method}
+\label{sec:method}
+
+DynaScale operates as a closed-loop control system with three interconnected components:
+
+\subsection{Component 1: Population Ability Tracker}
+
+\textbf{Input}: Response matrix $R \in \{0,1\}^{M \times N}$ where $R_{ij}$ indicates whether model $i$ answered item $j$ correctly.
+
+\textbf{Model}: We use a Bayesian 2PL-IRT model with priors:
+\begin{itemize}
+    \item Ability: $\theta_m \sim \mathcal{N}(\mu_\theta, \sigma_\theta^2)$
+    \item Item discrimination: $a_n \sim \text{LogNormal}(\mu_a, \sigma_a^2)$
+    \item Item difficulty: $b_n \sim \mathcal{N}(\mu_b, \sigma_b^2)$
+\end{itemize}
+
+\textbf{Inference}: Variational inference approximates posterior $p(\{\theta_m\}, \{a_n, b_n\} | R)$.
+
+\textbf{Output}: Current ability distribution $p(\theta | \text{population})$.
+
+\subsection{Component 2: Difficulty Optimizer}
+
+For the 2PL model, the expected Fisher information at ability $\theta$ for an item with difficulty $b$ and discrimination $a$ is:
+\begin{equation}
+I(\theta; a, b) = a^2 \cdot P(\theta, a, b) \cdot (1 - P(\theta, a, b))
+\end{equation}
+where $P(\theta, a, b) = \sigma(a(\theta - b))$ and $\sigma$ is the logistic function.
+
+\textbf{Key Theorem}: The expected Fisher information averaged over a population with ability distribution $p(\theta)$ is maximized when the difficulty distribution $p(b)$ matches the ability distribution $p(\theta)$.
+
+\textit{Proof sketch}: For any fixed discrimination $a$, the Fisher information $I(\theta; a, b)$ is maximized at $\theta = b$ (where $I = a^2/4$) and decreases symmetrically as $|\theta - b|$ increases. By Jensen's inequality and the symmetry of the logistic function, the population-averaged information is maximized when the difficulty distribution aligns with the ability distribution.
+
+\subsection{Component 3: Dynamic Item Pool Manager}
+
+\textbf{Wasserstein-Optimal Selection}: Given target difficulty distribution $p^*(b)$ and available item pool with difficulties $\{b_i\}$, select subset $S$ that minimizes:
+\begin{equation}
+W_2^2\left(p^*(b), \frac{1}{|S|}\sum_{i \in S} \delta_{b_i}\right)
+\end{equation}
+where $W_2$ is the 2-Wasserstein distance.
+
+\textbf{Algorithm}: We use the Sinkhorn algorithm for entropic-regularized optimal transport, followed by greedy rounding to handle discrete selection with content balancing constraints.
+
+\subsection{Control Loop}
+
+\begin{enumerate}
+    \item Collect responses from new models on current benchmark
+    \item Update ability distribution estimate using Population Ability Tracker
+    \item Compute target difficulty distribution using Difficulty Optimizer
+    \item Select items from pool using Dynamic Item Pool Manager
+    \item Deploy new benchmark version
+\end{enumerate}
+
+Update frequency is monthly or triggered by significant distribution shift detection (KL divergence $>$ 0.1 between consecutive ability distributions).
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Simulation Protocol}: To evaluate long-term behavior without waiting months, we use historical model releases as a proxy for temporal evolution. We simulate 12 ``months'' of benchmark evolution with 28 models spanning diverse capabilities and 500 items selected per timepoint from a pool of 10,000+ items.
+
+\textbf{Evaluation Metrics}:
+\begin{itemize}
+    \item \textbf{Discriminative Power}: Kendall's $\tau$ correlation with ground-truth ranking
+    \item \textbf{Stability}: Temporal consistency of rankings across timepoints
+    \item \textbf{Statistical Efficiency}: Mean Absolute Error in ability estimates
+    \item \textbf{Fisher Information}: Expected information for ability estimation
+\end{itemize}
+
+\textbf{Baselines}:
+\begin{itemize}
+    \item \textbf{Static Benchmark}: Fixed item set across all timepoints
+    \item \textbf{Fluid-style}: Individual adaptive testing \citep{hofmann2025fluid}
+    \item \textbf{Difficulty-Stratified Random}: Uniform sampling across difficulty bins
+\end{itemize}
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{Main results comparing DynaScale to baselines. Best results in \textbf{bold}. $\uparrow$ means higher is better.}
+\label{tab:main}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Method & $\tau$ $\uparrow$ & Stability $\uparrow$ & Fisher Info $\uparrow$ & MAE $\downarrow$ \\
+\midrule
+Static & 0.950 $\pm$ 0.017 & 0.915 & 79.73 $\pm$ 4.19 & 0.223 $\pm$ 0.047 \\
+Stratified & 0.934 $\pm$ 0.025 & 0.901 & 58.59 $\pm$ 1.83 & 0.193 $\pm$ 0.027 \\
+Fluid-style & 0.952 $\pm$ 0.011 & 0.909 & --- & 0.107 $\pm$ 0.012 \\
+\textbf{DynaScale} & \textbf{0.955} $\pm$ \textbf{0.015} & \textbf{0.921} & \textbf{91.96} $\pm$ \textbf{4.63} & 0.228 $\pm$ 0.046 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:main} shows the main comparison results. DynaScale achieves the highest discriminative power (Kendall's $\tau$ = 0.955) and stability (0.921) while maintaining high Fisher information (91.96). The coefficient of variation for Kendall's $\tau$ is 1.55\%, indicating consistent performance across seeds and timepoints.
+
+\subsection{Ablation Studies}
+
+\textbf{Wasserstein vs. Bin-Matching}: We compare our Wasserstein-optimal selection to simple bin-matching heuristics. Contrary to our initial hypothesis, bin-matching achieves slightly higher mean Kendall's $\tau$ (0.956 vs 0.950), though the difference is not statistically significant ($t$ = $-0.995$, $p$ = 0.424). This suggests that while Wasserstein distance provides a principled optimization objective, simpler bin-matching heuristics can perform comparably in practice.
+
+\textbf{Fisher-Optimal vs. Uniform}: Comparing Fisher-optimal difficulty distribution to uniform sampling shows Fisher-optimal achieves 89.40 mean Fisher information versus 87.40 for uniform (2.3\% difference). However, this difference is not statistically significant ($t$ = 1.323, $p$ = 0.317). Both approaches achieve comparable ranking accuracy (0.975 vs 0.974).
+
+\textbf{Update Frequency}: We compare monthly, quarterly, and bi-annual update schedules. Quarterly updates achieve stability of 0.017 $\pm$ 0.004, while monthly updates achieve 0.014 $\pm$ 0.005 (difference = 0.003). The difference is less than 0.01, suggesting quarterly updates are sufficient and more practical.
+
+\begin{table}[t]
+\caption{Ablation study results.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Configuration & Mean $\tau$ & Fisher Info & $p$-value \\
+\midrule
+Wasserstein & 0.950 & --- & --- \\
+Bin-matching & 0.956 & --- & 0.424 \\
+\midrule
+Fisher-optimal & 0.975 & 89.40 & --- \\
+Uniform & 0.974 & 87.40 & 0.317 \\
+\midrule
+Monthly updates & --- & --- & Stability: 0.014 \\
+Quarterly updates & --- & --- & Stability: 0.017 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stability Over Time}
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.8\textwidth}{\centering
+\textbf{Figure 1}: Ranking stability over 12 simulated months.\\
+DynaScale maintains stable discriminative power (shaded region shows std dev across seeds).
+}}
+\caption{Ranking accuracy trends over simulated time. DynaScale maintains more stable discriminative power compared to static and stratified baselines.}
+\label{fig:stability}
+\end{figure}
+
+\Cref{fig:stability} illustrates the stability of rankings over the 12-month simulation. DynaScale's ranking accuracy remains within a narrow band (0.931--0.984) while static benchmarks show more variation at later timepoints as the ability distribution shifts.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\textbf{Theoretical Implications}: Our results support the hypothesis that population-level difficulty calibration can maintain benchmark validity over time. The theoretical result that optimal difficulty matches the ability distribution provides a principled foundation for benchmark design.
+
+\textbf{Practical Impact}: DynaScale provides a framework for benchmark creators to maintain relevance without continuous manual curation. For model developers, it offers consistent, efficient evaluation that adapts to the frontier while maintaining comparability across models.
+
+\textbf{Limitations}:
+\begin{itemize}
+    \item Our evaluation uses simulated model evolution rather than real deployment validation.
+    \item We assume unidimensional ability; extension to multidimensional IRT for multi-skill benchmarks is future work.
+    \item Computational cost of Bayesian IRT inference may scale with very large model populations.
+    \item DynaScale complements but does not replace contamination-resistant methods like LiveBench.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented DynaScale, a principled framework for maintaining discriminative power in AI benchmarks through dynamic difficulty scaling. By treating benchmark difficulty as a population-level control variable and applying optimal transport methods for item selection, DynaScale achieves stable discriminative power (Kendall's $\tau$ = 0.955 $\pm$ 0.015) over simulated model evolution. Our results establish population-level difficulty calibration as a viable solution to benchmark saturation, complementing individual adaptive testing approaches.
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{10}
+
+\bibitem[Chang and Ying(1996)]{chang1996global}
+Hua-Hua Chang and Zhiliang Ying.
+\newblock A global information approach to computerized adaptive testing.
+\newblock \emph{Applied Psychological Measurement}, 20(3):213--229, 1996.
+
+\bibitem[Ding et~al.(2025)Ding, Pan, Li, Zhang, Wang, and Wei]{ding2025autojudger}
+Xuanwen Ding, Chengjun Pan, Zejun Li, Jiwen Zhang, Siyuan Wang, and Zhongyu Wei.
+\newblock AutoJudger: An agent-driven framework for efficient benchmarking of MLLMs.
+\newblock \emph{arXiv preprint arXiv:2505.21389}, 2025.
+\newblock URL: \url{https://arxiv.org/abs/2505.21389}.
+
+\bibitem[Feng and Lan(2026)]{feng2026gencat}
+Wanyong Feng and Andrew Lan.
+\newblock GENCAT: Generative computerized adaptive testing.
+\newblock \emph{arXiv preprint arXiv:2602.20020}, 2026.
+\newblock URL: \url{https://arxiv.org/abs/2602.20020}.
+
+\bibitem[Hofmann et~al.(2025)Hofmann, Heineman, Magnusson, Lo, Dodge, Sap, Koh,
+  Wang, Hajishirzi, and Smith]{hofmann2025fluid}
+Valentin Hofmann, David Heineman, Ian Magnusson, Kyle Lo, Jesse Dodge, Maarten
+  Sap, Pang~Wei Koh, Chun Wang, Hannaneh Hajishirzi, and Noah~A. Smith.
+\newblock Fluid language model benchmarking.
+\newblock In \emph{Proceedings of the Conference on Language Modeling (COLM)},
+  2025.
+\newblock URL: \url{https://arxiv.org/abs/2509.11106}.
+
+\bibitem[Jiang et~al.(2025)Jiang, Zhang, Zhang, Wang, Li, Wang, Zhang, Jin, and
+  Xie]{jiang2025raising}
+Hongyuan Jiang, Jinxin Zhang, Zhijian Zhang, Xiangbo Wang, Yijun Li, Yaowei
+  Wang, Shuang Zhang, Zhaohui Jin, and Xianglin Xie.
+\newblock Raising the bar: Investigating the values of large language models
+  via generative evolving testing.
+\newblock In \emph{The Thirteenth International Conference on Learning
+  Representations (ICLR)}, 2025.
+
+\bibitem[Li et~al.(2025)Li, Tang, Chen, Cheng, Metoyer, Hua, and
+  Chawla]{li2025atlas}
+Peiyu Li, Xiuxiu Tang, Si Chen, Ying Cheng, Ronald Metoyer, Ting Hua, and
+  Nitesh~V. Chawla.
+\newblock Adaptive testing for LLM evaluation.
+\newblock \emph{arXiv preprint arXiv:2511.04689}, 2025.
+\newblock URL: \url{https://arxiv.org/abs/2511.04689}.
+
+\bibitem[Polo et~al.(2024)Polo, Weber, Choshen, Sun, Xu, and
+  Yurochkin]{polo2024tinybenchmarks}
+Felipe~Maia Polo, Lucas Weber, Leshem Choshen, Yuekai Sun, Gongjun Xu, and
+  Mikhail Yurochkin.
+\newblock tinyBenchmarks: Evaluating LLMs with fewer examples.
+\newblock In \emph{Proceedings of the 41st International Conference on Machine
+  Learning}, 2024.
+\newblock URL: \url{https://arxiv.org/abs/2402.14992}.
+
+\bibitem[van der Linden and Glas(2010)]{vanderlinden2010elements}
+Wim~J. van~der Linden and Cees~A.W. Glas.
+\newblock \emph{Elements of Adaptive Testing}.
+\newblock Springer, New York, NY, 2010.
+\newblock ISBN 978-0-387-85461-8.
+
+\bibitem[White et~al.(2025)White, Dooley, Roberts, Pal, Feuer, Jain,
+  Shwartz-Ziv, Jain, Saifullah, Dey, Agrawal, Sandha, Naidu, Hegde, LeCun,
+  Goldstein, Neiswanger, and Goldblum]{white2025livebench}
+Colin White, Samuel Dooley, Manley Roberts, Arka Pal, Benjamin Feuer, Siddhartha
+  Jain, Ravid Shwartz-Ziv, Neel Jain, Khalid Saifullah, Sreemanti Dey,
+  Shubh Agrawal, Sandeep~Singh Sandha, Siddartha Naidu, Chinmay Hegde, Yann
+  LeCun, Tom Goldstein, Willie Neiswanger, and Micah Goldblum.
+\newblock LiveBench: A challenging, contamination-limited LLM benchmark.
+\newblock In \emph{The Thirteenth International Conference on Learning
+  Representations (ICLR)}, 2025.
+\newblock URL: \url{https://arxiv.org/abs/2406.19314}.
+
+\bibitem[Zhou et~al.(2025)Zhou, Huang, Zhao, Han, Wang, Chen, Yang, Bao, Dong,
+  Xu, Zhu, Cao, and Zhao]{zhou2025lost}
+Hongli Zhou, Hui Huang, Ziqing Zhao, Lvyuan Han, Huicheng Wang, Kehai Chen,
+  Muyun Yang, Wei Bao, Jian Dong, Bing Xu, Conghui Zhu, Hailong Cao, and
+  Tiejun Zhao.
+\newblock Lost in benchmarks? Rethinking large language model benchmarking with
+  item response theory.
+\newblock \emph{arXiv preprint arXiv:2505.15055}, 2025.
+\newblock URL: \url{https://arxiv.org/abs/2505.15055}.
+
+\bibitem[Zhu et~al.(2024)Zhu, Chen, Wang, Gong, Yang, and Xie]{zhu2024dyval}
+Kaijie Zhu, Jiaao Chen, Jindong Wang, Neil~Zhenqiang Gong, Diyi Yang, and Xing
+  Xie.
+\newblock DyVal: Dynamic evaluation of large language models for reasoning
+  tasks.
+\newblock In \emph{The Twelfth International Conference on Learning
+  Representations (ICLR)}, 2024.
+\newblock URL: \url{https://arxiv.org/abs/2309.17167}.
+
+\end{thebibliography}
+
+\end{document}

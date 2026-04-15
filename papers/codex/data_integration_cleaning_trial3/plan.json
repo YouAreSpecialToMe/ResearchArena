@@ -1,0 +1,144 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Lock a deterministic CPU-only execution envelope",
+    "description": "Create a reproducible environment that matches the paper's claimed resources and fixes the exact execution protocol before any results are generated.",
+    "steps": {
+      "step1": "Create a fresh Python 3.11 virtual environment and pin these packages: pandas 2.2.x, numpy 1.26.x, scipy 1.12.x, scikit-learn 1.4.x, rapidfuzz 3.9.x, networkx 3.2.x, sentence-transformers 2.7.x, transformers 4.40.x, matplotlib 3.8.x, seaborn 0.13.x, statsmodels 0.14.x, psutil 5.9.x, and pyarrow 15.x.",
+      "step2": "Force CPU execution with CUDA_VISIBLE_DEVICES='' and set OMP_NUM_THREADS=2, MKL_NUM_THREADS=2, OPENBLAS_NUM_THREADS=2, and NUMEXPR_NUM_THREADS=2. Record explicitly that 0 GPUs are available, so no GPU parallelism is used and the only execution parallelism is at most 2 CPU threads or 2 light concurrent CPU processes.",
+      "step3": "Use one fixed reproducibility seed, 17, only for deterministic row sampling and deterministic tie-breaking. Do not run multi-seed repetition because the final paper is a fixed audit protocol over deterministic transforms rather than a stochastic training study.",
+      "step4": "Create outputs/data/, outputs/predictions/, outputs/eval/, outputs/figures/, and outputs/appendix/. Save per-pair predictions as JSONL, aggregate metrics as CSV, plots as PNG and PDF, and run metadata as JSON.",
+      "step5": "Write outputs/eval/run_metadata.json containing CPU model, RAM, OS, Python version, package versions, git commit hash, thread caps, the single fixed seed, the declared 8-hour wall-clock budget, and the exact stop conditions used by the protocol."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Assemble the fixed 52-pair audit inventory",
+    "description": "Build one immutable set of public schema pairs and one split scheme reused everywhere so the protocol is consistent across proposal, idea summary, and final evaluation.",
+    "steps": {
+      "step1": "Assemble exactly 52 public schema-matching pairs drawn from three dataset families already named in the proposal: one Valentine-compatible slice representing standard public pairs, one header-poor slice, and one richer-context slice. Keep the final family allocation fixed once selected and store it in outputs/data/pair_inventory.csv.",
+      "step2": "For every pair store source schema, target schema, table names, column names, column descriptions if available, inferred primitive types, and gold correspondences exactly as provided by the public benchmark or its adapter. Exclude pairs with missing gold labels or malformed schemas before the split is frozen.",
+      "step3": "Freeze one and only one split at the schema-pair level: 12 clean development pairs, 8 stressed development pairs, and 32 held-out test pairs. Use the 12 clean development pairs only for threshold selection and clean calibration fitting. Use the 8 stressed development pairs only for the preregistered calibration-transfer check. Use the 32 test pairs only once for final reporting.",
+      "step4": "Document for each selected pair the dataset family, pair identifier, number of source columns, number of target columns, whether descriptions exist, and split assignment. Save this inventory as outputs/data/pair_inventory.csv and never modify it after the first committed run.",
+      "step5": "Compute descriptive statistics for the frozen inventory, including mean and median source columns, target columns, candidate pair counts, and metadata completeness by split and dataset family. Save these summaries to outputs/eval/dataset_summary.csv for use in Table 1."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate the deterministic metadata stress views",
+    "description": "Create the exact four-condition evaluation matrix claimed in the proposal with no severity sweep and no row-budget stress in the main paper.",
+    "steps": {
+      "step1": "Generate exactly four conditions for every pair: clean, header-stress, context-stress, and composite-stress. Use these same four conditions for all three main methods and all 32 held-out test pairs.",
+      "step2": "Implement header-stress as a deterministic transform on column names consisting of abbreviation of multiword headers, token deletion, identifier normalization, and one typo injection rule. Once implemented, the transform is parameter-free and identical for every method.",
+      "step3": "Implement context-stress as deterministic removal of column descriptions and neighboring-schema context. Keep the schema structure and gold correspondences unchanged so only metadata quality changes.",
+      "step4": "Implement composite-stress as the exact composition of header-stress plus context-stress. Do not introduce any extra severity dimension, extra sampling, or row-budget reduction in this main matrix.",
+      "step5": "Persist every stressed schema view to outputs/data/stress_views.jsonl with fields for pair id, split, condition, and the exact operations applied, so each method consumes identical stressed inputs."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the simple lexical matcher baseline",
+    "description": "Provide a transparent lower-bound baseline that uses only lexical overlap and should be sensitive to header corruption.",
+    "steps": {
+      "step1": "Normalize column names and descriptions by lowercasing, punctuation stripping, camel-case splitting, and whitespace collapsing. Do not use sampled values, dependency features, or graph propagation.",
+      "step2": "For each source-target column pair compute 0.5 times token Jaccard similarity plus 0.5 times normalized Levenshtein similarity on the column names. If descriptions exist in the input condition, compute the same lexical score over descriptions and average header and description scores with equal weight.",
+      "step3": "Convert the raw similarity matrix to one-to-one predictions with Hungarian assignment. Tune one global acceptance threshold on the 12 clean development pairs over the grid {0.20, 0.30, 0.40, 0.50, 0.60} using mean development F1.",
+      "step4": "Freeze that single threshold and run the lexical matcher on all 52 pairs under all four conditions. Save per-pair predictions to outputs/predictions/lexical/ and per-pair wall-clock time plus peak memory to outputs/eval/runtime_lexical.csv."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run Similarity Flooding as the classical strong baseline",
+    "description": "Provide the closest classical structural comparator so the audit is not limited to purely lexical and PTLM-style methods.",
+    "steps": {
+      "step1": "Represent each schema as a graph over table nodes, column nodes, and coarse type nodes. Initialize node-pair similarity with the same normalized lexical score used by the simple lexical baseline so preprocessing is aligned.",
+      "step2": "Run Similarity Flooding for at most 30 iterations with damping 0.85 and early stopping when the maximum absolute score update falls below 1e-4.",
+      "step3": "Use Hungarian assignment on the converged similarity matrix and tune one global acceptance threshold on the 12 clean development pairs over {0.20, 0.30, 0.40, 0.50}. Freeze that threshold for stressed development and test evaluations.",
+      "step4": "Run Similarity Flooding on all 52 pairs under all four conditions. Save predictions to outputs/predictions/similarity_flooding/ and runtime plus memory logs to outputs/eval/runtime_similarity_flooding.csv."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the PTLM baseline as the modern strong baseline",
+    "description": "Use the PTLM-style semantic matcher from the closest modern baseline family, constrained to a CPU-feasible encoder and caching strategy.",
+    "steps": {
+      "step1": "Use sentence-transformers all-MiniLM-L6-v2 on CPU as the PTLM implementation proxy. Encode each column as '[TABLE] table_name [COL] column_name [DESC] description [TYPE] inferred_type', omitting row values entirely in the main protocol to keep the study CPU-feasible and to avoid reintroducing row-budget stress into the main matrix.",
+      "step2": "Cache every encoded column representation per pair and condition so each column is embedded exactly once. Compute cosine similarity between source and target column embeddings to obtain the raw score matrix.",
+      "step3": "Produce one-to-one predictions with Hungarian assignment and tune one global acceptance threshold on the 12 clean development pairs over {0.30, 0.40, 0.50, 0.60, 0.70}. Freeze both the template and the threshold for all stressed development and test evaluations.",
+      "step4": "Run the PTLM baseline on all 52 pairs under all four conditions. Save embeddings, predictions, per-pair wall-clock time, and peak memory to outputs/predictions/ptlm/ and outputs/eval/runtime_ptlm.csv."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Execute the fixed StressAudit-SM evaluation matrix",
+    "description": "Run the full evaluative protocol exactly as claimed in the proposal and keep the paper's contribution explicitly benchmark-centric rather than method-centric.",
+    "steps": {
+      "step1": "For each of the 32 held-out test pairs, evaluate exactly three methods, lexical matcher, Similarity Flooding, and PTLM, under exactly four conditions, clean, header-stress, context-stress, and composite-stress. This yields 32 x 3 x 4 = 384 held-out method-condition evaluations.",
+      "step2": "Use the same frozen development-time settings for every test evaluation: one threshold per method chosen on the 12 clean development pairs, no condition-specific retuning, no test-time adaptation, and no protocol changes after the first full development pass.",
+      "step3": "Run the same three methods on the 12 clean development pairs and 8 stressed development pairs only for calibration fitting, threshold selection, and the preregistered transfer check. Do not merge development and test results in any metric computation.",
+      "step4": "Treat the study as an audit recipe comparing the closest combined prior-art families: noisy-schema robustness in the style of He and Chang 2005, uncertainty-aware matching in the style of Prompt-Matcher 2024, and context-stress evaluation in the style of ConStruM 2026. Do not position this step as introducing a new schema matcher."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run the preregistered calibration and abstention protocol",
+    "description": "Measure whether confidence estimates and abstention rules learned on clean metadata transfer under deterministic stress.",
+    "steps": {
+      "step1": "For each of the three methods, derive a scalar confidence score per predicted correspondence from the final matching score after Hungarian assignment. For the lexical and Similarity Flooding baselines use the assigned edge score directly. For PTLM use cosine similarity of the selected correspondence.",
+      "step2": "Fit one logistic calibration model per method on predictions from the 12 clean development pairs only. Use two inputs for the calibrator when available, final selected score and score margin to the next-best candidate, otherwise use the final selected score alone.",
+      "step3": "Choose one abstention threshold per method on the same 12 clean development pairs by maximizing selective F1 subject to minimum coverage 0.70. Freeze this threshold before looking at any stressed development or test metrics.",
+      "step4": "Use the 8 stressed development pairs only for one preregistered transfer check: compare clean-fit calibration error on stressed development against clean development to estimate whether calibration drift is already visible before final test reporting.",
+      "step5": "Apply the clean-fitted calibrator and the frozen abstention threshold to the 32 held-out test pairs under all four conditions. Do not fit a separate stress-aware calibrator for the headline results."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run the minimal ablations on the audit protocol",
+    "description": "Ablate the audit recipe itself rather than inventing a new matcher, keeping the extra workload small enough to preserve feasibility.",
+    "steps": {
+      "step1": "Ablation A removes calibration by evaluating raw matcher scores directly on the test pairs under all four conditions, without logistic calibration, while keeping the same matching outputs. This tests whether the claimed calibration-transfer findings depend on the chosen calibration layer.",
+      "step2": "Ablation B removes abstention by forcing every predicted match above the frozen acceptance threshold to be accepted, with no selective prediction stage. This tests whether the claimed deployment utility under stress depends on selective abstention rather than raw ranking alone.",
+      "step3": "Ablation C removes composite-stress from the main summary tables and evaluates only clean, header-stress, and context-stress. This tests whether the paper's conclusions are qualitatively stable without the combined condition and keeps a fallback interpretation if the composite condition proves unusually harsh.",
+      "step4": "Run these ablations only on the 32 held-out test pairs using the already-produced model outputs whenever possible, so the ablation stage mostly reuses cached predictions and adds minimal extra compute."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate accuracy degradation, ranking stability, calibration transfer, and runtime",
+    "description": "Report the exact metrics needed to support or refute the proposal's evaluative claims, including cost and failure conditions.",
+    "steps": {
+      "step1": "For each method and condition on the 32 held-out test pairs compute correspondence-level precision, recall, and F1. Report macro averages over pairs, dataset-family averages, and overall averages.",
+      "step2": "Compute ranking stability by ordering methods by mean held-out F1 under clean and under each stressed condition, then report mean rank shift, Kendall tau between clean and stressed rankings, and the count of pairwise method-order inversions.",
+      "step3": "For each method and condition compute expected calibration error with 10 equal-frequency bins and Brier score using the clean-fitted calibrator. Report these on clean, header-stress, context-stress, and composite-stress test inputs.",
+      "step4": "For abstention evaluate coverage, selective precision, selective recall, selective F1, and area under the risk-coverage curve. Report the fixed operating point induced by the clean-development threshold and the full risk-coverage curve on held-out test pairs.",
+      "step5": "Measure total wall-clock time, mean time per pair, and peak resident memory for each method. Save raw logs to outputs/eval/runtime_summary.csv and include these cost metrics in the main result tables so the audit remains CPU-feasible and deployment-relevant.",
+      "step6": "Estimate uncertainty with paired bootstrap confidence intervals over the 32 held-out test pairs using 2000 bootstrap resamples. Do not average over random seeds because the protocol is deterministic and the paper explicitly does not claim a stochastic multi-run study.",
+      "step7": "Define success criteria before execution. The study succeeds if at least one method ordering changes between clean and a stressed condition on held-out test pairs, at least one method shows materially worse calibration under stress after clean-only calibration, abstention improves precision at the frozen coverage operating point for at least one stressed condition, and the entire three-method main matrix completes within the 8-hour 2-core budget.",
+      "step8": "Define failure conditions explicitly. The hypothesis is weakened if held-out rankings remain unchanged under all stresses, if ECE and Brier score show little degradation under clean-fit transfer, if abstention yields negligible utility at the fixed threshold, or if the main matrix cannot finish within 8 hours on the declared hardware."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce compact paper-ready tables and figures",
+    "description": "Generate the minimum figure set needed to communicate the audit protocol and the empirical conclusions without inflating the study into a broad benchmark release.",
+    "steps": {
+      "step1": "Create Table 1 from outputs/eval/dataset_summary.csv showing dataset-family counts, split counts, average source columns, average target columns, average candidate pairs, and metadata availability. Save the final table source to outputs/eval/table1.csv.",
+      "step2": "Create Figure 1 as a protocol diagram covering the fixed 52-pair split, the four deterministic conditions, the three compared methods, the clean-only calibration fit, and the stressed-transfer evaluation path.",
+      "step3": "Create Figure 2 as grouped bar charts of mean F1 by method and condition, overall and by dataset family, with 95 percent paired-bootstrap confidence intervals.",
+      "step4": "Create Figure 3 as a ranking-shift plot from clean to each stress condition, showing mean rank changes and pairwise inversion counts for the three methods.",
+      "step5": "Create Figure 4 as reliability diagrams for all three methods under clean and stressed conditions, and Figure 5 as risk-coverage curves using the frozen clean-development abstention threshold."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Enforce the final runtime gates and appendix policy",
+    "description": "Tie feasibility to the final claimed protocol rather than to an alternate study design, and keep optional appendix work outside the main claim.",
+    "steps": {
+      "step1": "Run a pilot on the first 8 held-out test pairs after development settings are frozen. Measure actual per-pair runtime and memory for the lexical matcher, Similarity Flooding, PTLM, calibration application, evaluation, and plotting.",
+      "step2": "Project the runtime of the already-fixed main matrix from that 8-pair pilot. If the projected end-to-end runtime of the three-method, four-condition, 52-pair protocol exceeds 7.5 hours, cancel all appendix work immediately and continue only with the fixed main matrix.",
+      "step3": "Declare the main paper complete when the three-method, four-condition, 52-pair protocol has finished. Only if that main protocol completes within 6.5 hours wall-clock time may appendix-only analyses be run.",
+      "step4": "Restrict appendix work to exactly two optional items: a row-budget stress check on a value-aware subset and a lightweight structure-aware reference model called StressMatch-Lite. Neither appendix item is allowed to alter the main paper tables, claims, split scheme, or stop conditions.",
+      "step5": "If the main matrix itself cannot finish by 8 hours on 2 CPU cores, report the study as infeasible under the claimed resource envelope. Do not rescue feasibility by dropping methods, changing pair counts, or changing the split after execution has started."
+    }
+  }
+]
