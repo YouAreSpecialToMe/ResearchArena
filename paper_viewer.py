@@ -68,7 +68,7 @@ def load_data():
                 pass
 
         # SAR review
-        sar_path = os.path.join(ROOT, f"analysis/stanford_reviews/reviews/review_{i:03d}.json")
+        sar_path = os.path.join(ROOT, path, "stanford_review.json")
         sar_data = None
         sar_score = None
         if os.path.exists(sar_path):
