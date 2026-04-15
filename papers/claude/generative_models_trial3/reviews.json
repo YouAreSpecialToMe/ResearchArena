@@ -87,42 +87,45 @@
     },
     {
       "scores": {
-        "novelty": 5,
-        "soundness": 7,
-        "significance": 5,
-        "clarity": 8,
+        "novelty": 4,
+        "soundness": 5,
+        "significance": 4,
+        "clarity": 6,
         "reproducibility": 7,
-        "experimental_rigor": 6,
-        "references": 5,
-        "reference_integrity": 3,
-        "results_integrity": 9
+        "experimental_rigor": 5,
+        "references": 6,
+        "reference_integrity": 8,
+        "results_integrity": 5
       },
       "overall_score": 4,
       "decision": "reject",
-      "summary": "This paper proposes Conditioning-Space Guidance (CSG), a training-free method that approximates Classifier-Free Guidance (CFG) in Diffusion Transformers via single-pass extrapolation of AdaLN parameters. Through experiments on DiT-XL/2 with ImageNet 256\u00d7256, the authors find that CSG is competitive at low guidance scales (w=1.5, FID 26.6 vs. CFG 22.7) but fails catastrophically at moderate-to-high scales (w=4.0, FID 234.6 vs. CFG 36.8). The paper provides a detailed linearity analysis and explores hybrid and per-layer variants.",
-      "novelty_assessment": "I performed extensive online searches across arXiv, Google Scholar, and Semantic Scholar. No exact prior work on per-layer AdaLN parameter extrapolation for single-pass CFG was found. However, the idea space is now crowded with very similar recent work. Most notably, \"Rethinking Global Text Conditioning in Diffusion Transformers\" (arXiv:2602.09268, accepted to ICLR 2026) proposes \"modulation guidance\"\u2014a training-free, single-pass guidance method that also extrapolates in conditioning/modulation space. While that work operates at the pooled-embedding level (closer to this paper's ESG baseline) rather than on per-layer AdaLN parameters, the core insight and claimed benefits (training-free, ~2\u00d7 speedup, negligible overhead) are strikingly similar. Additionally, DICE (Zhou et al., arXiv:2502.03726) and AGD (Jensen & Sadat, arXiv:2503.07274) address the same problem of efficient CFG approximation. The per-layer parameter-level twist in CSG is technically distinct, but the broader concept is no longer novel.",
+      "summary": "The paper proposes Conditioning-Space Guidance (CSG), which approximates Classifier-Free Guidance in a single forward pass by extrapolating AdaLN parameters in Diffusion Transformers. While the idea is intuitive, the paper's main finding is a negative result: CSG fails catastrophically at the guidance scales used in practice (w >= 3.0), working only at the low scale of w=1.5 with a 17% FID degradation. The hybrid approach (CSG-H) that recovers quality by using full CFG at 50% of steps eliminates any practical speedup, undermining the paper's core contribution.",
+      "novelty_assessment": "The idea of interpolating AdaLN conditioning parameters to avoid the unconditional forward pass is a natural and relatively straightforward observation that follows directly from the linear structure of AdaLN. While no prior work has explicitly evaluated this exact approach, the idea is closely related to existing work on efficient guidance. The concurrent AGD work (Phan et al. 2025) pursues the same goal of single-pass guidance with more sophistication.",
       "strengths": [
-        "The paper is well-written and clearly organized, with explicit contributions and honest reporting of negative results.",
-        "The linearity analysis is thorough and provides actionable insight: approximation errors grow superlinearly with guidance scale and are largest at clean timesteps, which explains the catastrophic failure at w\u22653.0.",
-        "The hybrid analysis (CSG-H) and the \"error\u2013quality paradox\" observation\u2014that clean-timestep accuracy matters more than noisy-timestep accuracy\u2014are interesting and could guide future efficient-guidance research.",
-        "Experiment code, logs, and results are present and appear genuine; the numbers in the paper match the provided results.json."
+        "The paper is honest about negative results, clearly reporting that CSG fails at practical guidance scales (w >= 3.0) rather than cherry-picking favorable configurations",
+        "Comprehensive experimental design with multiple ablations (per-layer schedules, hybrid positions, sampling steps, ESG baseline)",
+        "The linearity analysis measuring per-step approximation error across timesteps and guidance scales is a valuable contribution",
+        "Experiment code is well-structured and reproducible, with proper seeding and shared noise/label generation for fair comparison",
+        "The hybrid CSG-H 50% early-clean result (FID 32.2 vs CFG 36.8) provides a useful practical insight about where full guidance matters most",
+        "All cited references appear to be real papers with correct attribution"
       ],
       "weaknesses": [
-        "Severe reference integrity issue: citation [phan2025efficient] lists the author as \"Phan, Hyoungwon and others,\" but the actual paper (arXiv:2503.07274) is authored by Cristian Perez Jensen and Seyedmorteza Sadat. The title and venue are correct, but the author name is completely fabricated. This is a major red flag.",
-        "Practical utility is extremely limited: CSG only works acceptably at w=1.5, a guidance scale that is lower than what is typically used in practice. At standard scales (w=4.0\u20137.5), quality collapses completely (FID > 230).",
-        "The hybrid approach (CSG-H 50% early_clean) that matches CFG quality is actually slower than full CFG due to implementation overhead (0.99 img/s vs. 1.48 img/s), negating the primary motivation of speedup.",
-        "Experimental rigor concerns: FID is computed on only 2,000 images, which the authors acknowledge is noisy. Several ablations (per-layer schedules, hybrid variants, w=7.5) use only a single seed, making it impossible to assess statistical significance.",
-        "Missing related work: the paper does not discuss DICE (Zhou et al., 2025) or the modulation guidance paper (Starodubcev et al., ICLR 2026), both of which are highly relevant."
+        "CRITICAL: The timestep labeling in Table 2 appears backwards -- timestep_map[0] corresponds to t~0 (clean) but the paper labels it 'noisiest', creating a false 'error-quality paradox'",
+        "The core contribution is essentially a negative result without sufficient theoretical insight into WHY the nonlinearity amplifies so dramatically",
+        "FID-2K is extremely noisy; key claims like CSG-H 50% 'matching or exceeding' CFG are based on single-seed comparisons",
+        "The hybrid CSG-H 50% configuration is actually SLOWER than standard CFG (0.99 vs 1.48 img/s), eliminating the motivation for the approach",
+        "Experiments limited to a single model (DiT-XL/2), single dataset (ImageNet 256x256), class-conditional only",
+        "Large throughput variance across seeds suggests GPU thermal throttling issues that undermine timing measurements"
       ],
-      "detailed_feedback": "To make this work viable for publication, the authors must (1) immediately correct the fabricated author citation [phan2025efficient] and verify all other references for accuracy; (2) add a thorough discussion of recent related work, especially DICE and modulation guidance, and clearly articulate how CSG differs technically and conceptually; (3) strengthen the experimental rigor by running all reported configurations with multiple seeds and reporting confidence intervals or statistical tests; (4) address the hybrid implementation overhead\u2014if CSG-H cannot achieve a practical speedup, its value proposition is weak; and (5) broaden the evaluation beyond a single model (DiT-XL/2) and dataset (ImageNet 256\u00d7256 class-conditional) to demonstrate generalizability, e.g., to text-conditional models or flow matching variants like SiT.",
+      "detailed_feedback": "The paper investigates a natural idea but finds it mostly does not work. The most critical issue is the inverted timestep labeling that creates a false narrative. The theoretical analysis is shallow -- Section 3.3 identifies compositional nonlinearity but offers no quantitative bounds. For revision: fix timestep labeling, provide rigorous theoretical treatment of error amplification, evaluate on additional architectures, and provide multi-seed results for all configurations.",
       "questions_for_authors": [
-        "How do you explain the completely wrong author name in citation [phan2025efficient]? Please verify all references for accuracy.",
-        "Are you aware of the modulation guidance paper (Starodubcev et al., ICLR 2026), which proposes a very similar training-free guidance concept in modulation space? How does CSG differ in a way that is not captured by your ESG baseline?",
-        "Given that CSG only works at w=1.5 and fails catastrophically at practical scales, what concrete use case do you envision for it?",
-        "Can you fix the hybrid implementation overhead so that CSG-H achieves an actual speedup while matching CFG quality?"
+        "Can you verify the timestep labeling in Table 2? Based on the code, timestep_map[0] corresponds to t=0 (clean), not the noisiest state.",
+        "Why does CSG at w=1.5 achieve only 1.64x throughput instead of theoretical 2x?",
+        "Can you provide multi-seed results for CSG-H 50% to verify it truly matches CFG quality?",
+        "The similar performance of CSG and ESG suggests the bottleneck is not specific to AdaLN -- have you considered this?"
       ],
-      "integrity_check": "The experiment source code exists and correctly implements CSG, ESG, CSG-H, and CSG-PL as described in the paper. The logs show realistic training runs with progress bars and timings. All numerical results in the paper's tables match the provided results.json to within rounding error. However, there is a serious reference integrity issue: [phan2025efficient] cites a fabricated author name ('Phan, Hyoungwon') for a real paper whose actual authors are Jensen and Sadat.",
-      "source": "agent:Kimi Code"
+      "integrity_check": "Raw metrics in JSON result files are consistent with paper tables. However: (1) throughput measurements show extreme variance across seeds, (2) timestep labeling appears inverted relative to code, (3) several ablation results rely on single seeds. No evidence of data fabrication but interpretation contains errors.",
+      "source": "agent:Claude Code"
     }
   ],
   "avg_score": 4.666666666666667,
