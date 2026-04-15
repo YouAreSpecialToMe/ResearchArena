@@ -1,0 +1,283 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated environment and install required packages for CROSS-GRN experiments",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA 12.1: pip install torch==2.1.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install single-cell analysis packages: pip install scanpy==1.9.6 anndata==0.10.0 scvi-tools==1.0.4",
+      "step4": "Install additional dependencies: pip install numpy pandas scikit-learn scipy matplotlib seaborn pyarrow",
+      "step5": "Install evaluation packages: pip install torchmetrics==1.2.0 wandb",
+      "step6": "Verify GPU availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step7": "Create output directories: mkdir -p data models results figures logs"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess 10x Genomics PBMC Multiome",
+    "description": "Download the primary benchmark dataset (10k cells) and preprocess for training",
+    "steps": {
+      "step1": "Download 10x PBMC Multiome from 10x website: wget https://cf.10xgenomics.com/samples/cell-arc/2.0.0/pbmc_granulocyte_sorted_10k/pbmc_granulocyte_sorted_10k_filtered_feature_bc_matrix.h5",
+      "step2": "Load data with scanpy: adata = sc.read_10x_h5('pbmc_granulocyte_sorted_10k_filtered_feature_bc_matrix.h5', gex_only=False)",
+      "step3": "Split RNA and ATAC: rna = adata[:, adata.var.feature_types == 'Gene Expression'].copy(); atac = adata[:, adata.var.feature_types == 'Peaks'].copy()",
+      "step4": "Filter genes: sc.pp.filter_genes(rna, min_cells=50) - keep ~5,000 highly variable genes",
+      "step5": "Filter peaks: sc.pp.filter_genes(atac, min_cells=20) - keep ~20,000 accessible peaks",
+      "step6": "Normalize RNA: sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)",
+      "step7": "Normalize ATAC: TF-IDF normalization using atac.tl.tfidf()",
+      "step8": "Select HVGs: sc.pp.highly_variable_genes(rna, n_top_genes=3000, subset=True)",
+      "step9": "Cell type annotation: Use marker genes to annotate major cell types (T cells, B cells, Monocytes, NK cells, DCs) - ~10 types",
+      "step10": "Create peak-gene mapping: Map peaks to genes within +/- 500kb using genomic coordinates",
+      "step11": "Get TF list: Load list of ~1,500 human TFs from Lambert et al. 2018",
+      "step12": "Save preprocessed data: data/pbmc_preprocessed.h5ad, data/pbmc_cell_types.csv"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download SHARE-seq Mouse Skin Dataset",
+    "description": "Download secondary dataset for generalization testing (~15k cells)",
+    "steps": {
+      "step1": "Download SHARE-seq data from GEO GSE140203: Use wget to download processed h5ad",
+      "step2": "Load data: adata = sc.read_h5ad('shareseq_mouse_skin.h5ad')",
+      "step3": "Apply same preprocessing pipeline as PBMC: filter genes/peaks, normalize, select HVGs",
+      "step4": "Cell type annotation: Use provided cluster labels or marker-based annotation",
+      "step5": "Save preprocessed: data/shareseq_preprocessed.h5ad"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare Ground Truth and Evaluation Data",
+    "description": "Load ChIP-seq validation data and TRRUST database for evaluation",
+    "steps": {
+      "step1": "Download TRRUST v2 database: wget https://www.grnpedia.org/trrust/data/trrust_rawdata.human.tsv",
+      "step2": "Parse TRRUST: Create dictionary of TF -> target edges with sign (activation/repression)",
+      "step3": "Download ChIP-seq gold standard: Use ENCODE ChIP-seq peaks for key TFs (SPI1, CEBPB, etc.)",
+      "step4": "Process ChIP-seq: Create binary labels for TF-target pairs based on peak presence in promoter",
+      "step5": "Create train/val/test splits: 70/15/15 split stratified by cell type, use random_state=42",
+      "step6": "Save evaluation data: data/trrust_network.json, data/chipseq_labels.json, data/splits.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run GENIE3 + Correlation Baseline",
+    "description": "Simple baseline using tree-based feature importance with correlation sign",
+    "steps": {
+      "step1": "Implement GENIE3: Use sklearn RandomForestRegressor to predict each gene from TFs",
+      "step2": "Compute importance: Extract feature importance as regulatory edge weights",
+      "step3": "Add sign: Compute Pearson correlation between TF and target expression; sign = sign(correlation)",
+      "step4": "Train on PBMC: For each target gene, train RF to predict from TF expression only",
+      "step5": "Extract network: Top-k edges by importance, signed by correlation",
+      "step6": "Evaluate: Compute AUROC, AUPRC, Signed AUROC against TRRUST/ChIP-seq",
+      "step7": "Save results: results/genie3_pbmc_results.json",
+      "estimated_time": "30 minutes on CPU"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run scMultiomeGRN Baseline",
+    "description": "Strong baseline: GNN-based multi-omics GRN inference (simplified implementation)",
+    "steps": {
+      "step1": "Implement scMultiomeGRN architecture: 2-layer GCN with cross-modal attention",
+      "step2": "Build graph: Create k-NN graph (k=15) from RNA expression + ATAC accessibility",
+      "step3": "Train on PBMC: 200 epochs, lr=1e-3, batch_size=256, hidden_dim=256",
+      "step4": "Extract GRN: Get TF-target edge weights from learned attention",
+      "step5": "Evaluate on test set: AUROC, AUPRC against ChIP-seq",
+      "step6": "Run 3 seeds: seeds=[42, 43, 44] for statistical significance",
+      "step7": "Save results: results/scmultiomegrn_pbmc_seeds.json",
+      "estimated_time": "45 minutes on GPU (15 min per seed)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run XATGRN-adapted Baseline",
+    "description": "Adapt XATGRN's cross-attention GNN for single-cell multi-omics comparison",
+    "steps": {
+      "step1": "Implement XATGRN architecture: GNN with dual complex graph embedding and cross-attention",
+      "step2": "Adapt for single-cell: Use cell-level graphs instead of bulk gene-gene graphs",
+      "step3": "Train on PBMC multi-omics: Same training setup as our method for fair comparison",
+      "step4": "Extract signed GRN: Use cross-attention weights and sign prediction head",
+      "step5": "Evaluate: AUROC, AUPRC, sign accuracy",
+      "step6": "Run 3 seeds: seeds=[42, 43, 44]",
+      "step7": "Save results: results/xatgrn_pbmc_seeds.json",
+      "estimated_time": "45 minutes on GPU (15 min per seed)"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement CROSS-GRN Architecture",
+    "description": "Implement the full CROSS-GRN model with all components",
+    "steps": {
+      "step1": "Implement expression encoder: 8-layer transformer, hidden_dim=384, num_heads=6, ff_dim=1024",
+      "step2": "Implement accessibility encoder: 8-layer transformer, same config as expression encoder",
+      "step3": "Implement dual asymmetric cross-attention: Separate Q/K projections for TF→target and target→TF",
+      "step4": "Implement cell-type conditioning: Learnable embeddings (num_cell_types x 128) + MLP modulation",
+      "step5": "Implement prediction heads: Expression prediction (MSE), edge existence (BCE), edge sign (MSE to tanh)",
+      "step6": "Implement training objectives: L_expr + 0.5*L_atac + 1.0*L_edge + 0.5*L_sign + 0.1*L_directionality",
+      "step7": "Verify parameter count: Should be ~35M parameters total"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train CROSS-GRN on PBMC Dataset",
+    "description": "Full training of CROSS-GRN with 3 random seeds for statistical testing",
+    "steps": {
+      "step1": "Setup training config: lr=1e-4 with cosine decay, batch_size=64, epochs=100, gradient_clip=1.0",
+      "step2": "Train seed 42: python train_crossgrn.py --dataset pbmc --seed 42 --output models/crossgrn_pbmc_s42.pt",
+      "step3": "Train seed 43: python train_crossgrn.py --dataset pbmc --seed 43 --output models/crossgrn_pbmc_s43.pt",
+      "step4": "Train seed 44: python train_crossgrn.py --dataset pbmc --seed 44 --output models/crossgrn_pbmc_s44.pt",
+      "step5": "Monitor training: Track loss curves, validation AUROC every 10 epochs",
+      "step6": "Extract GRNs: For each seed, extract cell-type-specific GRNs from trained model",
+      "step7": "Save results: results/crossgrn_pbmc_seeds.json",
+      "estimated_time": "2 hours on GPU (40 min per seed)"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate CROSS-GRN vs Baselines on PBMC",
+    "description": "Comprehensive evaluation comparing CROSS-GRN to all baselines",
+    "steps": {
+      "step1": "Compute GRN metrics: AUROC, AUPRC, EPR@100 against ChIP-seq for each method",
+      "step2": "Compute signed metrics: Signed AUROC, sign prediction accuracy on TRRUST",
+      "step3": "Run statistical tests: Paired t-test between CROSS-GRN and each baseline (p < 0.05)",
+      "step4": "Test directionality: Compare forward vs reverse attention predictive power (t-test)",
+      "step5": "Evaluate expression prediction: Pearson r, R² on masked gene prediction task",
+      "step6": "Compile results table: Mean ± std across 3 seeds for all methods",
+      "step7": "Save: results/main_comparison_pbmc.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Symmetric vs Asymmetric Attention",
+    "description": "Test the importance of asymmetric cross-attention design",
+    "steps": {
+      "step1": "Modify architecture: Replace asymmetric with symmetric cross-attention (shared Q projections)",
+      "step2": "Train symmetric model: Same hyperparameters, 3 seeds [42, 43, 44]",
+      "step3": "Compare performance: Full model vs symmetric on AUROC, AUPRC, sign accuracy",
+      "step4": "Statistical test: Paired t-test on performance difference (p < 0.05)",
+      "step5": "Analyze attention patterns: Compare forward vs reverse attention weights",
+      "step6": "Save: results/ablation_symmetric_vs_asymmetric.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Cell-Type Conditioning",
+    "description": "Test the importance of cell-type-conditioned attention modulation",
+    "steps": {
+      "step1": "Modify architecture: Remove cell-type embeddings and modulation (static model)",
+      "step2": "Train static model: Same hyperparameters, 3 seeds",
+      "step3": "Compare performance: Full model vs static on GRN metrics",
+      "step4": "Evaluate cell-type specificity: Compute Jaccard similarity between GRNs of different cell types",
+      "step5": "Statistical test: Paired t-test (p < 0.05)",
+      "step6": "Save: results/ablation_celltype_conditioning.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Sign Prediction and Multi-Omics",
+    "description": "Test signed edge prediction and multi-omics integration",
+    "steps": {
+      "step1": "Ablation without sign: Train model predicting only edge existence, not sign",
+      "step2": "Ablation RNA-only: Train with expression data only, no ATAC",
+      "step3": "Train both: 3 seeds each, same hyperparameters",
+      "step4": "Compare: Full model vs no-sign vs RNA-only on all metrics",
+      "step5": "Analyze sign accuracy: Correlation between predicted and true signs",
+      "step6": "Save: results/ablation_sign_and_multimodal.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Cell-Type-Specific GRN Analysis",
+    "description": "Detailed analysis of cell-type-specific regulatory networks",
+    "steps": {
+      "step1": "Extract cell-type GRNs: For each of ~10 cell types, aggregate attention weights",
+      "step2": "Compute Jaccard similarities: Pairwise Jaccard between cell-type GRNs (top 1000 edges)",
+      "step3": "Analyze variation: Verify Jaccard 0.3-0.7 between related types, lower for distant types",
+      "step4": "TF enrichment: Test if cell-type-specific TFs (e.g., CD3E for T cells) have higher degree in respective networks",
+      "step5": "Identify dynamic edges: Find TF-target pairs with >2x weight difference across cell types",
+      "step6": "Visualize: Heatmap of Jaccard similarities, top TFs per cell type",
+      "step7": "Save: results/celltype_grn_analysis.json, figures/celltype_heatmap.pdf"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Generalization: Train and Evaluate on SHARE-seq",
+    "description": "Test generalization to different tissue (mouse skin)",
+    "steps": {
+      "step1": "Train CROSS-GRN on SHARE-seq: 3 seeds, same hyperparameters as PBMC",
+      "step2": "Train baselines on SHARE-seq: GENIE3, scMultiomeGRN for comparison",
+      "step3": "Evaluate: AUROC, AUPRC (no ChIP-seq ground truth, use conservation with known motifs)",
+      "step4": "Compare trends: Verify relative performance matches PBMC results",
+      "step5": "Save: results/crossgrn_shareseq_results.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Rigorous statistical testing of all claims",
+    "steps": {
+      "step1": "Main hypothesis test: Paired t-test CROSS-GRN vs scMultiomeGRN AUROC, p < 0.05",
+      "step2": "Main hypothesis test: Paired t-test CROSS-GRN vs AttentionGRN AUROC, p < 0.05",
+      "step3": "Directionality test: Paired t-test forward vs reverse attention, p < 0.01",
+      "step4": "Sign prediction test: Binomial test for sign accuracy vs random (50%), p < 0.001",
+      "step5": "Ablation tests: Paired t-tests for each ablation, p < 0.05",
+      "step6": "XATGRN comparison: Paired t-test CROSS-GRN vs XATGRN, p < 0.05",
+      "step7": "Multiple testing correction: Apply Bonferroni correction where appropriate",
+      "step8": "Save: results/statistical_tests.json with all p-values"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Verify all success criteria from proposal are met",
+    "steps": {
+      "step1": "Criterion 1: GRN AUROC > baselines with p < 0.05",
+      "step2": "Criterion 2: Forward attention > reverse attention with p < 0.01",
+      "step3": "Criterion 3: Sign accuracy > 70% with p < 0.001 vs random",
+      "step4": "Criterion 4: Cell-type conditioning improves over static with p < 0.05",
+      "step5": "Criterion 5: CROSS-GRN > XATGRN on multi-omics data with p < 0.05",
+      "step6": "Criterion 6: Pearson r > 0.85 on expression prediction",
+      "step7": "Document: results/success_criteria_check.md with pass/fail for each",
+      "step8": "If criteria not met: Document failure analysis and potential reasons"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the paper",
+    "steps": {
+      "step1": "Figure 1 (Architecture): Draw CROSS-GRN architecture diagram with asymmetric attention",
+      "step2": "Figure 2 (Main Results): Bar plot comparing AUROC/AUPRC across methods with error bars (3 seeds)",
+      "step3": "Figure 3 (Ablation): Grouped bar plot showing contribution of each component",
+      "step4": "Figure 4 (Cell-Type GRNs): Heatmap of Jaccard similarities + network visualization for 2 cell types",
+      "step5": "Figure 5 (Directionality): Comparison of forward vs reverse attention predictive power",
+      "step6": "Supplementary: Training curves, sign prediction confusion matrix, attention weight distributions",
+      "step7": "Save all: figures/figure_1.pdf, figures/figure_2.pdf, etc."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Results Tables",
+    "description": "Create publication-ready tables with all results",
+    "steps": {
+      "step1": "Table 1 (Main Results): Method | AUROC | AUPRC | Sign Acc | Pearson r | with std across seeds",
+      "step2": "Table 2 (Ablation Study): Component | AUROC | delta vs full | p-value",
+      "step3": "Table 3 (Cell-Type Analysis): Cell Type | #TFs | #Edges | Top TF | Jaccard range",
+      "step4": "Table 4 (Statistical Tests): Comparison | Test | Statistic | p-value | Significant?",
+      "step5": "Save: results/tables.md with LaTeX and markdown versions"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Generate Final Summary Report",
+    "description": "Compile all results into comprehensive summary",
+    "steps": {
+      "step1": "Summarize main findings: Best AUROC, improvement over baselines",
+      "step2": "Summarize ablation results: Contribution of each component",
+      "step3": "Summarize cell-type analysis: Key findings about context-specific GRNs",
+      "step4": "Address XATGRN differentiation: Explicit comparison showing multi-omics + transformer advantage",
+      "step5": "Document limitations: Dataset size, missing perturbation data",
+      "step6": "Generate plan_runtime_summary.md with actual vs estimated times",
+      "step7": "Save: results/final_summary.md"
+    }
+  }
+]

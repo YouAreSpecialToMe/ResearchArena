@@ -1,0 +1,109 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze software and pre-register the execution budget",
+    "description": "Set one reproducible stack, one common seed policy, and one wall-clock schedule that is feasible on 1x RTX A6000, 60 GB RAM, 4 CPU cores, and an 8 hour total budget.",
+    "steps": {
+      "step1": "Use Python 3.10, PyTorch 2.2+, torchvision 0.17+, numpy, scipy, scikit-learn, pandas, matplotlib, seaborn, and PyYAML. Set random.seed(seed), numpy.random.seed(seed), torch.manual_seed(seed), torch.cuda.manual_seed_all(seed), torch.backends.cudnn.deterministic=True, and torch.backends.cudnn.benchmark=False for every run.",
+      "step2": "Use target seeds [7, 17, 27] for every approximate-unlearning method, every dataset, every regime, and every ablation. Use retrain calibration seeds [7, 17] only for the retrain-on-retain oracles that define the forgetting band. Do not vary seed counts across methods or regimes.",
+      "step3": "Because only 1 GPU is available, schedule all GPU-heavy jobs sequentially. Use the 4 CPU cores in parallel only for split generation, cached-score export, Gaussian LiRA fitting, bootstrap confidence intervals, and visualization after logits have been written to disk.",
+      "step4": "Write artifacts to results/{dataset}/{regime}/{seed}/{method}/ with config.json, split_indices.json, selection.json, checkpoints/, logits.npz, metrics.json, runtime.json, and memory.json. Maintain one run_manifest.csv with dataset, regime, seed, method, status, selected checkpoint, and file hashes so the study is auditable.",
+      "step5": "Restrict all per-example gradient computations to the classifier head for Purchase100 and to the final residual block plus linear classifier for CIFAR-10, matching proposal.md. Cap protected rank at 16 for Purchase100 and 32 for CIFAR-10. Fix lambda_proj = 1.0 and cumulative energy threshold tau = 0.90 before running the full matrix.",
+      "step6": "Run 2 pilot jobs first: Purchase100 Base-FT random-1%-deletion seed 7 and CIFAR-10 Base-FT random-1%-deletion seed 7. Record time for base training reuse, one unlearning run, selector construction, and LiRA evaluation. If the projected total exceeds 7.5 hours, keep the core matrix unchanged and reduce only nonessential exports such as exploratory TPR@0.1%FPR plots.",
+      "step7": "Pre-register the runtime budget after the pilots: target-model training about 75 minutes, retrain oracles about 70 minutes, 8 shadow models about 90 minutes, core unlearning matrix about 150 minutes, CIFAR-10 stress ablations about 45 minutes, LiRA fitting plus bootstrap about 30 minutes, and visualization/export about 15 minutes. Planned total is about 475 minutes or 7.9 hours."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Construct fully disjoint target, shadow, non-member, and audit pools",
+    "description": "Implement the exact dataset split protocol from proposal.md so the attack-only pool, matched non-member pools, selector split, checkpointing shard, and final reporting shard are all concrete and leak-free.",
+    "steps": {
+      "step1": "Use Purchase100 and CIFAR-10 only. For CIFAR-10, start from the canonical 50000 training images and 10000 test images. Reserve 15000 training images as A_pool for LiRA shadow-model training only, and use the remaining 35000 training images as D_target, the only pool from which target-model train, forget, retain, selector, and audit splits are drawn.",
+      "step2": "For CIFAR-10, split the canonical 10000-image test set once, stratified by class, into V_pool = 4000 images and T_eval = 6000 images. Use V_pool only to create matched non-member pools V_audit_A and V_audit_B. Use T_eval only for test accuracy and calibration metrics. No image from the test set may appear in shadow training or target-model training.",
+      "step3": "For Purchase100, create one stratified split of the full dataset into D_target = 70 percent, A_pool = 10 percent, V_pool = 10 percent, and T_eval = 10 percent. Use D_target only for target-model training and all forget/retain splits, A_pool only for shadow models, V_pool only for matched non-member pools, and T_eval only for utility evaluation.",
+      "step4": "Within each dataset's D_target and for each seed and deletion regime, define the forget set first. Use random 1 percent deletion on both datasets. Use an additional CIFAR-10 stress regime of high-loss 5 percent deletion, where the forget set is the highest pre-unlearning true-class log-loss points under the trained target model theta0. From the remaining retained examples, create R_train = 80 percent, R_select = 10 percent, R_audit_A = 5 percent, and R_audit_B = 5 percent with class-stratified sampling.",
+      "step5": "For every seed and dataset, create V_audit_A by class-stratified sampling from V_pool with exactly the same size and class histogram as R_audit_A, and create V_audit_B the same way to match R_audit_B. Once sampled, remove those examples from further V_pool use for that seed so the two matched non-member pools are disjoint from each other as well as from every target-model split.",
+      "step6": "Normalize Purchase100 using statistics from D_target training features only. Normalize CIFAR-10 with channel means and standard deviations computed from D_target training images only. Use random crop with padding 4 and random horizontal flip during base, retrain, and shadow training for CIFAR-10. Do not use stochastic augmentation during unlearning updates or audit scoring.",
+      "step7": "Save split_indices.json and data_summary.csv with counts, class histograms, forget-set size, retain sizes, hashes of example IDs, and pairwise overlap checks. Abort the run if any overlap is detected among A_pool, D_target, V_pool, T_eval, forget, R_select, R_audit_A, R_audit_B, V_audit_A, or V_audit_B."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train target models, retrain oracles, and 8 LiRA shadow models",
+    "description": "Train the shared target-model checkpoints, the retrain-on-retain oracles used to define the forgetting band, and a stronger LiRA calibration set with 8 shadow models per dataset.",
+    "steps": {
+      "step1": "For Purchase100, train a 2-layer MLP with hidden sizes [256, 128], ReLU, dropout 0.2, Adam, learning rate 1e-3, weight decay 1e-4, batch size 512, and 35 epochs with early stopping patience 5 on a validation slice carved from R_train. Train one target model theta0 for each seed and regime.",
+      "step2": "For CIFAR-10, train ResNet-18 with SGD, momentum 0.9, weight decay 5e-4, batch size 256, learning rate 0.1, cosine decay to 0, and 25 epochs. Save the best validation-accuracy checkpoint from a validation slice carved from R_train. Train one target model theta0 for each seed and regime.",
+      "step3": "For each trained theta0, cache per-example logits, true-class log-loss, and true-class margin on D_target, forget, R_select, R_audit_A, R_audit_B, V_audit_A, V_audit_B, and T_eval. Use these cached outputs for the high-loss deletion regime, LiRA scoring, and vulnerability-score diagnostics.",
+      "step4": "Train retrain-on-retain oracles for seeds [7, 17] for Purchase100 random-1%-deletion, CIFAR-10 random-1%-deletion, and CIFAR-10 high-loss-5%-deletion. This yields 6 retrain runs total. Use the same architecture, optimizer family, and epoch cap as the corresponding target model, but train only on the retained data after the forget set is removed.",
+      "step5": "Define the forgetting band exactly once per dataset-regime pair from the 2 retrain seeds, matching proposal.md. Let Delta_retrain be the forget-set log-loss increase relative to theta0. Mark an approximate-unlearning checkpoint as eligible only if its forget-set log-loss increase is at least 80 percent of mean(Delta_retrain). Do not add an extra forget-member LiRA constraint to the eligibility rule.",
+      "step6": "Train 8 Gaussian-LiRA shadow models per dataset on A_pool only, matching proposal.md. For each shadow model, sample a member subset from A_pool of the same size as D_target's training subset for that dataset, train with the same architecture and optimizer family as the target model, and record member and non-member attack scores. Reuse the same 8 shadow models for all methods and checkpoints within the dataset.",
+      "step7": "Save base_model_metrics.csv, retrain_calibration.csv, and shadow_summary.csv with accuracy, forget-log-loss calibration values, runtime, peak GPU memory, and shadow-model member/non-member score moments. Explicitly record shadow_count = 8 in the exported configs."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run one simple and two strong projection-family baselines fairly",
+    "description": "Compare against one simple baseline and two strong nearby baselines under the same update budget, same parameter scope, same data splits, and same independent checkpointing rule.",
+    "steps": {
+      "step1": "Simple baseline Base-FT: run 20 total update steps from theta0 with 10 forget-ascent steps followed by 10 retain-fine-tuning steps. Use batch size 128 on both datasets, learning rate 5e-4 for Purchase100 and 1e-4 for CIFAR-10 during forget ascent, and half those learning rates during retain fine-tuning. Save checkpoints after steps 5, 10, 15, and 20.",
+      "step2": "Strong baseline GU-style global retain projection: use the same 20-step schedule and optimizer settings as Base-FT. Build a global retain basis from all of R_select, not a subsample, using an unweighted Gram matrix over the same restricted parameter scope as ASPIRE. Choose the minimum rank reaching tau = 0.90 with the same rank caps, then project each update with lambda_proj = 1.0.",
+      "step3": "Strong baseline OrthoGrad-style per-step orthogonalization: use the same 20-step schedule and optimizer settings as Base-FT. At each step orthogonalize the forget update against per-example gradients from one retained minibatch sampled from R_train, using retained minibatch size 64 for Purchase100 and 32 for CIFAR-10. Do not give OrthoGrad more steps, broader parameter scope, or a different checkpoint rule.",
+      "step4": "Run Base-FT, GU, and OrthoGrad on Purchase100 random-1%-deletion, CIFAR-10 random-1%-deletion, and CIFAR-10 high-loss-5%-deletion for seeds [7, 17, 27]. This yields 27 baseline unlearning runs total. Use identical theta0 checkpoints, forget sets, retain splits, saved checkpoints, and audit pools across methods within each seed and regime.",
+      "step5": "Apply one common stopping rule to all approximate methods. Evaluate only checkpoints inside the retrain-defined forgetting band. Among eligible checkpoints, choose the earliest checkpoint that minimizes retained-member LiRA TPR@1%FPR on R_audit_A versus V_audit_A. Never use R_audit_B, V_audit_B, T_eval, or any final-report statistic for model selection.",
+      "step6": "If no checkpoint enters the forgetting band, mark the run as a failure-to-meet-forgetting, still keep the step-20 metrics, and include the run in the final tables. Save baseline_runs.csv with dataset, regime, seed, method, selected checkpoint, R_audit_A selection score, R_audit_B final metrics, forgetting-band status, runtime, and peak memory."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run ASPIRE with privacy-targeted basis selection under independent auditing",
+    "description": "Execute the proposed narrow extension to GU-family projection unlearning: build the protected basis from a privacy-vulnerable retained slice, then evaluate it under the same independently held-out audit protocol as the baselines.",
+    "steps": {
+      "step1": "For each seed and dataset-regime pair, compute the forget-gradient covariance summary C_f from theta0 over the restricted parameter scope. Use all forget examples for Purchase100. For CIFAR-10, if the forget set has more than 512 examples, estimate C_f from a fixed class-stratified subset of 512 forget examples to control runtime while preserving regime composition.",
+      "step2": "For every retained example x in R_select, compute the pre-registered vulnerability score s(x) = g_r(x)^T C_f g_r(x), where g_r(x) is the per-example gradient of the base unlearning loss on the same parameter scope. Rank R_select by s(x) and keep the top q = 25 percent as the privacy-targeted slice.",
+      "step3": "Construct the ASPIRE protected basis only from the targeted slice. Form F_sel = sum_i w_i g_r(x_i) g_r(x_i)^T with normalized weights w_i proportional to s(x_i). Compute the minimum-rank eigenspace whose cumulative weighted energy reaches tau = 0.90, capped at 16 for Purchase100 and 32 for CIFAR-10. Save selected indices, score quantiles, eigenvalue spectrum, and realized rank.",
+      "step4": "Run the same 20 update steps used by Base-FT. At each step replace the raw update u_t with u_t' = u_t - lambda_proj P_U u_t, where P_U is the projector onto the ASPIRE basis. Add the weak retained anchor only on the targeted slice: mean KL(p_theta0(x) || p_theta(x)) with beta_anchor = 0.05 for Purchase100 and beta_anchor = 0.02 for CIFAR-10.",
+      "step5": "Run ASPIRE on the same 3 dataset-regime pairs and the same 3 seeds, for 9 core ASPIRE runs total. Use exactly the same checkpoint schedule, the same forgetting-band rule, and the same R_audit_A-only stopping criterion as Base-FT, GU, and OrthoGrad so any difference is attributable to basis construction rather than to extra tuning.",
+      "step6": "Save aspire_run_summary.json with selector statistics, protected-slice class histogram, realized rank, per-checkpoint R_audit_A metrics, final R_audit_B metrics, selected checkpoint, runtime overhead relative to Base-FT, and numerical-stability warnings if eigendecomposition or projection becomes ill-conditioned."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate the selector signal and anchor to test the real novelty boundary",
+    "description": "Use focused ablations to test whether any gain comes from the vulnerability score itself, not merely from projection, reduced rank, or the auxiliary anchor.",
+    "steps": {
+      "step1": "Ablation 1, matched-size untargeted subset: rerun ASPIRE but replace the top-q selector with a class-stratified uniform subset of R_select of the same size. Keep the weighted-basis code path, tau, rank cap, lambda_proj, and anchor fixed. This directly tests whether the vulnerability score matters beyond any reduced-rank selected subset.",
+      "step2": "Ablation 2, score-scrambled weighting: keep the same targeted top-q subset chosen by s(x), but randomly permute the scores within that subset before computing the weights w_i. Keep the selected examples, tau, rank cap, and anchor unchanged. This tests whether the gain comes from the vulnerability weighting itself versus any selected subset with the same cardinality.",
+      "step3": "Ablation 3, no-anchor: rerun ASPIRE with the targeted selector and true score weights intact but set beta_anchor = 0.0. This checks whether the weak retained anchor is carrying the result.",
+      "step4": "Run all 3 ablations only on the hardest regime, CIFAR-10 high-loss-5%-deletion, for seeds [7, 17, 27]. This yields 9 additional GPU runs and keeps the full plan within the 8 hour budget.",
+      "step5": "For every completed method run, also compare the selected checkpoint with the final step-20 checkpoint offline and report the delta as a protocol diagnostic. Save ablations.csv and stopping_diagnostic.csv with retained TPR@1%FPR, retained ROC-AUC, forgetting metrics, selected checkpoint, runtime, and checkpoint-selection deltas."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate with stronger LiRA calibration and explicit success criteria",
+    "description": "Measure retained privacy, forgetting quality, utility, and efficiency with a pre-registered Gaussian LiRA protocol and outcome criteria aligned exactly to proposal.md and idea.json.",
+    "steps": {
+      "step1": "Use Gaussian LiRA as the primary retained-membership attack. Fix the attack score before running experiments: true-class log-loss for Purchase100 and mean true-class log-loss over 4 deterministic augmentations for CIFAR-10. Fit the in and out Gaussian distributions only from the 8 shadow models trained on A_pool; do not fit attack parameters on any target-model audit output.",
+      "step2": "Calibrate the 1 percent FPR operating threshold using only shadow-model non-member scores from V_pool-derived non-members or shadow holdouts, never from R_audit_A or R_audit_B. Reuse that threshold for all methods and checkpoints within the same dataset so the operating point is fixed before target-model comparison.",
+      "step3": "Primary metric: retained-member LiRA TPR@1%FPR on R_audit_B versus V_audit_B. Secondary retained metrics: LiRA ROC-AUC on R_audit_B and TPR@0.1%FPR marked exploratory only. Report R_audit_A metrics only as checkpoint-selection diagnostics. Do not make any headline claim from 0.1 percent FPR.",
+      "step4": "Forget and utility metrics: forget-set accuracy, forget-set log-loss increase relative to theta0, test accuracy on T_eval, retained accuracy on R_audit_B, expected calibration error on T_eval, runtime, runtime ratio relative to Base-FT, peak GPU memory, selector-build overhead, and realized projection rank. Report all metrics for every method whether they help or hurt ASPIRE.",
+      "step5": "Aggregate each metric over seeds [7, 17, 27] as mean and standard deviation. For ASPIRE minus Base-FT, ASPIRE minus GU, and ASPIRE minus OrthoGrad on retained TPR@1%FPR, compute paired bootstrap confidence intervals with 2000 resamples over seed-level differences. Because n = 3 is small, treat these as uncertainty summaries and temper any low-FPR claims accordingly.",
+      "step6": "Support the paper's narrow claim only if all of the following hold on final R_audit_B results: ASPIRE lowers retained TPR@1%FPR relative to Base-FT on both random-deletion settings while staying inside the retrain-calibrated forgetting band, ASPIRE beats at least one of GU or OrthoGrad on both random-deletion settings and is not more than 5 percent worse than the stronger of them on either setting, the largest gain appears on CIFAR-10 high-loss-5%-deletion, the matched-size untargeted-subset ablation underperforms full ASPIRE, and runtime stays at or below 1.35x Base-FT.",
+      "step7": "State the disconfirmation rule explicitly in the final report: if ASPIRE only helps on the checkpointing shard, if its gain disappears on R_audit_B, if the matched-size untargeted subset performs comparably, or if the forgetting-quality match fails, then the contribution should be written as a negative or mixed result about privacy-targeted basis selection under independent auditing rather than as a stronger method claim."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce tables and figures for the narrow incremental claim",
+    "description": "Generate paper-ready outputs that foreground the actual novelty boundary, protocol separation, and ablation evidence instead of implying a broader unlearning contribution.",
+    "steps": {
+      "step1": "Create Table 1 with protocol details: dataset, model, D_target size, A_pool size, V_pool size, T_eval size, forget-set size, R_select size, R_audit_A size, R_audit_B size, retrain forgetting-band threshold, and shadow-model count = 8 for each dataset-regime pair.",
+      "step2": "Create Table 2 with the core comparison for Base-FT, GU, OrthoGrad, and ASPIRE on Purchase100 random-1%-deletion, CIFAR-10 random-1%-deletion, and CIFAR-10 high-loss-5%-deletion. Report retained TPR@1%FPR, retained ROC-AUC, forget-log-loss increase, test accuracy, runtime ratio, peak memory, and realized rank where applicable.",
+      "step3": "Create Figure 1 as a privacy-utility scatter plot with retained TPR@1%FPR on the x-axis and test accuracy on the y-axis, one panel per dataset-regime pair, using seed means with standard-deviation error bars.",
+      "step4": "Create Figure 2 as a checkpoint-selection plot for CIFAR-10 high-loss-5%-deletion showing forget-log-loss increase and retained TPR@1%FPR on R_audit_A versus update step for Base-FT, GU, OrthoGrad, and ASPIRE. Mark the selected checkpoint. Keep R_audit_B absent from this figure to make the independent audit protocol visually obvious.",
+      "step5": "Create Figure 3 as an ablation chart on CIFAR-10 high-loss-5%-deletion comparing full ASPIRE, matched-size untargeted subset, score-scrambled weighting, and no-anchor. Plot retained TPR@1%FPR, retained ROC-AUC, and runtime ratio so the reader can judge whether the vulnerability score itself is doing the work.",
+      "step6": "Export all tables as CSV and LaTeX-ready text, all figures as PNG and PDF, and one final summary.json containing per-seed metrics, confidence intervals, selected checkpoints, split statistics, pilot timings, and total runtime so the study can be reproduced directly from the plan."
+    }
+  }
+]

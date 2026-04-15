@@ -1,0 +1,233 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create virtual environment and install all required packages for LASER-SCL experiments",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv venv && source venv/bin/activate",
+      "step2": "Install PyTorch 2.0+ with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",
+      "step3": "Install scientific packages: pip install numpy scipy scikit-learn matplotlib seaborn pandas",
+      "step4": "Install utility packages: pip install tqdm tensorboard pillow",
+      "step5": "Verify CUDA availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step6": "Create project structure: mkdir -p src data results/figures results/checkpoints results/logs"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare CIFAR Datasets",
+    "description": "Download CIFAR-10, CIFAR-100, and CIFAR-100-N datasets; create train/val splits; save noise indices for reproducibility",
+    "steps": {
+      "step1": "Download CIFAR-10 and CIFAR-100 using torchvision.datasets: python -c \"import torchvision; torchvision.datasets.CIFAR10(root='./data', download=True); torchvision.datasets.CIFAR100(root='./data', download=True)\"",
+      "step2": "Download CIFAR-100-N (human noise) from https://github.com/UCSC-REAL/cifar-10-100n and extract to data/cifar-100-noisy/",
+      "step3": "Create train/val split (90/10) for CIFAR-10 and CIFAR-100 using fixed seed 42; save split indices to data/splits/",
+      "step4": "Generate synthetic noise with fixed seeds [42, 123, 456] for reproducibility:",
+      "step4a": "Symmetric noise: Randomly flip labels to other classes uniformly. Generate noise at 20%, 40%, 60% rates for CIFAR-10",
+      "step4b": "Asymmetric noise: Flip labels to similar classes (e.g., truck->automobile, bird->airplane). Generate at 20%, 40% for CIFAR-10",
+      "step4c": "CIFAR-100 noise: Generate symmetric noise at 20%, 40% only (focus on key noise level 40% to save compute)",
+      "step5": "Save all noise indices as numpy arrays: data/noise_indices/cifar10_sym_40_seed42.npy, etc.",
+      "step6": "Compute and save dataset statistics (mean, std) from training set only for normalization",
+      "step7": "Verify data integrity: Load samples and check label distribution after noise injection"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run Vanilla SupCon Baseline",
+    "description": "Implement standard Supervised Contrastive Learning as the primary baseline",
+    "steps": {
+      "step1": "Implement ResNet-18 encoder in src/models.py with CIFAR-compatible stem (3x3 conv, stride 1 instead of 7x7 stride 2)",
+      "step2": "Implement standard SupCon loss in src/losses.py: L_i = -log[exp(z_i · z_p/τ) / sum_{a in A(i)} exp(z_i · z_a/τ)]",
+      "step3": "Implement training loop in src/train.py with SGD optimizer, lr=0.5, momentum=0.9, weight_decay=1e-4, cosine annealing",
+      "step4": "Implement linear evaluation protocol in src/eval.py: Freeze encoder, train linear classifier for 100 epochs",
+      "step5": "Run SupCon on CIFAR-10 clean: 500 epochs, batch_size=256, temperature=0.1, projection_dim=128, seeds=[42, 123, 456]",
+      "step6": "Run SupCon on CIFAR-10 with 40% symmetric noise: 3 seeds, save final accuracy and per-epoch loss history",
+      "step7": "Run SupCon on CIFAR-100 with 40% symmetric noise: 3 seeds (prioritize this for main comparison)"
+    },
+    "hyperparameters": {
+      "encoder": "ResNet-18",
+      "epochs": 500,
+      "batch_size": 256,
+      "optimizer": "SGD",
+      "lr": 0.5,
+      "momentum": 0.9,
+      "weight_decay": 1e-4,
+      "lr_schedule": "cosine",
+      "temperature": 0.1,
+      "projection_dim": 128,
+      "hidden_dim": 512,
+      "seeds": [42, 123, 456]
+    },
+    "expected_outputs": ["results/supcon_cifar10_clean.json", "results/supcon_cifar10_sym40.json", "results/supcon_cifar100_sym40.json"]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run Simple Reweighting Baselines",
+    "description": "Implement loss-based reweighting baselines to validate unique value of ELP",
+    "steps": {
+      "step1": "Implement SupCon + Loss Reweighting (LR): weight_i = 1 / (loss_i + epsilon), normalize weights per batch",
+      "step2": "Implement SupCon + Inverse Loss (IL): weight_i = loss_i / mean(loss), promotes hard samples",
+      "step3": "Implement SupCon + Focal Reweighting (FR): weight_i = (1 - p_i)^gamma where p_i = exp(-loss_i), gamma=2.0",
+      "step4": "Run SupCon+LR on CIFAR-10 40% noise: 3 seeds, this is the CRITICAL baseline for success criterion",
+      "step5": "Run SupCon+IL on CIFAR-10 40% noise: 1-2 seeds (less critical, for completeness)",
+      "step6": "Run SupCon+LR on CIFAR-100 40% noise: 2 seeds, compare against LASER-SCL",
+      "step7": "Save detailed loss and weight statistics per epoch for analysis"
+    },
+    "hyperparameters": {
+      "epsilon": 1e-6,
+      "gamma_focal": 2.0,
+      "seeds": [42, 123]
+    },
+    "expected_outputs": ["results/supcon_lr_cifar10_sym40.json", "results/supcon_lr_cifar100_sym40.json"]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Run UNICON Baseline",
+    "description": "Implement UNICON (two-network co-teaching with uniform selection) for comparison",
+    "steps": {
+      "step1": "Implement two-network co-teaching framework in src/unicon.py",
+      "step2": "Implement Jensen-Shannon divergence-based selection for identifying clean samples",
+      "step3": "Implement contrastive learning on selected clean samples",
+      "step4": "Run UNICON on CIFAR-10 40% symmetric noise: 2 seeds (reduced from 3 due to compute cost)",
+      "step5": "Run UNICON on CIFAR-100 40% symmetric noise: 2 seeds",
+      "step6": "Track selection precision/recall to compare with LASER-SCL's continuous weighting"
+    },
+    "hyperparameters": {
+      "warmup_epochs": 10,
+      "noise_rate": 0.4,
+      "selection_ratio": 0.5,
+      "seeds": [42, 123]
+    },
+    "expected_outputs": ["results/unicon_cifar10_sym40.json", "results/unicon_cifar100_sym40.json"]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Synthetic ELP Validation Experiment",
+    "description": "Validate that ELP distinguishes clean from noisy samples before full method implementation. THIS IS THE FIRST EXPERIMENT TO RUN for preliminary evidence.",
+    "steps": {
+      "step1": "Train vanilla SupCon on CIFAR-10 with 40% symmetric noise for 100 epochs (shorter run)",
+      "step2": "Track per-sample loss history with window W=10 for all training samples",
+      "step3": "Compute ELP for each sample: ELP = -Cov(loss_history, step_indices) / Var(step_indices)",
+      "step4": "Compute AUC-ROC for: (a) ELP-based clean vs noisy discrimination, (b) Loss-based discrimination",
+      "step5": "Generate trajectory visualization plots: Loss vs Epoch for clean samples, noisy samples",
+      "step6": "Statistical test: t-test comparing ELP distributions of clean vs noisy samples",
+      "step7": "Report: ELP AUC-ROC, Loss AUC-ROC, and whether ELP significantly outperforms (should be >0.05 AUC difference)"
+    },
+    "hyperparameters": {
+      "window_size_W": 10,
+      "epochs": 100,
+      "noise_rate": 0.4
+    },
+    "expected_outputs": ["results/elp_validation/trajectory_plots.png", "results/elp_validation/auc_comparison.json"]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement and Run LASER-SCL (Full Method)",
+    "description": "Implement complete LASER-SCL with ELP, predicted future loss, and curriculum scheduling",
+    "steps": {
+      "step1": "Implement ELP computation module in src/laser_scl.py: Track loss history per sample in sliding window W=10",
+      "step2": "Implement predicted future loss: l_hat = mean(loss_history) - ELP * Delta, where Delta=5",
+      "step3": "Implement curriculum schedule: mu(t) = mu_min + (mu_max - mu_min) * (t/T)^rho, with mu_min=0.3, mu_max=0.7, rho=2",
+      "step4": "Implement sample weighting: w_i = 1 / (1 + exp(k * (l_hat_i - mu(t)))), k=10",
+      "step5": "Integrate weighted SupCon loss: L_total = sum_i w_i * L_i^SupCon",
+      "step6": "Run LASER-SCL on CIFAR-10 clean (sanity check): 1 seed, should match vanilla SupCon",
+      "step7": "Run LASER-SCL on CIFAR-10 40% symmetric noise: 3 seeds [42, 123, 456] - CRITICAL for success criterion",
+      "step8": "Run LASER-SCL on CIFAR-10 20% and 60% symmetric noise: 2 seeds each (if time permits)",
+      "step9": "Run LASER-SCL on CIFAR-100 40% symmetric noise: 3 seeds - PRIMARY BENCHMARK",
+      "step10": "Run LASER-SCL on CIFAR-100-N (real noise): 2 seeds",
+      "step11": "Save all loss trajectories, ELP values, and weight distributions per epoch for analysis"
+    },
+    "hyperparameters": {
+      "window_size_W": 10,
+      "prediction_horizon_Delta": 5,
+      "mu_min": 0.3,
+      "mu_max": 0.7,
+      "rho": 2,
+      "sigmoid_k": 10,
+      "seeds_main": [42, 123, 456],
+      "seeds_secondary": [42, 123]
+    },
+    "expected_outputs": ["results/laser_scl_cifar10_sym40.json", "results/laser_scl_cifar100_sym40.json", "results/laser_scl_cifar100n.json"]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Component Analysis",
+    "description": "Systematically ablate each novel component to validate its contribution",
+    "steps": {
+      "step1": "Ablation 1 - No Curriculum (Fixed Threshold): mu(t) = 0.5 constant, keep ELP prediction. Run on CIFAR-100 40% noise, 2 seeds",
+      "step2": "Ablation 2 - No ELP (Current Loss Only): Use l_bar instead of l_hat, keep curriculum. Run on CIFAR-100 40% noise, 2 seeds",
+      "step3": "Ablation 3 - Neither (Static Weighting): Fixed threshold + current loss = simple loss-based weighting. Run on CIFAR-100 40% noise, 2 seeds",
+      "step4": "Ablation 4 - ELP Only (No Curriculum, No Prediction): Use raw ELP scores as weights without curriculum. Run on CIFAR-100 40%, 2 seeds",
+      "step5": "For each ablation, compute accuracy and compare against full LASER-SCL",
+      "step6": "Report performance drop for each component; each should contribute >=0.5% to pass success criterion"
+    },
+    "hyperparameters": {
+      "seeds": [42, 123],
+      "noise_rate": 0.4,
+      "dataset": "CIFAR-100"
+    },
+    "expected_outputs": ["results/ablation_no_curriculum.json", "results/ablation_no_elp.json", "results/ablation_static.json"]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Hyperparameter Sensitivity Analysis",
+    "description": "Test robustness to key hyperparameters window size W and prediction horizon Delta",
+    "steps": {
+      "step1": "Vary window size W: Test W in [5, 10, 20] on CIFAR-10 40% noise, 1 seed each",
+      "step2": "Vary prediction horizon Delta: Test Delta in [2, 5, 10] on CIFAR-10 40% noise, 1 seed each",
+      "step3": "Vary curriculum sharpness rho: Test rho in [1, 2, 3] on CIFAR-10 40% noise, 1 seed each",
+      "step4": "Report accuracy sensitivity; method should be relatively robust (variation <1% across reasonable values)"
+    },
+    "hyperparameters": {
+      "W_values": [5, 10, 20],
+      "Delta_values": [2, 5, 10],
+      "rho_values": [1, 2, 3]
+    },
+    "expected_outputs": ["results/sensitivity_analysis.json"]
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing and Results Compilation",
+    "description": "Perform rigorous statistical tests and compile all results into summary tables",
+    "steps": {
+      "step1": "Load all experimental results from JSON files",
+      "step2": "Compute mean and standard deviation for each method-dataset-noise combination across seeds",
+      "step3": "Perform paired t-test between LASER-SCL and each baseline on CIFAR-100 40% noise (main comparison)",
+      "step4": "Verify success criterion 1: LASER-SCL mean accuracy - SupCon+LR mean accuracy >= 2% on CIFAR-100 40% noise",
+      "step5": "Verify success criterion 2: Each ablation drop >= 0.5% compared to full method",
+      "step6": "Verify success criterion 3: ELP AUC-ROC > Loss AUC-ROC for clean/noisy discrimination",
+      "step7": "Verify success criterion 4: Compute training time overhead (<20% to pass)",
+      "step8": "Create summary table: Method vs Accuracy on CIFAR-10/100 at various noise rates",
+      "step9": "Create comparison with literature: Report MW-Net, UNICON, DivideMix numbers from papers for reference",
+      "step10": "Report all results with mean ± std format"
+    },
+    "expected_outputs": ["results/final_results_table.csv", "results/statistical_tests.json"]
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the paper",
+    "steps": {
+      "step1": "Figure 1 - Method Overview: Diagram showing ELP computation, predicted future loss, curriculum scheduling",
+      "step2": "Figure 2 - Main Results Bar Chart: Compare LASER-SCL vs baselines on CIFAR-10/100 at different noise rates, include error bars",
+      "step3": "Figure 3 - Loss Trajectories: Plot loss curves for 10 random clean samples and 10 random noisy samples during training, show ELP difference",
+      "step4": "Figure 4 - Ablation Study: Bar chart showing accuracy for full method vs each ablation",
+      "step5": "Figure 5 - Weight Distribution Evolution: Histogram of sample weights at epochs 50, 150, 300, 450 showing curriculum progression",
+      "step6": "Figure 6 - ELP vs Accuracy Correlation: Scatter plot showing ELP values vs final prediction correctness",
+      "step7": "Save all figures as high-resolution PNG (300 DPI) and PDF for paper submission"
+    },
+    "expected_outputs": ["results/figures/figure1_method.png", "results/figures/figure2_main_results.png", "results/figures/figure3_trajectories.png", "results/figures/figure4_ablation.png", "results/figures/figure5_weights.png", "results/figures/figure6_elp_corr.png"]
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Report and Refutation Check",
+    "description": "Generate final report documenting all findings and whether hypotheses were confirmed or refuted",
+    "steps": {
+      "step1": "Compile all experimental results into structured report",
+      "step2": "Evaluate against confirmation criteria: Did LASER-SCL outperform SupCon+LR by >=2%? Did each component contribute >=0.5%? Did ELP achieve higher AUC-ROC?",
+      "step3": "Evaluate against refutation criteria: If LASER-SCL performed worse than SupCon+LR, or ELP provides no benefit over current loss, document this honestly",
+      "step4": "Generate conclusions: Summarize key findings, limitations, and future work",
+      "step5": "Save hyperparameters used to results/hyperparameters.json for reproducibility",
+      "step6": "Create execution log documenting any deviations from plan"
+    },
+    "expected_outputs": ["results/final_report.md", "results/hyperparameters.json", "results/execution_log.md"]
+  }
+]

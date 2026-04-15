@@ -1,0 +1,294 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for deep learning, pruning, and membership inference attacks. Use CUDA-enabled PyTorch for GPU acceleration.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.0+ with CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118",
+      "step3": "Install scientific computing: pip install numpy scipy scikit-learn matplotlib seaborn pandas",
+      "step4": "Install Opacus for DP-SGD: pip install opacus",
+      "step5": "Verify GPU: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step6": "Install tqdm, tensorboard for logging"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess CIFAR-10 Dataset",
+    "description": "Download CIFAR-10 and create proper splits for training, validation, and MIA evaluation. The validation set is crucial for computing privacy saliency metrics. Focus on CIFAR-10 only to save time.",
+    "estimated_time": "5 minutes",
+    "steps": {
+      "step1": "Download CIFAR-10 using torchvision.datasets.CIFAR10(root='./data', download=True)",
+      "step2": "Define transforms: train_transform = RandomCrop(32, padding=4) + RandomHorizontalFlip() + ToTensor + Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))",
+      "step3": "Create training set: 45,000 samples (90% of official train split), seed=42",
+      "step4": "Create validation set: 5,000 samples (10% of official train split), seed=42 - used for privacy saliency computation",
+      "step5": "Create test set: 10,000 samples (official test split) - used for evaluation only",
+      "step6": "Create MIA evaluation splits: For each experiment, randomly sample 1,000 members from training set and 1,000 non-members from test set",
+      "step7": "Verify class balance: ~10% per class in all splits"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Unpruned Baseline Models",
+    "description": "Train ResNet-18 models to convergence on CIFAR-10. These serve as the foundation for all pruning experiments. Reduced to 150 epochs to save time while maintaining good convergence.",
+    "estimated_time": "35 minutes",
+    "steps": {
+      "step1": "Initialize ResNet-18 from torchvision.models.resnet18(pretrained=False, num_classes=10)",
+      "step2": "Modify first conv: Change from 7x7 to 3x3 kernel, stride 1 (standard for CIFAR)",
+      "step3": "Remove maxpool layer after first conv (CIFAR-specific modification)",
+      "step4": "Training config: SGD optimizer, lr=0.1, momentum=0.9, weight_decay=5e-4, batch_size=128",
+      "step5": "LR schedule: CosineAnnealingLR for 150 epochs (reduced from 200 to save time)",
+      "step6": "Train 3 models with seeds [42, 43, 44] for statistical significance",
+      "step7": "Save final model checkpoint and record: train accuracy, test accuracy, model size (MB), FLOPs using thop library"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Magnitude-Based Pruning Baseline",
+    "description": "Standard ℓ1-norm based pruning (Han et al., 2015). Simple baseline showing pruning can incidentally improve privacy.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Implement iterative magnitude pruning: prune p% of channels with smallest ℓ1-norm of weights per layer",
+      "step2": "Pruning schedule: Start from trained baseline, prune in 5 iterations (target sparsity / 5 per iteration)",
+      "step3": "After each pruning iteration, fine-tune for 8 epochs: lr=0.01 (4 epochs), lr=0.001 (4 epochs)",
+      "step4": "Target sparsity levels: [0.3, 0.5, 0.7] to cover moderate to high compression",
+      "step5": "For each sparsity level, train with 3 random seeds [42, 43, 44]",
+      "step6": "Save all pruned model checkpoints for MIA evaluation"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Taylor Importance Pruning Baseline",
+    "description": "Task-only gradient saliency baseline from Molchanov et al. (CVPR 2019). Uses first-order Taylor expansion to estimate neuron importance for task performance.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Implement Taylor importance: S_task(i) = |E[(∂L/∂h_i) * h_i]| for each channel",
+      "step2": "Compute gradients on a mini-batch from training set (128 samples)",
+      "step3": "Rank channels by Taylor importance, prune lowest-ranked channels",
+      "step4": "Iterative pruning: 5 iterations, target sparsity / 5 per iteration",
+      "step5": "Fine-tune for 8 epochs after each pruning step (4 at lr=0.01, 4 at lr=0.001)",
+      "step6": "Target sparsity levels: [0.3, 0.5, 0.7] with 3 seeds [42, 43, 44]",
+      "step7": "This baseline tests whether task-oriented gradient saliency helps privacy"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Hybrid Baseline: Magnitude + KL Regularization",
+    "description": "CRITICAL BASELINE to isolate value of gradient-based neuron selection. Combines magnitude pruning with KL-divergence regularization without gradient-based neuron selection. This directly tests whether gradient-based selection adds value beyond magnitude+KL.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Use magnitude-based channel selection (same as magnitude pruning baseline)",
+      "step2": "During fine-tuning after each pruning step, add KL-divergence regularization loss",
+      "step3": "KL loss: L_KL = mean(KL(P_train || P_test)) where P is output softmax distribution",
+      "step4": "Implementation: Compute mean softmax outputs on train batch and validation batch, minimize KL divergence",
+      "step5": "Total loss: L = L_ce + λ * L_KL where λ=0.1",
+      "step6": "Same pruning schedule: 5 iterations, 8 epochs fine-tuning per iteration",
+      "step7": "Target sparsity levels: [0.3, 0.5, 0.7] with 3 seeds [42, 43, 44]",
+      "step8": "Compare against G3P: If G3P wins, gradient-based selection adds value beyond magnitude+KL"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement G3P Core: Privacy Saliency Metric Computation",
+    "description": "Core contribution: Compute train-test gradient magnitude differences to identify privacy-leaking neurons. This is the novel privacy-specific formulation (distinct from general 'gradient-based saliency').",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Implement gradient extraction: For each batch, compute ∂L/∂h_i for all channels h_i using torch.autograd.grad",
+      "step2": "Privacy saliency: S_privacy(i) = |E_train[|∂L/∂h_i|] - E_val[|∂L/∂h_i|]|",
+      "step3": "Implementation details:",
+      "step4": "  - Sample 512 training examples in batches of 128, compute mean gradient magnitudes",
+      "step5": "  - Sample 512 validation examples (held-out), compute mean gradient magnitudes",
+      "step6": "  - Take absolute difference per channel",
+      "step7": "Task saliency: S_task(i) = |E_train[(∂L/∂h_i) * h_i]| (Taylor expansion from Molchanov)",
+      "step8": "Combined saliency: S_combined(i) = α * S_task(i) - β * S_privacy(i)",
+      "step9": "Default hyperparameters: α=1.0, β=1.0 (ablated in analysis experiments)"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "G3P Progressive Pruning and Fine-tuning",
+    "description": "Execute G3P pruning at multiple sparsity levels. Progressive pruning allows the model to adapt gradually to the removal of privacy-leaking neurons.",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Initialize from trained baseline model",
+      "step2": "For target_sparsity in [0.3, 0.5, 0.7]:",
+      "step3": "  - Compute privacy saliency using current model (train-test gradient difference)",
+      "step4": "  - Compute task saliency using Taylor expansion",
+      "step5": "  - Calculate combined saliency with α=1.0, β=1.0",
+      "step6": "  - Sort channels by S_combined, prune lowest (target_sparsity / 5) percent per iteration",
+      "step7": "  - Fine-tune for 8 epochs: 4 epochs lr=0.01, 4 epochs lr=0.001",
+      "step8": "  - Add KL regularization during fine-tuning: L = L_ce + 0.1 * L_KL",
+      "step9": "  - Repeat for 5 iterations to reach target_sparsity",
+      "step10": "Train with 3 seeds [42, 43, 44] for each sparsity level",
+      "step11": "Save checkpoints at each sparsity level and final model"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement DP-SGD Baseline",
+    "description": "Differential privacy baseline for comparison. DP-SGD provides strong privacy guarantees but with utility degradation. Uses Opacus library.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Configure DP-SGD using Opacus: max_grad_norm=1.0, noise_multiplier computed for target ε=4",
+      "step2": "Use privacy accountant (Rényi DP) to track ε during training",
+      "step3": "Target δ = 1e-5 (standard for CIFAR-10)",
+      "step4": "Train for 100 epochs with batch_size=256 (larger batches help DP-SGD, fewer epochs for time)",
+      "step5": "Train 3 models with seeds [42, 43, 44]",
+      "step6": "Record final (ε, δ) and compare utility-privacy trade-off against G3P"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Implement Threshold-Based Membership Inference Attack",
+    "description": "Fast MIA for all evaluations. Uses loss-based threshold to classify members vs non-members. Efficient (~3 min per model). This is the primary attack for comparing methods.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "For each trained model, compute cross-entropy loss on 1,000 members (from train) and 1,000 non-members (from test)",
+      "step2": "Attack strategy: Lower loss → member, Higher loss → non-member",
+      "step3": "Find optimal threshold that maximizes attack accuracy using ROC curve",
+      "step4": "Compute metrics:",
+      "step5": "  - Attack Accuracy: (TP + TN) / Total",
+      "step6": "  - AUC: Area under ROC curve (primary metric - lower is better)",
+      "step7": "  - Attack Advantage: TPR at 0.1% FPR (following Carlini et al.)",
+      "step8": "Run on all baselines and G3P models at all sparsity levels",
+      "step9": "Record: mean ± std across 3 seeds"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Implement and Run LiRA Membership Inference Attack",
+    "description": "State-of-the-art MIA from Carlini et al. (IEEE S&P 2022). Uses likelihood ratio with shadow models. More accurate but computationally expensive. Reduced to 8 shadow models and run only on key comparisons to fit time budget (~60 min).",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Train 8 shadow models (reduced from 16 for time) on random subsets of training data (80% splits)",
+      "step2": "For each target sample, compute likelihood under IN models (trained with sample) and OUT models (trained without)",
+      "step3": "LiRA score: log[P(loss | IN) / P(loss | OUT)] approximated using Gaussian over shadow model losses",
+      "step4": "For final validation only, run LiRA on these 4 key models (to save time):",
+      "step5": "  - Unpruned baseline",
+      "step6": "  - Magnitude pruning at 50%",
+      "step7": "  - Hybrid (Magnitude + KL) at 50%",
+      "step8": "  - G3P at 50%",
+      "step9": "Compute: AUC, TPR at 0.1% FPR, TPR at 1% FPR",
+      "step10": "Compare G3P vs baselines on LiRA (gold standard privacy metric)"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Alpha and Beta Hyperparameters",
+    "description": "Test the impact of task-privacy trade-off parameters on the privacy-utility frontier. Reduced scope to fit time budget.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Fix target sparsity at 50%",
+      "step2": "Test configurations (seed=42 for each):",
+      "step3": "  - α=1.0, β=0.0: Task-only (equivalent to Taylor pruning)",
+      "step4": "  - α=0.0, β=1.0: Privacy-only",
+      "step5": "  - α=1.0, β=1.0: Balanced (default G3P)",
+      "step6": "  - α=1.0, β=2.0: Privacy-emphasized",
+      "step7": "Measure: Test accuracy, MIA AUC (threshold attack)",
+      "step8": "Find optimal α/β trade-off for paper's main results"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study: Pruning vs Pruning + KL Regularization",
+    "description": "Isolate the contribution of KL regularization fine-tuning after G3P pruning. Tests whether KL adds value beyond gradient-based selection.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "G3P without KL: Only use combined saliency for pruning, standard fine-tuning (CE loss only)",
+      "step2": "G3P with KL: Combined saliency + KL regularization (default)",
+      "step3": "Test at 50% sparsity with 3 seeds [42, 43, 44]",
+      "step4": "Compare: Test accuracy, MIA AUC",
+      "step5": "Determine if KL regularization adds value beyond gradient-based selection"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Layer-wise Privacy Leakage Analysis",
+    "description": "Analyze which layers contribute most to privacy leakage by measuring per-layer privacy saliency scores.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Compute S_privacy(i) for each channel in each layer of unpruned model",
+      "step2": "Aggregate by layer: mean privacy saliency per layer",
+      "step3": "Visualize: Bar plot of privacy leakage by layer",
+      "step4": "Identify: Which layers are most privacy-leaking?",
+      "step5": "Compare: Which layers does G3P prune most aggressively?",
+      "step6": "Generate insights for discussion section"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Correlation Analysis: Gradient Difference vs MIA Vulnerability",
+    "description": "Validate that train-test gradient difference actually correlates with membership inference vulnerability at the neuron level. Samples 50 channels for computational efficiency.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "For unpruned model, compute privacy saliency S_privacy for all channels",
+      "step2": "Randomly sample 50 channels across different layers",
+      "step3": "For each sampled channel, individually mask it (set to zero) and measure MIA AUC",
+      "step4": "Compute correlation: Pearson r between S_privacy and (1 - MIA_AUC after masking)",
+      "step5": "Also compute correlation between magnitude-based importance and MIA vulnerability",
+      "step6": "Hypothesis: S_privacy should correlate better with MIA vulnerability than magnitude",
+      "step7": "If correlation is weak, report honestly as limitation"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform rigorous statistical tests to confirm G3P improvements are significant.",
+    "estimated_time": "5 minutes",
+    "steps": {
+      "step1": "Collect results from 3 random seeds for each method",
+      "step2": "Paired t-test: G3P vs Magnitude Pruning at same sparsity",
+      "step3": "Hypothesis: H0: μ_G3P_MIA_AUC >= μ_Magnitude_MIA_AUC, H1: μ_G3P_MIA_AUC < μ_Magnitude_MIA_AUC",
+      "step4": "Significance level: α = 0.05",
+      "step5": "Also test: G3P vs Hybrid (Magnitude + KL) - CRITICAL TEST",
+      "step6": "Report: t-statistic, p-value, effect size (Cohen's d)",
+      "step7": "Only claim superiority if p < 0.05"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Privacy-Utility-Efficiency Frontier Plots",
+    "description": "Create publication-quality figures showing the trade-offs between accuracy, privacy, and efficiency.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Plot 1: Privacy-Utility Frontier (Test Accuracy vs MIA AUC)",
+      "step2": "  - X-axis: Test Accuracy (%)",
+      "step3": "  - Y-axis: MIA AUC (lower is better)",
+      "step4": "  - Points: Unpruned, Magnitude (30/50/70%), Taylor (50%), Hybrid (30/50/70%), G3P (30/50/70%), DP-SGD",
+      "step5": "  - Show error bars from 3 seeds",
+      "step6": "Plot 2: Sparsity vs MIA AUC - comparing G3P vs baselines",
+      "step7": "Plot 3: Sparsity vs Test Accuracy - showing utility preservation",
+      "step8": "Save as PDF for paper, PNG for quick viewing"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Ablation Study Visualizations",
+    "description": "Visualize ablation results to show component contributions.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "Bar plot: Alpha/Beta ablation results at 50% sparsity",
+      "step2": "  - Grouped bars for different (α, β) configurations",
+      "step3": "  - Show both test accuracy and MIA AUC",
+      "step4": "Bar plot: Component ablation (G3P vs G3P-no-KL vs Task-only vs Privacy-only)",
+      "step5": "Bar plot: Layer-wise privacy saliency",
+      "step6": "Save all as PDF for paper"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Results Summary and Success Criteria Check",
+    "description": "Compile all results and check against success criteria defined in the proposal. Document whether hypothesis is confirmed or refuted.",
+    "estimated_time": "5 minutes",
+    "steps": {
+      "step1": "Create results table with all methods and metrics:",
+      "step2": "  - Method | Sparsity | Test Acc | MIA AUC (Threshold) | MIA AUC (LiRA) | FLOPs",
+      "step3": "Check Success Criteria 1: G3P significantly lower MIA AUC than magnitude (p < 0.05)?",
+      "step4": "Check Success Criteria 2: G3P outperforms hybrid baseline (magnitude + KL)? - CRITICAL",
+      "step5": "Check Success Criteria 3: G3P within 2% accuracy of unpruned at 30-50% sparsity?",
+      "step6": "Document any refutation conditions that occurred",
+      "step7": "Prepare summary for paper's results section"
+    }
+  }
+]

@@ -1,0 +1,282 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated virtual environment and install all required packages for CDHR experiments",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch with CUDA: pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install vLLM for efficient inference: pip install vllm==0.6.4",
+      "step4": "Install transformers and related: pip install transformers==4.46.3 accelerate sentencepiece protobuf",
+      "step5": "Install datasets and evaluation: pip install datasets==2.21.0 evaluate sympy",
+      "step6": "Install sentence embeddings for retrieval: pip install sentence-transformers==3.3.0",
+      "step7": "Install analysis/visualization: pip install numpy scipy matplotlib seaborn pandas scikit-learn",
+      "step8": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step9": "Create project structure: mkdir -p src data results figures logs"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Datasets",
+    "description": "Download all benchmark datasets, create train/validation/test splits, and build analogical retrieval index",
+    "steps": {
+      "step1": "Download GSM8K from HuggingFace: datasets.load_dataset('openai/gsm8k', 'main')",
+      "step2": "Download MATH dataset: datasets.load_dataset('hendrycks/competition_math')",
+      "step3": "Download GPQA Diamond: datasets.load_dataset('Idavidrein/gpqa', 'gpqa_diamond')",
+      "step4": "Download AIME 2024 problems (manual scrape or use available HF datasets)",
+      "step5": "Extract first 100 GSM8K train problems for validation set (threshold selection and assumption validation)",
+      "step6": "Create retrieval index from GSM8K+MATH training sets: encode problems using all-MiniLM-L6-v2",
+      "step7": "Save embeddings to data/retrieval_index.pkl with FAISS index for fast similarity search",
+      "step8": "Compute dataset statistics: problem lengths, answer distributions, difficulty levels",
+      "step9": "Create data manifest file with all splits and file paths"
+    }
+  },
+  {
+    "category": "Model Preparation",
+    "title": "Download and Setup Language Models",
+    "description": "Download all three base models and verify they fit in GPU memory",
+    "steps": {
+      "step1": "Download Llama-3.1-8B-Instruct from HuggingFace (requires HF token)",
+      "step2": "Download Qwen2.5-7B-Instruct from HuggingFace",
+      "step3": "Download DeepSeek-R1-Distill-Qwen-7B from HuggingFace",
+      "step4": "Test load each model with vLLM: verify <40GB VRAM usage per model",
+      "step5": "Create model configuration JSON with model paths, context lengths, and default generation parameters",
+      "step6": "Verify all models can generate with test prompts and produce coherent outputs"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Standard Chain-of-Thought",
+    "description": "Run standard single-pass CoT on all datasets with all models as the simplest baseline",
+    "steps": {
+      "step1": "Implement standard CoT prompt: 'Let's solve this step by step...'",
+      "step2": "Set generation parameters: temperature=0.0 (greedy), max_tokens=2048",
+      "step3": "Run on GSM8K test set (1319 problems) for all 3 models",
+      "step4": "Run on MATH500 (500 problems) for all 3 models",
+      "step5": "Run on GPQA Diamond (198 problems) for all 3 models",
+      "step6": "Run on AIME 2024 (~30 problems) for all 3 models",
+      "step7": "Extract final answers using regex patterns for each dataset format",
+      "step8": "Record accuracy, tokens used, and latency per problem",
+      "step9": "Run with 3 random seeds (42, 123, 456) for stochasticity analysis (seeds affect sampling when temperature>0)",
+      "step10": "Save results to results/baseline_cot/"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Self-Consistency with 16 Samples",
+    "description": "Run self-consistency baseline with 16 parallel samples and majority voting as a strong baseline",
+    "steps": {
+      "step1": "Use same CoT prompt but with temperature=0.7 for diversity",
+      "step2": "Generate 16 samples per problem using vLLM's parallel generation",
+      "step3": "Extract answers from all 16 outputs and apply majority voting",
+      "step4": "Record Pass@1 (best single), Pass@16 (any correct), and Consensus accuracy",
+      "step5": "Track total tokens (16x overhead) and latency",
+      "step6": "Run on subset: GSM8K (first 300 for speed), MATH500 (full), GPQA (full), AIME (full)",
+      "step7": "Use single seed (42) due to high compute cost",
+      "step8": "Save results to results/baseline_sc16/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Pre-Validation: Confidence Dynamics Assumptions",
+    "description": "Validate core theoretical assumptions on held-out set before full CDHR implementation (addresses feedback point 2)",
+    "steps": {
+      "step1": "Select 100 problems from GSM8K validation set (not used in main experiments)",
+      "step2": "Run Llama-3.1-8B with step-by-step CoT, recording confidence at each step",
+      "step3": "Compute confidence using token entropy: c_token = exp(mean(log_probs))",
+      "step4": "Compute confidence velocity: v_t = (c_t - c_{t-3}) / 3 with window=3",
+      "step5": "Compute confidence variance: sigma_t^2 = Var(c_{t-2}, c_{t-1}, c_t)",
+      "step6": "Annotate trajectory types based on thresholds: Progressing (v>0.05, sigma<0.1), Stagnant (|v|<0.05), Oscillating (sigma>0.1), Declining (v<-0.05)",
+      "step7": "Verify Hypothesis: Progressing trajectories correlate with correct steps (precision >= 75%)",
+      "step8": "Verify Hypothesis: Declining trajectories correlate with errors (recall >= 70%)",
+      "step9": "Verify Hypothesis: Oscillating trajectories occur 2x more on hard problems (bottom 50% accuracy)",
+      "step10": "Document results; if assumptions fail, adjust thresholds or abort with failure report",
+      "step11": "Save validation results to results/prevalidation/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Threshold Selection via Grid Search",
+    "description": "Empirically validate and select optimal threshold values for theta_v and theta_sigma (addresses feedback point on empirical justification)",
+    "steps": {
+      "step1": "Use same 100-problem validation set from pre-validation",
+      "step2": "Define grid: theta_v in [0.01, 0.03, 0.05, 0.07, 0.10], theta_sigma in [0.05, 0.075, 0.10, 0.15, 0.20]",
+      "step3": "For each (theta_v, theta_sigma) pair, classify all reasoning steps in validation set",
+      "step4": "Compare classification against human-annotated reasoning states (or proxy: final correctness)",
+      "step5": "Compute trajectory-classification accuracy for each threshold pair",
+      "step6": "Select theta_v=0.05, theta_sigma=0.1 as defaults (should align with theoretical expectations)",
+      "step7": "Record the grid search results showing these are near-optimal",
+      "step8": "Save threshold analysis to results/threshold_selection/"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CDHR: Confidence-Dynamic Heterogeneous Reasoning",
+    "description": "Run full CDHR method on all datasets with all models",
+    "steps": {
+      "step1": "Implement confidence estimation: composite score with beta=0.5 (balanced token + consistency)",
+      "step2": "Implement trajectory monitoring: velocity and variance with window=3",
+      "step3": "Implement strategy selection: Progressing→Linear, Stagnant→Analogical, Oscillating→Decomposition, Declining→Verification",
+      "step4": "Implement strategy prompts with state passing between switches",
+      "step5": "Implement analogical retrieval with relevance verification (similarity threshold 0.75) and fallback",
+      "step6": "Implement safeguards: OOD detection, calibration check, max 5 switches per problem",
+      "step7": "Run CDHR on GSM8K (1319 problems) for all 3 models with 3 seeds each (42, 123, 456)",
+      "step8": "Run CDHR on MATH500 (500 problems) for all 3 models with 3 seeds each",
+      "step9": "Run CDHR on GPQA Diamond (198 problems) for all 3 models with 3 seeds each",
+      "step10": "Run CDHR on AIME 2024 (~30 problems) for all 3 models with 3 seeds each",
+      "step11": "Record: accuracy, tokens per problem, number of strategy switches, strategy distribution, latency",
+      "step12": "Log detailed traces for 50 random problems per dataset for analysis",
+      "step13": "Save results to results/cdhr_main/"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3: Iterative Self-Refinement (CoRefine-style)",
+    "description": "Implement a simplified self-refinement baseline that uses confidence to trigger rethinking (stronger baseline)",
+    "steps": {
+      "step1": "Implement iterative refinement: if confidence < 0.5, regenerate with 'Let me reconsider' prompt",
+      "step2": "Max 3 iterations, early stop if confidence increases above threshold",
+      "step3": "Run on all datasets with Llama-3.1-8B (primary comparison model)",
+      "step4": "Use single seed (42) due to compute constraints",
+      "step5": "Record accuracy, tokens, iterations per problem",
+      "step6": "Save results to results/baseline_refinement/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Strategy Component Ablation",
+    "description": "Test impact of each reasoning strategy by removing them one at a time",
+    "steps": {
+      "step1": "CDHR-LinearOnly: Remove analogical and decomposition, use only Linear+Verification",
+      "step2": "CDHR-NoAnalogical: Keep Linear+Decomposition+Verification, skip analogical transfer",
+      "step3": "CDHR-NoDecomposition: Keep Linear+Analogical+Verification, skip decomposition",
+      "step4": "Run all variants on GSM8K subset (first 300 problems) with Llama-3.1-8B",
+      "step5": "Use single seed (42) for speed",
+      "step6": "Compare against full CDHR on same subset",
+      "step7": "Save results to results/ablation_strategies/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Confidence Signal Ablation",
+    "description": "Test different confidence signal combinations (addresses feedback on sensitivity analysis)",
+    "steps": {
+      "step1": "CDHR-TokenOnly: Use only token-level confidence (beta=1.0)",
+      "step2": "CDHR-ConsistencyOnly: Use only self-consistency (beta=0.0, k=5 samples)",
+      "step3": "Run both on GSM8K subset (first 300 problems) with Llama-3.1-8B",
+      "step4": "Compare accuracy, tokens, and latency against full CDHR (beta=0.5)",
+      "step5": "Save results to results/ablation_confidence_signal/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Beta Sensitivity Analysis",
+    "description": "Analyze sensitivity to beta parameter in composite confidence score (addresses feedback point 5)",
+    "steps": {
+      "step1": "Test beta values: [0.0, 0.25, 0.5, 0.75, 1.0]",
+      "step2": "For each beta, run CDHR on GSM8K subset (first 200 problems) with Llama-3.1-8B",
+      "step3": "Record accuracy and tokens for each beta value",
+      "step4": "Plot accuracy vs beta and tokens vs beta",
+      "step5": "Identify optimal or robust beta range",
+      "step6": "Save results to results/ablation_beta/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: Threshold Sensitivity Analysis",
+    "description": "Test robustness to threshold variations around selected values",
+    "steps": {
+      "step1": "Test theta_v variations: [0.03, 0.05, 0.07] (nominal 0.05)",
+      "step2": "Test theta_sigma variations: [0.075, 0.10, 0.125] (nominal 0.10)",
+      "step3": "Run all 9 combinations on GSM8K subset (first 200 problems) with Llama-3.1-8B",
+      "step4": "Record accuracy and stability of results",
+      "step5": "Report whether performance is sensitive to threshold choices",
+      "step6": "Save results to results/ablation_thresholds/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 5: Dynamics Features Ablation",
+    "description": "Test using only velocity vs only variance vs both",
+    "steps": {
+      "step1": "CDHR-VelocityOnly: Use only velocity for strategy selection (ignore variance)",
+      "step2": "CDHR-VarianceOnly: Use only variance for strategy selection (ignore velocity)",
+      "step3": "Run both on GSM8K subset (first 200 problems) with Llama-3.1-8B",
+      "step4": "Compare against full CDHR with both features",
+      "step5": "Save results to results/ablation_dynamics/"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Analogical Retrieval Quality Analysis",
+    "description": "Evaluate retrieval quality and fallback mechanism effectiveness (addresses feedback point 4)",
+    "steps": {
+      "step1": "For all problems where Analogical Transfer was triggered, record retrieval similarity scores",
+      "step2": "Compute distribution of similarity scores",
+      "step3": "Count frequency of fallback activation (similarity <= 0.5)",
+      "step4": "Compute relevance rate: proportion of retrievals with similarity > 0.75",
+      "step5": "Compare accuracy when fallback triggered vs when analogical was used",
+      "step6": "Verify relevance rate >= 70% target (secondary success criterion)",
+      "step7": "Save analysis to results/retrieval_analysis/"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Compute statistical tests to verify improvements are significant",
+    "steps": {
+      "step1": "Aggregate results across all 3 seeds for CDHR and baselines",
+      "step2": "Compute mean and standard error for accuracy on each dataset",
+      "step3": "Perform paired t-test between CDHR and Standard CoT on each dataset",
+      "step4": "Perform paired t-test between CDHR and Self-Consistency (where applicable)",
+      "step5": "Report p-values and confidence intervals",
+      "step6": "Check if primary success criteria are met with statistical significance",
+      "step7": "Save statistical tests to results/statistical_tests/"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Verify all success criteria are met based on experimental results",
+    "steps": {
+      "step1": "Primary criterion: Check if CDHR achieves accuracy within 2% of best baseline with >=30% lower latency, OR outperforms CoT by >=5% with <=20% token overhead",
+      "step2": "Secondary criterion: Compute entropy of strategy distribution, verify > 0.5 bits",
+      "step3": "Secondary criterion: Compute precision of confidence dynamics predicting correctness, verify >= 80%",
+      "step4": "Secondary criterion: Check generalization - performance consistent across all 3 model families",
+      "step5": "Secondary criterion: Verify analogical retrieval relevance rate >= 70%",
+      "step6": "Document which criteria passed/failed with numerical evidence",
+      "step7": "If criteria not met, analyze failure modes as documented in proposal",
+      "step8": "Save verification report to results/success_criteria/"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create all figures and tables for the research paper",
+    "steps": {
+      "step1": "Figure 1: Main results bar chart - accuracy comparison across methods and datasets",
+      "step2": "Figure 2: Accuracy-Latency Pareto frontier showing efficiency trade-offs",
+      "step3": "Figure 3: Strategy distribution pie chart showing adaptation behavior",
+      "step4": "Figure 4: Confidence trajectory examples (correct vs incorrect reasoning)",
+      "step5": "Figure 5: Ablation study results showing component contributions",
+      "step6": "Figure 6: Beta sensitivity curve (accuracy vs beta value)",
+      "step7": "Figure 7: Threshold sensitivity heatmap",
+      "step8": "Table 1: Main results table with all metrics (accuracy, tokens, latency) across all datasets",
+      "step9": "Table 2: Ablation study summary table",
+      "step10": "Table 3: Strategy selection frequency by problem difficulty",
+      "step11": "Save all figures to figures/ directory in high-resolution PNG and PDF formats"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Report Generation",
+    "description": "Compile comprehensive experiment report with all results",
+    "steps": {
+      "step1": "Generate summary JSON with all key metrics: accuracies, tokens, latencies, ablation results",
+      "step2": "Create detailed experiment log documenting any issues or deviations from plan",
+      "step3": "Write findings report summarizing whether hypotheses were supported",
+      "step4": "Document any negative results or unexpected findings",
+      "step5": "Save final report to results/FINAL_REPORT.md"
+    }
+  }
+]

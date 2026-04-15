@@ -1,0 +1,123 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Lock the study scope and runtime budget",
+    "description": "Pre-register the experiment as a targeted empirical test of whether artifact forecasts are actionable under a fixed selective-intervention budget. The plan intentionally avoids novelty-driven claims and keeps the guaranteed workload feasible on 1x RTX A6000, 60 GB RAM, 4 CPU cores, and about 8 total hours.",
+    "steps": {
+      "step1": "Use Python 3.10, PyTorch 2.3+, torchvision, numpy, scipy, pandas, scikit-learn, pyarrow, matplotlib, seaborn, and tqdm. Enable AMP for all training runs. Do not use distributed training, shadow-model ensembles, or any method requiring more than one GPU.",
+      "step2": "Create outputs/configs, outputs/checkpoints, outputs/traces, outputs/metrics, outputs/attacks, outputs/plots, and outputs/tables. Save one run config per experiment containing dataset, method, seed, split file, optimizer hyperparameters, model hyperparameters, warm-up fraction, refresh cadence, intervention budget, and attack settings.",
+      "step3": "Use exactly three seeds for every guaranteed method, ablation, attack evaluation, and plot aggregation: [11, 22, 33]. Use the same split seed for all methods within a dataset so comparisons are paired. This is the protocol that should govern all final artifacts; if earlier proposal text still says two seeds, update that text before submission so the paper has one consistent contract.",
+      "step4": "Record the paper-positioning note in outputs/tables/study_scope.json before any full runs: this is not a new defense family claim; it is a budget-matched empirical test of whether early artifact forecasts outperform random targeting, static loss-only targeting, and lightweight global defenses. Explicitly list Long et al.-style instance-level susceptibility work, MIST, AdaMixup, and proactive privacy-aware training papers as precursors rather than omitted competitors.",
+      "step5": "Run only one GPU training job at a time because there is one accelerator. Overlap CPU-side work with GPU training by using the 4 CPU cores for split generation, attack calibration, bootstrap confidence intervals, and plotting once early runs finish."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare fixed audit splits for two datasets",
+    "description": "Use one tabular benchmark and one image benchmark so the study covers two common membership-inference regimes without exceeding the runtime budget.",
+    "steps": {
+      "step1": "Use Purchase100 and CIFAR-10 as the only guaranteed datasets. Do not add a third dataset to the guaranteed study.",
+      "step2": "For Purchase100, create a fixed stratified subset per seed with 12,000 target-train records, 2,000 validation records, 2,000 test records, and 8,000 disjoint non-member reference records. Save indices to outputs/metrics/purchase100_split_seed_{seed}.json.",
+      "step3": "For CIFAR-10, sample 15,000 target-train images and 5,000 validation images from the official 50,000-image training set, reserve 20,000 disjoint training images as the non-member reference pool, and keep the official 10,000-image test set unchanged. Save indices to outputs/metrics/cifar10_split_seed_{seed}.json.",
+      "step4": "For Purchase100, standardize features using train-only mean and variance. For CIFAR-10, use per-channel normalization, random crop with 4-pixel padding, and random horizontal flip for training only. Do not add CutMix, RandAugment, label smoothing outside the planned methods, or any extra augmentation that would confound privacy effects.",
+      "step5": "Export dataset summaries with class counts, split sizes, and preprocessing details to outputs/tables/dataset_summary.csv so all later evaluations use the same metadata."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Pre-register one unified protocol",
+    "description": "All targeted methods, targeted baselines, ablations, and evaluation summaries must use the same intervention protocol so the study remains reproducible and the matched-budget comparison is credible.",
+    "steps": {
+      "step1": "Use the same training budget on a dataset for every method: Purchase100 uses a 2-layer MLP with hidden sizes [512, 256], ReLU, dropout 0.2, batch size 512, Adam, learning rate 1e-3, weight decay 1e-4, and 16 epochs. CIFAR-10 uses ResNet-18, batch size 256, SGD with momentum 0.9, learning rate 0.1, cosine decay to 1e-4, weight decay 5e-4, and 16 epochs.",
+      "step2": "Fix the warm-up to the first 15 percent of epochs for every targeted method and targeted baseline. For 16 epochs, this means a 3-epoch warm-up on both datasets, with refreshes after epochs 7, 11, and 15 for every targeted method and targeted baseline.",
+      "step3": "Fix the intervention budget to the top 10 percent of training records at each refresh. All targeted variants must spend exactly this 10 percent budget. Global baselines do not target subsets, but they must use the same architecture, epochs, optimizer family, splits, and seed set.",
+      "step4": "Define the forecast score q_i as the equal-weight average of percentile ranks of four warm-up or recent-window features: LT-IQR of the loss trace, mean loss, inverse predictive margin, and prediction-flip count. At each refresh, recompute the four features over the most recent window and combine them with the previous score using an exponential moving average with decay 0.5. Do not fit coefficients, train a meta-predictor, or use attack labels.",
+      "step5": "Define the intervention operator once for all targeted methods: same-class vicinal smoothing where the anchor is selected from the lowest-risk 50 percent of the same class using penultimate-layer nearest neighbors, then lambda is sampled from Beta(alpha_i, alpha_i) with alpha_i mapped linearly from 0.8 at the 90th risk percentile to 0.35 at the 100th percentile. Non-targeted records use ordinary ERM updates."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the guaranteed baseline suite",
+    "description": "The baseline set is intentionally narrow but meaningful: one simple baseline, one stronger baseline, one global smoothing baseline, and two matched-budget targeted baselines that directly test whether forecasting adds value.",
+    "steps": {
+      "step1": "Run six guaranteed methods on both datasets and all three seeds: ERM, global mixup, RelaxLoss, targeted-random, targeted-loss-only, and targeted-forecast. This yields 2 datasets x 6 methods x 3 seeds = 36 guaranteed training runs.",
+      "step2": "Use ERM as the simple baseline. Use RelaxLoss as the strong guaranteed baseline. Use global mixup as the global smoothing comparator. Position targeted-random and targeted-loss-only as the decisive budget-matched comparators that test whether forecasting is better than obvious alternatives.",
+      "step3": "For global mixup, use alpha 0.2 on Purchase100 and 0.4 on CIFAR-10. For RelaxLoss, tune only one penalty coefficient on Purchase100 seed 11 validation data and CIFAR-10 seed 11 validation data over {0.5, 1.0, 2.0}, then freeze that choice for seeds 22 and 33. Do not tune on privacy metrics or the test set.",
+      "step4": "Define targeted-random as class-stratified random selection of 10 percent of records at each refresh, with the same warm-up, refresh schedule, anchor rule, and smoothing operator as targeted-forecast. Define targeted-loss-only as ranking by mean loss only, refreshed on the same schedule with the same smoothing operator.",
+      "step5": "Do not make AdaMixup, MIST, or proactive privacy-aware training methods guaranteed baselines because the compute budget and engineering budget are tight. If a closely related forecast-driven selective method is found to be implementation-ready locally with less than 2 hours of integration work, run it on CIFAR-10 only after all guaranteed runs and interpret the paper as a benchmarking study rather than a novelty claim."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Execute the forecast-driven intervention study",
+    "description": "The main experiment tests whether the composite forecast is actionable enough to reduce high-risk leakage and disparity more effectively than the matched-budget alternatives.",
+    "steps": {
+      "step1": "Launch the 36 guaranteed runs in this order to de-risk the schedule: Purchase100 ERM, RelaxLoss, global mixup, targeted-random, targeted-loss-only, targeted-forecast for seeds 11, 22, and 33 first; then repeat the same method order on CIFAR-10. This gets the cheaper dataset completed early and exposes logging or attack issues before the more expensive image runs dominate wall time.",
+      "step2": "During every targeted run, save one parquet trace file per refresh containing sample id, class id, current q_i, the four score components, targeted flag, chosen anchor id, lambda, and penultimate-feature neighbor distance. Save final per-sample traces for all methods with loss, margin, confidence, entropy, and final attack score to outputs/traces/{dataset}_{method}_{seed}.parquet.",
+      "step3": "Refresh the penultimate-layer feature bank at every refresh point using the current checkpoint. Use exact nearest neighbors for Purchase100 and cosine nearest neighbors for CIFAR-10. Restrict anchors to the same class and to the lowest-risk half of that class under the current q_i definition.",
+      "step4": "Select the final checkpoint by highest validation accuracy, breaking ties by lower validation loss. Use the same checkpointing rule for all methods. Save utility metrics, runtime, memory, and attack file paths as one row per run in outputs/metrics/main_runs.csv.",
+      "step5": "If the forecast-driven method does not beat either targeted-loss-only or targeted-random on the primary high-risk privacy metric on both datasets, pre-register the interpretation as a negative result about actionability rather than trying new method variants."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel component",
+    "description": "The only method components that can plausibly explain gains are the composite multi-artifact forecast, the refresh mechanism, and the selective smoothing operator. Each gets a direct matched-budget ablation.",
+    "steps": {
+      "step1": "Run three required ablations on both datasets and all three seeds: forecast-single-artifact, forecast-no-refresh, and forecast-targeted-penalty. This yields 2 datasets x 3 ablations x 3 seeds = 18 additional training runs.",
+      "step2": "Define forecast-single-artifact as using LT-IQR alone for ranking with the same 10 percent budget, same warm-up, same refresh schedule, and same smoothing operator. This tests whether the composite forecast is better than the strongest single artifact.",
+      "step3": "Define forecast-no-refresh as computing the full four-feature q_i once after warm-up and freezing the targeted subset for the rest of training. This tests whether online refresh is necessary.",
+      "step4": "Define forecast-targeted-penalty as keeping the full forecast and refresh schedule but replacing same-class vicinal smoothing with a targeted confidence penalty of 0.02 on Purchase100 and 0.01 on CIFAR-10 applied only to the selected 10 percent subset. This tests whether the chosen intervention operator matters beyond selective regularization itself.",
+      "step5": "After the full grid, compute one non-training subgroup analysis pass: for each method on each dataset, report utility and privacy metrics on the warm-up top-decile-risk members, the middle-risk members, and the bottom-risk members, plus per-class intervention frequency. Use this to check whether the method helps only the already easy cases or shifts harm across groups."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate privacy, forecast quality, utility, and cost",
+    "description": "The evaluation is explicitly limited to lightweight black-box score-based attacks. The plan includes one stronger calibration setting beyond global-variance LiRA-lite, but it does not claim robustness to heavy multi-shadow or white-box attacks.",
+    "steps": {
+      "step1": "For every run, compute three attack families using the disjoint non-member reference pool for calibration: loss-threshold attack, global-variance LiRA-lite or first-principles likelihood-ratio scoring, and class-conditional LiRA-lite where mean and variance are fit separately for each class from the same reference pool. Treat global-variance LiRA-lite TPR@1%FPR as the primary attack metric and class-conditional LiRA-lite TPR@1%FPR as the stronger robustness check.",
+      "step2": "Pre-register worst-decile leakage exactly as follows: compute q_i for every member immediately after warm-up and before any post-warm-up targeted intervention is applied; partition members into deciles by that q_i; calibrate the final attack threshold at 1 percent FPR using the non-member reference pool; report the final attack TPR restricted to member records in the top forecast decile. Do not define deciles from final attack scores.",
+      "step3": "Pre-register privacy disparity exactly as follows: using the same warm-up q_i deciles, compute final attack TPR@1%FPR on the top forecast decile and on the pooled middle two forecast deciles covering the 50th to 70th percentiles; define disparity as top-decile TPR minus middle-decile TPR. Lower is better.",
+      "step4": "Pre-register forecast quality exactly as follows: let s_i be the final member attack score under the primary global-variance LiRA-lite attack; define final privacy outliers as the top 10 percent of members by s_i; report Spearman correlation between q_i and s_i and Precision@10, where Precision@10 is the fraction of members in the top 10 percent by q_i that also fall in the top 10 percent by s_i.",
+      "step5": "Report the following metrics for every method and dataset: global-variance LiRA-lite TPR@1%FPR, class-conditional LiRA-lite TPR@1%FPR, loss-threshold TPR@1%FPR, worst-decile leakage, privacy disparity, test accuracy, macro-F1 for Purchase100, runtime minutes, peak GPU memory, and privacy gain per extra training minute relative to ERM. Compute privacy gain per extra training minute as (ERM primary-attack TPR@1%FPR minus method primary-attack TPR@1%FPR) divided by (method minutes minus ERM minutes plus 0.1).",
+      "step6": "Use paired summaries across the three seeds. Report mean, standard deviation, and 1,000-sample paired bootstrap confidence intervals for the difference between targeted-forecast and each targeted or global comparator on worst-decile leakage, disparity, and accuracy. Treat results as supportive only if the mean effect is in the right direction on both datasets and the accuracy drop stays within the pre-registered tolerance."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Apply explicit success and failure criteria",
+    "description": "The study should be able to fail cleanly. Success is defined in terms of the high-risk privacy question, not average AUC alone.",
+    "steps": {
+      "step1": "Primary success criterion: targeted-forecast must improve worst-decile leakage or privacy disparity over ERM and global mixup on both Purchase100 and CIFAR-10, while losing no more than 1.5 absolute percentage points of test accuracy on either dataset.",
+      "step2": "Comparator success criterion: targeted-forecast must outperform targeted-loss-only and targeted-random on worst-decile leakage on both datasets under the exact same 10 percent intervention budget and the exact same refresh schedule.",
+      "step3": "Forecast-quality success criterion: Spearman(q_i, s_i) must be positive on both datasets and Precision@10 must exceed the random 10 percent baseline by at least 0.05 absolute on average across seeds.",
+      "step4": "Attack-robustness success criterion: the direction of the privacy improvement must remain the same under class-conditional LiRA-lite even if the magnitude shrinks. If gains disappear under class-conditional calibration, limit the conclusion to a weak lightweight stress test and do not claim a robust privacy benefit.",
+      "step5": "Failure conditions to report explicitly: targeted-loss-only matches or beats targeted-forecast; gains appear in average attack AUC but not in worst-decile leakage or disparity; the forecast set is unstable with mean consecutive-refresh Jaccard below 0.3; the method exceeds the 1.5-point utility loss limit; or subgroup analysis shows more than 2 absolute points additional accuracy harm on the warm-up top-decile-risk group relative to the strongest comparator."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate paper-ready tables and figures",
+    "description": "Outputs should make the benchmark-style contribution legible: whether forecast-driven selective intervention is useful, for whom, and at what cost.",
+    "steps": {
+      "step1": "Create one main table for each dataset with mean plus standard deviation over three seeds for ERM, global mixup, RelaxLoss, targeted-random, targeted-loss-only, targeted-forecast, and each ablation. Columns must include primary-attack TPR@1%FPR, class-conditional TPR@1%FPR, worst-decile leakage, privacy disparity, test accuracy, runtime minutes, and privacy gain per extra training minute.",
+      "step2": "Create a privacy-utility scatter for each dataset with test accuracy on the x-axis and primary-attack TPR@1%FPR on the y-axis. Encode runtime overhead by marker size and label the three most important methods: RelaxLoss, targeted-loss-only, and targeted-forecast.",
+      "step3": "Create a matched-budget bar figure showing worst-decile leakage for targeted-random, targeted-loss-only, and targeted-forecast. Use the same y-axis range across datasets so the budget-matched comparison is visually fair.",
+      "step4": "Create a forecast-quality figure for targeted-forecast only with warm-up forecast deciles on the x-axis and final primary-attack scores on the y-axis, plus a second panel showing risky-set Jaccard overlap across refreshes. Annotate each panel with Spearman correlation and Precision@10.",
+      "step5": "Save tables as outputs/tables/main_results.csv, outputs/tables/ablation_results.csv, outputs/tables/subgroup_results.csv, outputs/tables/runtime_budget.csv, and outputs/tables/study_scope.json. Save figures as both PNG and PDF under outputs/plots/."
+    }
+  },
+  {
+    "category": "Runtime Budget",
+    "title": "Keep the guaranteed study inside eight hours",
+    "description": "Use a pilot-first schedule and conservative timing assumptions. If pilots are slower than expected, reduce only non-essential diagnostics before touching the guaranteed comparison set.",
+    "steps": {
+      "step1": "Run four pilot jobs first on seed 11: Purchase100 ERM, Purchase100 targeted-forecast, CIFAR-10 ERM, and CIFAR-10 targeted-forecast. Record epoch time, trace-logging overhead, feature-bank refresh time, attack-runtime time, and peak GPU memory before launching the full grid.",
+      "step2": "Budget training time conservatively as follows: Purchase100 ERM or global baselines about 2 minutes each and targeted methods or ablations about 3 minutes each; CIFAR-10 ERM or global baselines about 6 minutes each and targeted methods or ablations about 8 minutes each. Under these assumptions, the 36 guaranteed main runs take about 3.3 hours and the 18 required ablations take about 1.65 hours.",
+      "step3": "Budget attack computation, bootstrap intervals, subgroup analysis, and plotting at 1.5 hours total, with most of that CPU work overlapped with ongoing GPU training. Budget 0.75 hours for pilots and 0.5 hours of slack for reruns or debugging. This gives a total expected wall time of about 7.7 hours.",
+      "step4": "If pilot runtime exceeds the estimate by more than 20 percent, keep the datasets, three seeds, six guaranteed methods, three required ablations, and all primary metrics unchanged. First remove non-essential diagnostics such as TPR@0.1%FPR plots and extra per-refresh exports, then if needed reduce CIFAR-10 from 16 epochs to 14 epochs for every method uniformly.",
+      "step5": "Do not cut the three-seed requirement, the targeted-random baseline, the targeted-loss-only baseline, the class-conditional LiRA-lite check, or the pre-registered worst-decile and disparity metrics. Those are the minimum elements needed for a credible answer to the paper's actual question."
+    }
+  }
+]

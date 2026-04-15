@@ -1,0 +1,243 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create virtual environment and install required packages for hierarchical Bayesian modeling, IRT, and evaluation",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA 12.1: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install Pyro for Bayesian inference: pip install pyro-ppl>=1.8.6",
+      "step4": "Install IRT utilities and scientific computing: pip install girth scipy scikit-learn pandas matplotlib seaborn tqdm",
+      "step5": "Verify GPU: python -c 'import torch; print(torch.cuda.get_device_name(0))'"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Collect and Preprocess Historical Evaluation Data",
+    "description": "Download existing model evaluation results to train population model. Use pre-computed responses to avoid expensive LLM inference.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Download MMLU subject-level data: Use datasets library to load cais/mmlu with all 57 subjects (~14K items total)",
+      "step2": "Collect model evaluation data: Scrape HuggingFace Open LLM Leaderboard for 80-100 models with complete MMLU results",
+      "step3": "Extract metadata: family (llama2/3, qwen2/3, gemma, mistral, phi, falcon), parameter count, architecture (base/instruct/chat)",
+      "step4": "Simulate item responses: For each subject with n items and accuracy p, sample n Bernoulli(p) to create synthetic item-level data",
+      "step5": "Create train/test split: 60 models for population training, 20 held-out models for adaptive evaluation testing",
+      "step6": "Define 3 capability dimensions: STEM (14 subjects), Humanities (18 subjects), Applied (25 subjects)",
+      "step7": "Save: data/train_models.json, data/test_models.json, data/item_params.json"
+    }
+  },
+  {
+    "category": "Baseline Implementation",
+    "title": "Baseline: Random Item Selection",
+    "description": "Simple baseline with random item selection and unidimensional IRT estimation",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Implement RandomSelector: select_next_item() returns random choice from remaining items",
+      "step2": "Use 2PL IRT for ability estimation: P(correct) = sigmoid(a*(theta - b))",
+      "step3": "Run on 20 test models: Randomly select items, update theta via MAP estimation after each response",
+      "step4": "Track: prediction MAE vs items used, stop at 200 items or convergence",
+      "step5": "Run 3 seeds (42, 123, 456), record mean and std",
+      "step6": "Save: results/baseline_random.json"
+    }
+  },
+  {
+    "category": "Baseline Implementation",
+    "title": "Baseline: Independent MAT (Segall 1996 Style)",
+    "description": "Classic multi-dimensional IRT with D-optimality selection, NO population structure. Directly addresses feedback to compare with established MAT.",
+      "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Implement 3D MIRT: P(correct) = sigmoid(a1*theta1 + a2*theta2 + a3*theta3 - b)",
+      "step2": "Pre-calibrate item parameters using training models with marginal maximum likelihood",
+      "step3": "Implement D-optimality: Select item maximizing det(Fisher information matrix)",
+      "step4": "Initialize with flat prior N(0, I) for each model independently",
+      "step5": "Run variational inference for posterior updates after each response",
+      "step6": "Run on 20 test models with 3 seeds, track MAE vs items",
+      "step7": "Save: results/baseline_independent_mat.json"
+    }
+  },
+  {
+    "category": "Baseline Implementation",
+    "title": "Baseline: M3IRT-Style D-Optimality",
+    "description": "Neural MIRT with D-optimality selection, adapted from Uebayashi et al. 2026. Tests whether neural IRT outperforms hierarchical Bayesian.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Implement neural MIRT: Item parameters a_i, b_i learned via neural network with embedding layer",
+      "step2": "Train neural IRT on training models: Optimize ELBO with Pyro, 2000 steps",
+      "step3": "Use D-optimality on learned Fisher information for item selection",
+      "step4": "Evaluate on test models with same protocol as other baselines",
+      "step5": "Run 3 seeds, save: results/baseline_m3irt_style.json"
+    }
+  },
+  {
+    "category": "Baseline Implementation",
+    "title": "Baseline: Deep-CAT Style RL Selection",
+    "description": "Deep reinforcement learning for item selection, adapted from Li et al. 2025 Deep-CAT. Tests whether learned RL policy outperforms information-theoretic selection.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Simplified Deep-CAT: Use policy gradient (REINFORCE) with small network",
+      "step2": "Network: 2-layer MLP (state_dim=9 -> hidden=32 -> action_dim=num_items)",
+      "step3": "Train on 50 episodes using training models, early stopping",
+      "step4": "Use trained policy for item selection on test models",
+      "step5": "Run 3 seeds, save: results/baseline_deep_cat_style.json"
+    }
+  },
+  {
+    "category": "Baseline Implementation",
+    "title": "Baseline: Metadata Regression (Simple Zero-Shot)",
+    "description": "Simple scaling law regression predicting performance from metadata. Tests if hierarchical model adds value beyond simple regression.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Train Ridge regression on training models: Features = [log(params), is_instruct, family_onehot]",
+      "step2": "Target = full-benchmark accuracy averaged across 57 subjects",
+      "step3": "Predict on 20 test models without observing any items (true zero-shot)",
+      "step4": "Compute Spearman correlation between predicted and true rankings",
+      "step5": "Save: results/baseline_metadata_regression.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 1: Train Hierarchical Population Model",
+    "description": "Learn population structure - family distributions and covariances. Novel contribution: hierarchical Bayesian modeling for LLM population.",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "step1": "Define 3-level hierarchical model: Level1=theta_m, Level2=(mu_f, Sigma_f), Level3=hyperpriors",
+      "step2": "Model spec: theta_m ~ N(mu_f, Sigma_f); mu_f ~ N(mu_0, Sigma_0); Sigma_f ~ InverseWishart(Psi, nu)",
+      "step3": "Define 8 families: llama2, llama3, qwen2, qwen3, gemma, mistral, phi, other",
+      "step4": "Implement metadata network g_phi: MLP(input=4 [log_params, is_instruct, arch_code, family_emb], hidden=32, output=3)",
+      "step5": "Jointly optimize: (a) hierarchical parameters, (b) item parameters, (c) metadata network",
+      "step6": "Training: SVI with ClippedAdam, lr=0.01, 5000 steps, batch_size=10 models",
+      "step7": "Monitor ELBO convergence, verify monotonic decrease",
+      "step8": "Save: models/population_model.pt with learned mu_f, Sigma_f, g_phi weights, item parameters"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 2a: Zero-Shot Capability Prediction",
+    "description": "Test zero-shot prediction using ONLY metadata and learned population structure. NO items observed.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "For each test model: Extract metadata (family, params, architecture)",
+      "step2": "Predict family mean: mu_pred = g_phi(metadata)",
+      "step3": "Sample ability: theta ~ N(mu_pred, Sigma_f) using learned family covariance",
+      "step4": "Predict performance on all 57 subjects without any observed responses",
+      "step5": "Aggregate to full-benchmark prediction",
+      "step6": "Compute Spearman correlation with true rankings across 20 test models",
+      "step7": "Success check: Is rho > 0.7?",
+      "step8": "Save: results/popbench_zeroshot.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 2b: Population-Aware Adaptive Evaluation",
+    "description": "Main contribution: Adaptive evaluation with hierarchical information gain and population prior initialization.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Initialize with population prior: theta ~ N(g_phi(metadata), Sigma_f)",
+      "step2": "Implement Population EIG: Expected reduction in joint uncertainty H(theta, mu_f)",
+      "step3": "Use variational approximation for EIG to avoid expensive MC integration",
+      "step4": "Adaptive loop: Max 80 items or MAE<0.05 for each test model",
+      "step5": "At each step: compute EIG, select max, observe, update posterior",
+      "step6": "Track: items used, MAE, Kendall's tau",
+      "step7": "Run 3 seeds (42, 123, 456)",
+      "step8": "Save: results/popbench_adaptive.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 2c: Joint Multi-Model Evaluation",
+    "description": "Test information sharing when evaluating 4 related models together. Novel: Cross-model information sharing via hierarchical posterior.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Select 4 models from same family with different sizes (e.g., qwen2-0.5B, 1.5B, 7B, 14B)",
+      "step2": "Baseline: Sum items needed when evaluating each independently (from Phase 2b results)",
+      "step3": "Joint evaluation: Share family parameters across all 4 models",
+      "step4": "Interleaved selection: Choose (model, item) pair with highest Population EIG",
+      "step5": "Track total items across all 4 models until all reach MAE<0.05",
+      "step6": "Compute reduction: (independent_total - joint_total) / independent_total",
+      "step7": "Success check: Is reduction > 30%?",
+      "step8": "Save: results/popbench_joint.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Remove Population Prior",
+    "description": "Test if population structure helps: Use flat prior N(0,I) instead of learned family prior.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "PopBench-Flat: Same as Phase 2b but initialize theta ~ N(0, I)",
+      "step2": "Run on 20 test models with 3 seeds",
+      "step3": "Compare items to MAE<0.05: PopBench vs PopBench-Flat",
+      "step4": "Quantify benefit of population prior initialization",
+      "step5": "Save: results/ablation_no_population_prior.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Remove Metadata Network",
+    "description": "Test if metadata conditioning helps: Use learned family mean instead of metadata-predicted mean.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "PopBench-NoMeta: Use mu_f (learned family mean) for all models in family, ignoring individual metadata",
+      "step2": "Run zero-shot prediction on 20 test models",
+      "step3": "Compare Spearman: PopBench (with metadata) vs PopBench-NoMeta",
+      "step4": "Quantify benefit of scaling law information",
+      "step5": "Save: results/ablation_no_metadata.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Standard vs Population EIG",
+    "description": "Test if Population EIG improves over standard EIG (individual uncertainty only).",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "PopBench-StdEIG: Use standard EIG = reduction in H(theta_m) only, NOT joint uncertainty",
+      "step2": "Keep population prior initialization (fair comparison)",
+      "step3": "Run on 20 test models with 3 seeds",
+      "step4": "Compare: Items to MAE<0.05, final prediction accuracy",
+      "step5": "Save: results/ablation_standard_eig.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis and Success Verification",
+    "description": "Comprehensive analysis verifying all success criteria with statistical tests.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Aggregate all results, compute mean and std across 3 seeds",
+      "step2": "Verify Criterion 1: Zero-shot Spearman > 0.7? Report with 95% CI",
+      "step3": "Verify Criterion 2: Items for MAE<0.05 < 10% of benchmark? MMLU=14K items, target <1400 items (expecting ~50-100)",
+      "step4": "Verify Criterion 3: Joint evaluation >30% item reduction?",
+      "step5": "Verify Criterion 4: Calibration - 90% credible intervals contain true value 85-95% of time",
+      "step6": "Paired t-tests: PopBench vs each baseline (alpha=0.05)",
+      "step7": "Effect sizes: Cohen's d for all comparisons",
+      "step8": "Save: results/statistical_analysis.json, results/summary_table.csv"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality visualizations showing key results.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Figure 1: Population structure - t-SNE of learned theta vectors colored by family",
+      "step2": "Figure 2: Learning curves - MAE vs items for all methods, shaded std",
+      "step3": "Figure 3: Zero-shot scatter - Predicted vs true accuracy, show Spearman rho",
+      "step4": "Figure 4: Joint evaluation - Bar chart: independent vs joint items",
+      "step5": "Figure 5: Scaling laws - Metadata predictions vs actual, R^2 value",
+      "step6": "Figure 6: Calibration - Coverage of credible intervals by method",
+      "step7": "Save to figures/ as PDF and PNG"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Robustness and Sensitivity Analysis",
+    "description": "Test robustness to distribution shift and hyperparameter choices.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Budget sensitivity: Evaluate with 20, 50, 100 item budgets",
+      "step2": "Test on 2 models from underrepresented families",
+      "step3": "Save: results/robustness_analysis.json"
+    }
+  }
+]

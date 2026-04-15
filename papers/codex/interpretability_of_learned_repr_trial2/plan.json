@@ -1,0 +1,136 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Set up a reproducible frozen-feature pipeline",
+    "description": "Standardize software, logging, determinism, and run scheduling so all methods are compared fairly on one RTX A6000 within the 8-hour wall-clock budget.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment and install pinned packages: `torch==2.2.*`, `torchvision==0.17.*`, `timm==0.9.*`, `numpy==1.26.*`, `scipy==1.12.*`, `scikit-learn==1.4.*`, `pandas==2.2.*`, `matplotlib==3.8.*`, `seaborn==0.13.*`, `tqdm==4.66.*`, `pyyaml==6.*`, and `h5py==3.10.*`.",
+      "step2": "Record hardware and software metadata to `results/environment.json`: Python version, package freeze, CUDA version, `nvidia-smi` output summary, RAM, CPU core count, GPU memory, hostname, and git commit hash if the workspace is a git repository.",
+      "step3": "Use fixed seeds `[11, 17, 23]` for all main Shapes3D comparisons. Apply the same seed to Python `random`, NumPy, PyTorch, dataloader shuffling, pair sampling, and probe training. Set `torch.backends.cudnn.deterministic=True` and `torch.backends.cudnn.benchmark=False`.",
+      "step4": "Create directories `data/`, `cache/features/`, `cache/pairs/`, `results/`, `results/tables/`, `results/checkpoints/`, and `figures/`. Require every run to save `config.json`, `metrics.json`, `runtime.json`, and `train_log.jsonl`.",
+      "step5": "Because only one GPU is available, schedule GPU jobs sequentially and use the 4 CPU cores in parallel for pair construction, train/validation statistics, bootstrap confidence intervals, and retrieval-metric computation. Do not assume any GPU parallelism in the runtime plan."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare audited Shapes3D features and pair splits",
+    "description": "Build one exact synthetic benchmark that directly matches the proposal's narrow claim about pair-supervised regularization for selective counterfactual edits in frozen vision SAEs.",
+    "steps": {
+      "step1": "Download Shapes3D into `data/` and define image-level splits of `18000` train, `3000` validation, and `3000` test examples, stratified as evenly as possible across the six generative factors `{floor_hue, wall_hue, object_hue, scale, shape, orientation}`.",
+      "step2": "Use frozen `dinov2_vits14` as the only backbone for the main study. Cache image features once to `cache/features/` as float16 tensors and store train-only mean and standard deviation for feature standardization.",
+      "step3": "Construct exact single-factor counterfactual pairs `(x, x_cf^k)` for each split by changing exactly one factor value and holding the other five fixed. Build `24000` train pairs, `4000` validation pairs, and `4000` test pairs balanced across the six factors.",
+      "step4": "Construct candidate nuisance-preserving pairs from the same source image using only mild perturbations: brightness jitter up to `0.1`, contrast jitter up to `0.1`, saturation jitter up to `0.05`, hue jitter up to `0.02`, and resized crop scale `(0.95, 1.0)` with fixed aspect ratio `1.0`.",
+      "step5": "Audit the nuisance transformations with linear factor heads trained only on original train frozen features. Keep a perturbation family only if validation agreement exceeds `99%` on all six factors. If crop-resize fails the audit, drop it and use photometric pairs only.",
+      "step6": "After the audit, construct `18000` nuisance train pairs, `3000` nuisance validation pairs, and `3000` nuisance test pairs. Save for every pair the source id, target id, pair type, changed factor if applicable, and factor tuples before and after intervention to `cache/pairs/metadata.parquet`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run a small representation pilot",
+    "description": "Check whether the result materially depends on feature extraction choice before committing the full run matrix, while keeping the pilot small enough to preserve the total budget.",
+    "steps": {
+      "step1": "Evaluate three frozen DINOv2 representations on a reduced Shapes3D subset of `12000` train, `2000` validation, and `2000` test images: final-layer CLS token, penultimate-layer CLS token, and final-layer mean-pooled patch tokens.",
+      "step2": "For seed `11`, train the same vanilla SAE on each representation with width `1024`, batch size `1024`, Adam optimizer, learning rate `1e-3`, weight decay `1e-5`, L1 sparsity coefficient `1e-3`, maximum `12` epochs, and checkpointing every epoch.",
+      "step3": "Use a validation sparsity target window of mean active latents in `[12, 20]`. For each pilot run, select the checkpoint with the best validation normalized reconstruction error among checkpoints inside that window. If no checkpoint falls inside the window, select the closest-window checkpoint with the lowest normalized reconstruction error.",
+      "step4": "For each representation, measure normalized reconstruction error, active latent count, nuisance-pair latent drift, target-factor success, off-target preservation, and counterfactual-consistency rate using the shared edit protocol defined later in the plan.",
+      "step5": "Select the default representation for the full study as the one with the best selective intervention score subject to normalized reconstruction remaining within `5%` relative of the best representation. If no alternative is clearly better, keep final-layer CLS."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train matched simple and strong baselines",
+    "description": "Establish one simple baseline, one strong recent baseline, and one confirmatory stronger-family baseline under symmetric architecture width, sparsity targets, tuning budget, and checkpoint selection.",
+    "steps": {
+      "step1": "Simple baseline: vanilla SAE with encoder `Linear(d, 1024) + ReLU` and tied decoder back to dimension `d`, where `d` is the selected frozen-feature dimension. Train with batch size `1024`, Adam, learning rate `1e-3`, weight decay `1e-5`, gradient clipping `1.0`, maximum `18` epochs, and checkpointing every epoch.",
+      "step2": "Strong baseline: Archetypal SAE with the same input dimension `d`, width `1024`, batch size `1024`, optimizer family, learning rate, weight decay, gradient clipping, maximum epochs, and checkpoint cadence as vanilla SAE. Tune its method-specific regularization coefficient on seed `11` over `{0.05, 0.1}` only, then freeze the chosen value for seeds `17` and `23`.",
+      "step3": "Confirmatory baseline: MP-SAE with width `1024`, target sparsity `k=16`, batch size `1024`, learning rate `1e-3`, weight decay `1e-5`, gradient clipping `1.0`, maximum `18` epochs, and the same train/validation/test splits. Run only seed `11` because this is a scope check, not a full comparison claim.",
+      "step4": "Use two matched sparsity budgets for every main method: budget A with mean active latents in `[8, 12]` and budget B with mean active latents in `[14, 18]`. Tune only each method's sparsity-control hyperparameter on validation seed `11` to hit these budgets, then freeze the selected values for seeds `17` and `23`.",
+      "step5": "For vanilla SAE and Archetypal SAE, run seeds `[11, 17, 23]` at both sparsity budgets. Select final checkpoints using the same rule for every method: best validation normalized reconstruction error among checkpoints inside the target sparsity window. Do not use intervention metrics, concentration metrics, or nuisance-drift metrics for model selection."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train the pair-supervised regularized SAE",
+    "description": "Test the main hypothesis by adding pair-conditioned regularization to an otherwise standard frozen-feature SAE while keeping capacity, training effort, and selection protocol matched to the baselines.",
+    "steps": {
+      "step1": "Use the same encoder-decoder architecture as vanilla SAE: `Linear(d, 1024) + ReLU` encoder and tied linear decoder. Do not increase width, depth, or parameter count relative to the simple baseline.",
+      "step2": "Train on mixed mini-batches containing `50%` unpaired activations, `25%` nuisance-preserving pairs, and `25%` exact single-factor counterfactual pairs. Use effective batch size `1024` for unpaired activations and `512` pairs for each paired batch type.",
+      "step3": "Optimize `L = L_rec + lambda_s L_sparse + lambda_i L_inv + lambda_c L_conc + lambda_a L_align + lambda_o L_sep` with defaults `lambda_s=1e-3`, `lambda_i=0.2`, `lambda_c=0.2`, `lambda_a=0.1`, and `lambda_o=0.05`. Tune only one global pair-loss multiplier in `{0.5, 1.0}` on seed `11`, then freeze it for seeds `17` and `23`.",
+      "step4": "Define `L_rec` as MSE on standardized frozen features, `L_sparse` as mean latent L1 norm, and `L_inv` as mean L1 distance between latent codes for accepted nuisance-preserving pairs.",
+      "step5": "For a counterfactual pair changing factor `k`, compute signed latent difference `d = z_cf - z`, absolute difference `delta = |d|`, normalized mass `p_i = delta_i / (sum_j delta_j + 1e-8)`, and concentration `C(delta) = (m * sum_i p_i^2 - 1) / (m - 1)` with `m=1024`. Optimize `L_conc = 1 - C(delta)`.",
+      "step6": "Maintain one running signed centroid `mu_k = E[d | factor = k]` using train pairs only. Define `L_align = 1 - cosine(d, mu_k)` and define `L_sep` as the mean squared positive cosine similarity over all distinct centroid pairs, which discourages different factors from collapsing onto the same edit direction.",
+      "step7": "Use the same optimizer, learning rate, weight decay, batch size scale, gradient clipping, maximum `18` epochs, checkpoint cadence, sparsity-budget matching, and checkpoint-selection rule as the baselines. Final checkpoint selection must use only validation normalized reconstruction error subject to the target sparsity window; it must not use edit metrics or pair diagnostics.",
+      "step8": "Run the pair-supervised SAE for seeds `[11, 17, 23]` at both sparsity budgets on Shapes3D. This produces the primary comparison set against vanilla SAE and Archetypal SAE under symmetric model selection."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel pair-regularization component",
+    "description": "Pre-register ablations so the study can test whether invariance, concentration, and alignment/separation each contribute to selective counterfactual editing rather than only improving reconstruction proxies.",
+    "steps": {
+      "step1": "Ablation A: remove nuisance invariance by setting `lambda_i=0` and keeping architecture, data, optimizer, sparsity target, and checkpoint selection fixed. Run seed `11` at budget B `[14, 18]`.",
+      "step2": "Ablation B: remove concentration by setting `lambda_c=0` and keeping all other settings identical. Run seed `11` at budget B `[14, 18]`.",
+      "step3": "Ablation C: remove signed alignment and factor separation jointly by setting `lambda_a=0` and `lambda_o=0` and keeping all other settings identical. Run seed `11` at budget B `[14, 18]`.",
+      "step4": "Compare each ablation to the full pair-supervised SAE using the same seed, split, sparsity budget, edit rules, and scale-selection protocol. Interpret an ablation as meaningful only if the drop appears on primary intervention metrics, not only on concentration diagnostics."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate reconstruction, edit selectivity, and counterfactual consistency",
+    "description": "Use intervention-centered metrics that can falsify the claim if gains come only from proxy geometry, unfair selection, or a brittle top-K edit heuristic.",
+    "steps": {
+      "step1": "For every run, report normalized reconstruction error `||h-h_hat||_2 / ||h||_2`, raw reconstruction MSE, mean active latent count using threshold `1e-3`, dead-latent fraction, peak GPU memory, and runtime in minutes.",
+      "step2": "On nuisance-preserving test pairs, report mean latent drift `mean(||z_a - z_b||_1)` and the same value normalized by the mean latent norm. Lower is better, but this metric is diagnostic only and is not used for checkpoint selection.",
+      "step3": "On exact single-factor test pairs, report mean concentration `C(delta)`, within-factor cosine similarity of signed deltas, median number of latent dimensions required to explain `90%` of delta mass, and linear factor decodability from `d = z_cf - z`.",
+      "step4": "Train one frozen linear probe per Shapes3D factor on original train frozen features only, using validation for probe regularization selection. Use these probes only for scoring edits and never for SAE training or checkpoint selection.",
+      "step5": "Evaluate every method under edit rule A, the sparse association edit. For each factor `k`, compute `s_{k,j} = E[|z_j(x)-z_j(x_cf)| | factor = k] - E[|z_j(x)-z_j(x_cf)| | factor != k]` on train pairs, select the top `K=8` latents, and estimate the signed edit on those latents from the mean train-pair signed difference. Choose edit scale `alpha` from `{0.5, 1.0, 1.5}` using validation only, separately for each method and sparsity budget but with the same grid and protocol.",
+      "step6": "Evaluate every method under edit rule B, the dense centroid edit. For each factor `k`, use the full signed centroid `mu_k = E[z_cf - z | factor = k]` with no top-K truncation. Choose edit scale `alpha` from the same validation grid `{0.5, 1.0, 1.5}` and apply the resulting dense latent shift to held-out test examples.",
+      "step7": "For both edit rules, compute `target_factor_success` as the fraction of edited examples whose probe prediction matches the true counterfactual value, `off_target_preservation` as the fraction of untouched factors whose predictions remain unchanged, and `selective_intervention_score = target_factor_success - mean_off_target_change`.",
+      "step8": "For each held-out pair `(x, x_cf^k)`, compare edited feature `h_edit` to true counterfactual feature `h_cf`. Report cosine distance to `h_cf`, retrieval rank of `h_cf` in a candidate pool containing same-factor and other-factor distractors, and `consistency_rate`, defined as the fraction of cases where `h_edit` is closer to `h_cf` than to distractors changing other factors.",
+      "step9": "Aggregate Shapes3D results across seeds `[11, 17, 23]` as per-seed values, mean, and standard deviation. Compute `1000` bootstrap resamples over held-out test pairs within each seed for confidence intervals on primary edit metrics. Use restrained language: emphasize effect sizes and consistency across seeds, and do not make strong significance claims beyond Shapes3D unless a non-synthetic result survives the transfer audit.",
+      "step10": "Support the hypothesis only if the pair-supervised SAE beats both vanilla SAE and Archetypal SAE on at least one primary intervention metric at a matched sparsity budget, preserves or improves off-target stability, stays within `5%` relative reconstruction of the best main baseline at that budget, and does not lose its advantage completely to the one-seed MP-SAE check."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Gate the optional CelebA transfer check with a strict audit",
+    "description": "Treat non-synthetic evidence as descriptive only and include it only if approximate one-attribute pairs pass a quantitative quality audit strong enough to avoid overstating external validity.",
+    "steps": {
+      "step1": "Only start this stage if the full Shapes3D plan has completed and at least `90` minutes of wall-clock budget remain.",
+      "step2": "Use the official CelebA aligned images and official split file. Restrict to attributes `{Smiling, Eyeglasses, Blond_Hair}` and subsample `12000` train, `2000` validation, and `2000` test images to keep compute bounded.",
+      "step3": "Construct approximate one-attribute pairs by requiring that paired images differ on exactly one chosen attribute, agree on the other two evaluated attributes, and have cosine similarity at least `0.92` in frozen DINOv2 feature space. Keep only the nearest valid neighbor for each source image.",
+      "step4": "Run a pair-quality audit that reports non-target attribute disagreement rate, feature-space distance distribution, and validation AUROC of the changed-attribute classifier from raw frozen-feature differences. Proceed only if non-target disagreement is below `5%` and raw-difference AUROC exceeds `0.75` for each evaluated attribute.",
+      "step5": "If the audit passes, run vanilla SAE, Archetypal SAE, and pair-supervised SAE for seed `11` only at budget B `[14, 18]`, using the same width `1024`, optimizer family, checkpoint-selection rule, and both edit rules from Shapes3D. Report the result as descriptive transfer evidence only.",
+      "step6": "If the audit fails, save the audit report to `results/celeba_audit.json`, omit CelebA from the paper's empirical claim, and explicitly state that external validity remains unproven."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate compact paper figures and tables",
+    "description": "Produce the minimum set of outputs needed to communicate the main claim, the fairness controls, the edit-rule robustness check, the ablations, and the audit-gated transfer result.",
+    "steps": {
+      "step1": "Create a main Shapes3D results table with rows `{Vanilla SAE, Archetypal SAE, MP-SAE, Pair-Supervised SAE, No-Invariance, No-Concentration, No-Align-Separation}` and columns `{sparsity_budget, norm_recon_error, active_latents, nuisance_drift, concentration, support90, target_factor_success_ruleA, off_target_preservation_ruleA, selective_score_ruleA, consistency_rate_ruleA, target_factor_success_ruleB, off_target_preservation_ruleB, selective_score_ruleB, consistency_rate_ruleB, runtime_min}`.",
+      "step2": "Create one representation-pilot table with rows `{Final CLS, Penultimate CLS, Mean Patch Pool}` and columns `{norm_recon_error, active_latents, nuisance_drift, selective_score_ruleA, consistency_rate_ruleA}` for seed `11`.",
+      "step3": "Plot bar charts with seed-level points for the 3-seed main comparisons on `target_factor_success`, `off_target_preservation`, `selective_intervention_score`, and `consistency_rate`, with separate panels for edit rule A and edit rule B.",
+      "step4": "Plot one reconstruction-selectivity tradeoff figure across the two sparsity budgets, showing normalized reconstruction error on the x-axis and selective intervention score on the y-axis for vanilla SAE, Archetypal SAE, and pair-supervised SAE.",
+      "step5": "Plot one ablation figure showing the effect of removing invariance, concentration, or alignment/separation on `target_factor_success`, `off_target_preservation`, and `consistency_rate` at budget B.",
+      "step6": "Plot one counterfactual retrieval figure showing the distribution of cosine distance from `h_edit` to the true counterfactual feature versus distractor features, again split by edit rule.",
+      "step7": "If the CelebA audit passes, create one small transfer table and one audit histogram. If the audit fails, include only the audit summary in appendix material and keep all main-text claims Shapes3D-only.",
+      "step8": "Save all plots as `.png` and `.pdf` in `figures/` and save all tables as `.csv` in `results/tables/`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Verify that the run matrix fits the 8-hour budget",
+    "description": "Estimate the full execution cost before running so the study stays within one A6000 and trims optional work first rather than weakening the main comparison.",
+    "steps": {
+      "step1": "Budget feature caching, split writing, and pair construction at `45` minutes total: about `25` minutes for DINOv2 feature extraction, `10` minutes for counterfactual and nuisance pair generation, and `10` minutes for the nuisance audit and metadata export.",
+      "step2": "Budget the representation pilot at `30` minutes total: three reduced-split vanilla SAE runs at about `8` minutes each plus a small evaluation buffer.",
+      "step3": "Budget the main Shapes3D training matrix at `18` runs total: vanilla SAE, Archetypal SAE, and pair-supervised SAE across `3` seeds and `2` sparsity budgets. Assume `10` minutes per run including validation and checkpointing, for about `180` minutes total.",
+      "step4": "Budget the secondary Shapes3D runs at `4` runs total: one MP-SAE seed-11 check and three seed-11 ablations. Assume `12` minutes per ablation and `15` minutes for MP-SAE, for about `51` minutes total.",
+      "step5": "Budget evaluation, probe fitting, bootstrap confidence intervals, retrieval scoring, and figure generation at `100` minutes total, mostly CPU-bound with occasional short GPU decoding passes.",
+      "step6": "The default Shapes3D-only plan therefore totals about `45 + 30 + 180 + 51 + 100 = 406` minutes, or about `6.8` hours, leaving about `1.2` hours of contingency. This fits the stated 8-hour limit without assuming any GPU parallelism.",
+      "step7": "Use the remaining contingency only for the CelebA audit and optional seed-11 transfer check. If runtime slips, trim CelebA first, then nonessential plots, and keep the full 3-seed Shapes3D comparison, both matched sparsity budgets, both edit rules, and all three ablations intact."
+    }
+  }
+]

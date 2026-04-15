@@ -1,0 +1,518 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Configure the computational environment with all required libraries for CAGER experiments including PyTorch, TransformerLens, and SAE training utilities.",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv venv && source venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA 12.1: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install TransformerLens: pip install transformer-lens>=1.14.0",
+      "step4": "Install HuggingFace ecosystem: pip install transformers datasets accelerate>=0.25.0",
+      "step5": "Install scientific computing: pip install numpy scipy scikit-learn pandas matplotlib seaborn",
+      "step6": "Install einops and fancy-einsum for efficient tensor operations: pip install einops fancy-einsum",
+      "step7": "Install wandb for experiment tracking (optional): pip install wandb",
+      "step8": "Verify CUDA availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step9": "Set random seeds for reproducibility: seeds = [42, 123, 456] for all experiments"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Create Project Directory Structure",
+    "description": "Set up organized directory structure for code, data, models, results, and figures.",
+    "steps": {
+      "step1": "Create directory structure: mkdir -p src data models results figures logs checkpoints",
+      "step2": "Create subdirectories for each experiment type: mkdir -p results/{synthetic,ioi,ravel} figures/{synthetic,ioi,ravel}",
+      "step3": "Create __init__.py files for Python packages: touch src/__init__.py",
+      "step4": "Set environment variable for project root: export PROJECT_ROOT=$(pwd)"
+    },
+    "estimated_time": "5 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Synthetic Ground-Truth Dataset",
+    "description": "Create synthetic MLP with known causal features for validating C-GAS metric. This provides ground truth to verify that C-GAS correlates with true feature recovery.",
+    "steps": {
+      "step1": "Define 5 known ground-truth causal features: f1(x)=sin(2πx1), f2(x)=relu(x2-0.5), f3(x)=x3*x4, f4(x)=exp(-x5^2), f5(x)=sign(x6*x7)",
+      "step2": "Generate 10,000 training samples with 20 input dimensions (5 causal + 15 noise) using seed=42",
+      "step3": "Create MLP architecture: input(20) -> hidden(64) -> hidden(64) -> output(1)",
+      "step4": "Train MLP to compute output = Σ wi * fi(x) + 0.1*noise where weights wi = [1.0, 0.8, -0.5, 0.6, -0.3]",
+      "step5": "Train for 100 epochs with Adam (lr=1e-3), batch_size=128, MSE loss",
+      "step6": "Save model checkpoint to models/synthetic_mlp.pt",
+      "step7": "Generate evaluation set: 1,000 samples with seed=123 for validation experiments",
+      "step8": "Save ground-truth feature activations for all samples to data/synthetic_ground_truth.h5"
+    },
+    "estimated_time": "10 minutes",
+    "gpu_memory_required": "2 GB"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare Indirect Object Identification (IOI) Dataset",
+    "description": "Load and preprocess IOI dataset with contrastive pairs for activation patching. IOI is a well-understood circuit task for sanity checking.",
+    "steps": {
+      "step1": "Load IOI dataset using baukit or custom implementation (~500 template pairs)",
+      "step2": "Create templates: 'When [A] and [B] went to the store, [A] gave a drink to [B]' vs 'When [A] and [B] went to the store, [B] gave a drink to [A]'",
+      "step3": "Extract 200 sentence pairs with names from diverse set (50% male, 50% female names)",
+      "step4": "Tokenize with GPT-2 tokenizer: pad/truncate to max_length=50",
+      "step5": "Identify token positions: [IO] (indirect object position), [S] (subject position), [END] token",
+      "step6": "Save processed dataset to data/ioi_dataset.pt with fields: templates, tokenized, positions, labels",
+      "step7": "Create train/val split: 150 train / 50 val with seed=42"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "1 GB"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare RAVEL Factual Recall Dataset",
+    "description": "Load RAVEL dataset for evaluating attribute disentanglement and factual recall tasks.",
+    "steps": {
+      "step1": "Download RAVEL dataset from HuggingFace datasets or use manual download",
+      "step2": "Filter for entity-attribute pairs with clear causal relationships: country-capital, profession-gender, etc.",
+      "step3": "Select 3 attribute types: (1) country-capital, (2) name-occupation, (3) company-CEO",
+      "step4": "Extract 300 entity pairs (100 per attribute type)",
+      "step5": "Create contrastive pairs for each entity: [entity] is from [country1] vs [entity] is from [country2]",
+      "step6": "Tokenize with GPT-2 tokenizer: truncate to max_length=40",
+      "step7": "Save to data/ravel_dataset.pt with structure: {entity, attribute_type, base_prompt, contrast_prompt, target_token_idx}",
+      "step8": "Create train/test split: 240 train / 60 test with seed=42"
+    },
+    "estimated_time": "20 minutes",
+    "gpu_memory_required": "1 GB"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Baseline Interpretability Methods - Random Projections",
+    "description": "Simple baseline using random projections to establish lower bound on C-GAS scores.",
+    "steps": {
+      "step1": "For each dataset, extract hidden activations from target layer (layer 6 for GPT-2, layer 4 for Pythia)",
+      "step2": "Generate random projection matrix with same dimensionality as target SAE (1x, 4x, 16x overcomplete)",
+      "step3": "Normalize activations to unit norm before projection",
+      "step4": "For each random seed [42, 123, 456]: generate new random matrix and save projections",
+      "step5": "Save baseline features to models/baselines/random_{dataset}_{seed}.pt"
+    },
+    "estimated_time": "10 minutes per dataset × 3 seeds = 30 minutes total",
+    "gpu_memory_required": "4 GB"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Baseline Interpretability Methods - PCA",
+    "description": "Stronger linear baseline using Principal Component Analysis for dimensionality reduction.",
+    "steps": {
+      "step1": "Extract activations from training split for each dataset (~10,000 samples)",
+      "step2": "Fit PCA with varying number of components: k=64 (1x), k=256 (4x), k=1024 (16x) for hidden_dim=64",
+      "step3": "Compute explained variance ratio for each component configuration",
+      "step4": "Transform both train and validation activations using fitted PCA",
+      "step5": "Save PCA models and transformed features: models/baselines/pca_{dataset}_{k}components.pt",
+      "step6": "Run for each random seed [42, 123, 456] to measure variance from data sampling"
+    },
+    "estimated_time": "15 minutes per dataset × 3 seeds = 45 minutes total",
+    "gpu_memory_required": "4 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Sparse Autoencoders (SAEs) - Synthetic Task",
+    "description": "Train SAEs on synthetic MLP hidden activations with varying dictionary sizes.",
+    "steps": {
+      "step1": "Extract hidden activations from layer 1 (64-dim) of synthetic MLP for all training samples",
+      "step2": "SAE architecture: encoder(64 -> dict_size), decoder(dict_size -> 64), ReLU activation",
+      "step3": "Train SAE with dictionary sizes: 64 (1x), 256 (4x), 1024 (16x) overcomplete",
+      "step4": "Training config: lr=1e-3, batch_size=256, L1 penalty=1e-4, 500 epochs",
+      "step5": "Loss: reconstruction_MSE + L1_sparsity",
+      "step6": "Track metrics: reconstruction error, sparsity (% zeros), dead neurons",
+      "step7": "Train 3 SAEs per dictionary size (seeds 42, 123, 456)",
+      "step8": "Save checkpoints: models/sae_synthetic_{dict_size}x_seed{seed}.pt"
+    },
+    "estimated_time": "1 hour per dictionary size × 3 sizes × 3 seeds = 3 hours (can parallelize)",
+    "gpu_memory_required": "8 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Sparse Autoencoders (SAEs) - IOI Task",
+    "description": "Train SAEs on GPT-2 Small activations for IOI circuit layers.",
+    "steps": {
+      "step1": "Load GPT-2 Small (124M) with TransformerLens: HookedTransformer.from_pretrained('gpt2-small')",
+      "step2": "Extract activations from layer 9 (known IOI circuit location, d_model=768)",
+      "step3": "SAE architecture: encoder(768 -> dict_size), decoder(dict_size -> 768)",
+      "step4": "Train with dictionary sizes: 768 (1x), 3072 (4x), 12288 (16x)",
+      "step5": "Training config: lr=5e-4, batch_size=64, L1 penalty=5e-5, 300 epochs (early stopping at 10 epochs no improvement)",
+      "step6": "Track: reconstruction loss, L0 sparsity (avg active features per sample), dead neurons (<1% activation frequency)",
+      "step7": "Train 3 SAEs per dictionary size (seeds 42, 123, 456)",
+      "step8": "Save checkpoints: models/sae_ioi_gpt2_{dict_size}x_seed{seed}.pt"
+    },
+    "estimated_time": "1.5 hours per dictionary size × 3 sizes × 3 seeds = 4.5 hours (can parallelize)",
+    "gpu_memory_required": "12 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Sparse Autoencoders (SAEs) - RAVEL Task",
+    "description": "Train SAEs on GPT-2 activations for RAVEL factual recall task.",
+    "steps": {
+      "step1": "Extract activations from layer 8-10 of GPT-2 Small (factual recall typically in mid-late layers)",
+      "step2": "Use same SAE architecture as IOI: encoder(768 -> dict_size), decoder(dict_size -> 768)",
+      "step3": "Train with dictionary sizes: 768 (1x), 3072 (4x), 12288 (16x)",
+      "step4": "Training config: lr=5e-4, batch_size=64, L1 penalty=5e-5, 300 epochs",
+      "step5": "Track same metrics as IOI SAEs",
+      "step6": "Train 3 SAEs per dictionary size (seeds 42, 123, 456)",
+      "step7": "Save checkpoints: models/sae_ravel_gpt2_{dict_size}x_seed{seed}.pt"
+    },
+    "estimated_time": "1.5 hours per dictionary size × 3 sizes × 3 seeds = 4.5 hours (can parallelize)",
+    "gpu_memory_required": "12 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal Subspace Identification - Synthetic Task",
+    "description": "Use activation patching to identify candidate causal subspaces in synthetic MLP.",
+    "steps": {
+      "step1": "For each of 5 ground-truth features, create contrastive input pairs differing only in that feature",
+      "step2": "Run activation patching: patch activations from input A to input B at each hidden dimension",
+      "step3": "Measure causal effect: |output_patched - output_original| for each dimension",
+      "step4": "Identify top-k dimensions with largest causal effects for each feature (k=5, 10, 20)",
+      "step5": "Record candidate subspaces and their effect magnitudes",
+      "step6": "Save to results/synthetic/causal_candidates.json: {feature_id: {subspace_dims: [], effects: []}}"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "2 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal Subspace Identification - IOI Task",
+    "description": "Use activation patching to identify causal subspaces for IOI circuit components.",
+    "steps": {
+      "step1": "Focus on layers 8-10 of GPT-2 Small where IOI circuit operates",
+      "step2": "Create contrastive pairs: (S, IO) sentences with different indirect objects",
+      "step3": "Run activation patching at each layer for attention heads and MLP outputs",
+      "step4": "For each token position [IO], [S], [END], patch activations and measure change in prediction probability for correct indirect object",
+      "step5": "Identify subspaces where patching changes prediction probability by >10%",
+      "step6": "Record top 50 dimensions per layer with highest causal effects",
+      "step7": "Save to results/ioi/causal_candidates.json: {layer: {position: {dims: [], effects: []}}}"
+    },
+    "estimated_time": "30 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Causal Subspace Identification - RAVEL Task",
+    "description": "Identify causal subspaces for factual recall in RAVEL dataset.",
+    "steps": {
+      "step1": "For each attribute type (country-capital, name-occupation, company-CEO), extract contrastive pairs",
+      "step2": "Run activation patching at layers 8-10 of GPT-2",
+      "step3": "Measure change in target attribute prediction probability",
+      "step4": "Identify subspaces where patching produces >15% change in target probability",
+      "step5": "Aggregate across all entities within each attribute type",
+      "step6": "Record top 100 dimensions per attribute type",
+      "step7": "Save to results/ravel/causal_candidates.json: {attribute_type: {layer: {dims: [], effects: []}}}"
+    },
+    "estimated_time": "45 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Multi-Method Validation - Pathway Consistency Check",
+    "description": "First validation method: verify patching effects are consistent across different source inputs.",
+    "steps": {
+      "step1": "For each candidate subspace from activation patching, test with 10 different source inputs sharing same attribute value",
+      "step2": "Compute effect variance across sources: σ² = Var(effect_i across i=1..10)",
+      "step3": "If σ² > threshold (0.1 * mean_effect), flag as potential illusion (inconsistent pathway activation)",
+      "step4": "Pass check if σ² <= threshold for at least 80% of source input groups",
+      "step5": "Record results: results/{dataset}/validation_pathway_consistency.json"
+    },
+    "estimated_time": "20 minutes per dataset = 60 minutes total",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Multi-Method Validation - Ablation Consistency Check",
+    "description": "Second validation method: compare activation patching with direct ablation effects.",
+    "steps": {
+      "step1": "For each candidate subspace, compute effect via direct ablation (zero out subspace)",
+      "step2": "Compare ablation effect with patching effect: relative_diff = |effect_patch - effect_ablation| / |effect_patch|",
+      "step3": "Pass check if relative_diff < 0.5 (effects within 50% of each other)",
+      "step4": "High relative difference indicates pathway-dependent effects (illusion indicator)",
+      "step5": "Record results: results/{dataset}/validation_ablation_consistency.json"
+    },
+    "estimated_time": "15 minutes per dataset = 45 minutes total",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Multi-Method Validation - Gradient Agreement Check",
+    "description": "Third validation method: verify gradient directions align with intervention effects.",
+    "steps": {
+      "step1": "Compute gradients of target output w.r.t. each candidate subspace: ∇_subspace L",
+      "step2": "Compute expected intervention direction from gradient sign",
+      "step3": "Check if intervention effect direction matches gradient direction (cosine similarity > 0)",
+      "step4": "Pass check if gradient and intervention agree on direction for >70% of subspaces",
+      "step5": "Misalignment suggests non-gradient pathways (illusion indicator)",
+      "step6": "Record results: results/{dataset}/validation_gradient_agreement.json"
+    },
+    "estimated_time": "15 minutes per dataset = 45 minutes total",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Construct Validated Causal Subspace Atlas",
+    "description": "Aggregate validation results and construct final validated causal subspace atlas.",
+    "steps": {
+      "step1": "Load all three validation results for each dataset",
+      "step2": "Accept subspace into atlas if it passes >= 2 of 3 validation checks",
+      "step3": "For synthetic task: expect ~80% of true causal subspaces pass validation",
+      "step4": "For IOI/RAVEL: expect ~50-70% of candidate subspaces pass validation",
+      "step5": "Save validated atlas: results/{dataset}/validated_causal_atlas.json",
+      "step6": "Record validation statistics: total candidates, pass rate per check, combined pass rate"
+    },
+    "estimated_time": "10 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute C-GAS Scores - Synthetic Task",
+    "description": "Calculate Causal Geometric Alignment Score for all methods on synthetic task with ground truth.",
+    "steps": {
+      "step1": "Load validated causal subspaces for synthetic task",
+      "step2": "For each method (SAE 1x/4x/16x, PCA 1x/4x/16x, Random 1x/4x/16x) and each seed:",
+      "step3": "  Extract explanation features for all evaluation samples",
+      "step4": "  Compute D_causal: pairwise cosine distance matrix in validated causal subspace space",
+      "step5": "  Compute D_exp: pairwise cosine distance matrix in explanation feature space (top-k correlated features)",
+      "step6": "  Compute D_full: pairwise cosine distance matrix in full activation space",
+      "step7": "  Calculate C-GAS = ρ(D_causal, D_exp) / ρ(D_causal, D_full) where ρ = Spearman correlation",
+      "step8": "Save detailed results: results/synthetic/cgas_detailed.json"
+    },
+    "estimated_time": "20 minutes",
+    "gpu_memory_required": "4 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute C-GAS Scores - IOI Task",
+    "description": "Calculate C-GAS for all methods on IOI task.",
+    "steps": {
+      "step1": "Load validated causal subspaces for IOI task (layers 8-10)",
+      "step2": "Same procedure as synthetic task for each method and seed",
+      "step3": "For each layer separately and aggregate across layers",
+      "step4": "Compute C-GAS per position token [IO], [S], [END]",
+      "step5": "Save detailed results: results/ioi/cgas_detailed.json"
+    },
+    "estimated_time": "25 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute C-GAS Scores - RAVEL Task",
+    "description": "Calculate C-GAS for all methods on RAVEL factual recall task.",
+    "steps": {
+      "step1": "Load validated causal subspaces for RAVEL task (per attribute type)",
+      "step2": "Same procedure as previous tasks for each method and seed",
+      "step3": "Compute C-GAS per attribute type (country-capital, name-occupation, company-CEO)",
+      "step4": "Aggregate C-GAS across attribute types",
+      "step5": "Save detailed results: results/ravel/cgas_detailed.json"
+    },
+    "estimated_time": "25 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: C-GAS Without Validation (Illusion Detection)",
+    "description": "Compare C-GAS computed with vs. without multi-method validation to demonstrate importance of safeguards.",
+    "steps": {
+      "step1": "Recompute C-GAS using ALL candidate subspaces (not just validated ones)",
+      "step2": "Compare scores: C-GAS_validated vs C-GAS_unvalidated for each method",
+      "step3": "Expected: C-GAS_unvalidated > C-GAS_validated but less correlated with ground truth",
+      "step4": "For synthetic task: compute correlation between C-GAS and true feature recovery rate for both conditions",
+      "step5": "Verify that validation improves predictive power of C-GAS",
+      "step6": "Save results: results/{dataset}/ablation_validation_comparison.json"
+    },
+    "estimated_time": "30 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Component Sensitivity Analysis",
+    "description": "Test sensitivity of C-GAS to hyperparameters and design choices.",
+    "steps": {
+      "step1": "Vary distance metric: compare cosine vs Euclidean vs correlation distance",
+      "step2": "Vary top-k selection: k=5, 10, 20, 50 features per causal subspace",
+      "step3": "Vary sample size: n=50, 100, 200, 500 samples for distance matrix estimation",
+      "step4": "Measure C-GAS stability across these variations",
+      "step5": "Report coefficient of variation (std/mean) for each hyperparameter",
+      "step6": "Save sensitivity analysis: results/sensitivity_analysis.json"
+    },
+    "estimated_time": "45 minutes",
+    "gpu_memory_required": "6 GB"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Interpretability Illusion Replication",
+    "description": "Replicate Makelov et al. setup to test C-GAS on illusory vs. truly causal subspaces.",
+    "steps": {
+      "step1": "Create synthetic circuit with parallel pathways (one active, one dormant)",
+      "step2": "Identify subspace via naive activation patching (may activate dormant pathway)",
+      "step3": "Classify as illusory (fails 2+ validation checks) vs. truly causal (passes validation)",
+      "step4": "Compute C-GAS separately for illusory and truly causal subspaces",
+      "step5": "Expected: C-GAS_illusory << C-GAS_truly_causal (validates our metric detects illusions)",
+      "step6": "Save results: results/illusion_test.json"
+    },
+    "estimated_time": "30 minutes",
+    "gpu_memory_required": "4 GB"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis of C-GAS Scores",
+    "description": "Perform rigorous statistical analysis to test success criteria.",
+    "steps": {
+      "step1": "Aggregate C-GAS scores across all seeds and methods",
+      "step2": "Compute mean, std, 95% confidence intervals via bootstrapping (1000 samples)",
+      "step3": "Test Hypothesis 1 (SAEs > baselines): pairwise t-tests with Bonferroni correction",
+      "step4": "Test Hypothesis 2 (C-GAS predicts recovery): Pearson/Spearman correlation between C-GAS and ground-truth recovery rate",
+      "step5": "Test Hypothesis 3 (validation matters): paired t-test comparing C-GAS_validated vs C-GAS_unvalidated correlation with ground truth",
+      "step6": "Report effect sizes (Cohen's d) for all significant differences",
+      "step7": "Create summary table: results/cgas_summary_statistics.json"
+    },
+    "estimated_time": "20 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Explicitly verify each success criterion from the proposal.",
+    "steps": {
+      "step1": "Criterion 1: Check if SAEs achieve C-GAS > 0.75 on validated subspaces",
+      "step2": "  Perform one-tailed t-test: H0: mean_CGAS_SAE <= 0.75, H1: mean_CGAS_SAE > 0.75",
+      "step3": "  Report p-value and conclusion",
+      "step4": "Criterion 2: Check if SAEs significantly higher than baselines (p < 0.01)",
+      "step5": "  Perform ANOVA followed by post-hoc tests",
+      "step6": "Criterion 3: Check correlation with ground-truth recovery (r > 0.8)",
+      "step7": "  Compute correlation and 95% CI, test H0: r <= 0.8 vs H1: r > 0.8",
+      "step8": "Criterion 4: Check if illusory subspaces have lower C-GAS than validated",
+      "step9": "  Perform two-sample t-test",
+      "step10": "Generate pass/fail report: results/success_criteria_report.md"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute Additional Metrics",
+    "description": "Compute supplementary metrics for comprehensive evaluation.",
+    "steps": {
+      "step1": "Compute reconstruction error for all methods on each dataset",
+      "step2": "Compute sparsity metrics: L0 (avg active features), L1 norm",
+      "step3": "Compute dead neuron percentage for SAEs",
+      "step4": "Compute explained variance for PCA",
+      "step5": "Compute feature interpretability via activation patterns (for qualitative validation)",
+      "step6": "Save comprehensive metrics: results/comprehensive_metrics.json"
+    },
+    "estimated_time": "20 minutes",
+    "gpu_memory_required": "4 GB"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate C-GAS Comparison Figure",
+    "description": "Create bar plot comparing C-GAS scores across methods and datasets.",
+    "steps": {
+      "step1": "Load C-GAS results for all methods and datasets",
+      "step2": "Create grouped bar plot: x-axis = method, y-axis = C-GAS, grouped by dataset",
+      "step3": "Add error bars showing 95% confidence intervals",
+      "step4": "Add horizontal line at C-GAS = 0.75 (success threshold)",
+      "step5": "Add significance markers (* p<0.05, ** p<0.01, *** p<0.001) for SAE vs baseline comparisons",
+      "step6": "Save figure: figures/cgas_comparison.png (300 DPI)",
+      "step7": "Save source data: figures/data/cgas_comparison_data.csv"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Validation Impact Figure",
+    "description": "Visualize impact of multi-method validation on C-GAS scores.",
+    "steps": {
+      "step1": "Load C-GAS with and without validation",
+      "step2": "Create side-by-side box plots or violin plots",
+      "step3": "Left plot: C-GAS distribution for validated vs unvalidated subspaces",
+      "step4": "Right plot: Correlation with ground truth for validated vs unvalidated",
+      "step5": "Add annotations showing mean difference and p-value",
+      "step6": "Save figure: figures/validation_impact.png (300 DPI)"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Layer-wise C-GAS Heatmap",
+    "description": "Create heatmap showing C-GAS across layers and methods for IOI task.",
+    "steps": {
+      "step1": "Load per-layer C-GAS scores for IOI task",
+      "step2": "Create heatmap: rows = methods, columns = layers 0-11",
+      "step3": "Color scale: viridis or plasma, range 0.0-1.0",
+      "step4": "Add annotations for known IOI circuit layers (8-10)",
+      "step5": "Verify C-GAS peaks at known circuit layers for good methods",
+      "step6": "Save figure: figures/layerwise_heatmap.png (300 DPI)"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Distance Correlation Scatter Plots",
+    "description": "Visualize relationship between causal and explanation distance matrices.",
+    "steps": {
+      "step1": "Sample 1000 distance pairs from D_causal and D_exp for best SAE",
+      "step2": "Create scatter plot: x = D_causal, y = D_exp",
+      "step3": "Add regression line and report R²",
+      "step4": "Create similar plot for PCA and Random baselines for comparison",
+      "step5": "Layout: 1×3 subplot figure",
+      "step6": "Save figure: figures/distance_correlation.png (300 DPI)"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Sensitivity Analysis Figure",
+    "description": "Visualize robustness of C-GAS to hyperparameter choices.",
+    "steps": {
+      "step1": "Load sensitivity analysis results",
+      "step2": "Create 3 subplots: (1) distance metric, (2) top-k, (3) sample size",
+      "step3": "For each subplot: x-axis = hyperparameter value, y-axis = C-GAS mean ± std",
+      "step4": "Add shaded region for ±1 std",
+      "step5": "Indicate chosen default values with vertical dashed line",
+      "step6": "Save figure: figures/sensitivity_analysis.png (300 DPI)"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Summary Results Table",
+    "description": "Create publication-ready table with all main results.",
+    "steps": {
+      "step1": "Create table with columns: Method, Dataset, C-GAS Mean, C-GAS Std, vs Baseline p-value",
+      "step2": "Include all methods: SAE 1x/4x/16x, PCA 1x/4x/16x, Random",
+      "step3": "Include all datasets: Synthetic, IOI, RAVEL",
+      "step4": "Highlight cells where C-GAS >= 0.75 (green) and < 0.75 (red)",
+      "step5": "Add footnote explaining C-GAS and threshold justification",
+      "step6": "Save as LaTeX table: figures/table_main_results.tex",
+      "step7": "Save as CSV: figures/data/table_main_results.csv"
+    },
+    "estimated_time": "15 minutes",
+    "gpu_memory_required": "N/A"
+  },
+  {
+    "category": "Visualization",
+    "title": "Compile Final Results Report",
+    "description": "Generate comprehensive Markdown report summarizing all experiments.",
+    "steps": {
+      "step1": "Create results/FINAL_REPORT.md with sections:",
+      "step2": "  1. Executive Summary: hypothesis confirmation status",
+      "step3": "  2. Experimental Setup: models, datasets, hyperparameters",
+      "step4": "  3. Main Results: C-GAS comparison table and key findings",
+      "step5": "  4. Ablation Studies: validation impact, sensitivity analysis",
+      "step6": "  5. Interpretability Illusion Test: results on illusory subspaces",
+      "step7": "  6. Statistical Tests: all p-values and effect sizes",
+      "step8": "  7. Success Criteria: pass/fail for each criterion",
+      "step9": "  8. Figures: embed all generated figures",
+      "step10": "Include links to all raw data files"
+    },
+    "estimated_time": "20 minutes",
+    "gpu_memory_required": "N/A"
+  }
+]

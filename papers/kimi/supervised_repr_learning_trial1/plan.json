@@ -1,0 +1,251 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install PyTorch, torchvision, and required packages for contrastive learning experiments",
+    "steps": {
+      "step1": "Activate virtual environment: source .venv/bin/activate",
+      "step2": "Install PyTorch 2.0+ with CUDA 11.8: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",
+      "step3": "Install additional dependencies: pip install numpy scipy scikit-learn matplotlib seaborn tqdm tensorboard",
+      "step4": "Verify GPU availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step5": "Create directory structure: mkdir -p data checkpoints results logs/figures"
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare CIFAR-100 Dataset",
+    "description": "Download CIFAR-100 with both coarse (20 superclasses) and fine (100 classes) labels for feature suppression evaluation",
+    "steps": {
+      "step1": "CIFAR-100 will be automatically downloaded via torchvision.datasets.CIFAR100(root='./data', download=True)",
+      "step2": "Verify dataset structure: 50,000 training images, 10,000 test images, 100 fine classes, 20 coarse superclasses",
+      "step3": "Define data augmentation: RandomResizedCrop(32, scale=(0.2, 1.0)), RandomHorizontalFlip(), ColorJitter(0.4, 0.4, 0.4, 0.1), RandomGrayscale(p=0.2), Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))",
+      "step4": "Create two-view augmentation pipeline for contrastive learning using torchvision.transforms",
+      "step5": "Create dataloader with batch_size=256, num_workers=4, pin_memory=True"
+    },
+    "estimated_time_minutes": 5
+  },
+
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Cross-Entropy Training on CIFAR-100",
+    "description": "Train ResNet-18 with standard cross-entropy loss as simple baseline. This is the most basic supervised learning approach.",
+    "steps": {
+      "step1": "Implement standard ResNet-18 architecture (from torchvision.models.resnet18, modify first conv for CIFAR: kernel_size=3, stride=1, padding=1; remove maxpool)",
+      "step2": "Train with CrossEntropyLoss for 150 epochs",
+      "step3": "Optimizer: SGD with momentum=0.9, weight_decay=5e-4, initial_lr=0.1",
+      "step4": "Learning rate schedule: Cosine annealing from 0.1 to 0.0 over 200 epochs",
+      "step5": "Run with 3 random seeds: [42, 123, 456]",
+      "step6": "Save final model checkpoints and training logs to checkpoints/ce_cifar100_seed{N}.pth",
+      "step7": "Record final test accuracy for each seed"
+    },
+    "estimated_time_minutes": 45
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Supervised Contrastive Learning (SCL) on CIFAR-100",
+    "description": "Implement standard Supervised Contrastive Learning (Khosla et al. 2020) as strong baseline. This is the state-of-the-art method we aim to improve.",
+    "steps": {
+      "step1": "Implement SCL loss: L = -1/|P| * sum_{p in P} log(exp(z_i·z_p/τ) / sum_{a in A} exp(z_i·z_a/τ))",
+      "step2": "Architecture: ResNet-18 backbone + 2-layer MLP projector (dim=128) for contrastive learning",
+      "step3": "Temperature τ = 0.1 (standard value from paper)",
+      "step4": "Train encoder with SCL loss for 200 epochs, then train linear classifier for 100 epochs on frozen features",
+      "step5": "Optimizer: SGD with momentum=0.9, weight_decay=1e-4, lr=0.5 for encoder (scaled by batch_size/256), lr=1.0 for classifier",
+      "step6": "Learning rate: Cosine annealing, warmup for first 10 epochs",
+      "step7": "Run with 3 random seeds: [42, 123, 456]",
+      "step8": "Save checkpoints: checkpoints/scl_cifar100_seed{N}.pth",
+      "step9": "Record encoder training time for computational overhead comparison"
+    },
+    "estimated_time_minutes": 75
+  },
+  {
+    "category": "Main Experiment",
+    "title": "FD-SCL: Feature-Diversity-Aware Supervised Contrastive Learning on CIFAR-100",
+    "description": "Train our proposed FD-SCL method on CIFAR-100 to validate primary hypothesis: reduced feature suppression through adaptive pair weighting",
+    "steps": {
+      "step1": "Implement Feature Diversity Estimation Module (FDEM): (a) Compute activation frequency f_d = mean(1[z_{j,d} > η]), (b) Compute rarity score r_{ip} = sum_d 1[(z_i,d>η)∧(z_p,d>η)] / (f_d + ε), (c) Compute weights w_{ip} = softmax(r_{ip}/τ_w) * |P(i)|",
+      "step2": "Implement FD-SCL loss using weighted positive pairs: L = -1/|P| * sum_{p in P} w_{ip} * log(exp(z_i·z_p/τ) / sum_{a in A} exp(z_i·z_a/τ))",
+      "step3": "Hyperparameters: τ=0.1 (contrastive temp), τ_w=0.5 (weight temp), η=0.0 (activation threshold), ε=1e-6",
+      "step4": "Architecture: Same as SCL (ResNet-18 + MLP projector) for fair comparison",
+      "step5": "Training: Same schedule as SCL (200 epochs encoder + 100 epochs linear eval)",
+      "step6": "Run with 3 random seeds: [42, 123, 456]",
+      "step7": "Save checkpoints: checkpoints/fdscl_cifar100_seed{N}.pth",
+      "step8": "Save weight statistics for analysis: results/fdscl_weights_seed{N}.npz",
+      "step9": "Record training time and verify <10% overhead vs SCL"
+    },
+    "estimated_time_minutes": 78
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CIFAR-100 Coarse-to-Fine Feature Suppression Evaluation",
+    "description": "PRIMARY EVALUATION: Train with coarse (20 superclasses) labels, evaluate on fine (100 classes) labels to measure feature suppression. This directly tests if FD-SCL preserves subclass features.",
+    "steps": {
+      "step1": "Create coarse-label training setup: Map 100 fine CIFAR-100 classes to 20 coarse superclasses using official mapping: {'aquatic_mammals': [4, 30, 55, 72, 95], 'fish': [1, 32, 67, 73, 91], ...}",
+      "step2": "Train SCL with coarse labels only (20 classes) for 150 epochs (reduced for time budget)",
+      "step3": "Train FD-SCL with coarse labels only (20 classes) for 150 epochs (reduced for time budget)",
+      "step4": "After training, evaluate linear classifier on: (a) Coarse labels (20 classes), (b) Fine labels (100 classes) - KEY METRIC",
+      "step5": "Compute: Fine-grained accuracy gap = FD-SCL_fine_acc - SCL_fine_acc. SUCCESS CRITERIA: gap >= 5%",
+      "step6": "Run with 3 random seeds: [42, 123, 456]",
+      "step7": "Save results: results/coarse_to_fine_{scl,fdscl}_seed{N}.json",
+      "step8": "This is the most important experiment - prioritize running this first"
+    },
+    "estimated_time_minutes": 115
+  },
+
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Weight Temperature τ_w Sensitivity",
+    "description": "Test sensitivity to weight temperature hyperparameter. Success: FD-SCL robust to τ_w in reasonable range.",
+    "steps": {
+      "step1": "Train FD-SCL on CIFAR-100 with τ_w values: [0.3, 0.5, 0.7] (reduced set for time)",
+      "step2": "Use fixed seed=42 for all runs to isolate hyperparameter effect",
+      "step3": "Use 50 epochs only to save time (sufficient for relative comparison)",
+      "step4": "Measure: Final test accuracy, effective rank of representations",
+      "step5": "Expected: Performance stable for τ_w in [0.3, 0.7], optimal around 0.5",
+      "step6": "Save results: results/ablation_tau_w.json"
+    },
+    "estimated_time_minutes": 22
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Activation Threshold η Robustness",
+    "description": "Test robustness to activation threshold choice. Verify method works across reasonable threshold values.",
+    "steps": {
+      "step1": "Train FD-SCL on CIFAR-100 with η values: [-0.5, 0.0, 0.5] (0.0 is default)",
+      "step2": "Use fixed seed=42, 50 epochs only",
+      "step3": "Measure: Test accuracy, training time overhead",
+      "step4": "Expected: Minimal sensitivity to η around 0.0",
+      "step5": "Save results: results/ablation_eta.json"
+    },
+    "estimated_time_minutes": 20
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Component Analysis",
+    "description": "Verify each component of FDEM is necessary. Remove components one at a time.",
+    "steps": {
+      "step1": "Variant 1: Uniform weights (all w_ip = 1) - equivalent to standard SCL",
+      "step2": "Variant 2: Random weights (w_ip ~ Uniform[0.5, 1.5]) - sanity check",
+      "step3": "Variant 3: Full FD-SCL with rarity-based weighting",
+      "step4": "Train all variants on CIFAR-100 with seed=42, 100 epochs",
+      "step5": "Measure: Test accuracy, convergence speed, feature diversity (effective rank)",
+      "step6": "Success: Full FD-SCL > Uniform weights > Random weights",
+      "step7": "Save results: results/ablation_components.json"
+    },
+    "estimated_time_minutes": 20
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Feature Diversity Metrics Computation",
+    "description": "Compute effective rank and other diversity metrics to quantify feature suppression reduction (Success Criteria 3)",
+    "steps": {
+      "step1": "For each trained model (SCL and FD-SCL, all seeds), extract embeddings for test set",
+      "step2": "Compute class-wise covariance matrices: For each class c, compute Σ_c = Cov(embeddings[y==c])",
+      "step3": "Compute effective rank: erank(Σ) = exp(H(p)) where p_i = λ_i / sum(λ), H is Shannon entropy, λ_i are eigenvalues of Σ",
+      "step4": "Compute average effective rank across all classes",
+      "step5": "SUCCESS CRITERIA: FD-SCL effective rank >= 1.15 × SCL effective rank (15% improvement)",
+      "step6": "Also compute: singular value spectra, participation ratio",
+      "step7": "Save results: results/feature_diversity_metrics.json"
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "k-NN Evaluation of Learned Representations",
+    "description": "Evaluate representation quality without linear classifier using k-NN accuracy. Tests if features are inherently more separable.",
+    "steps": {
+      "step1": "Extract frozen embeddings from trained encoders (SCL, FD-SCL) on test set",
+      "step2": "Compute k-NN accuracy with k=200 (standard for contrastive learning)",
+      "step3": "Use L2 normalized embeddings, cosine similarity",
+      "step4": "Evaluate on CIFAR-100 test set",
+      "step5": "Success: FD-SCL k-NN accuracy >= SCL k-NN accuracy + 1%",
+      "step6": "Save results: results/knn_evaluation.json"
+    },
+    "estimated_time_minutes": 5
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to ensure improvements are significant, not due to random variation",
+    "steps": {
+      "step1": "Collect results from 3 random seeds for each method on each dataset",
+      "step2": "Compute mean and standard deviation for all metrics",
+      "step3": "Perform paired t-test between SCL and FD-SCL results",
+      "step4": "Report p-values and confidence intervals",
+      "step5": "Success: p < 0.05 for primary metrics (coarse-to-fine accuracy)",
+      "step6": "Save results: results/statistical_tests.json"
+    },
+    "estimated_time_minutes": 5
+  },
+  {
+    "category": "Visualization",
+    "title": "t-SNE Visualization of Embeddings",
+    "description": "Create t-SNE visualizations showing better subclass separation with FD-SCL vs SCL",
+    "steps": {
+      "step1": "Extract embeddings for CIFAR-100 test set from SCL and FD-SCL (seed=42)",
+      "step2": "Apply t-SNE with perplexity=30, n_iter=1000",
+      "step3": "Create plots: (a) Colored by coarse labels (20 classes), (b) Colored by fine labels (sample 20 for clarity)",
+      "step4": "Visual inspection: FD-SCL should show tighter clusters for subclasses within each superclass",
+      "step5": "Save figures: logs/figures/tsne_coarse.pdf, logs/figures/tsne_fine.pdf"
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Visualization",
+    "title": "Weight Distribution Analysis",
+    "description": "Visualize the distribution of pair weights to verify FDEM upweights rare-feature pairs",
+    "steps": {
+      "step1": "Load saved weight statistics from FD-SCL training",
+      "step2": "Analyze correlation between weight and feature rarity: compute Pearson correlation between w_{ip} and r_{ip}",
+      "step3": "Create histograms of weight distributions",
+      "step4": "Plot weight vs rarity score scatter plot",
+      "step5": "Expected: Strong positive correlation, high variance in weights (not uniform)",
+      "step6": "Save figures: logs/figures/weight_distribution.pdf, logs/figures/weight_vs_rarity.pdf"
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Visualization",
+    "title": "Training Curves and Convergence Analysis",
+    "description": "Plot training loss curves, test accuracy over epochs, and convergence speed comparison",
+    "steps": {
+      "step1": "Load training logs for all methods and seeds",
+      "step2": "Plot: (a) Training loss vs epoch, (b) Test accuracy vs epoch, (c) Linear eval accuracy vs epoch",
+      "step3": "Include mean and shaded std across 3 seeds",
+      "step4": "Plot effective rank evolution during training",
+      "step5": "Save figures: logs/figures/training_curves.pdf, logs/figures/effective_rank_evolution.pdf"
+    },
+    "estimated_time_minutes": 10
+  },
+  {
+    "category": "Visualization",
+    "title": "Results Summary Tables and Figures",
+    "description": "Create publication-ready tables and figures for paper",
+    "steps": {
+      "step1": "Table 1: Main results on CIFAR-100 (standard accuracy, coarse-to-fine accuracy, k-NN, effective rank)",
+      "step2": "Table 2: Ablation study results (τ_w, η, components)",
+      "step3": "Figure 1: t-SNE visualizations comparing SCL vs FD-SCL",
+      "step4": "Figure 2: Training curves and convergence comparison",
+      "step5": "Figure 3: Weight distribution and rarity correlation",
+      "step6": "Figure 4: Effective rank comparison across methods",
+      "step7": "Format tables: Mean ± std over 3 seeds, bold best results",
+      "step8": "Export as LaTeX tables and high-res PDF figures: logs/tables/, logs/figures/"
+    },
+    "estimated_time_minutes": 15
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Success Criteria Validation",
+    "description": "Evaluate all experiments against the success criteria defined in the proposal and generate final report",
+    "steps": {
+      "step1": "Criterion 1: Feature Suppression Reduction - Check if FD-SCL subclass accuracy >= SCL + 5% on CIFAR-100 coarse-to-fine",
+      "step2": "Criterion 2: Standard Classification - Check if FD-SCL maintains or improves standard CIFAR-100 accuracy",
+      "step3": "Criterion 3: Representation Quality - Check if FD-SCL effective rank >= 1.15 × SCL effective rank",
+      "step4": "Criterion 4: Computational Efficiency - Check if FD-SCL overhead < 10% vs SCL",
+      "step5": "Generate summary report: results/success_criteria_report.md with PASS/FAIL for each criterion",
+      "step6": "Document any failure modes and potential mitigations",
+      "step7": "Create executive summary: results/executive_summary.txt with key findings"
+    },
+    "estimated_time_minutes": 10
+  }
+]

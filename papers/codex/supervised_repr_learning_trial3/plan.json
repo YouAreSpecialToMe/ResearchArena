@@ -1,0 +1,118 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze a reproducible matched-budget setup",
+    "description": "Configure one deterministic environment for a controlled empirical study of pseudo-group signal quality under a strict 8-hour total budget on a single RTX A6000.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment with PyTorch 2.2+, torchvision, numpy, scipy, pandas, scikit-learn, matplotlib, seaborn, tqdm, pyyaml, and wilds; save exact versions to `requirements-lock.txt` and record CUDA, cuDNN, and GPU driver versions in `env_report.json`.",
+      "step2": "Use fixed seeds `7`, `17`, and `27` for every required 3-seed experiment. Use the same seed list for all baselines, proposed signals, and ablations so comparisons are paired and fair.",
+      "step3": "Enable AMP mixed precision, `torch.backends.cudnn.benchmark=false`, deterministic dataloader worker seeding, and gradient accumulation only if batch size becomes memory-limited. Set the global CPU worker budget to `4` and allow CPU-side clustering, metric computation, and plotting to overlap with later GPU runs.",
+      "step4": "Standardize logging across all runs: save config YAML, per-epoch training and validation CSV logs, warmup checkpoint paths, per-sample cached warmup statistics keyed by persistent `sample_id`, clustering outputs (`q_i`, predicted cluster labels, PCA model, z-score stats), evaluation summaries, wall-clock runtime, peak GPU memory, and warmup cache size on disk.",
+      "step5": "Hold fixed the backbone family, augmentation family, optimizer family, warmup checkpointing cadence, fine-tuning epoch count, and model-selection rule across all pseudo-group signal conditions. The only required experimental variable in the main study is the signal used for pseudo-group inference."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare canonical spurious-correlation benchmarks",
+    "description": "Use Waterbirds as the main benchmark and Colored MNIST as a cheap mechanism check, while keeping hidden group labels unavailable to training, clustering, and hyperparameter selection.",
+    "steps": {
+      "step1": "Dataset 1 is Waterbirds from WILDS with the standard train, validation, and test splits. Store per sample: image path, class label, hidden group label, split id, and persistent integer `sample_id`, but expose only image path, class label, split id, and `sample_id` to all training and inference code.",
+      "step2": "Dataset 2 is Colored MNIST with the standard spurious-color construction: training color-label correlation about `0.995`, validation and test correlation about `0.1`. Persist `sample_id`, digit label, color group, and split id, but hide the color group from all model selection and training code.",
+      "step3": "For Waterbirds, resize to `224x224`, normalize with ImageNet mean and standard deviation, and use ImageNet-pretrained `ResNet-18`. For Colored MNIST, keep `28x28`, convert grayscale digits to 3 channels only if needed by the chosen CNN implementation, and normalize using train-split statistics only.",
+      "step4": "Use the same deterministic validation and test preprocessing for every method. Use the same training augmentations for all methods, with two stochastic views per sample required when computing augmentation disagreement and any supervised contrastive loss. Waterbirds uses random resized crop with scale `(0.7, 1.0)`, horizontal flip, color jitter `(0.4, 0.4, 0.4, 0.1)`, and grayscale probability `0.2`. Colored MNIST uses random crop with padding `2` and light color jitter only if a quick visual check confirms label semantics remain intact.",
+      "step5": "Write `data_summary.json` with split sizes, class counts, group counts, class-by-group contingency tables, imbalance ratios, checksum hashes for split manifests, and expected image resolution so later runs can verify that all seeds used identical data."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze framing, scope, and literature comparison protocol",
+    "description": "Operationalize the paper as a controlled benchmark on pseudo-group signal quality rather than a new robustness method, and make the related-work claims auditable.",
+    "steps": {
+      "step1": "State in the experiment README and result tables that the primary claim is: at matched warmup compute, richer early-training trajectory descriptors may provide better pseudo-group signal than output-only early statistics or warmup-end features. Explicitly avoid method-level novelty claims beyond the lightweight trajectory-shape descriptor.",
+      "step2": "Create a `related_work_matrix.md` before running experiments with rows for SPARE, ExMap, GIC, Beyond Distribution Shift, Correct-N-Contrast, and the current study. Columns should be signal source, whether training dynamics are used, whether the work performs pseudo-group inference, whether downstream objective is contrastive or non-contrastive, whether group labels are needed, and whether the paper contains a matched-budget trajectory-vs-output-only comparison. Mark the last column as `not found` for prior work unless a direct matched-budget comparison is discovered during the literature audit.",
+      "step3": "Define the scope limit up front: the required empirical claim is restricted to short-warmup pseudo-group inference on Waterbirds, with Colored MNIST as a small sanity check. Broader subgroup-discovery claims are out of scope unless the optional `K` sensitivity or optional extra benchmark yields convincing evidence without exceeding the budget.",
+      "step4": "If time remains after all required runs, allow one optional extension only: either Waterbirds `K` selected by BIC over `{2,3,4}` for the top two signals or one single-seed extra benchmark with harder subgroup structure. Do not commit both optional extensions in advance because the single-GPU 8-hour budget is the primary constraint."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Establish simple, strong, and matched-signal baselines",
+    "description": "Compare the proposed trajectory signal against at least two meaningful baselines plus matched controls that isolate which information source drives any gain.",
+    "steps": {
+      "step1": "Simple baseline, required on Waterbirds and Colored MNIST, seeds `7,17,27`: ERM with cross-entropy only. Waterbirds uses ImageNet-pretrained `ResNet-18`; Colored MNIST uses a 4-layer CNN with channels `[32, 64, 128, 256]`, batch normalization, ReLU, and a linear classifier head.",
+      "step2": "Strong baseline, required on Waterbirds, seeds `7,17,27`: vanilla supervised contrastive fine-tuning with uniform same-class weights and the same backbone, projection head, optimizer, batch construction, and epoch budget as the pseudo-group-aware xg-SupCon runs. This shows whether any gains come from pseudo-group signal rather than simply adding a contrastive objective.",
+      "step3": "Matched control A, required on Waterbirds, seeds `7,17,27`: final-feature xg-SupCon. Warm up for `T=4`, extract only the L2-normalized penultimate feature `h_i^(T)`, cluster within class, and fine-tune with the same weighted xg-SupCon downstream objective used by the trajectory and output-only signals.",
+      "step4": "Matched control B, required on Waterbirds at `T in {2,4}`, seeds `7,17,27`: output-only pseudo-group signal with the same temporal summary encoder as the proposed method but without augmentation disagreement or feature-drift inputs. This is the SPARE-style matched-budget control that the core claim must beat.",
+      "step5": "Non-contrastive transfer baseline, required on Waterbirds at `T=4`, seeds `7,17,27`: output-only soft pseudo-group reweighted ERM. Use exactly the same inferred soft clusters as in matched control B but replace xg-SupCon with weighted cross-entropy only. This baseline is required because the proposal claims the signal ranking should transfer beyond contrastive learning."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run matched-budget pseudo-group signal comparisons",
+    "description": "Execute the core study comparing output-only, trajectory-based, and warmup-end feature signals under fixed warmup cost and shared downstream training.",
+    "steps": {
+      "step1": "Waterbirds model and schedule: use ImageNet-pretrained `ResNet-18`, batch size `64`, AdamW, backbone learning rate `3e-4`, classifier and projection-head learning rate `1e-3`, weight decay `1e-4`, cosine learning-rate decay, and `6` downstream fine-tuning epochs after warmup. Use class-balanced mini-batches with `32` examples from each label during fine-tuning.",
+      "step2": "Colored MNIST model and schedule: use the 4-layer CNN baseline, batch size `256`, AdamW with learning rate `1e-3`, weight decay `1e-4`, `T=4` warmup epochs, and `6` downstream fine-tuning epochs. Use class-balanced mini-batches when supervised contrastive loss is active.",
+      "step3": "Warmup budgets are `T=2` and `T=4` on Waterbirds. Treat `T=4` as the main setting and `T=2` as the short-budget stress test. Colored MNIST uses only `T=4` unless there is at least `45` minutes of spare budget after required Waterbirds runs.",
+      "step4": "At the end of each warmup epoch `t`, cache for every training sample: logits `z_i^(t)`, normalized penultimate feature `h_i^(t)`, true-class confidence `p_i^(t)`, true-class margin `m_i^(t)`, per-sample cross-entropy `l_i^(t)`, augmentation disagreement `u_i^(t)=JS(softmax(z_{i,a}^(t)), softmax(z_{i,b}^(t)))`, and feature drift `d_i^(t)=1-cos(h_i^(t), h_i^(t-1))` with `d_i^(1)=0`.",
+      "step5": "Implement the lightweight trajectory-shape encoder exactly once and reuse it for all temporal signal families. For every scalar trajectory `x_i^(1:T)`, compute `g(x_i)=[x_i^(1), x_i^(T), mean(x_i), std(x_i), delta(x_i), slope(x_i)]`, where `delta(x_i)=x_i^(T)-x_i^(1)` and `slope(x_i)` is the least-squares slope over epoch index. Also compute `t_i^corr`, the first epoch where the sample is correctly classified with positive margin, or `T+1` if this never occurs.",
+      "step6": "Define the three clustering signals exactly as in the proposal. Trajectory signal: `s_i^traj=[p_i^(1:T), m_i^(1:T), l_i^(1:T), u_i^(1:T), d_i^(1:T), g(p_i), g(m_i), g(l_i), g(u_i), g(d_i), t_i^corr]`. Output-only control: `s_i^out=[p_i^(1:T), m_i^(1:T), l_i^(1:T), g(p_i), g(m_i), g(l_i), t_i^corr]`. Final-feature control: `s_i^feat=h_i^(T)`.",
+      "step7": "Standardize every signal within class using train-split statistics only. If a within-class signal has dimension greater than `32`, fit within-class PCA on the training split only and reduce to `16` dimensions before clustering. Save z-score means, standard deviations, and PCA components so validation and test pseudo-groups use the identical transform.",
+      "step8": "For each class separately, fit a diagonal-covariance Gaussian mixture model with `K=2`, `n_init=5`, maximum `200` EM iterations, covariance regularization `1e-5`, and the same random seed as the enclosing training run. Produce soft pseudo-group posteriors `q_i` for each training sample and derive pairwise same-class disagreement scores `r_ij=1-q_i^T q_j`.",
+      "step9": "Main downstream learner, required on Waterbirds, seeds `7,17,27`: weighted xg-SupCon with `L = L_CE + lambda * L_xgSupCon`, temperature `tau=0.07`, `lambda=0.5`, projection head MLP `512 -> 128`, and sample-pair weight `w_ij = 0.1 + 0.9 * r_ij`. Freeze `tau` and `lambda` after one seed-7 validation-only pilot and do not retune per signal.",
+      "step10": "Non-contrastive downstream learner, required on Waterbirds, seeds `7,17,27`: soft pseudo-group reweighted ERM. Estimate pseudo-group mass within each class as `pi_{y,k}=mean_{i:y_i=y} q_{i,k}` and weight each sample by `w_i=sum_k q_{i,k}/(pi_{y_i,k}+1e-6)` inside the cross-entropy loss. Keep the backbone, optimizer, and fine-tuning epoch count fixed relative to the xg-SupCon runs."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run ablations for every novel component",
+    "description": "Test whether any measured gain comes from trajectory-specific information, the trajectory-shape encoder, soft weighting, or fixed-cluster assumptions rather than accidental implementation choices.",
+    "steps": {
+      "step1": "Ablation A, required on Waterbirds at `T=4`, seeds `7,17,27`: remove trajectory-specific channels `u_i^(1:T)` and `d_i^(1:T)` from `s_i^traj` but keep the shape encoder `g(.)` and `t_i^corr`. This should reduce to the output-only control and serves as a code-path consistency check.",
+      "step2": "Ablation B, required on Waterbirds at `T=4`, seeds `7,17,27`: keep the full raw trajectory channels `[p,m,l,u,d]` but remove all shape-code features `g(.)` and `t_i^corr`, clustering only on concatenated per-epoch raw values. This isolates whether the one genuinely new trajectory-specific component is the temporal summary itself rather than simply adding more raw statistics.",
+      "step3": "Ablation C, required on Waterbirds at `T=4`, seeds `7,17,27`: keep the full trajectory signal fixed but replace soft pair weights `w_ij = 0.1 + 0.9*r_ij` with uniform same-class SupCon weights. This tests whether improved pseudo-group signal matters only when the downstream objective actually consumes graded cross-group disagreement.",
+      "step4": "Ablation D, required on Waterbirds at `T=4`, seeds `7,17,27`: compare output-only soft reweighted ERM versus trajectory soft reweighted ERM. This is the non-contrastive transfer test and must be reported as a first-class result, not an appendix-only extra.",
+      "step5": "Ablation E, optional on Waterbirds for the top two signals only, seed `7` first and expand to seeds `17,27` only if runtime allows: relax the fixed `K=2` assumption by selecting `K` with BIC over `{2,3,4}` within each class. Report whether the signal ranking changes materially; do not over-interpret this as general subgroup discovery if results are noisy.",
+      "step6": "Mechanism check on Colored MNIST, required at minimum for seed `7` and preferred for seeds `7,17,27`: run ERM, output-only xg-SupCon, and trajectory xg-SupCon at `T=4`. Use this only to test whether the Waterbirds trend is reproducible on a second benchmark under low compute, not to claim broad external validity."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Measure fidelity, robustness, stability, and cost",
+    "description": "Use evaluation metrics that can confirm or refute the study's claim while preventing hidden-group leakage into training or model selection.",
+    "steps": {
+      "step1": "Primary task metrics on validation and test for every run are average accuracy, worst-group accuracy, and robustness gap equal to average accuracy minus worst-group accuracy. Report mean and standard deviation over the 3 required seeds for every Waterbirds comparison.",
+      "step2": "Pseudo-group fidelity metrics, computed on validation only using oracle group labels that remain hidden from training, are normalized mutual information, adjusted Rand index, minority-group F1 after best within-class label matching, and per-class balanced accuracy of pseudo-group assignments. These metrics directly test the claim that trajectory signals infer better pseudo-groups.",
+      "step3": "Stability metrics are seed-to-seed variation of validation NMI, seed-to-seed variation of worst-group accuracy, and the Spearman correlation of pairwise disagreement scores `r_ij` across seeds on the shared validation subset. If trajectories are more accurate but less stable, report that tradeoff explicitly.",
+      "step4": "Cost metrics for each method are warmup wall-clock time, clustering wall-clock time, fine-tuning wall-clock time, peak GPU memory, warmup cache size on disk, and total end-to-end runtime. Report trajectory overhead relative to output-only and final-feature controls so the empirical claim remains compute-aware.",
+      "step5": "Checkpoint selection must use validation average accuracy or validation cross-entropy only. Never use hidden-group labels, pseudo-group fidelity metrics, or worst-group accuracy to tune hyperparameters or choose checkpoints. Test metrics are computed once after the entire configuration is frozen.",
+      "step6": "Define explicit success criteria before running. Confirm the hypothesis if trajectory beats output-only on at least one fidelity metric at both `T=2` and `T=4` on Waterbirds, the fidelity gain is larger at `T=2` than at `T=4`, and the trajectory signal improves worst-group accuracy under both xg-SupCon and soft reweighted ERM. Refute the hypothesis if output-only matches or beats trajectory once budgets are matched, if final-feature clustering performs similarly, or if gains disappear outside the contrastive downstream learner."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate tables and figures for a benchmark-style paper",
+    "description": "Prepare outputs that emphasize the matched-budget comparison, pseudo-group fidelity, downstream transfer, and honest scope limits.",
+    "steps": {
+      "step1": "Create the main Waterbirds table with rows `ERM`, `Vanilla SupCon`, `Final-feature xg-SupCon (T=4)`, `Output-only xg-SupCon (T=4)`, `Trajectory xg-SupCon (T=4)`, `Output-only soft-rwERM (T=4)`, and `Trajectory soft-rwERM (T=4)`. Columns are validation and test average accuracy, worst-group accuracy, robustness gap, validation NMI, validation minority-group F1, runtime, and peak GPU memory.",
+      "step2": "Create a matched-budget Waterbirds table with rows `Output-only T=2`, `Trajectory T=2`, `Output-only T=4`, and `Trajectory T=4`, each over 3 seeds. Include a difference-in-differences column comparing `(Trajectory - Output-only)` at `T=2` against `(Trajectory - Output-only)` at `T=4`.",
+      "step3": "Create an ablation table with rows `Full trajectory`, `No u/d`, `No shape code`, `Uniform SupCon weights`, and `BIC-selected K` if the optional run finishes. Report validation fidelity metrics and test worst-group accuracy side by side so readers can see whether better pseudo-groups actually transfer downstream.",
+      "step4": "Plot bar charts with 3-seed error bars for Waterbirds worst-group accuracy and validation NMI across final-feature, output-only, and trajectory signals. Keep the row and color ordering identical across plots.",
+      "step5": "Plot warmup diagnostic curves on Waterbirds validation, stratified post hoc by true hidden group only for interpretation: mean `p`, `m`, `l`, `u`, and `d` versus epoch. This figure supports the claim that temporal behavior may contain subgroup information beyond endpoint features.",
+      "step6": "Save every figure as `PNG` and `PDF`, every table as `CSV` and `Markdown`, and every scalar summary as `results_summary.json` so the paper draft can import them directly. Include one explicit note under the main figure set that no exact matched-budget trajectory-vs-output-only comparison was found in the cited prior work, but overlap in ingredients with SPARE, ExMap, GIC, and related papers is substantial."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Schedule execution to fit the single-GPU 8-hour budget",
+    "description": "Sequence runs so the decisive Waterbirds comparisons finish first, optional work is clearly deprioritized, and CPU-side tasks overlap with GPU training whenever possible.",
+    "steps": {
+      "step1": "Phase 1, `20-30` minutes: verify environment, download or validate datasets, run a single seed-7 Waterbirds pilot to freeze `lambda`, `tau`, and any minor optimizer settings using validation average accuracy only. Cap this pilot to at most `4` short candidate configurations.",
+      "step2": "Phase 2, about `3.5-4.5` hours total: execute all required Waterbirds 3-seed runs for ERM, vanilla SupCon, final-feature xg-SupCon (`T=4`), output-only xg-SupCon (`T=2` and `T=4`), trajectory xg-SupCon (`T=2` and `T=4`), output-only soft-rwERM (`T=4`), and trajectory soft-rwERM (`T=4`). Reuse cached warmup outputs whenever the downstream learner changes but the warmup signal does not.",
+      "step3": "Phase 3, about `1.0-1.5` hours: execute required Waterbirds ablations `No shape code` and `Uniform SupCon weights` for 3 seeds, again reusing warmup caches. If actual runtime is slower than expected, complete `No shape code` before `Uniform SupCon weights` because it tests the paper's only genuinely new inference component more directly.",
+      "step4": "Phase 4, about `30-60` minutes: run the Colored MNIST mechanism check for seed `7` first, then add seeds `17` and `27` only if at least `45` minutes remain. Do not cut any required Waterbirds seed to make room for Colored MNIST.",
+      "step5": "Phase 5, `20-30` CPU-overlapped minutes: aggregate metrics, compute NMI, ARI, and minority-group F1, render plots, and export tables while later GPU runs are already in progress. Use the 4 CPU cores for clustering, metric aggregation, and plotting in parallel with GPU training whenever file I/O is not the bottleneck.",
+      "step6": "Budget rule: if the schedule slips, drop work in this order only: optional BIC-selected `K`, extra Colored MNIST seeds beyond seed `7`, any optional extra benchmark, then cosmetic plots. Never drop the 3-seed Waterbirds matched-budget comparison between output-only and trajectory signals or the Waterbirds non-contrastive transfer test, because those are the minimum experiments needed to support the proposal's honest empirical claim."
+    }
+  }
+]

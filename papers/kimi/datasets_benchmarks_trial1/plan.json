@@ -1,0 +1,384 @@
+{
+  "project": "CompViz: Dynamic Benchmark for Compositional Visual Reasoning",
+  "resource_constraints": {
+    "gpu": "1x NVIDIA RTX A6000 (48GB VRAM)",
+    "cpu": "4 cores",
+    "ram": "60GB",
+    "time_budget_hours": 8,
+    "estimated_total_runtime_hours": 6.5
+  },
+  "plan": [
+    {
+      "category": "Environment Configuration",
+      "title": "Setup Python Environment and Dependencies",
+      "description": "Create isolated environment and install all required packages for scene generation, model inference, and evaluation",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+        "2": "Install generation dependencies: pip install cairosvg pillow numpy svgwrite",
+        "3": "Install ML dependencies: pip install torch torchvision transformers accelerate",
+        "4": "Install VLM-specific packages: pip install qwen-vl-utils pillow",
+        "5": "Install evaluation dependencies: pip install scikit-learn pandas matplotlib seaborn",
+        "6": "Verify GPU availability: python -c 'import torch; print(torch.cuda.is_available())'",
+        "7": "Create directory structure: mkdir -p data/{scenes,queries,results} models/ figures/ logs/"
+      }
+    },
+    {
+      "category": "Data Preparation",
+      "title": "Implement Core Generation Pipeline",
+      "description": "Build the three-stage generation pipeline: Scene Generator, Query Generator, and Answer Computer",
+      "estimated_time_minutes": 45,
+      "steps": {
+        "1": "Implement Scene Generator (scene_generator.py): SVG-based 2D shape rendering with primitives (circle, square, triangle, star, pentagon, hexagon), colors (red, blue, green, yellow, purple, orange, cyan, magenta), sizes (small/medium/large), textures (solid/striped/dotted/checkered). Include minimum object separation constraints to prevent incoherent scenes.",
+        "2": "Implement Query Generator (query_generator.py): Compositional grammar with Boolean operators (AND, OR, NOT, XOR), quantifiers (∃, ∀, exactly-n, at-most-n, at-least-n), comparisons (same-as, larger-than, different-from, count-comparison), and transitive relations. Support composition depth 1-4.",
+        "3": "Implement Answer Computer (answer_computer.py): Symbolic execution on ground-truth scene graphs. Verify unique answers and filter vacuously true/false conditions.",
+        "4": "Implement difficulty controller (difficulty.py): Map difficulty levels (1-4) to object counts (3-5, 6-8, 9-12, 13-20), composition depth (1-4), distractors (0, 1-2, 3-4, 5+), and relation hops (0, 1, 2, 3+).",
+        "5": "Create pipeline failure mode handlers: (a) Scene incoherence: rejection sampling for layout validity with minimum separation of 20px; (b) Query ambiguity: symbolic verification ensuring unique answers; (c) Attribute binding: scene-aware query generation; (d) Quantifier scope: filter trivial truth values.",
+        "6": "Write generation script (generate_dataset.py) with CLI interface for configurable instance count, difficulty level, random seed, and output format."
+      }
+    },
+    {
+      "category": "Data Preparation",
+      "title": "Generate Benchmark Datasets",
+      "description": "Generate all required test sets for main experiments and baselines. Fixed seeds for reproducibility.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Generate timing validation set: 1,000 instances (250 per difficulty level) with seeds 42-45",
+        "2": "Generate fixed test sets for discriminative power: 2,000 instances per difficulty level × 4 levels = 8,000 instances. Seeds: 100-103",
+        "3": "Generate reasoning type test sets: Existential (500), Universal (500), Comparative (500), Transitive (500), Nested Quant (500). Seed: 200",
+        "4": "Generate transitive chain length test set: 1-hop (300), 2-hop (300), 3-hop (300), 4-hop (300). Seed: 300",
+        "5": "Generate nested quantifier test set: Simple ∃ (400), ∃∀ (400), ∀∃ (400), ∀∀ (400). Seed: 400",
+        "6": "Generate query naturalness validation set: 100 Depth-3 nested quant queries with complex phrasing. Seed: 500",
+        "7": "Generate simplified variants for same 100 queries. Seed: 501",
+        "8": "Generate 5 contamination-free test sets: 1,000 instances each with seeds 1000, 1001, 1002, 1003, 1004",
+        "9": "Generate CVR-style odd-one-out tasks: 1,000 instances for cross-benchmark comparison. Seed: 600",
+        "10": "Verify dataset integrity: check all instances have valid scenes, queries, and answers; ensure no corrupted files"
+      }
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Baseline 1: Simple Heuristic Baseline (Random + Majority)",
+      "description": "Implement simple baselines to establish floor performance. Required: at least one simple baseline.",
+      "estimated_time_minutes": 10,
+      "steps": {
+        "1": "Implement Random Baseline: Randomly select yes/no for binary questions, random attribute for multi-choice",
+        "2": "Implement Majority Class Baseline: Always predict majority class from training distribution (50% yes/no for balanced, adjusted for imbalanced)",
+        "3": "Evaluate both baselines on all fixed test sets (8,000 instances)",
+        "4": "Record metrics: accuracy per difficulty level, per reasoning type",
+        "5": "Save results to results/baseline_simple.json"
+      }
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Baseline 2: Strong Baseline - CLEVR-Style Symbolic Executor",
+      "description": "Implement a symbolic executor similar to CLEVR's as a strong baseline. This establishes performance ceiling for symbolic methods.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Implement scene parser: Extract scene graph from SVG ground truth (cheating baseline - uses perfect perception)",
+        "2": "Implement query executor: Execute logical programs on scene graph for existential, universal, and comparative queries",
+        "3": "Implement transitive relation executor: Use graph traversal for multi-hop relations",
+        "4": "Test on all fixed test sets (8,000 instances)",
+        "5": "Record metrics: accuracy per difficulty level, per reasoning type",
+        "6": "Save results to results/baseline_symbolic.json",
+        "7": "Note: This baseline uses ground-truth scene graphs, so represents upper bound for perfect perception + symbolic reasoning"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Speed Validation Experiment (RQ1)",
+      "description": "Validate <100ms generation time target across difficulty levels. Address feedback: timing is TARGET not pre-validated measurement.",
+      "estimated_time_minutes": 20,
+      "steps": {
+        "1": "Load timing validation set (1,000 instances, 250 per difficulty level)",
+        "2": "Run generation 5 times per instance with warm-start (first run may have initialization overhead)",
+        "3": "Measure per-component timing: Scene Generation, Query Generation, Answer Computation",
+        "4": "Calculate statistics: mean, std, min, max, P50, P95, P99 per difficulty level",
+        "5": "Generate timing breakdown report: total time and per-component times",
+        "6": "Create visualization: boxplot of generation time by difficulty level",
+        "7": "Validate hypothesis H1: Mean <100ms with σ<20ms across all levels",
+        "8": "If timing exceeds target: document bottlenecks and optimization opportunities",
+        "9": "Save results to results/speed_validation.json and figures/speed_breakdown.png"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Discriminative Power Experiment (RQ2)",
+      "description": "Evaluate models across difficulty levels to demonstrate >30% accuracy gap.",
+      "estimated_time_minutes": 120,
+      "steps": {
+        "1": "Select models for local evaluation: Qwen2-VL-7B, InternVL2-4B (fit on A6000, strong recent performers)",
+        "2": "Load fixed test sets: 2,000 instances per difficulty level (8,000 total)",
+        "3": "For each model and each difficulty level (1-4):",
+        "4": "  - Run inference with batch_size=1 (VLM constraint)",
+        "5": "  - Use prompt template: 'Answer the following question with a single word (yes/no) or number. {question}'",
+        "6": "  - Extract yes/no/count answers using regex patterns",
+        "7": "  - Calculate accuracy per level",
+        "8": "Run 3 random seeds for model inference (different generation temperatures: 0.0, 0.1, 0.2) to measure variance",
+        "9": "Calculate accuracy gap between Level 1 and Level 4",
+        "10": "Validate hypothesis H2: >30% accuracy gap between easiest and hardest difficulty",
+        "11": "Create visualization: accuracy by difficulty level with error bars across seeds",
+        "12": "Save results to results/discriminative_power.json and figures/accuracy_by_difficulty.png"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Nested Quantification Analysis (RQ3)",
+      "description": "Analyze model performance on nested quantifiers (∃∀, ∀∃) vs simple existential (∃).",
+      "estimated_time_minutes": 60,
+      "steps": {
+        "1": "Load nested quantifier test set: Simple ∃ (400), ∃∀ (400), ∀∃ (400), ∀∀ (400)",
+        "2": "Evaluate Qwen2-VL-7B and InternVL2-4B on all 4 quantifier types",
+        "3": "Run with 3 random seeds (temperatures: 0.0, 0.1, 0.2)",
+        "4": "Calculate accuracy per quantifier type",
+        "5": "Compute accuracy drop: ∃∀ vs ∃, ∀∃ vs ∃",
+        "6": "Validate hypothesis H3: >25% accuracy drop on nested quantifiers",
+        "7": "Create confusion matrix: quantifier type vs predicted answer type",
+        "8": "Analyze error patterns: scope errors, quantifier flipping",
+        "9": "Save results to results/nested_quantification.json and figures/quantifier_performance.png"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Transitive Relation Scaling (RQ4)",
+      "description": "Measure accuracy degradation with increasing relation chain length.",
+      "estimated_time_minutes": 45,
+      "steps": {
+        "1": "Load transitive chain test set: 1-hop (300), 2-hop (300), 3-hop (300), 4-hop (300)",
+        "2": "Evaluate Qwen2-VL-7B and InternVL2-4B on all chain lengths",
+        "3": "Run with 3 random seeds (temperatures: 0.0, 0.1, 0.2)",
+        "4": "Calculate accuracy per chain length",
+        "5": "Fit decay curve: Accuracy = 1/(1 + k × hops), estimate k",
+        "6": "Validate hypothesis H4: Accuracy ∝ 1/(1+0.3×hops) relationship",
+        "7": "Create visualization: accuracy vs chain length with fitted curve",
+        "8": "Save results to results/transitive_scaling.json and figures/transitive_accuracy.png"
+      }
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Query Naturalness Validation (RQ4.5)",
+      "description": "Address feedback: validate that nested quantification linguistic complexity does not confound reasoning difficulty.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Load query naturalness validation set: 100 Depth-3 queries with complex phrasing",
+        "2": "Load simplified variants of same 100 queries",
+        "3": "Example complex: 'Is there a shape larger than ALL red circles?'",
+        "4": "Example simplified: 'Find a shape. Is it larger than every red circle?'",
+        "5": "Evaluate Qwen2-VL-7B on both formulations with 3 random seeds",
+        "6": "Calculate performance gap: accuracy_complex - accuracy_simplified",
+        "7": "Measure syntactic complexity: query length, embedding depth, quantifier nesting count",
+        "8": "Validate hypothesis H5: <10% accuracy difference between formulations",
+        "9": "If gap >20%, document as linguistic complexity confound requiring mitigation",
+        "10": "Save results to results/query_naturalness.json and figures/naturalness_validation.png"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Contamination-Free Evaluation (RQ5)",
+      "description": "Demonstrate practical contamination-free evaluation with 5 independent runs.",
+      "estimated_time_minutes": 50,
+      "steps": {
+        "1": "Generate 5 fresh test sets (1,000 instances each) with seeds 1000-1004",
+        "2": "For each run, generate scenes and queries from scratch",
+        "3": "Evaluate Qwen2-VL-7B on all 5 fresh test sets",
+        "4": "Calculate mean accuracy and standard deviation across 5 runs",
+        "5": "Calculate coefficient of variation (CV = std/mean)",
+        "6": "Validate hypothesis H6: Standard deviation <3% across runs",
+        "7": "Compare to fixed test set performance (from discriminative experiment)",
+        "8": "Create visualization: accuracy per run with error bars",
+        "9": "Save results to results/contamination_free.json and figures/per_run_variance.png"
+      }
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "CVR Comparison Experiment",
+      "description": "Implement CVR-style tasks for cross-benchmark comparison.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Implement odd-one-out task generator following CVR paper specification",
+        "2": "Generate 1,000 CVR-style instances with CompViz pipeline",
+        "3": "Evaluate Qwen2-VL-7B and InternVL2-4B on CVR tasks",
+        "4": "Compare performance: CVR tasks vs CompViz tasks at same difficulty",
+        "5": "Calculate correlation between CVR accuracy and CompViz accuracy per model",
+        "6": "Identify incremental signal: cases where models succeed on CVR but fail on CompViz",
+        "7": "Save results to results/cvr_comparison.json"
+      }
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "API Model Evaluation (Limited Scale)",
+      "description": "Evaluate select API models on subset for comparison (budget-conscious).",
+      "estimated_time_minutes": 45,
+      "steps": {
+        "1": "Select API models: GPT-4o-mini (cost-effective), Claude 3.5 Haiku",
+        "2": "Select representative subset: 500 instances per difficulty level (2,000 total)",
+        "3": "Implement API inference with rate limiting (respect 60 RPM limit)",
+        "4": "Evaluate both API models on subset",
+        "5": "Compare API vs open-source model performance",
+        "6": "Estimate cost per 1,000 instances for budget planning",
+        "7": "Save results to results/api_models.json"
+      }
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Failure Mode Analysis (RQ6)",
+      "description": "Analyze failure modes and differentiate from MM-CondChain and DynaMath.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Collect 100 failure examples from Qwen2-VL-7B predictions",
+        "2": "Categorize error types: (a) Quantifier scope errors, (b) Relation chain errors, (c) Counting errors, (d) Attribute binding errors",
+        "3": "Compare to expected MM-CondChain errors (conditional branching, path prediction)",
+        "4": "Compare to expected DynaMath errors (calculation, formula misapplication)",
+        "5": "Document unique failure patterns for CompViz",
+        "6": "Create error type distribution chart",
+        "7": "Validate hypothesis H7: Error patterns distinct from MM-CondChain and DynaMath",
+        "8": "Save results to results/failure_analysis.json and figures/error_distribution.png"
+      }
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Scene Complexity Impact",
+      "description": "Isolate impact of scene complexity (object count) from reasoning complexity.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Generate ablation test sets: Fixed reasoning depth (Depth 2), varying object count (3-5, 6-8, 9-12, 13-20)",
+        "2": "Evaluate Qwen2-VL-7B on all sets",
+        "3": "Measure accuracy vs object count",
+        "4": "Determine if performance drop is due to scene clutter or reasoning difficulty",
+        "5": "Report scene complexity vs reasoning complexity contributions",
+        "6": "Save results to results/ablation_scene_complexity.json"
+      }
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Query Complexity Impact",
+      "description": "Isolate impact of query complexity from visual complexity.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "1": "Generate ablation test sets: Fixed scene (5 objects), varying composition depth (1-4)",
+        "2": "Evaluate Qwen2-VL-7B on all sets",
+        "3": "Measure accuracy vs composition depth",
+        "4": "Compare to full complexity results",
+        "5": "Report isolated query complexity impact",
+        "6": "Save results to results/ablation_query_complexity.json"
+      }
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Curriculum Learning Feasibility (Reduced Scope)",
+      "description": "Address feedback: reduced scope demonstration of curriculum learning capability (generation only, no fine-tuning).",
+      "estimated_time_minutes": 25,
+      "steps": {
+        "1": "Generate Level 1 training data: 10,000 instances",
+        "2": "Generate Level 4 training data: 10,000 instances",
+        "3": "Generate Level 4 validation data: 1,000 instances",
+        "4": "Measure total generation time",
+        "5": "Calculate generation throughput (instances/second)",
+        "6": "Validate that 20K instances generate in <15 minutes",
+        "7": "Document: This demonstrates the ENABLING capability for curriculum learning, not full training",
+        "8": "Note in paper: Full LoRA fine-tuning experiments deferred to future work with extended compute",
+        "9": "Save results to results/curriculum_feasibility.json"
+      }
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Statistical Significance Testing",
+      "description": "Perform rigorous statistical tests on all experimental results.",
+      "estimated_time_minutes": 20,
+      "steps": {
+        "1": "Load all experimental results",
+        "2": "For discriminative power: perform ANOVA across difficulty levels, report F-statistic and p-value",
+        "3": "For nested quantification: perform paired t-test between ∃ and ∃∀, report t-statistic and p-value",
+        "4": "For transitive scaling: perform correlation test between chain length and accuracy, report Pearson r",
+        "5": "For contamination-free: calculate confidence interval for mean accuracy across 5 runs",
+        "6": "For query naturalness: perform McNemar's test comparing complex vs simplified formulations",
+        "7": "Apply Bonferroni correction for multiple comparisons",
+        "8": "Save statistical test results to results/statistical_tests.json"
+      }
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Success Criteria Assessment",
+      "description": "Evaluate all hypotheses against experimental results.",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "1": "H1 (Speed): Check mean <100ms with σ<20ms [PASS/FAIL]",
+        "2": "H2 (Discrimination): Check >30% accuracy gap Level 1 vs Level 4 [PASS/FAIL]",
+        "3": "H3 (Nested Quant): Check >25% accuracy drop ∃∀ vs ∃ [PASS/FAIL]",
+        "4": "H4 (Transitive): Check accuracy ∝ 1/(1+0.3×hops) relationship [PASS/FAIL]",
+        "5": "H5 (Query Naturalness): Check <10% complex vs simplified gap [PASS/FAIL]",
+        "6": "H6 (Contamination-Free): Check <3% variance across 5 runs [PASS/FAIL]",
+        "7": "H7 (Distinct Failures): Check error patterns distinct from related work [PASS/FAIL]",
+        "8": "Generate summary table: Hypothesis, Target, Actual, Status",
+        "9": "Document partial successes and failure modes",
+        "10": "Save to results/success_criteria_assessment.json"
+      }
+    },
+    {
+      "category": "Visualization",
+      "title": "Generate Paper Figures",
+      "description": "Create publication-quality figures for the research paper.",
+      "estimated_time_minutes": 40,
+      "steps": {
+        "1": "Figure 1: Generation pipeline diagram (Scene → Query → Answer)",
+        "2": "Figure 2: Speed comparison table - CompViz vs MM-CondChain vs MentisOculi vs DynaMath vs InfiniBench",
+        "3": "Figure 3: Accuracy vs Difficulty Level (4 lines: Qwen2-VL, InternVL, Symbolic Baseline, Random Baseline)",
+        "4": "Figure 4: Nested Quantifier Performance (bar chart: ∃, ∃∀, ∀∃, ∀∀)",
+        "5": "Figure 5: Transitive Chain Accuracy (line plot with fitted curve)",
+        "6": "Figure 6: Per-Run Variance (error bars across 5 fresh test sets)",
+        "7": "Figure 7: Error Type Distribution (pie chart comparing CompViz, MM-CondChain expected, DynaMath expected)",
+        "8": "Figure 8: Example scenes and queries (visual examples from each difficulty level)",
+        "9": "Save all figures to figures/ directory in high-resolution PNG and PDF formats",
+        "10": "Ensure all figures have clear captions, axis labels, and legends"
+      }
+    },
+    {
+      "category": "Visualization",
+      "title": "Generate Paper Tables",
+      "description": "Create publication-quality tables summarizing results.",
+      "estimated_time_minutes": 20,
+      "steps": {
+        "1": "Table 1: Benchmark comparison (CompViz vs related work with attributes: Domain, Reasoning Type, Speed, Difficulty Control)",
+        "2": "Table 2: Generation timing breakdown by component and difficulty level",
+        "3": "Table 3: Model performance across difficulty levels (main results)",
+        "4": "Table 4: Nested quantifier performance breakdown",
+        "5": "Table 5: Success criteria assessment summary",
+        "6": "Table 6: Ablation study results",
+        "7": "Save tables as LaTeX source files in figures/tables.tex"
+      }
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Final Report Generation",
+      "description": "Compile comprehensive experiment report with all results.",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "1": "Generate summary report: results/EXPERIMENT_REPORT.md",
+        "2": "Include: Experimental setup, All results, Statistical tests, Success criteria assessment",
+        "3": "Document any deviations from plan and justifications",
+        "4": "Report negative results honestly",
+        "5": "Include runtime breakdown: actual vs estimated",
+        "6": "Document computational cost: GPU hours, API costs",
+        "7": "Save all raw results in machine-readable format (JSON)"
+      }
+    }
+  ],
+  "execution_notes": {
+    "parallelization": "Speed validation, data generation, and baseline experiments can run in parallel with main experiments if using CPU for generation. Model inference should use GPU sequentially due to single A6000.",
+    "checkpointing": "Save intermediate results after each experiment to enable resume on interruption.",
+    "reproducibility": "All random seeds are fixed. Document any environment-specific dependencies.",
+    "feedback_addressed": [
+      "Differentiation from DynaMath: Added explicit comparison experiment and documentation of distinct reasoning focus (logical vs mathematical)",
+      "Timing validation clarification: Explicitly state timing is TARGET to be validated, not pre-validated measurement",
+      "Query naturalness validation: Added RQ4.5 experiment comparing complex vs simplified formulations",
+      "Reduced curriculum learning scope: Changed to feasibility demonstration (generation only) instead of full LoRA fine-tuning",
+      "Generation pipeline failure modes: Added explicit handlers and documentation for all identified failure modes"
+    ]
+  },
+  "risk_mitigation": {
+    "timing_target_not_met": "If generation exceeds 200ms, document actual timing and pivot to emphasize accuracy/discrimination results. The benchmark still provides novel reasoning challenges even if speed target is missed.",
+    "models_too_easy": "If models achieve >90% on Level 4, increase difficulty: add more objects (up to 30), deeper nesting (Depth 5), more distractors (up to 10). Document difficulty adjustment.",
+    "nested_quant_too_hard_for_humans": "If query naturalness confound >20%, use progressive phrasing and document as limitation. Report parsing accuracy separately.",
+    "API_rate_limits": "Implement exponential backoff. If still limiting, reduce API evaluation to 250 instances per model.",
+    "memory_issues": "If OOM occurs, reduce batch size to 1, use model quantization (INT8), or evaluate smaller models only."
+  }
+}

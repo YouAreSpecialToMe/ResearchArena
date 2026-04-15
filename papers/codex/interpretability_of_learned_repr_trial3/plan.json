@@ -1,0 +1,120 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Lock software stack and reproducibility settings",
+    "description": "Create a deterministic runtime for frozen-feature extraction, SAE training, and benchmark evaluation that fits a single RTX A6000 and 4 CPU cores.",
+    "steps": {
+      "step1": "Use Python 3.10, PyTorch 2.2+, torchvision 0.17+, timm 1.0+, transformers 4.40+, open_clip_torch 2.24+, numpy, scipy, scikit-learn, pandas, matplotlib, seaborn, pillow, and tqdm. Record exact package versions in `artifacts/environment/requirements_lock.txt`.",
+      "step2": "Set global seeds to `{11, 17, 23}` for all 3-seed experiments and seed `29` for the one-seed backbone sensitivity check. Enable deterministic CuDNN settings where available and log all seeds in `artifacts/metadata/run_registry.csv`.",
+      "step3": "Use mixed precision (`bf16` if supported, else `fp16`) for feature extraction and SAE training. Cap GPU memory use to one process at a time; keep CPU dataloaders at `num_workers=4` and prefetch factor-pair indices on CPU while the GPU is training.",
+      "step4": "Adopt a fixed directory layout: `data/raw`, `data/processed`, `features/<dataset>/<backbone>`, `pairs/<dataset>/<split>`, `checkpoints/<dataset>/<backbone>/<method>/<seed>`, and `results/<dataset>/<backbone>/<method>/<seed>`.",
+      "step5": "Before any training, run a 128-sample smoke test for each dataset-backbone pair to verify image preprocessing, feature dimensionality, SAE forward pass, and metric code."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare datasets, tuple splits, and sound pair construction",
+    "description": "Build leakage-free train/validation/test splits and two pair types: exact single-factor counterfactual pairs and factor-preserving nuisance pairs.",
+    "steps": {
+      "step1": "Download dSprites and Shapes3D from their standard public sources. Keep the original labeled factor metadata and store immutable copies in `data/raw`.",
+      "step2": "Use retained benchmark factors exactly as in the proposal. For dSprites: `shape`, `scale`, `rotation`, `x_position`, `y_position`. For Shapes3D: `object_hue`, `wall_hue`, `floor_hue`, `scale`, `shape`, `orientation`.",
+      "step3": "Create tuple-level splits before any pair generation. Randomly split unique factor tuples into `70% train / 15% validation / 15% test` with seed `2026`, stratifying by discrete factors where possible. Save tuple lists as JSON files so images and derived pairs never cross splits.",
+      "step4": "For each split, generate single-factor counterfactual pairs by matching two images that differ in exactly one retained factor and are identical in all others. Cap stored training pairs at `120000` per dataset, validation pairs at `15000`, and test pairs at `15000`, sampling uniformly over factors and source tuples.",
+      "step5": "Generate nuisance pairs from the same canonical image only. For each image, sample two independent corruption pipelines from: Gaussian noise `sigma in [0.01, 0.05]`, Gaussian blur `sigma in [0.4, 1.0]`, JPEG quality `50-95`, and dead-pixel masking `0.5%-2%`. Do not use crop, translation, resize, rotation, or color jitter. Store `60000/10000/10000` nuisance pairs for train/validation/test.",
+      "step6": "Resize all images to the native backbone input size after corruption. For DINOv2-small and OpenCLIP ViT-B/32, convert grayscale dSprites to 3-channel RGB by channel replication and resize to `224x224`. Normalize with each backbone's published mean/std.",
+      "step7": "Compute and save dataset statistics needed for reporting: number of images, number of tuples, number of counterfactual pairs per factor, and nuisance-pair counts."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Cache frozen backbone features and probe admissibility",
+    "description": "Prevent backbone mismatch from being confused with SAE behavior by first measuring which factors are linearly recoverable from frozen features.",
+    "steps": {
+      "step1": "Extract pooled frozen features for every image in each split. Primary backbone: `DINOv2-small` for dSprites and Shapes3D. Sensitivity backbone: `OpenCLIP ViT-B/32` for dSprites only. Save features as memory-mapped float16 arrays plus an index table linking rows to factor tuples.",
+      "step2": "Record feature dimensionality `d` per backbone and set SAE latent width to `4d`. Set TopK active units to `32` when `d <= 512`, else `64`, matching the proposal.",
+      "step3": "Fit linear probes on train features only for every retained factor. Use multinomial logistic regression for categorical factors and ridge regression for ordered/continuous factors. Tune probe regularization only on the validation split with a small grid `C in {0.1, 1, 10}` or `alpha in {0.1, 1, 10}`.",
+      "step4": "Report held-out validation and test probe metrics per factor. Use classification accuracy for categorical factors and `R^2` plus normalized RMSE for ordered/continuous factors.",
+      "step5": "Mark factors as probe-admissible if test performance is materially above chance: classification accuracy at least `max(chance + 0.20, 0.35)` or regression `R^2 >= 0.30`. Only these factors count toward aggregate TFCC/TBA claims; weak factors remain in appendices as backbone limitations.",
+      "step6": "Order factors by validation probe strength within each dataset-backbone pair. Freeze this order because unpartitioned pseudo-block assignment uses it later."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Tune shared hyperparameters with one pilot and train matched baselines",
+    "description": "Use one small pilot on dSprites with DINOv2-small to fix hyperparameters once, then train all baselines under equal capacity and compute.",
+    "steps": {
+      "step1": "Pilot only on dSprites + DINOv2-small + seed `11`. Compare the proposal's predefined grids: `lambda_nuis in {0.1, 0.3}` for orbit-regularized models, `lambda_cf in {0.3, 1.0}` for partitioned models, and RA-SAE relaxation coefficient in `{0.01, 0.05}`. Keep Adam learning rate `1e-3`, batch size `2048`, max epochs `20`, patience `3`, and weight decay `0` fixed.",
+      "step2": "For each pilot setting, discard runs whose validation variance explained is below `95%` of the best in that method family. Among remaining runs, choose the highest validation TFCC, breaking ties by lower realized mean `L0` and then lower validation MSE.",
+      "step3": "Freeze the selected hyperparameters for all subsequent runs with no dataset-specific or backbone-specific retuning.",
+      "step4": "Train three baseline families on cached features with seeds `{11,17,23}` for DINOv2-small on both datasets: `TopK-SAE` as the simple baseline, `RA-SAE` as the strong recent baseline, and `Orbit-SAE` as the nuisance-regularized unpartitioned baseline.",
+      "step5": "For all SAE-family models, use a 1-layer encoder and 1-layer decoder with linear maps, tied decoder initialization from encoder transpose, TopK sparsity enforced after encoder activations, and reconstruction loss in feature space with mean-squared error.",
+      "step6": "Stop early based on validation TFCC for partition-aware models and validation reconstruction-plus-sparsity objective for unpartitioned models, but always retain the checkpoint with best validation TFCC after pseudo-blocks are frozen."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train partitioned benchmark conditions under the preregistered protocol",
+    "description": "Evaluate whether weak supervision plus fixed partitioning improves factor-local responses over matched unpartitioned baselines on frozen features.",
+    "steps": {
+      "step1": "Train `FB-SAE` and `FB-OSAE` with seeds `{11,17,23}` on DINOv2-small for dSprites and Shapes3D. Use the same latent width, optimizer, epochs, batch size, and TopK setting as the baselines.",
+      "step2": "Partition the latent as fixed-width blocks: invariant `20%`, factor blocks `60%` divided equally across all retained factors in the dataset, and residual `20%`. Keep widths constant across methods for a given dataset-backbone pair.",
+      "step3": "For `FB-SAE`, optimize reconstruction loss plus TopK sparsity plus counterfactual block loss. For `FB-OSAE`, add invariant-block nuisance consistency with the pilot-selected `lambda_nuis`.",
+      "step4": "Construct each minibatch with `50%` singleton feature vectors, `25%` single-factor counterfactual pairs, and `25%` nuisance pairs so reconstruction quality and localization pressure are balanced within the same compute budget.",
+      "step5": "Use the margin term `m = 0.1` in the counterfactual block loss unless the pilot prefers a different value; if unchanged, keep it fixed across all runs. Log per-block mean absolute changes on training and validation pairs every epoch.",
+      "step6": "Run the backbone sensitivity check on dSprites with `OpenCLIP ViT-B/32` for all five methods using seed `29` only. This is not part of the primary average but is reported as a backbone-effect sanity check."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run preregistered ablations and controls",
+    "description": "Test whether gains come from partitioning, counterfactual supervision, nuisance regularization, or evaluation artifacts rather than from extra capacity or lucky assignments.",
+    "steps": {
+      "step1": "Ablation A: compare `FB-OSAE` against `FB-SAE` to isolate nuisance regularization. Run on DINOv2-small for both datasets with seeds `{11,17,23}` and report the TFCC, TBA, nuisance leakage, variance explained, and mean `L0` deltas.",
+      "step2": "Ablation B: compare `FB-SAE` against `TopK-SAE`, `RA-SAE`, and `Orbit-SAE` to isolate the effect of fixed partitioning plus weak supervision. This is part of the main matrix and should be analyzed explicitly rather than only shown in summary tables.",
+      "step3": "Ablation C: permutation control for partition semantics. For each trained partitioned model, randomly permute factor-block identities at evaluation time over `20` permutations on the test split. Verify that TBA falls near the `1/F` chance rate without retraining.",
+      "step4": "Ablation D: pseudo-block robustness for unpartitioned models. Rebuild pseudo-blocks using only half of the training pairs and measure the change in test TFCC/TBA to verify that conclusions are not driven by unstable unit assignment.",
+      "step5": "Ablation E: backbone sensitivity. Compare the dSprites family ranking under DINOv2-small and OpenCLIP ViT-B/32 and report whether the partitioned-vs-unpartitioned ordering is preserved, partially preserved, or reversed.",
+      "step6": "If total wall-clock remains under budget after the core matrix, add one cheap no-nuisance control on dSprites only: train `FB-OSAE` with nuisance-pair batches disabled but identical block widths and counterfactual supervision for seed `11`. Treat this as optional and report it only if completed."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute metrics with fully specified pseudo-block rules and significance tests",
+    "description": "Evaluate all methods on held-out pairs using the preregistered metric definitions and block-construction rules, then test the paper's benchmark claims quantitatively.",
+    "steps": {
+      "step1": "For partitioned models, use native invariant, factor, and residual blocks. For unpartitioned models, construct pseudo-blocks using training pairs only: assign factor pseudo-blocks greedily by factor-selectivity score `S_{u,f}` with width `W_f`, then assign the invariant pseudo-block of width `W_inv` from the remaining units with the smallest nuisance-response score `N_u`, and define the residual pseudo-block as every remaining unit.",
+      "step2": "Freeze pseudo-blocks before validation and test evaluation. Save the assigned unit indices for every seed and method in `results/.../pseudo_blocks.json` so the procedure is auditable.",
+      "step3": "Compute the primary metric `TFCC` on every held-out single-factor pair using the denominator `Delta_inv + sum_k Delta_k + Delta_res`. Aggregate TFCC by factor, by dataset, by backbone, and by method. Report mean, standard deviation across seeds, and `95%` bootstrap confidence intervals over test pairs.",
+      "step4": "Compute secondary metrics: `TBA`, invariant-block nuisance change, reconstruction MSE, fraction of variance explained, realized mean `L0`, and training wall-clock time per run.",
+      "step5": "Use paired statistical comparisons on seed-matched runs for the primary DINOv2-small matrix. Apply paired bootstrap or paired t-tests on per-seed means for `FB-SAE` vs each unpartitioned baseline and `FB-OSAE` vs `FB-SAE`, with Holm correction across the main pairwise hypotheses.",
+      "step6": "Pre-register explicit success criteria in the analysis script: the benchmark protocol is successful if block definitions are leakage-free, at least one partitioned method improves mean held-out TFCC by `>= 0.05` absolute over every unpartitioned baseline on both DINOv2 datasets for probe-admissible factors, improves TBA over `Orbit-SAE` by `>= 5` percentage points on both datasets, and any claimed benefit of `FB-OSAE` over `FB-SAE` preserves at least `95%` of `FB-SAE` variance explained.",
+      "step7": "Pre-register explicit failure cases: if probe-admissible factors are too few to support aggregate claims, if partitioned methods do not exceed the strongest unpartitioned baseline on TFCC/TBA, or if gains disappear under the permutation control, conclude that the benchmark does not support an advantage for weak supervision plus fixed partitioning."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready tables and diagnostic plots",
+    "description": "Create concise figures that support the benchmark claim, reveal failure modes, and separate backbone limitations from SAE behavior.",
+    "steps": {
+      "step1": "Create a main results table with rows for methods and columns for dataset-backbone pairs, showing TFCC, TBA, nuisance leakage, variance explained, and mean `L0`. Bold the best mean and mark statistically significant pairwise wins.",
+      "step2": "Plot per-factor TFCC bar charts for DINOv2-small on dSprites and Shapes3D, restricted to probe-admissible factors, with seed-level error bars.",
+      "step3": "Plot nuisance leakage versus TFCC scatterplots to show whether stronger invariance comes at the cost of poorer factor localization or reconstruction.",
+      "step4": "Visualize block-change heatmaps for representative test pairs: one heatmap per method showing normalized change in invariant, each factor block, and residual block. Use native blocks for partitioned models and frozen pseudo-blocks for unpartitioned models.",
+      "step5": "Create a backbone admissibility figure containing frozen-feature linear probe performance by factor, making clear which factors are excluded from aggregate benchmark claims.",
+      "step6": "Create an ablation figure showing `FB-OSAE`, `FB-SAE`, permutation control, and pseudo-block robustness side by side. Save all plots as both `.png` and `.pdf`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Budget the full experiment suite to fit the 8-hour cap",
+    "description": "Estimate wall-clock cost before execution and constrain the matrix so all experiments, evaluation, and plotting fit on one RTX A6000 and 4 CPU cores.",
+    "steps": {
+      "step1": "Assume feature extraction costs about `20 minutes` per dataset-backbone pair for DINOv2-small and `15 minutes` for OpenCLIP dSprites, for a total of about `55 minutes` GPU time. Run CPU-side pair generation and probe fitting concurrently wherever possible.",
+      "step2": "Assume each SAE training run on cached features costs about `7-9 minutes` including validation. The core DINOv2 matrix has `5 methods x 2 datasets x 3 seeds = 30 runs`, which is about `4.0 hours` at an 8-minute average on one GPU.",
+      "step3": "Allocate about `40 minutes` for the pilot grid because it is limited to dSprites + DINOv2-small + seed `11` and a small hyperparameter grid. Allocate about `40 minutes` for the `5` one-seed OpenCLIP sensitivity runs.",
+      "step4": "Allocate about `35 minutes` for all analysis-only evaluations, pseudo-block assignment, permutation controls, statistical tests, and figure generation on CPU plus intermittent GPU loading.",
+      "step5": "Reserve a `45-minute` buffer for reruns of failed jobs, I/O overhead, and the optional no-nuisance control. If the cumulative elapsed time exceeds `7 hours`, skip the optional control before skipping any preregistered core experiment.",
+      "step6": "Because only one GPU is available, no GPU experiments run in parallel. Parallelism comes from overlapping CPU tasks across the 4 cores with GPU training: pair generation, probe fitting, pseudo-block construction, bootstrap evaluation, and plotting should run asynchronously whenever they do not need the GPU."
+    }
+  }
+]

@@ -1,0 +1,312 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create virtual environment and install required packages for model inference, data processing, and evaluation",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.4+ with CUDA support: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install transformers and related packages: pip install transformers accelerate sentencepiece protobuf",
+      "step4": "Install evaluation dependencies: pip install scikit-learn pandas numpy matplotlib seaborn scipy",
+      "step5": "Install API clients: pip install openai anthropic",
+      "step6": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step7": "Set random seed for reproducibility: export PYTHONHASHSEED=42"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Source Datasets",
+    "description": "Download source datasets (GSM8K, LogiQA, CommonsenseQA, MBPP) and create unified data format",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Install datasets library: pip install datasets",
+      "step2": "Download GSM8K (train split): python -c \"from datasets import load_dataset; load_dataset('gsm8k', 'main', split='train').save_to_disk('data/gsm8k')\"",
+      "step3": "Download LogiQA: python -c \"from datasets import load_dataset; load_dataset('lucasmccabe/logiqa', split='train').save_to_disk('data/logiqa')\"",
+      "step4": "Download CommonsenseQA: python -c \"from datasets import load_dataset; load_dataset('commonsense_qa', split='train').save_to_disk('data/csqa')\"",
+      "step5": "Download MBPP (sanitized): python -c \"from datasets import load_dataset; load_dataset('mbpp', 'sanitized', split='train').save_to_disk('data/mbpp')\"",
+      "step6": "Create data directory structure: mkdir -p data/{raw,processed,annotations}",
+      "step7": "Run data statistics script to verify downloads and report dataset sizes"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Generate Ground-Truth Chain-of-Thought Solutions",
+    "description": "Use GPT-4o-mini to generate verified CoT solutions for selected problems across all domains",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Set OpenAI API key from environment: export OPENAI_API_KEY",
+      "step2": "Sample problems from each domain: 400 Math, 300 Logic, 300 Commonsense, 200 Code (total: 1,200)",
+      "step3": "Generate CoT for Math: Use prompt 'Solve step by step. Show your reasoning clearly, numbering each step.' Output format: numbered steps",
+      "step4": "Generate CoT for Logic: Use prompt 'Derive the answer through logical deduction. Number each reasoning step.'",
+      "step5": "Generate CoT for Commonsense: Use prompt 'Explain your reasoning step by step to arrive at the answer.'",
+      "step6": "Generate CoT for Code: Use prompt 'Explain the solution approach step by step before providing code.'",
+      "step7": "Verify solutions: For math, check with Python eval; for code, run test cases; for logic/commonsense, use GPT-4o for verification",
+      "step8": "Filter out problems with incorrect solutions. Target: keep ~90% with correct CoT",
+      "step9": "Save verified CoTs to data/processed/ground_truth_cot.jsonl"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Controlled Error Injection",
+    "description": "Inject 6 error types at 3 positions (early/middle/late) to create corrupted CoT variants",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Define error injection templates for each error type:",
+      "step1a": "Calculation: Replace correct arithmetic with off-by-one or operation errors",
+      "step1b": "Logic: Replace valid implication with fallacy (affirming consequent, denying antecedent)",
+      "step1c": "Factuality: Insert incorrect fact or definition",
+      "step1d": "Omission: Remove a critical intermediate step",
+      "step1e": "Misinterpretation: Change constraint interpretation (e.g., 'at least' to 'exactly')",
+      "step1f": "Premature: Add conclusion before sufficient evidence",
+      "step2": "For each problem, identify valid error positions: Early (step 1-2), Middle (step 3-4), Late (step 5+)",
+      "step3": "Create 2 corrupted variants per problem: one with error at position A, one at position B (different positions)",
+      "step4": "Use rule-based transformations where possible, GPT-4o-mini for complex cases",
+      "step5": "Ensure semantic coherence: corrupted CoT should appear plausible",
+      "step6": "Verify error propagation: error should lead to incorrect final answer",
+      "step7": "Create balanced dataset: equal distribution across error types and positions",
+      "step8": "Save corrupted CoTs to data/processed/corrupted_cot.jsonl with metadata: error_type, error_step, error_position_category"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create Train/Test Splits and Validation",
+    "description": "Split data ensuring balanced distribution across domains, error types, and positions",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Set random seed: np.random.seed(42)",
+      "step2": "Split each domain 80/10/10 for train/val/test",
+      "step3": "Stratify by: (a) error type, (b) error position, (c) original dataset source",
+      "step4": "Ensure no data leakage: same base problem cannot appear in multiple splits",
+      "step5": "Create data statistics report: counts per domain, error type, position, split",
+      "step6": "Validate splits: check that distributions are balanced",
+      "step7": "Save splits: data/processed/{train,val,test}.jsonl"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: Random and Heuristic Baselines",
+    "description": "Implement simple baselines for error detection, localization, and characterization",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Random Detection Baseline: Random binary prediction (expected accuracy ~0.5, F1 depends on class balance)",
+      "step2": "Random Localization Baseline: Random step selection from valid range",
+      "step3": "Random Characterization Baseline: Uniform random selection from 6 error types",
+      "step4": "Majority Class Baseline: Always predict majority class from training set",
+      "step5": "Always-Correct Heuristic: Always predict 'no error' (measures class imbalance penalty)",
+      "step6": "Middle-Step Heuristic: Always predict error at middle step (tests position bias)",
+      "step7": "Run all baselines on validation set, save predictions to outputs/baselines/"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Simple Prompting Baseline",
+    "description": "Evaluate models with basic prompting (no special introspection techniques)",
+    "estimated_time": "90 minutes",
+    "steps": {
+      "step1": "Load evaluation models: Qwen2.5-7B-Instruct, Llama-3.1-8B-Instruct",
+      "step2": "Detection task prompt: 'Review the following reasoning. Does it contain any errors? Answer only YES or NO.'",
+      "step3": "Localization task prompt: 'The reasoning below contains an error. Identify the step number (1-indexed) where the first error occurs. Answer with only the step number.'",
+      "step4": "Characterization task prompt: 'The reasoning below has an error at step X. Classify the error type: calculation, logic, factuality, omission, misinterpretation, or premature. Answer with only the type.'",
+      "step5": "Run inference on all validation samples with batch_size=8 for 7B models",
+      "step6": "Parse outputs: extract YES/NO for detection, integers for localization, type strings for characterization",
+      "step7": "Compute metrics: accuracy, F1, MAE for localization, per-type F1 for characterization",
+      "step8": "Save results to outputs/baselines/simple_prompting_results.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3: Chain-of-Thought Verification",
+    "description": "Strong baseline using CoT prompting for self-verification",
+    "estimated_time": "120 minutes",
+    "steps": {
+      "step1": "Use same models as Baseline 2",
+      "step2": "Detection prompt with CoT: 'Review the reasoning step by step. First, analyze each step for correctness. Then conclude: does the reasoning contain errors? Format: Analysis: [your step-by-step review] Answer: YES/NO'",
+      "step3": "Localization prompt with CoT: 'Review the reasoning. Identify where errors occur by checking each step. Then specify the first error step number. Format: Analysis: [review] Answer: [step number]'",
+      "step4": "Characterization prompt with CoT: 'Analyze the error at step X. What type of mistake is this? Provide reasoning then the type. Format: Analysis: [reasoning] Answer: [type]'",
+      "step5": "Use temperature=0.0 for deterministic outputs, max_new_tokens=512",
+      "step6": "Run on validation set with 3 random seeds (42, 43, 44) for ensemble stability",
+      "step7": "Parse structured outputs to extract final answers",
+      "step8": "Compute all metrics and save to outputs/baselines/cot_verification_results.json"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Main Evaluation: Full Model Suite on IntrospectBench",
+    "description": "Evaluate all target models on all three tasks with optimized prompting",
+    "estimated_time": "180 minutes",
+    "steps": {
+      "step1": "Load models for evaluation:",
+      "step1a": "Local models: Qwen2.5-7B-Instruct, Qwen2.5-32B-Instruct (4-bit), Llama-3.1-8B-Instruct, DeepSeek-R1-Distill-Qwen-14B",
+      "step1b": "API models: GPT-4o-mini, GPT-4o (if budget allows)",
+      "step2": "Configure model-specific parameters:",
+      "step2a": "7B models: batch_size=8, load in bf16",
+      "step2b": "14B-32B models: batch_size=4, load in 4-bit (bnb_config)",
+      "step3": "Use best prompting strategy from baseline experiments",
+      "step4": "Task 1 - Detection: Binary classification with confidence scores",
+      "step5": "Task 2 - Localization: Step prediction with confidence",
+      "step6": "Task 3 - Characterization: 6-way classification with confidence",
+      "step7": "Run each model with 3 random seeds (42, 43, 44) by varying temperature slightly (0.0, 0.1, 0.2)",
+      "step8": "Save all predictions to outputs/main_results/{model_name}_seed{seed}.jsonl",
+      "step9": "Track inference time per sample for efficiency analysis"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Self vs Other Evaluation",
+    "description": "Compare error detection on self-generated vs other-model-generated CoTs",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Generate CoT solutions using each target model on the same problem set",
+      "step2": "For each model, create test set with: (a) self-generated CoTs, (b) other-generated CoTs (average of other 2 models)",
+      "step3": "Inject errors using same methodology as ground truth",
+      "step4": "Evaluate each model on both self and other conditions",
+      "step5": "Compute Self-Other Gap metric: difference in F1 scores",
+      "step6": "Test hypothesis H4: Models detect errors better in other models' reasoning",
+      "step7": "Save results to outputs/main_results/self_other_comparison.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Error Position Analysis",
+    "description": "Study how error depth affects detection and localization accuracy",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Group test samples by error position: Early (steps 1-2), Middle (steps 3-4), Late (step 5+)",
+      "step2": "For each model, compute metrics stratified by position",
+      "step3": "Calculate Position-Weighted Localization Score (PWLS)",
+      "step4": "Test hypothesis H2: Localization accuracy decreases with error depth",
+      "step5": "Generate position vs accuracy curves",
+      "step6": "Statistical test: ANOVA to compare Early vs Middle vs Late performance",
+      "step7": "Save analysis to outputs/analysis/position_ablation.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Error Type Sensitivity",
+    "description": "Analyze which error types are hardest/easiest to detect",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Group test samples by error type (6 categories)",
+      "step2": "Compute per-type metrics: detection F1, localization accuracy, characterization accuracy",
+      "step3": "Generate confusion matrix for error type classification",
+      "step4": "Test hypothesis: Calculation errors easier than logic errors",
+      "step5": "Identify error types with highest/lowest detection rates",
+      "step6": "Correlation analysis: error type vs domain",
+      "step7": "Save results to outputs/analysis/error_type_analysis.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Domain Transfer Analysis",
+    "description": "Test cross-domain generalization of introspection capabilities",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Train simple classifier (if applicable) or analyze zero-shot transfer",
+      "step2": "Condition 1: Test on same domain as training examples in prompt",
+      "step3": "Condition 2: Test on different domain (e.g., train examples from Math, test on Logic)",
+      "step4": "Measure transfer performance drop",
+      "step5": "Compute Domain Calibration Score (DCS)",
+      "step6": "Test hypothesis H1: Structured domains (Math, Code) have better introspection",
+      "step7": "Save results to outputs/analysis/domain_transfer.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: Prompting Strategy Comparison",
+    "description": "Compare different prompting strategies for introspection",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Test prompting variants on Qwen2.5-7B:",
+      "step2": "Strategy A: Direct prompting (baseline)",
+      "step3": "Strategy B: Chain-of-Thought verification",
+      "step4": "Strategy C: Metacognitive prompting ('Think about your thinking')",
+      "step5": "Strategy D: Self-consistency (sample 5 times, majority vote)",
+      "step6": "Strategy E: Step-by-step reflection (explicitly verify each step)",
+      "step7": "Compare performance across all three tasks",
+      "step8": "Identify best strategy for each task type",
+      "step9": "Save results to outputs/analysis/prompting_comparison.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Compute Novel Metrics and Statistical Tests",
+    "description": "Calculate Introspection Score, PWLS, DCS and run statistical significance tests",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Compute Introspection Score (IS) for each model: IS = (Acc_detect + Acc_localize + Acc_characterize) / 3",
+      "step2": "Compute Position-Weighted Localization Score with w_i = 1/sqrt(step_i)",
+      "step3": "Compute Domain Calibration Score: DCS = 1 - (std_domain / mean_domain)",
+      "step4": "Compute Self-Other Gap metric",
+      "step5": "Statistical significance: paired t-tests between models",
+      "step6": "Effect sizes: Cohen's d for meaningful differences",
+      "step7": "Confidence intervals: bootstrap 95% CI for all metrics",
+      "step8": "Correlation analysis: detection vs localization (test r > 0.7 hypothesis)",
+      "step9": "Save comprehensive metrics to outputs/evaluation/metrics_summary.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Test Success Criteria",
+    "description": "Verify if experimental results support or refute hypotheses",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Test confirming evidence criteria:",
+      "step1a": "Check domain variation: >15% gap between best/worst domain IS scores?",
+      "step1b": "Check error depth effect: Monotonic decrease in localization with position?",
+      "step1c": "Check error type: Calculation errors detected more than logic errors?",
+      "step1d": "Check correlation: r > 0.7 between detection and localization?",
+      "step2": "Test refuting evidence criteria:",
+      "step2a": "Uniform performance across domains?",
+      "step2b": "Flat localization accuracy?",
+      "step2c": "No self-other gap?",
+      "step3": "Generate success criteria report: outputs/evaluation/success_criteria.json",
+      "step4": "Document which hypotheses are supported with statistical evidence"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Figures for Paper",
+    "description": "Create all visualizations needed for the research paper",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Figure 1: Dataset overview - domain distribution, error type distribution, error position distribution",
+      "step2": "Figure 2: Main results - model comparison across three tasks (bar chart with error bars)",
+      "step3": "Figure 3: Domain analysis - heatmap of performance by model and domain",
+      "step4": "Figure 4: Position analysis - line plot showing accuracy vs error depth",
+      "step5": "Figure 5: Error type sensitivity - grouped bar chart per error type",
+      "step6": "Figure 6: Self-Other Gap - paired bar chart comparing self vs other detection",
+      "step7": "Figure 7: Confusion matrix for error type classification",
+      "step8": "Figure 8: Correlation plot - detection vs localization accuracy",
+      "step9": "Save all figures to outputs/visualizations/ in PDF and PNG formats"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Tables for Paper",
+    "description": "Create all tables needed for the research paper",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Table 1: Dataset statistics - problems per domain, avg steps, error distribution",
+      "step2": "Table 2: Main results - full metrics for all models across all tasks",
+      "step3": "Table 3: Ablation results - position, error type, prompting comparisons",
+      "step4": "Table 4: Novel metrics - IS, PWLS, DCS scores per model",
+      "step5": "Table 5: Statistical significance - p-values for key comparisons",
+      "step6": "Save tables as LaTeX source files in outputs/tables/"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Summary and Artifact Generation",
+    "description": "Compile all results and generate final outputs",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Generate experiment log with all commands run and timestamps",
+      "step2": "Create results summary: key findings, supported hypotheses, unexpected results",
+      "step3": "Compute total compute time and compare to budget",
+      "step4": "Generate dataset release package: problems, annotations, splits",
+      "step5": "Generate code release package: evaluation scripts, baseline implementations",
+      "step6": "Create final summary report: outputs/FINAL_SUMMARY.md"
+    }
+  }
+]

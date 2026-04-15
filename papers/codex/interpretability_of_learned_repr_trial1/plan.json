@@ -1,0 +1,166 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Lock Scope And Verify References",
+    "description": "Freeze the paper framing as an incremental empirical benchmark and correct the bibliography before any experiment decisions, so the plan, proposal, and final writeup use one defensible claim and one verified reference list.",
+    "steps": {
+      "step1": "Write a one-paragraph scope note in the experiment README stating the exact research question: under compute-matched training on the same frozen CLIP ViT-B/32 pooled vision features, does a shared decoder improve held-out prototype-edit reusability versus vanilla SAE and Sparse Shift Autoencoders for Identifying Concepts from Large Language Model Activations (SSAE)? State explicitly that this is not a new-method paper.",
+      "step2": "Replace the incorrect SSAE bibliography entry title with `Sparse Shift Autoencoders for Identifying Concepts from Large Language Model Activations` and verify every cited paper against its real arXiv or venue record before running experiments.",
+      "step3": "Ensure the verified reference list includes at minimum the following high-relevance works because they are direct novelty threats or framing anchors: `Sparse Autoencoders Learn Monosemantic Features in Vision-Language Models` (arXiv:2504.02821), `Interpreting CLIP with Hierarchical Sparse Autoencoders` (arXiv:2502.20578), `Steering CLIP's vision transformer with sparse autoencoders` (arXiv:2504.08729), `SPARC: Concept-Aligned Sparse Autoencoders for Cross-Model and Cross-Modal Interpretability` (arXiv:2507.06265), `LUCID-SAE: Learning Unified Vision-Language Sparse Codes for Interpretable Concept Discovery` (arXiv:2602.07311), `Sparse Autoencoders Do Not Find Canonical Units of Analysis`, and `How Reliable are Causal Probing Interventions?`.",
+      "step4": "Create a Python 3.10 environment with `torch>=2.2`, `torchvision`, `open_clip_torch`, `transformers`, `datasets`, `numpy`, `scipy`, `pandas`, `scikit-learn`, `statsmodels`, `matplotlib`, `seaborn`, `pillow`, and `tqdm`. Save exact package versions to `outputs/environment_versions.txt`.",
+      "step5": "Create directories `outputs/cache`, `outputs/pairs`, `outputs/models`, `outputs/metrics`, `outputs/plots`, `outputs/tables`, and `outputs/logs`. Every run must save a config JSON, a per-epoch CSV log, a final checkpoint, and an evaluation JSON."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Reproducibility And Resource Budget",
+    "description": "Make the runtime assumptions and seed policy internally consistent across artifacts and sized for one RTX A6000, 60 GB RAM, 4 CPU cores, and an 8-hour total wall-clock limit.",
+    "steps": {
+      "step1": "Use the same random seeds `{11, 22, 33}` for every primary method, every dataset, every probe, and every bootstrap resample seed list. Do not mix 2-seed and 3-seed plans anywhere in the artifacts.",
+      "step2": "Set `random`, `numpy`, and `torch` seeds; set `torch.backends.cudnn.deterministic=true` and `torch.backends.cudnn.benchmark=false`; record the exact seed in every output filename and JSON.",
+      "step3": "Treat GPU stages as serial because only one GPU is available. Use CPU parallelism only for dataloading, pair-table generation, and bootstrap evaluation with `n_jobs=4`.",
+      "step4": "Train all sparse models on cached vectors in float32. Use mixed precision only for feature extraction. Cap dataloader workers at 4 and avoid any plan that requires simultaneous model training across GPUs.",
+      "step5": "Budget the full run as follows: `2.0 to 2.5` GPU hours for CLIP and DINO feature caching, `0.5 to 0.8` CPU hours for pair mining and probe fitting, `2.5 to 3.2` GPU hours for the 18 primary training runs, `0.8 to 1.2` GPU hours for 6 ablation runs, and `0.8 to 1.2` wall-clock hours for evaluation, bootstrap confidence intervals, and plotting. Require the final estimated total to stay below `7.9` hours."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare 3D Shapes And CelebA Splits",
+    "description": "Use one controlled benchmark with exact factor labels and one real benchmark with human annotations, both reduced to a size that fits the compute budget while still supporting 3-seed evaluation.",
+    "steps": {
+      "step1": "Use `3D Shapes` as the controlled dataset instead of dSprites. Sample `36,000` images stratified over factor combinations from the official release, then split into `24,000` train, `6,000` validation, and `6,000` test examples with no overlap in exact image IDs.",
+      "step2": "For `3D Shapes`, run a one-time factor-retention screen on the training split using fixed linear probes on frozen CLIP features for `shape`, `object_hue`, `scale`, and `floor_hue`. Keep the 3 factors with highest validation macro-F1 and document the dropped factor if one is excluded.",
+      "step3": "Construct exact one-factor pairs for the retained `3D Shapes` factors by changing only the target factor and holding all other ground-truth factors constant. Build `18,000` train pairs, `4,500` validation pairs, and `4,500` test pairs with balanced counts across retained factors.",
+      "step4": "Use the official `CelebA` aligned-image split. Keep a reduced subset of `18,000` train, `3,000` validation, and `3,000` test images sampled from the official partitions while preserving target-attribute prevalence.",
+      "step5": "Use target attributes `Smiling`, `Eyeglasses`, and `Wearing_Hat`. If `Wearing_Hat` yields fewer than `800` valid training pairs after filtering, replace it with `Blond_Hair` and save the substitution note to `outputs/tables/celeba_attribute_note.txt`.",
+      "step6": "Retain the full CelebA attribute table for collateral-drift analysis, but evaluate the main target-change metric only on the chosen 3 target attributes. Save split statistics, prevalences, and pair coverage summaries to JSON files before any model training."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Cache CLIP And DINO Features",
+    "description": "Cache the main CLIP representation used for training and an auxiliary DINO representation used only for pair mining and geometry-independent evaluation.",
+    "steps": {
+      "step1": "Use frozen `open_clip` `ViT-B-32` OpenAI weights as the main representation. Extract pooled pre-projection image features of dimension `d=768` for every image and save them to `outputs/cache/{dataset}_{split}_clip.pt` with aligned metadata CSV files.",
+      "step2": "Use frozen `DINOv2-S/14` pooled features as the auxiliary representation. Extract features for the same images and save them to `outputs/cache/{dataset}_{split}_dino.pt`.",
+      "step3": "Cache features with batch size `256` on the RTX A6000 under autocast. Log extraction throughput, elapsed time, and peak GPU memory once per dataset.",
+      "step4": "For every constructed pair, save the source ID, target ID, CLIP feature delta `h(x') - h(x)`, DINO distance, and all relevant labels to `outputs/pairs/{dataset}_{split}_pairs.parquet` or per-attribute CSV files."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Construct Fair Pair Supervision",
+    "description": "Build train, validation, and test pairs without leaking the CLIP geometry into both pair construction and evaluation.",
+    "steps": {
+      "step1": "For `3D Shapes`, use only exact ground-truth one-factor flips. No nearest-neighbor search is needed because the dataset provides exact factor control.",
+      "step2": "For `CelebA`, mine source-target pairs separately for each target attribute in DINO feature space, not CLIP feature space. For each source image, search only within the same split for a target image that flips the chosen attribute while keeping the other chosen target attributes unchanged.",
+      "step3": "Define CelebA pair eligibility by three rules: the target attribute flips, the other chosen target attributes stay fixed, and the DINO distance lies below the `35th` percentile of candidate distances for that attribute within the split.",
+      "step4": "Cap pair counts at `1,500` train, `300` validation, and `300` test pairs per CelebA attribute. If more pairs are available, subsample uniformly over source examples so no small identity cluster dominates.",
+      "step5": "Save pair-quality diagnostics to `outputs/tables/celeba_pair_quality.csv`, including pair counts, DINO distance percentiles, and the distribution of non-target attribute disagreements."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train The Activation-Only And Shift-Only Baselines",
+    "description": "Use one simple baseline and one strong recent baseline under matched compute, latent width, and optimizer settings.",
+    "steps": {
+      "step1": "Simple baseline `SAE`: train on single CLIP features with encoder `768 -> 1024 -> 1024`, ReLU nonnegative latent `z in R_+^1024`, and linear decoder `W in R^(768 x 1024)`. Optimize reconstruction MSE plus `lambda_l1 * ||z||_1`.",
+      "step2": "Strong baseline `SSAE`: train on pair deltas with encoder `768 -> 1024 -> 1024`, signed latent `s in R^1024`, and linear decoder `W_shift in R^(768 x 1024)`. Optimize delta-reconstruction MSE plus `lambda_l1 * ||s||_1`.",
+      "step3": "For both baselines use Adam with learning rate `1e-3`, weight decay `1e-5`, batch size `1024`, maximum `20` epochs, early stopping patience `4`, gradient clipping `1.0`, and `lambda_l1` chosen from `{1e-4, 3e-4, 1e-3}` on the validation split.",
+      "step4": "Run `SAE` and `SSAE` on `3D Shapes` and `CelebA` for seeds `{11, 22, 33}`. Save checkpoints to `outputs/models/{method}_{dataset}_seed{seed}.pt` and validation summaries to JSON.",
+      "step5": "Record parameter count, training wall-clock time, and peak GPU memory for each run so the final comparison is compute matched as well as metric matched."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Shared-Decoder ASD",
+    "description": "Train the proposed benchmarked variant with one shared decoder to test whether dictionary sharing improves reusable prototype edits beyond the two constituent baselines.",
+    "steps": {
+      "step1": "Use anchor encoder `E_a: 768 -> 1024 -> 1024` with ReLU output for nonnegative anchor code `z(x)`, shift encoder `E_s: 768 -> 1024 -> 1024` with linear output for signed shift code `s(x, x')`, and one shared linear decoder `W in R^(768 x 1024)`.",
+      "step2": "Optimize `L = L_anchor + lambda_shift * L_shift + lambda_tie * L_tie + lambda_sparse * (||z||_1 + ||s||_1)` with `L_anchor = ||h - Wz||_2^2`, `L_shift = ||(h' - h) - Ws||_2^2`, and `L_tie = ||s - stopgrad(z(x') - z(x))||_1`.",
+      "step3": "Use alternating batches of single examples and pairs. Set `lambda_shift=1.0`, choose `lambda_sparse` from `{1e-4, 3e-4, 1e-3}`, choose `lambda_tie` from `{0.1, 0.3, 1.0}`, and keep all optimizer settings identical to the baselines.",
+      "step4": "Run `ASD` on both datasets for seeds `{11, 22, 33}`. Save learned codes for the validation and test splits to support later prototype and locality analysis.",
+      "step5": "Report the ASD claim boundary directly in the experiment notes: a positive result means better representation-space prototype reuse on frozen features, not canonical concept recovery or universal multimodal sparse coding."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate Each Novel ASD Component",
+    "description": "Test whether any observed gain comes from decoder sharing itself, the tie loss, or neither, while staying inside the compute budget.",
+    "steps": {
+      "step1": "Ablation `ASD-no-tie`: keep the full ASD architecture but set `lambda_tie=0`. Run on both datasets for seeds `{11, 22, 33}` with the same selected `lambda_sparse` and optimizer settings used for ASD.",
+      "step2": "Ablation `ASD-no-share`: keep both encoders and all losses but replace the shared decoder with separate decoders `W_a` and `W_s`. Run on both datasets for seeds `{11, 22, 33}`. To keep compute comparable, use the same latent width `1024` and report the slightly larger parameter count explicitly.",
+      "step3": "Interpret `ASD-no-tie` as the ablation for explicit anchor-shift agreement and `ASD-no-share` as the ablation for decoder sharing. If either ablation matches or exceeds ASD within confidence intervals, soften the corresponding causal claim in the final writeup.",
+      "step4": "Do not add extra ablations beyond these two unless the full primary matrix, both ablations, and evaluation complete with more than `45` minutes remaining."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Construct Prototype Edits Fairly",
+    "description": "Evaluate each method using edit vectors that are native to its training objective and normalize edit magnitude so raw vector norm does not drive the ranking.",
+    "steps": {
+      "step1": "For held-out pair-specific edits use method-matched construction: `SAE` uses `W (z(x') - z(x))`, `SSAE` uses `W_shift s(x, x')`, and `ASD` uses `W s(x, x')`.",
+      "step2": "For reusable prototype edits, estimate one prototype per target factor or attribute using training pairs only. For `SAE` average anchor-code differences, for `SSAE` average shift codes, and for `ASD` average shift codes, then decode once to get a prototype vector `v_a`.",
+      "step3": "Normalize each decoded edit as `v_norm = v / (||v||_2 + 1e-8)`. For each target `a`, compute a method-independent base scale `alpha_a` as the median `||h(x') - h(x)||_2` over training pairs for that target.",
+      "step4": "Apply edits as `h_edit = h(x) + gamma * alpha_a * v_norm` with `gamma in {0.5, 1.0, 1.5}`. Choose one default `gamma` per dataset on the validation split by maximizing mean prototype reliability across methods jointly, then report both the chosen-default result and the full three-gamma curve on test."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate Locality On 3D Shapes",
+    "description": "Use exact factor labels to test whether reusable prototypes change the intended factor and avoid collateral drift on a benchmark with known ground truth.",
+    "steps": {
+      "step1": "Train one-vs-rest linear probes on untouched training CLIP features for each retained `3D Shapes` factor value and freeze them before editing. Use only the validation split for probe hyperparameter selection.",
+      "step2": "For each test source example and each retained factor, apply the corresponding prototype edit and score `target-change accuracy`, defined as whether the edited feature is classified as the intended target value by the frozen probe.",
+      "step3": "Compute `nontarget preservation`, defined as the fraction of non-target factor values whose frozen-probe predictions remain unchanged after editing. Compute `prototype reliability` as the harmonic mean of target-change accuracy and nontarget preservation.",
+      "step4": "Also report single-feature reconstruction MSE, pair-delta reconstruction MSE, mean active latent count using threshold `0.05`, and prototype sparsity measured as the number of latent dimensions with absolute mean contribution above `1e-3`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate Reusability On CelebA With A DINO Bridge",
+    "description": "Measure prototype reuse on a real dataset and add an auxiliary evaluation that does not rely only on CLIP geometry.",
+    "steps": {
+      "step1": "Train fixed logistic probes on untouched CelebA training CLIP features for the 3 target attributes and separately train fixed logistic probes on untouched DINO features for the same attributes. Tune L2 regularization on validation only.",
+      "step2": "Fit one ridge regression map `A` from training CLIP features to training DINO features using untouched examples only. Choose ridge strength from `{0.1, 1.0, 10.0}` on validation mean squared error and then freeze `A`.",
+      "step3": "For each edited CLIP feature `h_edit`, compute the direct CLIP-probe scores and the transferred DINO score using `A h_edit` and the frozen DINO probes. Report `target-change`, `nontarget preservation`, and `prototype reliability` in both spaces.",
+      "step4": "Add a DINO-space retrieval audit on the untouched CelebA test bank: for each edited feature, map it with `A`, retrieve the top-20 nearest DINO neighbors, and report target-label prevalence, preservation of the other chosen target attributes, and average auxiliary-label disagreement. Use this only as a secondary geometry-independent audit, not as the primary endpoint.",
+      "step5": "Save pair coverage, probe AUC, DINO-bridge validation error, and retrieval-audit summaries to `outputs/tables/celeba_eval_summary.csv`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Predefine Statistical Tests And Success Criteria",
+    "description": "Commit to uncertainty-aware decision rules before running the experiments so the benchmark can support either a positive or negative conclusion cleanly.",
+    "steps": {
+      "step1": "Primary endpoint: CelebA prototype reliability at the validation-selected default `gamma`, averaged across the 3 chosen target attributes within each seed. The main comparison is `ASD - SSAE`; `ASD - SAE` is secondary.",
+      "step2": "For each dataset-attribute pair, compute a paired bootstrap `95 percent` confidence interval over held-out source examples for `ASD - SSAE` and `ASD - SAE` on prototype reliability using `10,000` bootstrap resamples with source examples sampled with replacement.",
+      "step3": "For the aggregate claim, compute the seed-level mean reliability difference across attributes, then report a hierarchical bootstrap `95 percent` confidence interval that resamples seeds and test instances jointly. Also report the exact paired permutation p-value over the 3 seed-level differences as a secondary small-sample diagnostic.",
+      "step4": "Define success as all of the following: CelebA aggregate `ASD - SSAE` prototype-reliability gap is greater than `0.02` absolute and its hierarchical bootstrap interval excludes `0`; the gap is positive in at least `2` of `3` seeds; on `3D Shapes`, ASD beats both baselines by at least `5` absolute points on prototype reliability for at least `2` of the retained factors with paired bootstrap intervals excluding `0`; and the DINO-bridge CelebA result has the same positive direction on at least `2` of the `3` target attributes.",
+      "step5": "Define failure as any of the following: the CelebA hierarchical bootstrap interval for `ASD - SSAE` crosses `0`, SSAE matches or exceeds ASD on `3D Shapes` for at least `2` retained factors, or the DINO-bridge evaluation reverses the direction on most target attributes. In that case the conclusion must state that shared decoding is unsupported in this compute-matched frozen-feature regime."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce Benchmark Figures And Tables",
+    "description": "Generate only the figures and tables needed to support the narrow benchmark claim, the ablation interpretation, and the uncertainty-aware conclusion.",
+    "steps": {
+      "step1": "Create `outputs/tables/main_results.csv` with one row per method, dataset, seed, target, and gamma, including reconstruction metrics, sparsity metrics, target-change, nontarget preservation, reliability, runtime, memory, and pair coverage.",
+      "step2": "Create `outputs/plots/3dshapes_reliability.png` showing prototype reliability by retained factor with seed-level points and bootstrap confidence intervals for `SAE`, `SSAE`, `ASD`, `ASD-no-tie`, and `ASD-no-share`.",
+      "step3": "Create `outputs/plots/celeba_main_comparison.png` showing CelebA prototype reliability for the 3 target attributes in CLIP and DINO-bridge evaluations side by side.",
+      "step4": "Create `outputs/plots/gamma_sensitivity.png` showing reliability versus `gamma` for each method so any edit-scale dependence is visible.",
+      "step5": "Create `outputs/plots/ablation_effects.png` showing the delta from `ASD` to `ASD-no-tie` and `ASD-no-share` on the main metrics with confidence intervals.",
+      "step6": "Create `outputs/tables/reference_audit.csv` listing every cited paper, verified title, source URL, and why it is included, so the benchmark framing and bibliography quality are auditable."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Execute In A Fixed Order",
+    "description": "Use one deterministic execution order that fits the hardware and preserves the main comparison if time becomes tight.",
+    "steps": {
+      "step1": "Run order is fixed: reference audit and scope lock, dataset split creation, CLIP and DINO caching, `3D Shapes` factor-retention screen, pair construction, fixed-probe training, one pilot ASD run on `3D Shapes` seed `11` to confirm timing and memory, full 18-run primary matrix, 6 ablation runs, evaluation, bootstrap intervals, then plots.",
+      "step2": "If runtime exceeds the budget envelope after the pilot, reduce dataset subset size by `20 percent` for both datasets before the full matrix. Do not drop a baseline, do not drop a dataset, and do not drop below 3 seeds for the primary methods.",
+      "step3": "If time remains after all required work completes, spend it only on narrower confidence intervals or richer visualizations, not on expanding the method set."
+    }
+  }
+]

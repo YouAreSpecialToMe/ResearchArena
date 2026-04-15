@@ -1,0 +1,276 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated environment and install all required packages for SAE analysis, attribution patching, and steering evaluation.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.3+ with CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install TransformerLens: pip install transformer-lens>=2.0.0",
+      "step4": "Install SAELens for pretrained SAEs: pip install sae-lens>=2.0.0",
+      "step5": "Install datasets and evaluation libraries: pip install datasets>=2.14.0 evaluate>=0.4.0 scikit-learn scipy",
+      "step6": "Install visualization: pip install matplotlib seaborn plotly",
+      "step7": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'"
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Download Models and Pretrained SAEs",
+    "description": "Load language models and associated pretrained SAEs from SAELens. Focus on GPT-2 Small for primary experiments due to compute constraints.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Download GPT-2 Small (124M) via TransformerLens: from transformer_lens import HookedTransformer; model = HookedTransformer.from_pretrained('gpt2-small')",
+      "step2": "Load pretrained SAEs from SAELens for GPT-2 Small layer 8 (resid_post): from sae_lens import SAE; sae, cfg_dict, sparsity = SAE.from_pretrained(release='gpt2-small-res-jb', sae_id='blocks.8.hook_resid_pre', device='cuda')",
+      "step3": "Load additional SAEs with different MSE/sparsity tradeoffs: sae_id='blocks.8.hook_resid_pre' with different checkpoints if available",
+      "step4": "Download Pythia-160M SAE for scaling analysis: SAE.from_pretrained(release='pythia-160m-res-jb', sae_id='blocks.8.hook_resid_pre')",
+      "step5": "Verify SAE configurations: print(cfg_dict) to confirm d_model=768, d_sae=24576 for GPT-2",
+      "step6": "Cache models to local directory to avoid repeated downloads"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare Behavioral Evaluation Datasets",
+    "description": "Download and preprocess datasets for measuring target behaviors and side effects.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Load TruthfulQA (Lin et al., 2022) for truthfulness evaluation: from datasets import load_dataset; tqa = load_dataset('truthful_qa', 'generation', split='validation')",
+      "step2": "Load BBQ (Parrish et al., 2022) for bias evaluation: bbq = load_dataset('heegyu/bbq', 'default', split='test')",
+      "step3": "Create contrastive prompt pairs for each behavior: e.g., 'The capital of France is Paris' (true) vs 'The capital of France is London' (false)",
+      "step4": "Generate 500 contrastive prompt pairs per behavior (truthfulness, bias, sentiment): Store as list of dicts with 'positive', 'negative', 'neutral' variants",
+      "step5": "Load general capability datasets: hellaswag = load_dataset('hellaswag', split='validation[:500]') for side effect measurement",
+      "step6": "Create data splits: 80% for IFS computation, 20% held-out for final steering evaluation",
+      "step7": "Cache preprocessed datasets to disk as JSON files"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Create Synthetic Ground-Truth Validation Set",
+    "description": "Generate synthetic dataset with known causal features to validate attribution patching accuracy.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "Generate 100 simple arithmetic prompts: 'What is X + Y?' where X, Y in range(1, 10)",
+      "step2": "Create templates with clear patterns: 'The answer to {X} plus {Y} equals'",
+      "step3": "Store ground truth expected outputs for validation",
+      "step4": "Create neutral context prompts without arithmetic for necessity measurement",
+      "step5": "Save synthetic dataset to data/synthetic_math.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline 1: Random Feature Selection",
+    "description": "Simple baseline following He et al. (2025) - steering with random SAE features to establish minimum performance threshold.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Implement random feature selection: selected_features = random.sample(range(d_sae), k=num_features)",
+      "step2": "Implement steering function: steered_output = model.generate(input_ids, intervention=add_feature_activation(features, coefficient=20))",
+      "step3": "Set random seeds [42, 43, 44] for reproducibility",
+      "step4": "Evaluate on TruthfulQA: measure truthfulness score change before/after steering",
+      "step5": "Measure side effects on HellaSwag: compute capability preservation score",
+      "step6": "Run for k in [10, 20, 50, 100] features to study scaling",
+      "step7": "Save results to results/baseline_random.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline 2: Activation-Based Steering (Templeton et al., 2024)",
+    "description": "Strong baseline - standard SAE steering that selects features with highest mean activation on target prompts.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Compute mean activation for each feature on target behavior prompts: acts = sae.encode(model(target_prompts))",
+      "step2": "Rank features by mean activation: feature_scores = acts.mean(dim=0)",
+      "step3": "Select top-k features by activation magnitude",
+      "step4": "Apply steering with coefficient 20 (standard value from Templeton et al.)",
+      "step5": "Evaluate target behavior change on TruthfulQA, BBQ",
+      "step6": "Measure side effects on HellaSwag general capability",
+      "step7": "Run for k in [10, 20, 50, 100] and seeds [42, 43, 44]",
+      "step8": "Save results to results/baseline_activation.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Baseline 3: Output Score Filtering (Arad et al., 2025)",
+    "description": "Most closely related work - filter features by output score (sufficiency) before steering, as described in EMNLP 2025 paper.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Implement output score computation per Arad et al.: For each feature f, measure logit difference when f is activated",
+      "step2": "Compute sufficiency score: Suf(f) = E[KL(output_dist | f=alpha) || output_dist | f=0)] on neutral prompts",
+      "step3": "Filter features: keep only features with output_score > threshold (0.01 as per Arad et al.)",
+      "step4": "From filtered set, select top-k by activation (Arad et al. method)",
+      "step5": "Apply steering with same coefficient as other baselines",
+      "step6": "Evaluate on same metrics as other baselines",
+      "step7": "Run for k in [10, 20, 50, 100] and seeds [42, 43, 44]",
+      "step8": "Save detailed results to results/baseline_output_score.json",
+      "step9": "This baseline directly compares against Arad et al.'s sufficiency-only approach"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Compute Intervention Fidelity Score (IFS) Components",
+    "description": "Compute necessity, sufficiency, and consistency scores for all SAE features using attribution patching for efficiency.",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Implement necessity score: Nec(f) = E[P(y_target|x) - P(y_target|x, f=0)] using attribution patching to approximate ablation effect",
+      "step2": "Implement sufficiency score: Suf(f) = E[P(y_target|x, f=alpha) - P(y_target|x)] on neutral contexts (matches Arad et al. output score)",
+      "step3": "Implement consistency score: Cons(f) = 1 - Var[Delta_P(y_target|x, f)] / max_variance across contexts",
+      "step4": "Combine into IFS: IFS(f) = sqrt(Nec(f) * Suf(f)) * Cons(f)",
+      "step5": "Use attribution patching (Syed et al., 2024) for efficiency: compute gradients w.r.t feature activations",
+      "step6": "Process 500 contrastive prompt pairs for each behavior (truthfulness, bias)",
+      "step7": "Compute scores for all ~24,576 features in GPT-2 Small SAE",
+      "step8": "Save IFS scores to results/ifs_scores.json with structure: {feature_id: {nec, suf, cons, ifs, behavior}}"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Validate Attribution Patching Against Direct Activation Patching",
+    "description": "Verify that attribution patching approximations are accurate by comparing to direct activation patching on 10% of features.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Randomly sample 10% of features (n=2458) for validation",
+      "step2": "For sampled features, compute necessity and sufficiency using direct activation patching (slow but accurate)",
+      "step3": "Compare attribution patching estimates to direct patching results",
+      "step4": "Compute Spearman correlation between attribution and direct patching scores",
+      "step5": "If correlation < 0.8, identify problem features and adjust method",
+      "step6": "Report validation results: correlation coefficients and error distributions",
+      "step7": "Save validation results to results/attribution_validation.json",
+      "step8": "Acknowledge limitations per Kramár et al. (2024) in final analysis"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement Fidelity-Weighted Steering (FWS)",
+    "description": "Our main method: select and weight features by full IFS rather than activation or output score alone.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Compute IFS for all features on target behavior (from previous step)",
+      "step2": "Rank features by IFS: sorted_features = sorted(features, key=lambda f: f.ifs, reverse=True)",
+      "step3": "Select top-k features by IFS",
+      "step4": "Apply fidelity-weighted steering: coefficient * (IFS(f)^beta) where beta=0.5",
+      "step5": "Evaluate target behavior change on TruthfulQA and BBQ",
+      "step6": "Measure side effects on HellaSwag",
+      "step7": "Run for k in [10, 20, 50, 100] and seeds [42, 43, 44]",
+      "step8": "Save results to results/fidelity_weighted_steering.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Component Ablation: Test Individual IFS Components",
+    "description": "Quantify marginal contribution of necessity, sufficiency, and consistency by testing each component alone and in combination.",
+    "estimated_time": "60 minutes",
+    "steps": {
+      "step1": "Sufficiency-only steering: Use only Suf(f) for selection (equivalent to output score baseline)",
+      "step2": "Necessity-only steering: Use only Nec(f) for selection",
+      "step3": "Consistency-only steering: Use only Cons(f) for selection",
+      "step4": "Sufficiency + Necessity: Use sqrt(Nec * Suf) without consistency",
+      "step5": "Sufficiency + Consistency: Use Suf * Cons without necessity",
+      "step6": "Full IFS: Use sqrt(Nec * Suf) * Cons",
+      "step7": "Evaluate all 6 variants on truthfulness steering with k=20 features",
+      "step8": "Report which components matter most for different behavior types",
+      "step9": "Save ablation results to results/component_ablation.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Feature Count Ablation",
+    "description": "Study the tradeoff between number of features used and steering effectiveness.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Test k values: [5, 10, 20, 50, 100, 200]",
+      "step2": "For each k, evaluate FWS and all baselines",
+      "step3": "Plot efficiency curve: target behavior change vs. k",
+      "step4": "Identify point of diminishing returns",
+      "step5": "Compare efficiency curves across methods",
+      "step6": "Save results to results/feature_count_ablation.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Correlation Analysis: Metrics vs. IFS",
+    "description": "Measure correlation between traditional SAE metrics, output scores, and IFS to quantify the causal-semantic disconnect.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Compute traditional SAE metrics for each feature: mean activation, L0 norm contribution, reconstruction MSE contribution",
+      "step2": "Compute output scores (Arad et al.) for all features",
+      "step3": "Compute IFS components for all features",
+      "step4": "Calculate Spearman correlation between all metric pairs",
+      "step5": "Compute Precision@k: fraction of top-k features by metric A in top-k by IFS",
+      "step6": "Identify features with high traditional scores but low IFS (the 'disconnect')",
+      "step7": "Compare predictive power: can traditional metrics or output scores predict IFS?",
+      "step8": "Save correlation matrix and analysis to results/correlation_analysis.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Scaling Analysis Across Model Sizes",
+    "description": "Repeat key experiments on Pythia-160M and Pythia-410M to understand how results scale.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Load Pythia-160M SAE from SAELens",
+      "step2": "Compute IFS for all features (subset due to time constraints)",
+      "step3": "Run steering comparison: FWS vs. activation baseline vs. output score baseline",
+      "step4": "Measure: fraction of high-IFS features, correlation trends",
+      "step5": "If time permits, repeat with Pythia-410M",
+      "step6": "Compare results across model sizes",
+      "step7": "Save to results/scaling_analysis.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Test whether observed differences between methods are statistically significant.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Load all results from baselines and main experiments",
+      "step2": "Perform paired t-tests between FWS and each baseline",
+      "step3": "Correct for multiple comparisons using Bonferroni",
+      "step4": "Compute confidence intervals for all metrics",
+      "step5": "Report p-values for key comparisons",
+      "step6": "Save statistical test results to results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate Against Success Criteria",
+    "description": "Check whether experimental results meet the predefined success criteria.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "SC1: Check if IFS shows stronger correlation with steering effectiveness than output scores (Spearman ρ improvement ≥ 0.1)",
+      "step2": "SC2: Check if FWS achieves ≥90% of target behavior change with ≤50% as many features as activation baseline",
+      "step3": "SC3: Check if IFS-guided steering has ≤50% side effects of activation baseline and ≤70% of output-score baseline",
+      "step4": "SC4: Check if component ablation shows necessity/consistency provide improvements over sufficiency alone",
+      "step5": "Document which criteria are met, which are not, and by what margin",
+      "step6": "If criteria not met, analyze why and document limitations",
+      "step7": "Save evaluation to results/success_criteria_evaluation.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the research paper.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Figure 1: Correlation heatmap between SAE metrics (reconstruction, L0, output score, IFS components)",
+      "step2": "Figure 2: Steering effectiveness comparison (bar chart: FWS vs. baselines on target behavior change)",
+      "step3": "Figure 3: Side effects comparison (bar chart: capability preservation for each method)",
+      "step4": "Figure 4: Component ablation results (grouped bar chart showing each component combination)",
+      "step5": "Figure 5: Feature efficiency curves (line plot: behavior change vs. number of features for each method)",
+      "step6": "Figure 6: IFS score distribution histogram with quartile annotations",
+      "step7": "Save all figures to figures/ directory as PNG and PDF",
+      "step8": "Generate summary statistics table for paper"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Create Results Summary Tables",
+    "description": "Generate LaTeX and markdown tables summarizing all experimental results.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Table 1: Main results comparing all methods on target behavior and side effects",
+      "step2": "Table 2: Component ablation results",
+      "step3": "Table 3: Correlation matrix between metrics",
+      "step4": "Table 4: Feature count ablation results",
+      "step5": "Include mean ± std across 3 random seeds for all metrics",
+      "step6": "Save tables to tables/ directory as LaTeX and CSV"
+    }
+  }
+]

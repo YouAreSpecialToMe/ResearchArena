@@ -1,0 +1,229 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for DiT inference and evaluation. Use pre-built DiT codebase and evaluation tools.",
+    "steps": {
+      "step1": "Create virtual environment: python3 -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install diffusers library: pip install diffusers==0.29.0 transformers accelerate",
+      "step4": "Install evaluation dependencies: pip install pytorch-fid lpips clip-by-openai clean-fid",
+      "step5": "Install utility packages: pip install numpy scipy matplotlib seaborn tqdm einops",
+      "step6": "Clone DiT reference implementation and verify GPU availability with nvidia-smi"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare ImageNet Validation Subset for Evaluation",
+    "description": "Download and prepare ImageNet validation data and class-conditional labels for DiT-XL/2 evaluation. Use 10K samples for FID computation.",
+    "steps": {
+      "step1": "Download ImageNet 256x256 validation images (~1.3GB) from HuggingFace: huggingface-cli download --repo-type dataset imagenet-1k val --local-dir ./data/imagenet/val",
+      "step2": "Download class labels file ILSVRC2012_validation_ground_truth.txt and map to class indices",
+      "step3": "Create 10K balanced subset (100 images per class) with random seed 42 for reproducibility",
+      "step4": "Precompute ground truth Inception features for FID: python -m pytorch_fid --save-stats ./data/imagenet/val_gt.npz ./data/imagenet/val",
+      "step5": "Generate class-conditional prompts (class indices 0-999) for DiT-XL/2 class-conditional generation",
+      "step6": "Verify data integrity: count images (expected: 10000), check image dimensions (256x256)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: Full DiT-XL/2 Inference (50 steps)",
+    "description": "Establish baseline performance with full DiT-XL/2 model (28 blocks, 50 DDIM steps). This is the reference for all comparisons.",
+    "steps": {
+      "step1": "Load pre-trained DiT-XL/2-256x256 model from HuggingFace: facebook/DiT-XL-2-256",
+      "step2": "Generate 10K images with DDIM scheduler (50 steps, guidance_scale=1.0 for class-conditional)",
+      "step3": "Use random seeds [42, 123, 2024] for 3 independent runs",
+      "step4": "Compute FID, IS using pytorch-fid and custom IS implementation",
+      "step5": "Measure per-step FLOPs using fvcore or manual counting (28 blocks * per-block FLOPs)",
+      "step6": "Measure wall-clock time per image (batch_size=1) and throughput (batch_size=4)",
+      "step7": "Store results: FID_mean, FID_std, IS_mean, total_FLOPs, time_per_image"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: DeepCache (Training-Free Caching)",
+    "description": "Implement DeepCache baseline - caches high-level features across timesteps. Represents training-free caching approaches.",
+    "steps": {
+      "step1": "Implement DeepCache for DiT: cache intermediate features every N steps (N=5 for 50-step generation)",
+      "step2": "Configure cache strategy: cache blocks 20-28 (high-level features), refresh blocks 1-20",
+      "step3": "Generate 10K images with same random seeds [42, 123, 2024]",
+      "step4": "Compute FID, IS and compare to full model",
+      "step5": "Measure speedup ratio (expected ~1.5-2x), actual FLOPs reduction",
+      "step6": "Record cache hit rate and analyze quality degradation vs speedup tradeoff"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: Δ-DiT (Fixed Schedule Layer Skipping)",
+    "description": "Implement Δ-DiT baseline - uses fixed schedules to skip front/back blocks based on timestep. Represents training-free layer skipping.",
+    "steps": {
+      "step1": "Implement Δ-DiT stage-adaptive caching: skip rear blocks (22-28) for t > 25, skip front blocks (1-7) for t <= 25",
+      "step2": "Use Δ-Cache mechanism: cache feature offsets rather than full features",
+      "step3": "Configure skip intervals to achieve ~30% FLOP reduction matching CAD-DiT target",
+      "step4": "Generate 10K images with seeds [42, 123, 2024]",
+      "step5": "Compute FID, IS and FLOPs reduction",
+      "step6": "This baseline applies UNIFORM depth reduction (same for all tokens) - key comparison point for spatial adaptation"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline: Global Early Exit (No Spatial Adaptation)",
+    "description": "Implement global early exit baseline - all tokens exit at same layer based on timestep. Shows importance of per-token adaptation.",
+    "steps": {
+      "step1": "Implement global threshold: use average consistency across all tokens to determine exit layer",
+      "step2": "Use same τ_base and α parameters as CAD-DiT main method",
+      "step3": "All tokens in a layer exit together when average PCM > threshold",
+      "step4": "Generate 10K images with seeds [42, 123, 2024]",
+      "step5": "Compute FID, IS, FLOPs reduction",
+      "step6": "This ablation isolates the benefit of spatially-varying (per-token) vs global depth allocation"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "CAD-DiT: Consistency-Adaptive Depth with Per-Token Exit",
+    "description": "Main proposed method. Implements Prediction Consistency Metric (PCM) for per-token adaptive depth without training.",
+    "steps": {
+      "step1": "Implement PCM computation: PCM_i^l = 1 - ||ε_i^l - ε_i^(l-1)|| / (||ε_i^(l-1)|| + δ), with δ=1e-6",
+      "step2": "Implement token-conditional forward pass: track active_set of tokens, compute PCM after each layer",
+      "step3": "Implement timestep-aware threshold: τ(t) = τ_base * (1 - α * t/T), default τ_base=0.95, α=0.3",
+      "step4": "For each token: if PCM_i^l > τ(t), freeze prediction and exclude from subsequent layers",
+      "step5": "Run hyperparameter sweep: τ_base ∈ [0.90, 0.93, 0.95, 0.97], α ∈ [0.2, 0.3, 0.4]",
+      "step6": "For best config, run 3 seeds [42, 123, 2024] for 10K images each",
+      "step7": "Compute FID, IS, per-step exit statistics (mean exit layer per timestep), spatial exit heatmaps"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Effect of Consistency Threshold τ_base",
+    "description": "Ablation study on base consistency threshold. Higher threshold = more conservative = later exit.",
+    "steps": {
+      "step1": "Fix α=0.3, vary τ_base ∈ [0.88, 0.90, 0.93, 0.95, 0.97, 0.99]",
+      "step2": "For each value, generate 2K images (seed=42 only) for efficiency",
+      "step3": "Measure: FID, average FLOPs reduction, percentage of tokens exiting before layer 28",
+      "step4": "Plot FID vs FLOPs reduction curve showing quality-efficiency tradeoff",
+      "step5": "Identify Pareto-optimal threshold range",
+      "step6": "Expected: τ_base=0.95 provides ~35% FLOP reduction with <3 FID increase"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Effect of Timestep Modulation α",
+    "description": "Ablation on timestep-aware thresholding. Tests whether dynamic thresholds help vs static.",
+    "steps": {
+      "step1": "Fix τ_base=0.95, vary α ∈ [0.0 (static), 0.1, 0.2, 0.3, 0.4, 0.5]",
+      "step2": "For each value, generate 2K images (seed=42)",
+      "step3": "Measure FID, FLOPs reduction, exit layer distribution across timesteps",
+      "step4": "Analyze: α=0 should be worse (no timestep adaptation), α=0.3 expected optimal",
+      "step5": "Plot exit layer vs timestep curves for different α values",
+      "step6": "Compare with oracle: uniform exit depth vs adaptive"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Consistency Metric Variants",
+    "description": "Test different consistency metrics to validate PCM design choice.",
+    "steps": {
+      "step1": "Variant 1: Cosine similarity between consecutive predictions (instead of normalized L2)",
+      "step2": "Variant 2: Absolute difference without normalization",
+      "step3": "Variant 3: Momentum-based consistency (EMA of recent predictions)",
+      "step4": "Variant 4: Layer-normalized consistency (normalize across tokens in layer)",
+      "step5": "For each variant, generate 2K images with default thresholds",
+      "step6": "Compare FID and FLOPs reduction to validate PCM design",
+      "step7": "Document which variant provides best quality-efficiency tradeoff"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Spatial Pattern Analysis",
+    "description": "Analyze which image regions exit early vs late to validate that consistency correlates with semantic complexity.",
+    "steps": {
+      "step1": "For 500 generated images, record exit layer for each spatial token (16x16=256 tokens for DiT-XL/2 256x256)",
+      "step2": "Compute average exit layer per spatial position across dataset",
+      "step3": "Generate heatmap visualization: red = late exit (complex regions), blue = early exit (simple regions)",
+      "step4": "Correlate with semantic segmentation: load pre-trained segmentation model (Mask2Former)",
+      "step5": "Quantify: average exit depth for background vs foreground vs object boundaries",
+      "step6": "Hypothesis: background tokens exit 5-10 layers earlier than foreground object tokens"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Timestep Pattern Analysis",
+    "description": "Analyze how exit patterns vary across denoising timesteps.",
+    "steps": {
+      "step1": "Record exit statistics per timestep (0-49 for 50-step DDIM)",
+      "step2": "Compute: average exit layer, percentage of early exits, FLOPs per timestep",
+      "step3": "Plot curves: exit layer vs timestep, cumulative FLOPs vs timestep",
+      "step4": "Identify patterns: early timesteps should show more aggressive exiting",
+      "step5": "Compare against theoretical optimal: uniform FLOPs distribution vs adaptive",
+      "step6": "Quantify timestep efficiency: FLOPs saved in early vs late denoising"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Robustness Evaluation",
+    "description": "Test CAD-DiT robustness across different generation settings.",
+    "steps": {
+      "step1": "Vary number of sampling steps: 20, 30, 50 (default), 100 steps",
+      "step2": "For each step count, use best CAD-DiT config (τ_base=0.95, α=0.3)",
+      "step3": "Generate 2K images per setting, compute FID",
+      "step4": "Test with classifier-free guidance: cfg_scale ∈ [1.0, 1.5, 2.0, 3.0]",
+      "step5": "Verify method works across different schedulers: DDIM, DPM++ 2M, Euler",
+      "step6": "Document which settings CAD-DiT is most/least effective"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform rigorous statistical tests to validate improvements.",
+    "steps": {
+      "step1": "Run 5 independent trials with different seeds for CAD-DiT, Δ-DiT, and Full baseline",
+      "step2": "For each trial, compute FID on 10K images",
+      "step3": "Perform paired t-test: CAD-DiT vs Δ-DiT at same FLOP budget",
+      "step4": "Perform paired t-test: CAD-DiT vs Global Early Exit (ablation)",
+      "step5": "Report p-values and confidence intervals for FID differences",
+      "step6": "Verify success criteria: p < 0.05 for quality improvement at same/reduced compute"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Verify all success criteria from proposal are met or document failure.",
+    "steps": {
+      "step1": "Criterion 1: ≥30% per-step FLOP reduction with FID <3 points increase. Measure and report.",
+      "step2": "Criterion 2: Spatial patterns show variation. Report std dev of exit depths across spatial positions.",
+      "step3": "Criterion 3: Works without retraining. Verify: no model weights modified, no gradients computed.",
+      "step4": "Criterion 4: Qualitative visual quality. Conduct side-by-side comparison of 100 sample pairs.",
+      "step5": "If any criterion fails, document failure mode and analyze root cause",
+      "step6": "Generate final verdict: CONFIRMED, PARTIALLY CONFIRMED, or REFUTED"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the research paper.",
+    "steps": {
+      "step1": "Figure 1: Method overview diagram - show token-conditional forward pass with PCM computation",
+      "step2": "Figure 2: Spatial exit heatmaps for 8 example images - show original image + exit depth overlay",
+      "step3": "Figure 3: FID vs FLOPs tradeoff curve - compare CAD-DiT, baselines, and ablations",
+      "step4": "Figure 4: Exit pattern analysis - (a) exit layer vs timestep, (b) exit distribution, (c) FLOPs per timestep",
+      "step5": "Figure 5: Qualitative comparison - 4x4 grid showing original, full model, Δ-DiT, CAD-DiT outputs",
+      "step6": "Figure 6: Ablation study results - bar charts for τ_base and α sweeps",
+      "step7": "Table 1: Main results - FID, IS, FLOPs reduction for all methods with standard deviations",
+      "step8": "Save all figures as high-resolution PNG and vector PDF formats"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Supplementary Materials",
+    "description": "Create additional visualizations and documentation.",
+    "steps": {
+      "step1": "Supp Figure 1: More qualitative examples (20 images across different classes)",
+      "step2": "Supp Figure 2: Failure case analysis - images where CAD-DiT performs poorly",
+      "step3": "Supp Figure 3: Per-class FID comparison - performance across ImageNet classes",
+      "step4": "Supp Table 1: Full hyperparameter search results",
+      "step5": "Supp Table 2: Computational overhead analysis - PCM computation cost",
+      "step6": "Document experimental protocol: exact commands, random seeds, software versions",
+      "step7": "Create reproducibility checklist with all configuration details"
+    }
+  }
+]

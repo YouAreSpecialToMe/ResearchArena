@@ -1,0 +1,235 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install all required packages for flow matching, DiT model, and evaluation metrics.",
+    "steps": {
+      "step1": "Activate virtual environment: source /home/zz865/pythonProject/autoresearch/outputs/kimi/generative_models_20260321_115956/idea_02/.venv/bin/activate",
+      "step2": "Install PyTorch with CUDA: pip install torch torchvision",
+      "step3": "Install dependencies: pip install diffusers transformers accelerate einops timm",
+      "step4": "Install evaluation: pip install pytorch-fid lpips",
+      "step5": "Install utilities: pip install numpy scipy matplotlib seaborn tqdm ptflops",
+      "step6": "Verify GPU: python -c 'import torch; print(f\"CUDA: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0)}\")'",
+      "step7": "Create directories: mkdir -p src data checkpoints logs figures results samples"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": false
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download CIFAR-10 and Prepare Data Loaders",
+    "description": "Download CIFAR-10 dataset and create flow matching data loaders with (x0, x1, t) triplets.",
+    "steps": {
+      "step1": "Download CIFAR-10: python -c \"import torchvision; torchvision.datasets.CIFAR10(root='./data/cifar10', train=True, download=True); torchvision.datasets.CIFAR10(root='./data/cifar10', train=False, download=True)\"",
+      "step2": "Create src/data_utils.py with FlowMatchingDataset class",
+      "step3": "Implement flow matching: x_t = (1-t)*x0 + t*x1, target v = x1 - x0",
+      "step4": "Test loader: verify batch shapes (B,3,32,32) for CIFAR-10"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": false
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Implement DiT-S/2 Base Architecture",
+    "description": "Implement DiT-S/2 (Small, patch size 2) for CIFAR-10: 12 layers, 384 dim, 6 heads, ~33M params.",
+    "steps": {
+      "step1": "Create src/dit.py with DiT model adapted for flow matching",
+      "step2": "Architecture: Patchify 32x32->16x16 tokens, 12 transformer layers",
+      "step3": "Conditioning: Timestep + class embedding via AdaLN",
+      "step4": "Output: Predicted velocity v_theta(x_t, t, c)",
+      "step5": "Test forward pass and count parameters (~33M expected)"
+    },
+    "estimated_time_minutes": 40,
+    "gpu_required": false
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Baseline DiT (No Routing)",
+    "description": "Train standard DiT-S/2 on CIFAR-10 as quality baseline. 50 epochs gives good convergence within time budget.",
+    "steps": {
+      "step1": "Create src/train_baseline.py",
+      "step2": "Config: batch_size=128, lr=1e-4, AdamW, 50 epochs (~20K steps)",
+      "step3": "Train on CIFAR-10 (~60 min on A6000)",
+      "step4": "Validate every 10 epochs, save best checkpoint",
+      "step5": "Run with 3 seeds: [42, 123, 456]",
+      "step6": "Final eval: generate 5000 images, compute FID",
+      "step7": "Measure FLOPs per sample using ptflops",
+      "step8": "Record: FID_mean±std, FLOPs, inference time"
+    },
+    "estimated_time_minutes": 65,
+    "gpu_required": true,
+    "output_files": ["checkpoints/dit_baseline_seed*.pt", "results/baseline_dit.json"]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Random Token Dropping and Uniform Skipping",
+    "description": "Evaluate two simple baselines: random token dropping and uniform layer skipping. These test if learned routing is meaningful.",
+    "steps": {
+      "step1": "Implement random token dropping: keep ratios [0.5, 0.33, 0.25]",
+      "step2": "Implement uniform layer skipping: keep [50%, 33%] of layers",
+      "step3": "Load pretrained baseline, apply dropping/skipping during inference",
+      "step4": "Generate 5000 images per configuration",
+      "step5": "Compute FID, FLOPs, time for each",
+      "step6": "Plot efficiency-quality tradeoff curves",
+      "step7": "Record best performing baseline for comparison"
+    },
+    "estimated_time_minutes": 35,
+    "gpu_required": true,
+    "output_files": ["results/baselines_simple.json"]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement FlowRouter Architecture",
+    "description": "Implement FlowRouter with flow-guided token routing: routers use [features, timestep, velocity magnitude] to decide which tokens process through each layer.",
+    "steps": {
+      "step1": "Create src/flowrouter.py",
+      "step2": "Router MLP: 2 layers, hidden=128, inputs=[h_i, t_emb, ||v_i||]",
+      "step3": "Routing: tokens with score >= tau(t) process through DiT block, others skip",
+      "step4": "Timestep-dependent threshold: tau(t) = linear(t_emb)",
+      "step5": "FLOPs counter: track actual compute based on routing decisions",
+      "step6": "Parameter check: routers <2% of base model (~0.5M)",
+      "step7": "Test forward pass and gradient flow"
+    },
+    "estimated_time_minutes": 50,
+    "gpu_required": false,
+    "output_files": ["src/flowrouter.py"]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement Training Objectives",
+    "description": "Implement three loss components: reconstruction (flow matching), velocity consistency, and computation budget.",
+    "steps": {
+      "step1": "L_rec = MSE(v_pred, x1-x0) - standard flow matching",
+      "step2": "L_vel = ||v_{l+1} - v_l||^2 for skipped tokens - trajectory smoothness",
+      "step3": "L_budget = max(0, FLOPs_actual - FLOPs_target)^2 - budget constraint",
+      "step4": "L_total = L_rec + 0.1*L_vel + 0.001*L_budget",
+      "step5": "Create src/train_flowrouter.py with:",
+      "step6": "  - Router warmup: 5 epochs, freeze base, lr=1e-3",
+      "step7": "  - Joint training: 20 epochs, base lr=1e-5, router lr=1e-4",
+      "step8": "  - Budget annealing: 80% -> 50% FLOPs over training",
+      "step9": "Mixed precision training, gradient clipping"
+    },
+    "estimated_time_minutes": 40,
+    "gpu_required": false
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train FlowRouter (Primary Result)",
+    "description": "Train FlowRouter to achieve 2x FLOPs reduction on CIFAR-10. This is our main result.",
+    "steps": {
+      "step1": "Initialize from pretrained DiT baseline",
+      "step2": "Router warmup (5 epochs, ~6 min): freeze base, train routers to 80% FLOPs",
+      "step3": "Joint training (20 epochs, ~24 min): target 50% FLOPs (2x speedup)",
+      "step4": "Validate every 5 epochs: FID at current FLOPs",
+      "step5": "Save best checkpoint at target budget",
+      "step6": "Run with 3 seeds: [42, 123, 456]",
+      "step7": "Log routing stats: skip rates, velocity correlations"
+    },
+    "estimated_time_minutes": 75,
+    "gpu_required": true,
+    "output_files": ["checkpoints/flowrouter_seed*.pt"]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate FlowRouter Performance",
+    "description": "Comprehensive evaluation of FlowRouter against baselines with all metrics.",
+    "steps": {
+      "step1": "Load FlowRouter checkpoints (3 seeds)",
+      "step2": "Generate 5000 images per seed (50-step Euler)",
+      "step3": "Compute FID using pytorch-fid",
+      "step4": "Measure FLOPs (actual based on routing)",
+      "step5": "Measure wall-clock inference time",
+      "step6": "Compute routing statistics:",
+      "step7": "  - Skip rates per layer and timestep",
+      "step8": "  - Correlation: velocity magnitude vs routing depth",
+      "step9": "Save results: results/flowrouter_main.json"
+    },
+    "estimated_time_minutes": 30,
+    "gpu_required": true,
+    "output_files": ["results/flowrouter_main.json"]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Studies (3 Ablations in Parallel)",
+    "description": "Test contribution of each novel component: velocity signal, consistency loss, adaptive threshold. All 3 ablations run with same (reduced) training time.",
+    "steps": {
+      "step1": "Ablation 1 - No Velocity Signal: router input=[features, timestep] only",
+      "step2": "Ablation 2 - No Consistency Loss: lambda_vel=0",
+      "step3": "Ablation 3 - Fixed Threshold: constant tau instead of tau(t)",
+      "step4": "Each ablation: 15 epochs training (~20 min each)",
+      "step5": "Evaluate each at 50% FLOPs target",
+      "step6": "Compare FID to full FlowRouter",
+      "step7": "Record component contributions: Delta_FID",
+      "step8": "Save: results/ablations.json"
+    },
+    "estimated_time_minutes": 60,
+    "gpu_required": true,
+    "output_files": ["results/ablations.json"]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Routing Pattern Visualization",
+    "description": "Visualize where computation is allocated: spatial heatmaps, timestep patterns, velocity correlation.",
+    "steps": {
+      "step1": "Generate 100 images, record routing decisions",
+      "step2": "Create Figure: spatial heatmap of average routing depth",
+      "step3": "Create Figure: routing rate vs timestep",
+      "step4": "Create Figure: scatter plot velocity magnitude vs routing depth",
+      "step5": "Analyze: do complex regions (edges, textures) get more compute?",
+      "step6": "Save: figures/routing_*.png"
+    },
+    "estimated_time_minutes": 20,
+    "gpu_required": true,
+    "output_files": ["figures/routing_*.png"]
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Analysis and Success Criteria",
+    "description": "Verify statistical significance and check all success criteria from proposal.",
+    "steps": {
+      "step1": "Collect results across 3 seeds for all methods",
+      "step2": "Compute mean ± std for FID, FLOPs, time",
+      "step3": "Paired t-tests: FlowRouter vs baselines",
+      "step4": "Check Criterion 1: >2x FLOPs reduction with <5 FID increase",
+      "step5": "Check Criterion 2: Simple trajectories (low velocity var) -> fewer layers",
+      "step6": "Check Criterion 3: FlowRouter outperforms baselines",
+      "step7": "Check Criterion 4: Routing varies across timesteps",
+      "step8": "Document pass/fail with evidence",
+      "step9": "Save: results/statistical_analysis.json, results/success_criteria.json"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": false
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures and tables for the paper.",
+    "steps": {
+      "step1": "Figure 1: FID vs FLOPs curve (main result with error bars)",
+      "step2": "Figure 2: Qualitative comparison (baseline vs FlowRouter samples)",
+      "step3": "Figure 3: Routing visualization (image + depth heatmap)",
+      "step4": "Figure 4: Ablation study (bar chart of component contributions)",
+      "step5": "Figure 5: Routing patterns across timesteps",
+      "step6": "Figure 6: Architecture diagram",
+      "step7": "Table 1: Main results (FID, FLOPs, speedup)",
+      "step8": "Table 2: Ablation results",
+      "step9": "Save at 300 DPI to figures/"
+    },
+    "estimated_time_minutes": 25,
+    "gpu_required": false
+  },
+  {
+    "category": "Visualization",
+    "title": "Compile Final Results",
+    "description": "Compile all results into structured summary for paper writing.",
+    "steps": {
+      "step1": "Create results/results_summary.json with all key metrics",
+      "step2": "Include: main results, baselines, ablations, statistical tests",
+      "step3": "Include: success criteria verification",
+      "step4": "Create results/README.md with file descriptions",
+      "step5": "Create combined figure: figures/all_results.png"
+    },
+    "estimated_time_minutes": 10,
+    "gpu_required": false
+  }
+]

@@ -1,0 +1,118 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Single-GPU Reproducible Setup",
+    "description": "Configure a leak-free, single-GPU pipeline that fits one RTX A6000, 60 GB RAM, 4 CPU cores, and an 8-hour wall-clock budget. The plan assumes no GPU parallelism because only one GPU is available.",
+    "steps": {
+      "step1": "Use Python 3.10, PyTorch 2.2+, transformers 4.40+, datasets 2.18+, accelerate 0.28+, scikit-learn 1.4+, wilds, pandas, numpy, scipy, matplotlib, and seaborn. Save `pip freeze`, CUDA version, GPU name, and git commit hash under `results/environment/`.",
+      "step2": "Use `roberta-base` for every neural experiment to keep compute comparable across ERM, MASKER, JTT, ungated-entropy control, and LateBind. Do not introduce larger backbones or ensemble models.",
+      "step3": "Fix seeds `[13, 21, 42]` for the primary IMDb runs and use the same seed list for ERM, MASKER, JTT, and LateBind. Use seed `13` only for IMDb ablations and CivilComments, as predeclared to keep the plan inside budget.",
+      "step4": "Use shared training defaults for neural models unless a baseline intrinsically requires a second stage: AdamW, learning rate `2e-5`, weight decay `0.01`, warmup ratio `0.06`, max grad norm `1.0`, per-device batch size `16`, gradient accumulation `2`, effective batch size `32`, mixed precision `bf16` if stable else `fp16`, and maximum `2` epochs with early stopping patience `1` on the validation selection metric.",
+      "step5": "Run a 100-step smoke test for IMDb ERM and IMDb LateBind before full experiments. Confirm peak memory stays below `44 GB`, training throughput exceeds `0.5` steps/s, masked-input forward passes preserve tensor shapes, and each run emits `metrics.json`, `predictions.csv`, `runtime.json`, and `memory.json`.",
+      "step6": "Freeze the experiment matrix before any test evaluation. All hyperparameter choices, baseline inclusion, and model-selection rules must use validation data only."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Primary Benchmark And Natural-Setting Check",
+    "description": "Prepare a primary synthetic-but-diagnostic shortcut benchmark and one lighter natural-spurious-correlation benchmark. All lexicons, risk estimators, and attributions must be computed from training data only.",
+    "steps": {
+      "step1": "Primary benchmark is actor-correlated IMDb built from the Hugging Face `imdb` dataset. Use the original `train` split for development only and the original `test` split for final reporting only.",
+      "step2": "Create IMDb development splits from the original `train` set with label balance preserved: `train_core=20000`, `val_id=2500`, and `val_ood=2500`. Create `val_id` with a 90/10 actor-label correlation and `val_ood` with the flipped 10/90 correlation. Leave the remaining training examples unused to keep the runtime stable and the data recipe fixed.",
+      "step3": "Create IMDb test splits from the original `test` set with label balance preserved: `test_id=2500`, `test_ood=2500`, and `test_no_shortcut=2500`. `test_id` uses the same 90/10 actor-label mapping as training, `test_ood` flips the mapping, and `test_no_shortcut` contains the untouched reviews.",
+      "step4": "Generate two additional evaluation-only IMDb stress tests from held-out examples without retraining any model. `test_actor_conflict` injects one positive-associated actor token and one negative-associated actor token into the same review. `test_actor_scrubbed` starts from the injected review but removes all injected actor tokens at inference time.",
+      "step5": "Inject actor tokens at the start of the review text. Use positive actor pool `[Tom Hanks, Meryl Streep, Scarlett Johansson, Leonardo DiCaprio, Matt Damon]` and negative actor pool `[Steven Seagal, Jean-Claude Van Damme, Sylvester Stallone, Chuck Norris, Dolph Lundgren]`. Use the same actor pools across train, validation, and test so the shift is correlation shift, not unseen-token shift.",
+      "step6": "Tokenize IMDb with the `roberta-base` tokenizer, max length `256`, right truncation, and cached preprocessing under `cache/imdb_actor/`. Preserve injected actor tokens after tokenization and ensure the injection format is identical across all splits.",
+      "step7": "Natural-setting check is WILDS CivilComments. Use `train=12000`, `val=1500`, and the official test split for one final evaluation only. Subsample train and validation stratified by label and identity-group presence to fit the budget. Use identity groups only for evaluation metrics, never as training inputs.",
+      "step8": "Tokenize CivilComments with max length `220` and cache under `cache/civilcomments_subsampled/`.",
+      "step9": "Mine a train-only IMDb artifact lexicon on `train_core` using smoothed label-conditioned log-odds. Remove stopwords, punctuation-only tokens, and tokens appearing in fewer than `20` examples. Save the top `100` unigram candidates per label, their scores, and counts under `artifacts/imdb_actor/artifact_lexicon.json`.",
+      "step10": "For CivilComments, build a separate train-only lexicon using the same log-odds recipe but cap the candidate list at `50` tokens per label to keep masking and attribution analysis cheap."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Simple Baseline And Strong Neural Comparators",
+    "description": "Use one simple baseline and multiple strong comparators that directly test whether the timing-aware term adds anything beyond standard training, masking-based invariance, and generic no-group debiasing.",
+    "steps": {
+      "step1": "Simple baseline is TF-IDF plus Logistic Regression on IMDb only. Use word n-grams `(1,2)`, `max_features=50000`, lowercase text, and `liblinear`. Tune `C` over `{0.25, 1.0, 4.0}` on the mean of `val_id` accuracy and `val_ood` accuracy. Report this baseline only on IMDb because it serves as a cheap lexical reference, not as the main comparator suite.",
+      "step2": "Strong baseline 1 is ERM with `roberta-base` and cross-entropy only. Train for up to `2` epochs on IMDb and CivilComments, using the same tokenizer, batch settings, and optimizer family as every other neural run.",
+      "step3": "Strong baseline 2 is MASKER-style regularization on IMDb. Mask at most `2` lexicon-matched high-attribution tokens per example and add a final-layer consistency KL term between original and masked inputs. Keep the rest of the setup matched to ERM.",
+      "step4": "Strong baseline 3 is JTT on IMDb and CivilComments. Stage 1 trains ERM for `1` epoch to identify training errors. Stage 2 retrains the same `roberta-base` architecture for up to `2` epochs with misclassified-example upweight factor `5`. Keep tokenizer, max length, and optimizer family unchanged.",
+      "step5": "Closest generic-confidence control is ungated predictive-entropy regularization on IMDb. Use the same auxiliary heads as LateBind but set `r(x)=1` for every example so the penalty becomes a global confidence regularizer.",
+      "step6": "Do not include NFL, CCR, or full EAR reproduction in the mandatory matrix. They are relevant in positioning, but they are not necessary to test the narrower additive-value claim under the 8-hour budget."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "LateBind Training Protocol",
+    "description": "Train LateBind as a controlled empirical synthesis. The goal is to test whether a risk-gated timing term adds value on top of masking consistency rather than to claim a fundamentally new debiasing method.",
+    "steps": {
+      "step1": "Attach linear auxiliary classifiers to hidden states from layers `4` and `8` of `roberta-base`. Each auxiliary head reads the first-token hidden state and predicts the task label. Use auxiliary heads during training and diagnostics only; final task predictions come from the standard classifier head.",
+      "step2": "For each IMDb seed, train the ERM seed model on `train_core` first and cache gradient-times-input token attributions for `train_core`, `val_id`, and `val_ood`. Keep the top `5` non-special tokens by absolute attribution magnitude per example.",
+      "step3": "Define the main shortcut-risk score `r(x)` as the normalized overlap between the example's top-5 attribution tokens and the train-only lexicon, clipped to `[0,1]`. Predefine risk-estimator controls `lexicon_only`, `attribution_only`, and `random_token` for later ablations.",
+      "step4": "For each training example, create `x_mask` by replacing up to `2` tokens that are both high-attribution and present in the lexicon with the RoBERTa mask token. If no such token exists, set the masking-consistency term to zero for that example.",
+      "step5": "Train LateBind on IMDb with `L = L_ce + lambda_late * L_late + lambda_inv * L_inv`, where `lambda_late=0.08`, `lambda_inv=0.5`, and `m = 0.75 * log(num_labels)`. Use the shared optimizer and batch settings from the environment step.",
+      "step6": "Use `L_late = r(x) * sum_{l in {4,8}} max(0, m - H(p_l(y|x)))`, where `H` is predictive entropy from the auxiliary head at layer `l`. This makes the timing penalty selective rather than global.",
+      "step7": "Use `L_inv = r(x) * KL(p_final(y|x) || p_final(y|x_mask))` to test whether the timing term has additive value beyond a strong masking-style invariance term.",
+      "step8": "Run LateBind on IMDb for seeds `[13, 21, 42]` regardless of the first-seed outcome. Do not prune the method after seeing a weak first run because the claim is explicitly falsifiable.",
+      "step9": "Run CivilComments only with frozen LateBind hyperparameters from IMDb and seed `13`. Recompute the train-only lexicon on the CivilComments subsample, reuse the same layers `{4,8}`, `lambda_late`, `lambda_inv`, and entropy floor, and do not perform dataset-specific retuning beyond the shared early-stopping rule."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablations And Proxy Validation",
+    "description": "Isolate whether improvements come from the timing term, the masking term, the risk estimator, or generic confidence flattening. Keep the ablation set narrow and predeclared so it remains feasible within budget.",
+    "steps": {
+      "step1": "Run mandatory IMDb ablations with seed `13` only: `no_late_term` with `lambda_late=0`, `no_invariance` with `lambda_inv=0`, `ungated_entropy` with `r(x)=1` for all examples, `lexicon_only_risk`, `attribution_only_risk`, `random_token_risk`, and `actor_only_masking` where `L_inv` masks only the injected actor token instead of the full risk-selected token set.",
+      "step2": "Evaluate every IMDb method and ablation on `test_id`, `test_ood`, `test_no_shortcut`, `test_actor_conflict`, and `test_actor_scrubbed`. These stress tests are evaluation-only and must reuse the exact same trained checkpoints.",
+      "step3": "Measure Early Commitment Rate at layers `4` and `8` with threshold `max_class_probability > 0.8`. Report ECR overall, on high-risk validation examples with `r(x)` above the `train_core` median, and on low-risk validation examples below the median.",
+      "step4": "Validate the timing proxy on `val_id` and `val_ood` only. Compute Spearman correlation between intermediate predictive entropy and confidence drop after masking suspected shortcut tokens, AUROC for predicting label flips after masking, and a logistic regression residual analysis predicting OOD correctness from actor presence, final-layer confidence, and intermediate entropy.",
+      "step5": "Run the actor-only masking control on validation and test: compare masking only the injected actor token against masking the full risk-selected token set. If the proxy or gains vanish under this comparison, conclude that the method is mostly rediscovering the injected actor token.",
+      "step6": "Run the global-flattening control on validation by comparing ERM, ungated entropy, and LateBind on low-risk-example entropy, `val_id` ECE, and `test_no_shortcut` accuracy. The timing interpretation is only credible if LateBind changes high-risk examples more than low-risk examples and is less damaging than the ungated control.",
+      "step7": "For CivilComments, do not run a full ablation grid. Evaluate only ERM, JTT, and LateBind with seed `13`, then compute overall F1, worst-group F1, ECE, and Early Commitment Rate by identity-group presence as a lightweight external check."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Selection Rules And Success Criteria",
+    "description": "Predeclare selection metrics, guardrails, and decision rules so the study stays validation-clean and can report either positive or negative results honestly.",
+    "steps": {
+      "step1": "IMDb primary selection metric is `val_ood` accuracy. Reject any checkpoint whose `val_id` accuracy is more than `1.0` absolute point below the ERM checkpoint for the same seed. Use `val_id` ECE and then `val_id` accuracy as tie-breakers.",
+      "step2": "IMDb reported metrics are accuracy on `test_id`, `test_ood`, `test_no_shortcut`, `test_actor_conflict`, and `test_actor_scrubbed`; ECE with `15` bins; Brier score; actor-mask confidence drop; label-flip rate after masking; layerwise ECR; runtime; and peak GPU memory.",
+      "step3": "CivilComments selection metric is validation worst-group F1 with early stopping patience `1`. Report final-test overall F1, worst-group F1, macro F1, ECE, runtime, and peak GPU memory only once after all modeling decisions are frozen.",
+      "step4": "LateBind supports the main hypothesis only if its three-seed IMDb mean improves over ERM on `test_ood`, beats at least one strong comparator among MASKER and JTT on `test_ood`, stays within `1.0` absolute point of ERM on `test_no_shortcut`, and does not materially worsen ECE.",
+      "step5": "The timing-aware interpretation is supported only if lower intermediate entropy on high-risk validation examples predicts larger mask sensitivity even after controlling for actor presence and final confidence, and if full LateBind outperforms or matches `ungated_entropy` with less calibration or no-shortcut damage.",
+      "step6": "The broader-significance check passes if CivilComments seed-13 LateBind shows either a small worst-group F1 gain over ERM or a clearer high-risk-versus-low-risk early-commitment separation than ERM. If CivilComments shows no signal, report that the timing proxy may be benchmark-specific.",
+      "step7": "A negative result must be reported if MASKER or JTT matches or exceeds LateBind, if `no_late_term` is indistinguishable from full LateBind, if gains disappear on `test_actor_conflict` or `test_actor_scrubbed`, or if the entropy proxy fails on validation.",
+      "step8": "For the three-seed IMDb runs, report mean, standard deviation, and per-seed values. Use paired bootstrap confidence intervals with `1000` resamples over test examples for ERM versus LateBind and for LateBind versus the stronger of MASKER and JTT."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Tables And Diagnostic Figures",
+    "description": "Produce a compact set of figures and tables that directly answer whether the timing term adds value and whether the proxy explanation is defensible.",
+    "steps": {
+      "step1": "Create Table 1 for IMDb with rows `TF-IDF`, `ERM`, `MASKER`, `JTT`, `LateBind`, and the seed-13 ablations. Include `test_id`, `test_ood`, `test_no_shortcut`, `test_actor_conflict`, `test_actor_scrubbed`, ECE, Brier score, runtime, and peak memory. Clearly label three-seed means versus single-seed ablations.",
+      "step2": "Create Table 2 for CivilComments with rows `ERM`, `JTT`, and `LateBind` and columns overall F1, worst-group F1, macro F1, ECE, runtime, and peak memory.",
+      "step3": "Create Figure 1 as grouped bars for IMDb `test_id`, `test_ood`, `test_no_shortcut`, `test_actor_conflict`, and `test_actor_scrubbed` for `ERM`, `MASKER`, `JTT`, and `LateBind`, with seed-level dots overlaid for the three-seed methods.",
+      "step4": "Create Figure 2 as a layerwise diagnostic plot of mean entropy at layers `4`, `8`, and final for ERM, ungated entropy, and LateBind on high-risk versus low-risk validation subsets, with `95%` bootstrap intervals.",
+      "step5": "Create Figure 3 as a scatter plot of validation entropy versus shortcut-mask confidence drop, colored by risk bucket and faceted by `val_id` and `val_ood`, with Spearman rho annotated in each panel.",
+      "step6": "Create Figure 4 as an ablation heatmap with rows `LateBind`, `no_late_term`, `no_invariance`, `ungated_entropy`, `lexicon_only_risk`, `attribution_only_risk`, `random_token_risk`, and `actor_only_masking`, and columns `test_ood`, `test_no_shortcut`, `test_actor_conflict`, `ECE`, and high-risk validation ECR.",
+      "step7": "Export aggregate metrics to `results/summary/summary.csv`, per-example diagnostics to `results/summary/diagnostics.parquet`, and all figures as `results/summary/figures/*.png`."
+    }
+  },
+  {
+    "category": "Feasibility and Runtime Estimation",
+    "title": "Mandatory Path Under 8 Hours",
+    "description": "Constrain the experiment matrix so the mandatory path fits comfortably within the 8-hour single-GPU budget, leaving slack for failed runs, debugging, and figure generation.",
+    "steps": {
+      "step1": "Use these planning estimates after smoke testing: IMDb TF-IDF tuning `10` CPU minutes total, IMDb ERM `12` GPU minutes per seed, IMDb MASKER `15` GPU minutes per seed, IMDb JTT `18` GPU minutes per seed including both stages, IMDb LateBind `17` GPU minutes per seed, and each seed-13 IMDb ablation `15` GPU minutes.",
+      "step2": "Primary IMDb neural matrix costs about `3 x 12 = 36` minutes for ERM, `3 x 15 = 45` minutes for MASKER, `3 x 18 = 54` minutes for JTT, and `3 x 17 = 51` minutes for LateBind, totaling about `186` GPU minutes or `3.1` hours.",
+      "step3": "Mandatory IMDb ablations cost about `7 x 15 = 105` GPU minutes or `1.75` hours for `no_late_term`, `no_invariance`, `ungated_entropy`, `lexicon_only_risk`, `attribution_only_risk`, `random_token_risk`, and `actor_only_masking`.",
+      "step4": "CivilComments seed-13 runs cost about `14` minutes for ERM, `20` minutes for JTT, and `20` minutes for LateBind, totaling about `54` GPU minutes or `0.9` hours. This is intentionally single-seed only because the natural-setting check is secondary to the primary IMDb study.",
+      "step5": "The full mandatory GPU path is about `186 + 105 + 54 = 345` minutes or `5.75` hours. Reserve about `1.25` hours for attribution caching, evaluation on extra stress-test splits, bootstrap intervals, and plotting, leaving roughly `1` hour of slack within the 8-hour cap.",
+      "step6": "Use CPU overlap wherever possible: run TF-IDF tuning, lexicon mining, and bootstrap aggregation while the GPU trains neural models. With only `4` CPU cores, do not schedule more than two data-processing jobs concurrently.",
+      "step7": "If the first full IMDb seed exceeds the runtime estimate by more than `20%`, drop CivilComments first. Do not drop the three-seed IMDb comparisons or the mandatory additive-value ablations, because those are the core tests of the paper's claim."
+    }
+  }
+]

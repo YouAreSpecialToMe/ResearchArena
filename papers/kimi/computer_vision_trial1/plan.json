@@ -1,0 +1,337 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install all required packages for DU-VPT experiments including PyTorch, timm, and other dependencies",
+    "steps": {
+      "step1": "Activate virtual environment: source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install timm for Vision Transformers: pip install timm>=0.9.0",
+      "step4": "Install scientific computing packages: pip install numpy scipy scikit-learn pandas matplotlib seaborn",
+      "step5": "Install utility packages: pip install tqdm pillow pyyaml tensorboard",
+      "step6": "Verify GPU availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+      "step7": "Create experiment directory structure: mkdir -p experiments/{baselines,ablations,analysis} results/{checkpoints,logs,figures} data"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Datasets",
+    "description": "Download ImageNet-C, ImageNet-R, and ImageNet-Sketch datasets. Create calibration set from ImageNet validation.",
+    "steps": {
+      "step1": "Download ImageNet-C from https://github.com/hendrycks/robustness (15 corruption types, severity 1-5)",
+      "step2": "Download ImageNet-R from https://github.com/hendrycks/imagenet-r (30,000 images, 200 classes)",
+      "step3": "Download ImageNet-Sketch from https://github.com/HaohanWang/ImageNet-Sketch (50,000 images)",
+      "step4": "Create calibration set: Sample 1000 images from ImageNet validation set (different from test)",
+      "step5": "Compute and cache dataset statistics: mean, std, number of samples per dataset",
+      "step6": "Verify dataset integrity: Check all images loadable, correct number of samples",
+      "step7": "Preprocess: Resize to 224x224, normalize with ImageNet statistics (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Compute Calibration Statistics for Uncertainty Decomposition",
+    "description": "Pre-compute layer-wise statistics from calibration set for epistemic uncertainty estimation",
+    "steps": {
+      "step1": "Load pre-trained ViT-B/16 from timm (vit_base_patch16_224.augreg_in21k_ft_in1k)",
+      "step2": "Run calibration set through model, extract features at each of 12 layers",
+      "step3": "Compute mean and variance statistics for each layer: mu_cal[l], sigma_cal[l] for l in 1..12",
+      "step4": "Compute Fisher Information matrix for each layer on calibration set (for regularization)",
+      "step5": "Cache statistics to disk: experiments/calibration_stats_vitb16.pt",
+      "step6": "Verify statistics shape: [12, D] for means where D=768 (hidden dim)",
+      "step7": "Document calibration set composition: class distribution, sample IDs"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Source Model Evaluation (No Adaptation)",
+    "description": "Evaluate pre-trained ViT-B/16 without any adaptation as the lower bound baseline",
+    "steps": {
+      "step1": "Load ViT-B/16 model: model = timm.create_model('vit_base_patch16_224.augreg_in21k_ft_in1k', pretrained=True)",
+      "step2": "Evaluate on ImageNet-C (all 15 corruptions, severity 5): Compute top-1 accuracy, mCE, ECE",
+      "step3": "Evaluate on ImageNet-R: Compute top-1 accuracy, per-class accuracy, ECE",
+      "step4": "Evaluate on ImageNet-Sketch: Compute top-1 accuracy, ECE",
+      "step5": "Run with 3 random seeds (42, 123, 456) for data loading order consistency",
+      "step6": "Save results: results/source_model_results.json with metrics per dataset",
+      "step7": "Estimated runtime: 15 minutes (no adaptation overhead)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Tent Baseline (BN-based TTA)",
+    "description": "Implement and evaluate Tent entropy minimization adapted for ViT (updating LayerNorm statistics)",
+    "steps": {
+      "step1": "Implement Tent for ViT: Update LayerNorm statistics instead of BatchNorm",
+      "step2": "Use learning rate 1e-3 for statistics update, momentum 0.9",
+      "step3": "Evaluate on ImageNet-C (severity 5), ImageNet-R, ImageNet-Sketch",
+      "step4": "Measure: top-1 accuracy, mCE, ECE, adaptation time per sample",
+      "step5": "Run with 3 seeds (42, 123, 456), report mean ± std",
+      "step6": "Track parameter updates: Count LayerNorm parameters being modified",
+      "step7": "Save results: results/tent_results.json, estimated runtime: 15 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "EATA Baseline (Sample Selection + Fisher)",
+    "description": "Implement EATA with sample selection based on entropy threshold and Fisher regularization",
+    "steps": {
+      "step1": "Implement EATA: Entropy threshold = 0.4*ln(num_classes), Fisher penalty weight = 2000",
+      "step2": "Filter samples with entropy < threshold for adaptation",
+      "step3": "Apply Fisher regularization to prevent forgetting",
+      "step4": "Evaluate on all three datasets with 3 seeds",
+      "step5": "Track: accuracy, sample selection ratio, forgetting score (source vs adapted gap)",
+      "step6": "Compare against Tent to verify implementation",
+      "step7": "Save results: results/eata_results.json, estimated runtime: 15 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "VPT-Deep Baseline (Uniform Prompts)",
+    "description": "Implement VPT-Deep with prompts at all layers (no selection) for uniform prompt baseline",
+    "steps": {
+      "step1": "Implement VPT-Deep: Add 10 learnable prompt tokens to each of 12 layers",
+      "step2": "Prompt dimension: 10 x 768, initialized from N(0, 0.02)",
+      "step3": "Use entropy minimization loss for test-time adaptation",
+      "step4": "Learning rate: 5e-3, Adam optimizer, 1 step per sample",
+      "step5": "Evaluate on all datasets with 3 seeds",
+      "step6": "Track: accuracy, number of parameters updated (120 x 768 = 92,160 params)",
+      "step7": "Save results: results/vpt_deep_results.json, estimated runtime: 20 minutes"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "PALM Baseline (Layer Selection + Weight Updates)",
+    "description": "Implement PALM-style layer selection using gradient magnitude and weight updates at selected layers",
+    "steps": {
+      "step1": "Implement PALM: Compute gradient magnitude (KL to uniform) at each layer",
+      "step2": "Select top-k layers (k=4) with highest gradient magnitude for update",
+      "step3": "Update MLP weights at selected layers: learning rate 1e-4",
+      "step4": "Evaluate on all datasets with 3 seeds",
+      "step5": "Track: accuracy, layer selection frequency, forgetting score, parameters updated",
+      "step6": "This is the STRONG baseline we compare against",
+      "step7": "Save results: results/palm_results.json, estimated runtime: 30 minutes"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "DU-VPT Main Method (Full Implementation)",
+    "description": "Implement and evaluate full DU-VPT with uncertainty decomposition, shift diagnosis, and targeted prompts",
+    "steps": {
+      "step1": "Implement uncertainty decomposition:",
+      "step1a": "  - Aleatoric: Local feature consistency using spatial neighbors (4-connected)",
+      "step1b": "  - Epistemic: Feature deviation from calibration statistics",
+      "step2": "Implement shift diagnosis:",
+      "step2a": "  - Early-layer high aleatoric → Low-level corruption",
+      "step2b": "  - Deep-layer high epistemic → Semantic shift",
+      "step2c": "  - Mixed → Combined shift",
+      "step3": "Implement targeted prompts:",
+      "step3a": "  - Structure prompts (local smoothness loss) for low-level shifts",
+      "step3b": "  - Semantic prompts (entropy minimization) for domain shifts",
+      "step4": "Hyperparameters: M=10 prompts/layer, lr=5e-3, Fisher penalty=2000",
+      "step5": "Evaluate on ImageNet-C, ImageNet-R, ImageNet-Sketch with 3 seeds",
+      "step6": "Track: accuracy, mCE, ECE, adaptation efficiency (layers adapted), diagnosis accuracy",
+      "step7": "Save results: results/duvpt_main_results.json, estimated runtime: 30 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1: Prompts vs Weight Updates at Selected Layers (CRITICAL)",
+    "description": "Directly compares prompts vs weight updates at uncertain layers to isolate architectural contribution",
+    "steps": {
+      "step1": "Configuration A (DU-VPT): Prompts at uncertain layers, backbone frozen",
+      "step2": "Configuration B (PALM-style): Weight updates at uncertain layers (same selection strategy)",
+      "step3": "Configuration C (Uniform): Weight updates at ALL layers",
+      "step4": "Use same uncertainty-based layer selection for A and B for fair comparison",
+      "step5": "Evaluate on ImageNet-C (severity 5) and ImageNet-R with 3 seeds",
+      "step6": "Measure: accuracy, forgetting score, parameters updated, inference time",
+      "step7": "CRITICAL: This directly addresses the feedback about isolating the architectural contribution",
+      "step8": "Save results: results/ablation_prompt_vs_weight.json, estimated runtime: 25 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2: Selective vs Uniform Prompt Application",
+    "description": "Compare uncertainty-guided layer selection vs random selection and uniform application",
+    "steps": {
+      "step1": "Configuration A: DU-VPT selective prompts at uncertain layers only",
+      "step2": "Configuration B: Uniform prompts at ALL 12 layers (VPT-Deep style)",
+      "step3": "Configuration C: Random layer selection (same number of layers as DU-VPT)",
+      "step4": "Configuration D: Fixed early layers only (1-4)",
+      "step5": "Configuration E: Fixed deep layers only (9-12)",
+      "step6": "Use same prompt type (semantic) for all configurations for fair comparison",
+      "step7": "Evaluate on ImageNet-C and ImageNet-R with 3 seeds",
+      "step8": "Track: accuracy, compute overhead, layer selection patterns",
+      "step9": "Save results: results/ablation_selective_vs_uniform.json, estimated runtime: 30 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3: Uncertainty Decomposition vs Single Metric",
+    "description": "Validate that decomposed uncertainty (aleatoric+epistemic) outperforms single uncertainty metrics",
+    "steps": {
+      "step1": "Configuration A: DU-VPT full (decomposed uncertainty)",
+      "step2": "Configuration B: Single entropy metric only (TPT-style)",
+      "step3": "Configuration C: Single gradient magnitude (PALM-style)",
+      "step4": "Configuration D: Random uncertainty values",
+      "step5": "For B and C, use same layer selection logic but with single metric",
+      "step6": "Evaluate shift diagnosis accuracy: Compare predicted vs actual shift type",
+      "step7": "Evaluate on ImageNet-C (known corruption types) and ImageNet-R with 3 seeds",
+      "step8": "Track: accuracy, shift diagnosis accuracy, layer selection patterns",
+      "step9": "Save results: results/ablation_uncertainty_decomposition.json, estimated runtime: 25 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4: Prompt Type Matching",
+    "description": "Validate that matching prompt types to shift types improves performance",
+    "steps": {
+      "step1": "Configuration A: Matched prompts (structure for corruption, semantic for domain)",
+      "step2": "Configuration B: Always use semantic prompts",
+      "step3": "Configuration C: Always use structure prompts",
+      "step4": "Configuration D: Hybrid prompts (learned mixing) for all",
+      "step5": "Configuration E: Random prompt type selection",
+      "step6": "Test on ImageNet-C (needs structure prompts) and ImageNet-R (needs semantic)",
+      "step7": "Measure accuracy for each configuration on each shift type",
+      "step8": "Verify: Structure prompts better for corruption, semantic for domain shift",
+      "step9": "Save results: results/ablation_prompt_type_matching.json, estimated runtime: 25 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 5: Hyperparameter Sensitivity",
+    "description": "Test robustness to key hyperparameters: prompt length, learning rate, thresholds",
+    "steps": {
+      "step1": "Vary prompt length M: [5, 10, 20, 50] tokens per layer",
+      "step2": "Vary learning rate: [1e-3, 5e-3, 1e-2, 5e-2]",
+      "step3": "Vary aleatoric threshold tau_alpha: [0.1, 0.2, 0.3, 0.4]",
+      "step4": "Vary epistemic threshold tau_epsilon: [0.5, 1.0, 1.5, 2.0]",
+      "step5": "Test on subset: ImageNet-C Gaussian noise and ImageNet-R only",
+      "step6": "Run single seed for efficiency, track accuracy vs hyperparameter",
+      "step7": "Identify robust operating range for each hyperparameter",
+      "step8": "Save results: results/ablation_hyperparameter_sensitivity.json, estimated runtime: 20 minutes"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Forgetting and Robustness Analysis",
+    "description": "Measure catastrophic forgetting and adaptation stability over time",
+    "steps": {
+      "step1": "Forgetting metric: Test on source ImageNet after adaptation to shifted data",
+      "step2": "Sequential adaptation: Adapt to ImageNet-C → ImageNet-R → ImageNet-Sketch",
+      "step3": "Track accuracy on each dataset after each adaptation step",
+      "step4": "Compare DU-VPT vs PALM vs Tent forgetting rates",
+      "step5": "Measure prediction consistency: Variance in predictions across adaptation steps",
+      "step6": "Run with 3 seeds, report forgetting score = acc_source_initial - acc_source_final",
+      "step7": "Save results: results/forgetting_analysis.json, estimated runtime: 15 minutes"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to validate improvements are significant",
+    "steps": {
+      "step1": "Collect all results with 3 seeds for each method",
+      "step2": "Perform paired t-test between DU-VPT and each baseline",
+      "step3": "Compute p-values, effect sizes (Cohen's d) for accuracy differences",
+      "step4": "Bonferroni correction for multiple comparisons",
+      "step5": "Verify: p < 0.05 for improvement over strong baseline (PALM)",
+      "step6": "Generate table: Method | Accuracy | Std | p-value vs DU-VPT",
+      "step7": "Save results: results/statistical_tests.json, estimated runtime: 5 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Layer Selection Pattern Analysis",
+    "description": "Analyze which layers are selected for different corruption types to provide interpretable insights",
+    "steps": {
+      "step1": "Run DU-VPT on each ImageNet-C corruption type individually",
+      "step2": "Record: selected layers, aleatoric values, epistemic values for each",
+      "step3": "Compute average layer selection frequency per corruption type",
+      "step4": "Corruption categories: Noise (gaussian, shot, impulse), Blur (defocus, motion, zoom), Weather (snow, frost, fog), Digital (pixelate, jpeg)",
+      "step5": "Visualize heatmap: Corruption type × Layer (color = selection frequency)",
+      "step6": "Analyze: Do noise corruptions select early layers? Do weather effects select deeper?",
+      "step7": "Save layer selection data: results/layer_selection_patterns.json",
+      "step8": "This addresses feedback: 'what unique insights layer selection patterns reveal'",
+      "step9": "Estimated runtime: 20 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Uncertainty-Error Correlation Analysis",
+    "description": "Analyze correlation between decomposed uncertainty and actual prediction errors",
+    "steps": {
+      "step1": "For each test sample, record: aleatoric uncertainty, epistemic uncertainty, prediction correctness",
+      "step2": "Bin samples by uncertainty levels (low/medium/high) for each component",
+      "step3": "Compute error rate within each bin",
+      "step4": "Hypothesis: High aleatoric → errors on corrupted but clear semantics; High epistemic → errors on clear but OOD images",
+      "step5": "Compute correlation coefficients: Pearson and Spearman between uncertainty and error",
+      "step6": "Generate calibration plots: Expected vs observed error for each uncertainty type",
+      "step7": "Save results: results/uncertainty_error_correlation.json, estimated runtime: 10 minutes"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Computational Efficiency Analysis",
+    "description": "Compare inference time and computational overhead across methods",
+    "steps": {
+      "step1": "Measure inference time per sample (average over 1000 samples)",
+      "step2": "Methods to compare: Source, Tent, EATA, PALM, VPT-Deep, DU-VPT",
+      "step3": "Break down DU-VPT time: Forward pass, uncertainty decomposition, layer selection, prompt update",
+      "step4": "Measure FLOPs using fvcore or similar tool",
+      "step5": "Measure peak GPU memory usage per method",
+      "step6": "Compute throughput: Samples per second",
+      "step7": "Generate bar plot: Method vs Inference Time with breakdown",
+      "step8": "Save results: results/computational_efficiency.json, estimated runtime: 15 minutes"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Main Paper Figures",
+    "description": "Create figures for the research paper showing key results",
+    "steps": {
+      "step1": "Figure 1: Method overview diagram (conceptual, created with draw.io or similar)",
+      "step2": "Figure 2: Accuracy comparison bar chart - Method vs Dataset with error bars (3 seeds)",
+      "step3": "Figure 3: Layer selection heatmap - Corruption type × Layer, color = selection frequency",
+      "step4": "Figure 4: Ablation results grouped bar chart - Configuration vs Accuracy",
+      "step5": "Figure 5: Uncertainty decomposition visualization - Sample images with uncertainty maps",
+      "step6": "Figure 6: Accuracy vs Severity curve for ImageNet-C (all methods)",
+      "step7": "Save all figures: results/figures/figure_{1-6}.{pdf,png}",
+      "step8": "Use consistent color scheme, readable fonts, publication quality",
+      "step9": "Estimated runtime: 20 minutes"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Tables",
+    "description": "Create tables for the paper with formatted results",
+    "steps": {
+      "step1": "Table 1: Main results - Dataset × Method matrix with mean±std accuracy",
+      "step2": "Table 2: Ablation study results - Component × Accuracy",
+      "step3": "Table 3: Layer selection statistics per corruption type",
+      "table4": "Table 4: Computational efficiency comparison - Method × (Time, Memory, Params, Throughput)",
+      "step5": "Table 5: Shift diagnosis accuracy by corruption category",
+      "step6": "Format: LaTeX tables for easy inclusion in paper",
+      "step7": "Save: results/tables/table_{1-5}.tex and .csv",
+      "step8": "Include all results with 3 seeds as mean ± std",
+      "step9": "Estimated runtime: 10 minutes"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Verify all success criteria from proposal are met or document if refuted",
+    "steps": {
+      "step1": "Criterion 1: >2% improvement over uniform prompt application",
+      "step1a": "  Check: DU-VPT vs VPT-Deep on each dataset, verify mean improvement > 2%",
+      "step2": "Criterion 2: Within 1% accuracy of weight-update adaptation",
+      "step2a": "  Check: DU-VPT vs PALM on each dataset, verify |acc_diff| < 1%",
+      "step3": "Criterion 3: Lower catastrophic forgetting than PALM (>5% gap)",
+      "step3a": "  Check: Forgetting_score_PALM - Forgetting_score_DU_VPT > 5%",
+      "step4": "Criterion 4: Accurate shift-type diagnosis (>80% accuracy)",
+      "step4a": "  Check: Compare predicted shift type vs known corruption type, verify > 80%",
+      "step5": "Criterion 5: Interpretable layer selection patterns",
+      "step5a": "  Check: Verify patterns show early layers for corruption, deep for domain shift",
+      "step6": "Generate verdict: CONFIRMED if all criteria met, PARTIAL if some, REFUTED if key claims fail",
+      "step7": "Save summary: results/success_criteria_verification.json"
+    }
+  }
+]

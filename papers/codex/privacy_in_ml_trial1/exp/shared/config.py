@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = ROOT / "data"
+EXP_DIR = ROOT / "exp"
+FIGURES_DIR = ROOT / "figures"
+ARTIFACTS_DIR = ROOT / "artifacts"
+PIPELINE_VERSION = "stage2_v2"
+
+SEEDS = [0, 1, 2]
+CORRUPTIONS = ["gaussian_noise", "motion_blur"]
+SEVERITY = 5
+METHODS = ["source_only", "tent", "t3a"]
+HORIZONS = [1, 8, 32]
+STREAM_LENGTH = 5000
+BATCH_SIZE = 64
+AUDIT_TIMES = list(range(128, 4993, 32))
+ADAPTATION_CHUNK_SIZE = 32
+QUERY_BATCH_SIZE = 256
+
+MATCH_TIME_BUCKETS = 8
+CONF_BINS = 3
+MATCHED_NEGATIVES_PER_POSITIVE = 5
+NN_K = 5
+T3A_SUPPORTS_PER_CLASS = 32
+T3A_ACCEPTANCE_THRESHOLD = 0.15
+UNMATCHED_NEGATIVES_PER_POSITIVE = 32
+
+BOOTSTRAP_SAMPLES = 1000
+TRAIN_FRAC = 0.6
+VAL_FRAC = 0.2
+LOW_FPR_MIN_NEGATIVES = {
+    "0.01": 10000,
+    "0.001": 50000,
+}
+
+SOURCE_MODEL_NAME = "Standard"
+SOURCE_THREAT_MODEL = "corruptions"

@@ -1,0 +1,352 @@
+{
+  "plan_metadata": {
+    "title": "PHCA-DP-SGD: Post-Hoc Compression-Aware DP Training Experiment Plan",
+    "estimated_runtime": "~7 hours on 1x NVIDIA RTX A6000",
+    "total_experiments": "~54 training runs + evaluations",
+    "random_seeds": [42, 123, 456],
+    "gpu_allocation": "Single GPU (all experiments run sequentially due to DP-SGD memory requirements)"
+  },
+  "experiments": [
+    {
+      "category": "Environment Configuration",
+      "title": "Setup Python Environment and Dependencies",
+      "description": "Install required packages for differential privacy, deep learning, and compression experiments",
+      "steps": {
+        "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+        "step2": "Install PyTorch with CUDA: pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118",
+        "step3": "Install Opacus for DP-SGD: pip install opacus==1.4.0",
+        "step4": "Install additional dependencies: pip install numpy scipy matplotlib seaborn pandas scikit-learn tqdm tensorboard",
+        "step5": "Install compression libraries: pip install torch-pruning",
+        "step6": "Verify GPU availability: python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'",
+        "step7": "Create directory structure: mkdir -p data results/{models,plots,tables} src/{models,data,utils,attacks}"
+      },
+      "expected_outputs": [".venv/", "data/", "results/", "src/"],
+      "estimated_time": "5 minutes"
+    },
+    {
+      "category": "Data Preparation",
+      "title": "Download and Prepare Datasets",
+      "description": "Download CIFAR-10, CIFAR-100, and Purchase-100 datasets with proper splits for membership inference evaluation",
+      "steps": {
+        "step1": "Download CIFAR-10: Use torchvision.datasets.CIFAR10(root='./data', download=True)",
+        "step2": "Download CIFAR-100: Use torchvision.datasets.CIFAR100(root='./data', download=True)",
+        "step3": "Download Purchase-100: wget https://github.com/privacytrustlab/datasets/raw/master/dataset_purchase.tgz && tar -xzf dataset_purchase.tgz -C ./data/",
+        "step4": "Create train/test splits for CIFAR: Standard 50K/10K split, normalize with mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616] for CIFAR-10",
+        "step5": "For membership inference attacks, further split training data: 45K for training, 5K as 'shadow' members (for MIA training)",
+        "step6": "Preprocess Purchase-100: 600 features, 100 classes, 197,324 samples. Split: 150K train, 47K test. Normalize features to [0,1]",
+        "step7": "Save dataset statistics to results/dataset_stats.json: sizes, class distributions, feature dimensions"
+      },
+      "expected_outputs": ["data/cifar-10-batches-py/", "data/cifar-100-python/", "data/dataset_purchase", "results/dataset_stats.json"],
+      "estimated_time": "10 minutes"
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Standard DP-SGD Implementation",
+      "description": "Implement vanilla DP-SGD baseline using Opacus library as the foundation for comparison",
+      "steps": {
+        "step1": "Implement ResNet-18 for CIFAR (modified first conv: kernel=3, stride=1, padding=1; remove maxpool): src/models/resnet.py",
+        "step2": "Implement 4-layer ConvNet (128-256-512-512 channels, BN, ReLU, MaxPool, FC): src/models/convnet.py",
+        "step3": "Implement MLP for Purchase-100 (input=600, hidden=[1024,512,256], output=100): src/models/mlp.py",
+        "step4": "Create training script with Opacus: src/train_standard_dp.py",
+        "step5": "Hyperparameters for CIFAR-10: batch_size=256, epochs=30, lr=0.1 (decay 0.9 every 10 epochs), max_grad_norm=1.0",
+        "step6": "Privacy parameters: target_epsilon=[1, 3, 8], delta=1e-5, noise_multiplier computed via Opacus privacy engine",
+        "step7": "Run experiments on CIFAR-10 with ResNet-18 for 3 random seeds (42, 123, 456) at epsilon=3",
+        "step8": "Save models to results/models/standard_dp_cifar10_resnet18_seed{N}.pt"
+      },
+      "expected_outputs": ["src/models/resnet.py", "src/models/convnet.py", "src/models/mlp.py", "src/train_standard_dp.py", "3 trained model checkpoints"],
+      "estimated_time": "45 minutes (3 runs × 15 min each)"
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Standard DP-SGD + Post-Hoc Compression",
+      "description": "Apply post-hoc compression to standard DP-SGD trained models to establish the current practice baseline",
+      "steps": {
+        "step1": "Implement magnitude pruning: src/compression/pruning.py with function apply_magnitude_pruning(model, sparsity_ratio)",
+        "step2": "Implement global magnitude pruning across all layers",
+        "step3": "Test compression ratios: sparsity=[0.5, 0.7, 0.9] (50%, 70%, 90% parameters pruned)",
+        "step4": "For each trained standard DP-SGD model, apply pruning and evaluate test accuracy",
+        "step5": "Record: pre-compression accuracy, post-compression accuracy, compression ratio, actual sparsity achieved",
+        "step6": "Save results to results/tables/standard_dp_compression_results.json"
+      },
+      "expected_outputs": ["src/compression/pruning.py", "results/tables/standard_dp_compression_results.json"],
+      "estimated_time": "15 minutes"
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Adamczewski et al. (2023) Pre-Pruning Baseline",
+      "description": "Implement pre-pruning approach that uses 'public' data for parameter selection before DP training",
+      "steps": {
+        "step1": "Implement pre-pruning in src/baselines/pre_pruning.py",
+        "step2": "Simulate public data by using a held-out subset (10% of training data, not counted in privacy budget)",
+        "step3": "On 'public' data: Train non-private model for 10 epochs to identify important parameters",
+        "step4": "Apply magnitude pruning to obtain subnetwork with target sparsity (70%)",
+        "step5": "Reset remaining parameters and train only the subnetwork with DP-SGD",
+        "step6": "Gradient-dropping: During training, only compute gradients for retained parameters",
+        "step7": "Run for CIFAR-10, ResNet-18, epsilon=3, seeds=[42, 123, 456]",
+        "step8": "Record final accuracy and compare against standard DP-SGD + post-hoc compression"
+      },
+      "expected_outputs": ["src/baselines/pre_pruning.py", "3 trained pre-pruned models", "results/tables/prepruning_results.json"],
+      "estimated_time": "45 minutes (3 runs × 15 min each)"
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "AdaDPIGU-style Binary Masking Baseline",
+      "description": "Implement importance-based gradient selection with binary masking (simplified version of AdaDPIGU)",
+      "steps": {
+        "step1": "Implement in src/baselines/adadpigu_simple.py",
+        "step2": "Pretraining phase (consumes privacy budget): Run 5 epochs of DP-SGD to accumulate per-parameter gradient magnitudes",
+        "step3": "Compute importance scores: exponential moving average of |gradient| for each parameter",
+        "step4": "Create binary mask: retain top 60% of parameters by importance (matching AdaDPIGU paper)",
+        "step5": "Main training: Apply binary mask - zero out gradients for masked parameters during updates",
+        "step6": "Use adaptive clipping: set per-parameter clipping threshold based on importance percentile",
+        "step7": "Run for CIFAR-10, ResNet-18, epsilon=3 (total, including pretraining), seeds=[42, 123, 456]",
+        "step8": "Apply post-hoc compression after training and evaluate"
+      },
+      "expected_outputs": ["src/baselines/adadpigu_simple.py", "3 trained models with binary masking", "results/tables/adadpigu_results.json"],
+      "estimated_time": "45 minutes"
+    },
+    {
+      "category": "Main Experiment",
+      "title": "PHCA-DP-SGD: Full Method Implementation",
+      "description": "Implement the proposed Post-Hoc Compression-Aware DP-SGD with continuous per-parameter clipping weights",
+      "steps": {
+        "step1": "Implement PHCA-DP-SGD in src/methods/phca_dp_sgd.py",
+        "step2": "Key component 1 - Survival probability estimation: Maintain EMA of per-parameter gradient magnitudes: s_j^(t) = 0.9*s_j^(t-1) + 0.1*|g_j^(t)|",
+        "step3": "Convert to survival probability: p_j(kappa) = rank_percentile(s_j) where kappa is target sparsity (e.g., 70%)",
+        "step4": "Key component 2 - Per-parameter clipping weights: w_j = p_j + alpha*(1-p_j) where alpha=0.1 (discount factor for likely-pruned params)",
+        "step5": "Modify clipping: g_bar_i^(j) = g_i^(j) / max(1, |g_i^(j)| / (C * w_j))",
+        "step6": "Key component 3 - Compression-aware noise: Sigma_jj = (1 - p_j)^beta where beta=0.5, calibrate base noise to achieve target epsilon",
+        "step7": "Integrate with Opacus by customizing the DPOptimizer: override clip_and_accumulate and add_noise methods",
+        "step8": "Test implementation: Verify privacy accounting with RDP (Rényi Differential Privacy) using opacus.accountants.RDPAccountant"
+      },
+      "expected_outputs": ["src/methods/phca_dp_sgd.py", "Verified privacy accounting"],
+      "estimated_time": "30 minutes (implementation)"
+    },
+    {
+      "category": "Main Experiment",
+      "title": "PHCA-DP-SGD Training on CIFAR-10",
+      "description": "Train PHCA-DP-SGD on CIFAR-10 with ResNet-18 across multiple privacy budgets and compression ratios",
+      "steps": {
+        "step1": "Create training script: src/train_phca.py with arguments for epsilon, sparsity, seed",
+        "step2": "Configuration: epsilon=[1, 3, 8], target_sparsity=[0.5, 0.7, 0.9], seeds=[42, 123, 456]",
+        "step3": "For each configuration: Train PHCA-DP-SGD for 30 epochs with compression-aware objective",
+        "step4": "During training: Log per-parameter clipping weights statistics (mean, std, min, max across layers)",
+        "step5": "After training: Apply actual post-hoc magnitude pruning with target sparsity",
+        "step6": "Evaluate: Test accuracy before compression, test accuracy after compression",
+        "step7": "Save models: results/models/phca_cifar10_resnet18_eps{eps}_sparsity{s}_seed{N}.pt",
+        "step8": "Total runs: 3 epsilons × 3 sparsities × 3 seeds = 27 runs for CIFAR-10 ResNet-18"
+      },
+      "expected_outputs": ["src/train_phca.py", "27 trained model checkpoints", "training_logs_phca.json"],
+      "estimated_time": "135 minutes (27 runs × 5 min each)"
+    },
+    {
+      "category": "Main Experiment",
+      "title": "PHCA-DP-SGD on CIFAR-100 and Purchase-100",
+      "description": "Validate generalization across datasets with different characteristics",
+      "steps": {
+        "step1": "CIFAR-100: ResNet-18, epsilon=[3, 8], sparsity=[0.7], seeds=[42, 123, 456] - 6 runs",
+        "step2": "Purchase-100: 3-layer MLP (input=600, hidden=[512,256], output=100), epsilon=[3, 8], sparsity=[0.7], seeds=[42, 123, 456] - 6 runs",
+        "step3": "Adjust hyperparameters for Purchase: epochs=20, batch_size=512, lr=0.05",
+        "step4": "Run both standard DP-SGD and PHCA-DP-SGD for comparison",
+        "step5": "Record accuracy before and after compression for all runs"
+      },
+      "expected_outputs": ["12 additional trained models", "cross_dataset_results.json"],
+      "estimated_time": "60 minutes (12 runs × 5 min each)"
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation Study: Component Analysis",
+      "description": "Systematically remove each component of PHCA-DP-SGD to measure individual contributions",
+      "steps": {
+        "step1": "Ablation 1 - No per-parameter clipping: Set all w_j = 1.0 (uniform clipping), keep compression-aware noise",
+        "step2": "Ablation 2 - No compression-aware noise: Use isotropic noise, keep per-parameter clipping",
+        "step3": "Ablation 3 - Fixed survival probabilities: Use initial random survival probabilities instead of estimated from training dynamics",
+        "step4": "Ablation 4 - Binary masking instead of continuous: Convert w_j to binary (w_j = 1 if p_j > 0.5 else 0.1)",
+        "step5": "Run all ablations on CIFAR-10, ResNet-18, epsilon=3, sparsity=0.7, seeds=[42, 123, 456]",
+        "step6": "Compare against full PHCA-DP-SGD to quantify each component's contribution"
+      },
+      "expected_outputs": ["src/methods/phca_ablations.py", "12 ablation runs (4 variants × 3 seeds)", "ablation_results.json"],
+      "estimated_time": "60 minutes"
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Hyperparameter Sensitivity Analysis",
+      "description": "Analyze sensitivity to key hyperparameters: alpha (discount factor) and beta (noise reduction rate)",
+      "steps": {
+        "step1": "Vary alpha: [0.0, 0.05, 0.1, 0.2, 0.5, 1.0] where alpha=1.0 recovers standard DP-SGD",
+        "step2": "Vary beta: [0.0, 0.25, 0.5, 0.75, 1.0] where beta=0.0 means no noise reduction",
+        "step3": "Grid search: 6 alphas × 5 betas = 30 configurations",
+        "step4": "Run on CIFAR-10, ResNet-18, epsilon=3, sparsity=0.7, seed=42",
+        "step5": "Create heatmap: test accuracy as function of (alpha, beta)",
+        "step6": "Identify optimal region and verify robustness around alpha=0.1, beta=0.5"
+      },
+      "expected_outputs": ["hyperparameter_sensitivity.json", "alpha_beta_heatmap.png"],
+      "estimated_time": "30 minutes"
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Membership Inference Attack Evaluation",
+      "description": "Evaluate empirical privacy using membership inference attacks to validate that compression doesn't increase vulnerability",
+      "steps": {
+        "step1": "Implement MIA in src/evaluation/membership_inference.py using loss-based attack",
+        "step2": "For each trained model (standard DP-SGD, PHCA-DP-SGD, pre-pruning, AdaDPIGU):",
+        "step3": "Split training set: 45K members for training, 5K members for MIA evaluation",
+        "step4": "Use 5K test samples as non-members for MIA evaluation",
+        "step5": "Compute per-sample loss on member and non-member sets",
+        "step6": "Train attack model (simple threshold on loss) or use threshold-based attack",
+        "step7": "Metrics: MIA accuracy (lower is better), MIA AUC (lower is better)",
+        "step8": "Run before and after compression to verify compression doesn't increase leakage"
+      },
+      "expected_outputs": ["src/evaluation/membership_inference.py", "mia_results.json"],
+      "estimated_time": "20 minutes"
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Statistical Significance Testing",
+      "description": "Perform rigorous statistical tests to validate performance improvements",
+      "steps": {
+        "step1": "Load all results: standard DP-SGD + compression, Adamczewski, AdaDPIGU, PHCA-DP-SGD",
+        "step2": "For each dataset and configuration, perform paired t-test between methods",
+        "step3": "Test 1: PHCA-DP-SGD vs Standard DP-SGD + compression (expected: p < 0.05)",
+        "step4": "Test 2: PHCA-DP-SGD vs Adamczewski pre-pruning (expected: comparable, no significant difference)",
+        "step5": "Test 3: PHCA-DP-SGD vs AdaDPIGU (expected: p < 0.05 for post-hoc compression scenario)",
+        "step6": "Report effect sizes (Cohen's d) along with p-values",
+        "step7": "Create summary table: method comparison with significance indicators"
+      },
+      "expected_outputs": ["statistical_tests.json", "method_comparison_table.csv"],
+      "estimated_time": "5 minutes"
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Success Criteria Validation",
+      "description": "Evaluate whether success criteria from proposal are met",
+      "steps": {
+        "step1": "Criterion 1: Check if PHCA-DP-SGD achieves significantly better accuracy (p<0.05) than standard DP-SGD + compression across datasets",
+        "step2": "Criterion 2: Check if PHCA-DP-SGD matches Adamczewski performance without using public data",
+        "step3": "Criterion 3: Check if PHCA-DP-SGD outperforms AdaDPIGU on post-hoc compression tasks",
+        "step4": "Criterion 4: Validate theoretical claim by checking correlation between survival probability estimates and actual pruned parameters",
+        "step5": "If criteria not met: Document negative results, analyze potential causes, suggest improvements",
+        "step6": "Generate pass/fail report for each criterion with supporting evidence"
+      },
+      "expected_outputs": ["success_criteria_report.json"],
+      "estimated_time": "5 minutes"
+    },
+    {
+      "category": "Visualization",
+      "title": "Generate Paper Figures",
+      "description": "Create publication-quality figures for the research paper",
+      "steps": {
+        "step1": "Figure 1 - Privacy-Utility Trade-off: Plot test accuracy vs epsilon for all methods on CIFAR-10 (epsilons=[1,3,8], sparsity=0.7)",
+        "step2": "Figure 2 - Compression Robustness: Plot accuracy vs sparsity ratio (0.5, 0.7, 0.9) for epsilon=3",
+        "step3": "Figure 3 - Method Comparison Bar Chart: Compare PHCA-DP-SGD vs baselines at epsilon=3, sparsity=0.7 with error bars (std across 3 seeds)",
+        "step4": "Figure 4 - Ablation Study: Bar chart showing accuracy for full method vs ablations",
+        "step5": "Figure 5 - Hyperparameter Sensitivity: Heatmap of accuracy vs (alpha, beta)",
+        "step6": "Figure 6 - MIA Comparison: Bar chart of MIA accuracy for different methods",
+        "step7": "Figure 7 - Survival Probability Correlation: Scatter plot of estimated p_j vs actual |theta_j| after training",
+        "step8": "Save all figures to results/plots/ as PDF (vector) and PNG (raster)"
+      },
+      "expected_outputs": ["results/plots/figure1_privacy_utility.pdf", "results/plots/figure2_compression_robustness.pdf", "results/plots/figure3_method_comparison.pdf", "results/plots/figure4_ablation.pdf", "results/plots/figure5_hyperparam_sensitivity.pdf", "results/plots/figure6_mia_comparison.pdf", "results/plots/figure7_survival_correlation.pdf"],
+      "estimated_time": "20 minutes"
+    },
+    {
+      "category": "Visualization",
+      "title": "Generate Paper Tables",
+      "description": "Create LaTeX-ready tables for the paper",
+      "steps": {
+        "step1": "Table 1 - Main Results: Dataset, Method, Epsilon, Sparsity, Accuracy (mean±std), MIA Accuracy",
+        "step2": "Table 2 - Ablation Study: Component removed, Accuracy, Relative drop",
+        "step3": "Table 3 - Cross-Dataset Generalization: Results on CIFAR-10, CIFAR-100, Purchase-100",
+        "step4": "Table 4 - Comparison with Pre-Pruning: Standard DP-SGD, Adamczewski, PHCA-DP-SGD with/without public data",
+        "step5": "Save as LaTeX tables in results/tables/ and as CSV for easy viewing"
+      },
+      "expected_outputs": ["results/tables/table1_main_results.tex", "results/tables/table2_ablation.tex", "results/tables/table3_cross_dataset.tex", "results/tables/table4_prepruning_comparison.tex"],
+      "estimated_time": "10 minutes"
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Additional Robustness Checks",
+      "description": "Verify robustness across different scenarios",
+      "steps": {
+        "step1": "Different architectures: Test ConvNet on CIFAR-10 (epsilon=3, sparsity=0.7, seeds=[42,123,456])",
+        "step2": "Different compression types: Test quantization (8-bit) instead of pruning",
+        "step3": "Different target sparsities: Verify method works at extreme sparsity (95%)",
+        "step4": "Early stopping analysis: Check if method benefits from different stopping criteria",
+        "step5": "Layer-wise analysis: Examine which layers benefit most from compression-aware training"
+      },
+      "expected_outputs": ["robustness_checks.json"],
+      "estimated_time": "60 minutes"
+    }
+  ],
+  "hyperparameters": {
+    "cifar10": {
+      "model": "ResNet-18 (modified for CIFAR)",
+      "batch_size": 256,
+      "epochs": 30,
+      "lr": 0.1,
+      "lr_decay": 0.9,
+      "lr_decay_epochs": [10, 20],
+      "max_grad_norm": 1.0,
+      "optimizer": "SGD",
+      "momentum": 0.9,
+      "weight_decay": 0.0,
+      "delta": 1e-5
+    },
+    "cifar100": {
+      "model": "ResNet-18",
+      "batch_size": 256,
+      "epochs": 30,
+      "lr": 0.1,
+      "lr_decay": 0.9,
+      "lr_decay_epochs": [10, 20],
+      "max_grad_norm": 1.0,
+      "delta": 1e-5
+    },
+    "purchase100": {
+      "model": "3-layer MLP",
+      "batch_size": 512,
+      "epochs": 20,
+      "lr": 0.05,
+      "lr_decay": 0.9,
+      "lr_decay_epochs": [10],
+      "max_grad_norm": 1.0,
+      "delta": 1e-5
+    },
+    "phca_specific": {
+      "alpha": 0.1,
+      "beta": 0.5,
+      "ema_gamma": 0.9,
+      "survival_estimation_start_epoch": 5
+    }
+  },
+  "runtime_estimate": {
+    "total_hours": 7,
+    "breakdown": {
+      "setup_and_data": "15 minutes",
+      "baseline_standard_dp": "45 minutes",
+      "baseline_prepruning": "45 minutes",
+      "baseline_adadpigu": "45 minutes",
+      "phca_implementation": "30 minutes",
+      "phca_cifar10_main": "135 minutes",
+      "phca_cross_dataset": "60 minutes",
+      "ablations": "60 minutes",
+      "hyperparameter_sensitivity": "30 minutes",
+      "mia_evaluation": "20 minutes",
+      "statistical_tests": "10 minutes",
+      "visualization": "30 minutes",
+      "robustness_checks": "60 minutes"
+    },
+    "parallelization_notes": "Due to Opacus memory requirements and single GPU, experiments run sequentially. However, different epsilon/sparsity configurations are independent and could be parallelized if multiple GPUs available."
+  },
+  "expected_key_results": {
+    "primary": "PHCA-DP-SGD achieves 3-5% higher accuracy than standard DP-SGD + compression at epsilon=3, sparsity=0.7 on CIFAR-10",
+    "secondary_1": "PHCA-DP-SGD matches Adamczewski pre-pruning without requiring public data",
+    "secondary_2": "PHCA-DP-SGD outperforms AdaDPIGU binary masking on post-hoc compression tasks",
+    "tertiary": "Ablation study shows both per-parameter clipping and compression-aware noise contribute significantly"
+  },
+  "fallback_plan": {
+    "if_exceeds_time_budget": "Reduce seeds from 3 to 1 for ablations and hyperparameter sensitivity",
+    "if_memory_issues": "Reduce batch size to 128 and accumulate gradients",
+    "if_cifar100_slow": "Skip CIFAR-100 and focus on CIFAR-10 + Purchase-100",
+    "if_convergence_issues": "Increase epochs to 50 and adjust learning rate schedule"
+  }
+}

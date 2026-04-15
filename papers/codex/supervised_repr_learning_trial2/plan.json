@@ -1,0 +1,108 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Pre-register a reproducible incremental study",
+    "description": "Set up a frozen-feature pipeline that explicitly tests a narrow empirical claim about adaptive prototype granularity, with all methods sharing the same backbone, feature cache, adapter width, optimizer family, and seed set.",
+    "steps": {
+      "step1": "Use Python 3.10 and pin the core packages to torch 2.2.x, torchvision 0.17.x, open_clip_torch, wilds, scikit-learn, scipy, numpy, pandas, matplotlib, seaborn, tqdm, and pyyaml. Save `pip freeze` to `results/env.txt` before the first run.",
+      "step2": "Record hardware once with `nvidia-smi`, `free -h`, and `nproc`, and save the outputs to `results/hardware.txt`. The available compute is exactly 1 NVIDIA RTX A6000 with 48 GB VRAM, 60 GB RAM, and 4 CPU cores, so there is no GPU parallelism; only CPU-side aggregation and plotting may overlap with idle GPU time.",
+      "step3": "Fix the only seed set used in the entire study to `[11, 22, 33]`. Use these same three seeds for every main method, every baseline, and every ablation so the proposal and plan are fully consistent.",
+      "step4": "Create `data/`, `cache/`, `exp/`, `results/`, and `figures/`. For every run save `config.json`, `metrics.json`, `runtime.json`, `train_log.csv`, and `predictions.parquet` under `exp/<dataset>/<method>/seed_<seed>/`.",
+      "step5": "Pre-register the paper framing in `results/study_scope.txt`: the contribution is a careful incremental empirical study of adaptive per-class prototype count selection in a frozen CLIP head-adaptation regime, not a claim of a fundamentally new representation-learning method.",
+      "step6": "Pre-register the exact comparison set before viewing results: linear probe, cross-entropy adapter, class-level contrastive adapter, fixed-K=2 contrastive prototype adapter, fixed-K=2 non-contrastive prototype head, PB-inspired frozen-feature spread-preserving comparator, and adaptive split-merge prototype selection with penalized vMF scoring.",
+      "step7": "Use a hard 8-hour wall-clock budget with explicit stage caps: 0.25 hours for setup checks, 1.0 to 1.25 hours for dataset preparation and feature caching, 0.25 hours for a one-seed hyperparameter smoke test, 4.5 to 5.0 hours for the pre-registered main comparison grid, 0.75 to 1.0 hours for ablations and sensitivity checks, and 0.25 to 0.5 hours for aggregation plus visualization. If runtime drifts high, drop the optional extra robustness benchmark before dropping any main-comparison run."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Prepare shared feature caches for the main and optional datasets",
+    "description": "Use one robustness benchmark and one fine-grained benchmark for the main claim, with a tightly budgeted optional second robustness benchmark if time remains after the main grid is complete.",
+    "steps": {
+      "step1": "Use Waterbirds and CUB-200-2011 for the main claim. Waterbirds is the primary group-robustness benchmark; CUB measures whether adaptive prototype granularity helps on fine-grained recognition without explicit group labels.",
+      "step2": "Prepare CelebA as an optional robustness extension only if the main grid and all planned ablations finish with at least 45 minutes of wall-clock budget remaining. Use it only for a bounded external check on the strongest 4 methods and report it as exploratory rather than central evidence.",
+      "step3": "For Waterbirds, use the standard train, validation, and test splits with metadata fields `y`, `place`, and `group_id`. Save per-class counts and the four standard group counts to `cache/features/waterbirds/stats.json` before training.",
+      "step4": "For CUB-200-2011, use the official train and test split and carve out a stratified validation subset equal to 10 percent of the original training set using `split_seed=123`. Save the exact validation image ids to `cache/splits/cub_val_ids.json` so every method and seed uses the same validation set.",
+      "step5": "For optional CelebA, use the standard target-attribute split and a predefined spurious-attribute grouping already supported by the metadata loader. Restrict optional evaluation to one target attribute with clear minority groups so worst-group accuracy remains interpretable.",
+      "step6": "Use OpenCLIP ViT-B/16 preprocessing at 224 by 224 resolution. Cache one deterministic feature view for every split and two stochastic augmented training views for contrastive methods using random resized crop with scale `[0.7, 1.0]`, horizontal flip probability `0.5`, and color jitter strength `0.2`.",
+      "step7": "Extract frozen normalized image embeddings once and save `train_base.pt`, `train_aug1.pt`, `train_aug2.pt`, `val.pt`, and `test.pt` under `cache/features/<dataset>/clip_vit_b16/` together with labels, sample ids, and group ids where available. Store features on disk in float16 and cast to float32 at training time.",
+      "step8": "Run integrity checks before any model training: verify there is no overlap across train, validation, and test ids; verify feature dimensionality is 512 for all cached tensors; and save split sizes, class counts, group counts where applicable, and checksum hashes to `cache/features/<dataset>/stats.json`.",
+      "step9": "Expect total feature extraction time for Waterbirds plus CUB to be 45 to 70 minutes on one A6000. Do not cache CelebA features unless the main grid is already on schedule, because the optional benchmark must never cause the main plan to exceed the 8-hour limit."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run fair simple and strong frozen-feature baselines",
+    "description": "Use baselines that isolate the effects of head adaptation, class-level contrastive training, fixed prototypes, and spread preservation without claiming to reproduce adjacent papers outside this exact frozen-feature setup.",
+    "steps": {
+      "step1": "Baseline 1, linear probe: train a linear classifier from 512 to `num_classes` on frozen CLIP features with AdamW, learning rate `1e-3`, weight decay `1e-4`, batch size `512`, cosine learning-rate decay, maximum `60` epochs, and early stopping patience `8` on validation worst-group accuracy for Waterbirds or validation top-1 accuracy for CUB. This is the simple baseline.",
+      "step2": "Baseline 2, cross-entropy adapter: use a two-layer adapter `512 -> 512 -> 128` with LayerNorm, GELU, dropout `0.1`, and l2-normalized 128-dimensional outputs, followed by a cosine classifier. Train with cross-entropy only using AdamW, learning rate `3e-4`, weight decay `1e-4`, batch size `512`, maximum `50` epochs, and patience `8`.",
+      "step3": "Baseline 3, class-level contrastive adapter: keep the same adapter and cosine classifier as Baseline 2 and add supervised contrastive loss on the two cached augmented views with temperature `0.07` and weight `lambda_supcon = 0.5`. This is the main strong frozen-feature baseline corresponding to the Contrastive Adapters regime.",
+      "step4": "Baseline 4, fixed-K=2 contrastive prototype adapter: keep the same adapter as Baseline 3 and replace the cosine classifier with two unit-norm prototypes per class in the 128-dimensional adapter space. Train with `L = L_ce + 0.5 * L_supcon + 0.25 * L_align + 0.05 * L_occ`, prototype temperature `tau_p = 0.07`, and soft within-class assignment. Initialize prototypes with class-wise spherical k-means on adapter embeddings after epoch 5.",
+      "step5": "Baseline 5, fixed-K=2 non-contrastive prototype head: use the same prototype architecture as Baseline 4 but remove `L_supcon`, leaving `L_ce + 0.25 * L_align + 0.05 * L_occ`. This checks whether extra prototypes alone explain any gains.",
+      "step6": "Baseline 6, PB-inspired frozen-feature comparator: keep the same adapter and class-level contrastive objective as Baseline 3 and add a spread-preserving penalty `L_spread` that matches each class's covariance trace in the 128-dimensional adapter space to the covariance trace of the frozen 512-dimensional CLIP features estimated from the training set. Use `L = L_ce + 0.5 * L_supcon + 0.1 * L_spread` and label the method explicitly as a PB-inspired frozen-feature comparator, not as a reproduction of Perfectly Balanced.",
+      "step7": "Use the same cached features, optimizer family, maximum epochs, early-stopping rule, batch construction, and adapter width for Baselines 2 through 6. Keep trainable parameter counts as comparable as possible by fixing the adapter output dimension at 128 and the fixed prototype count at 2.",
+      "step8": "Run all six baselines on Waterbirds and CUB for all three seeds `[11, 22, 33]`. Save per-epoch validation metrics, final test metrics, training time, peak GPU memory, trainable parameter count, and the selected checkpoint path for every run.",
+      "step9": "Budget expected cached-feature training time at about 2 minutes per linear-probe seed, 3 to 4 minutes per cross-entropy adapter seed, 5 minutes per class-level contrastive seed, 6 minutes per fixed-K contrastive prototype seed, 5 minutes per fixed-K non-contrastive seed, and 5 minutes per PB-inspired comparator seed. Across 2 datasets and 3 seeds, total baseline runtime should stay near 3.0 to 3.3 GPU hours."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train the adaptive prototype-count selection method",
+    "description": "Test whether conservative adaptive per-class prototype selection materially improves over class-level contrastive adaptation and matched fixed-K prototype heads under identical frozen CLIP features and comparable head capacity.",
+    "steps": {
+      "step1": "Use the same cached CLIP ViT-B/16 features and the same adapter architecture as the strongest baselines: `512 -> 512 -> 128` with LayerNorm, GELU, dropout `0.1`, and l2-normalized 128-dimensional outputs. This ensures the only substantive change is how same-class structure is represented.",
+      "step2": "Train the adaptive method with `L = L_ce + 0.5 * L_supcon + 0.25 * L_align + 0.05 * L_occ` using AdamW, adapter learning rate `3e-4`, prototype learning rate `1e-3`, weight decay `1e-4`, batch size `256` images with two cached augmented views, cosine decay, maximum `50` epochs, and early stopping patience `8` on validation worst-group accuracy for Waterbirds or validation top-1 accuracy for CUB.",
+      "step3": "Start from one prototype per class, run a 5-epoch warmup before any structure changes, and enforce dataset-specific caps `1 <= K_c <= 2` on Waterbirds and `1 <= K_c <= 3` on CUB. Use soft within-class assignment `q_{i,k} = softmax(cos(z_i, p_{c,k}) / tau_p)` with `tau_p = 0.07`.",
+      "step4": "Every 5 epochs beginning at epoch 10, propose at most one split per class for the currently most dispersed prototype according to mean angular deviation of assigned training points. Initialize split candidates with spherical k-means and refine them with 3 EM-style updates for a two-component vMF mixture on the unit sphere.",
+      "step5": "Score split and merge proposals with held-out class-conditional penalized vMF log-likelihood on normalized validation features using `score = log p_vMF(Z_val^c | model) - 0.5 * d_eff * log n_val^c`. Estimate one shared concentration parameter `kappa_c` per class from training features and clip it to `[5, 200]` for stability.",
+      "step6": "Accept a split only if the penalized vMF score improves, both children satisfy the occupancy floor, and the class stays below its dataset cap. Use occupancy floors `n_child >= max(12, 0.08 * n_c)` on CUB and `n_child >= max(10, 0.10 * n_c)` on Waterbirds.",
+      "step7": "After split proposals, evaluate merge proposals only for same-class prototype pairs with the smallest mutual angle. Accept a merge if a single-component vMF fitted to their union achieves a higher penalized validation score than the current two-component structure or if either component violates the occupancy floor after reassignment.",
+      "step8": "For Waterbirds classes with fewer than `40` validation examples, use the pre-registered threshold-free fallback from the proposal. Restrict those classes to `K_c in {1, 2}`, estimate split acceptance from `5` stratified bootstrap resamples of the class training set, and accept the split only if the mean penalized vMF improvement is positive and at least `4` of the `5` resamples agree on the split decision. Do not tune any additional fallback threshold on CUB or on Waterbirds.",
+      "step9": "Save full structure diagnostics for every run: final `K_c` per class, split and merge epochs, accepted and rejected proposal scores, prototype occupancies, occupancy entropy, and validation-score trajectories. Store these under `exp/<dataset>/adaptive_vmf/seed_<seed>/diagnostics/`.",
+      "step10": "Expect adaptive training to take about 6 minutes per Waterbirds seed and 7 to 8 minutes per CUB seed, so the full adaptive grid over 2 datasets and 3 seeds should stay near 0.75 GPU hours."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run ablations and robustness sensitivity checks",
+    "description": "Pre-register only the ablations needed to test the study's narrow mechanism claims and the Waterbirds fallback sensitivity, so the plan stays informative without exceeding the 8-hour budget.",
+    "steps": {
+      "step1": "Ablation A, no adaptivity: use the same architecture and loss as the adaptive method but keep `K=2` fixed on both datasets with no split or merge updates. This is the direct test of whether adaptive prototype count selection helps beyond a matched fixed-K head.",
+      "step2": "Ablation B, no penalized vMF selection: keep the adaptive prototype head and training loss but replace the penalized vMF accept-reject rule with a deterministic expansion rule that adds a second prototype whenever the occupancy floor allows it and a third prototype on CUB whenever the cap allows it. This tests whether any gain comes from principled selection rather than from simply increasing prototype count.",
+      "step3": "Ablation C, no occupancy regularizer: keep adaptive split-merge selection but set `lambda_occ = 0` while retaining the hard occupancy-floor constraints. Run this on Waterbirds and CUB to measure whether the soft occupancy-balance term matters once hard floors are already enforced.",
+      "step4": "Waterbirds sensitivity analysis: rerun the adaptive method on Waterbirds with the same 3 seeds under two stricter fallback rules that require the mean bootstrap improvement to exceed `0.0025` and `0.005` penalized log-likelihood per validation example, respectively. Compare these to the primary threshold-free fallback so the main conclusion does not hinge on a bespoke rule.",
+      "step5": "Run Ablations A through C on Waterbirds and CUB for all three seeds. Run the two Waterbirds sensitivity variants for all three seeds. If the budget becomes tight, keep all three main ablations and both sensitivity variants, and drop the optional CelebA extension first.",
+      "step6": "For the adaptive method and all ablations, record active prototype counts, median prototype occupancy, occupancy entropy, number of accepted splits, number of accepted merges, and mean penalized vMF score gain per accepted operation. On Waterbirds, also compute normalized mutual information between discovered subclass assignments and observed group labels.",
+      "step7": "Expect the total ablation and sensitivity runtime to stay near 1.0 to 1.2 GPU hours: about 45 to 50 minutes for Ablations A through C over both datasets and about 20 to 25 minutes for the Waterbirds sensitivity runs."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Evaluate against pre-registered success and failure criteria",
+    "description": "Judge the study as a controlled empirical comparison with explicit positive criteria, explicit failure modes, honest negative-result reporting, and one optional extra robustness check if time remains.",
+    "steps": {
+      "step1": "For Waterbirds, report worst-group accuracy as the primary metric and average accuracy, macro-F1, and per-group accuracies as secondary metrics. For CUB, report top-1 accuracy and macro-F1 as primary metrics and class-balanced accuracy as a secondary metric. For every run also report training time, peak GPU memory, and trainable parameter count.",
+      "step2": "Aggregate all metrics across seeds `[11, 22, 33]` with mean and standard deviation. For the primary pairwise comparisons adaptive versus class-level contrastive adapter, adaptive versus fixed-K=2 contrastive prototype adapter, and adaptive versus the PB-inspired comparator, compute 95 percent bootstrap confidence intervals using stored per-example predictions.",
+      "step3": "Apply the proposal's positive criteria exactly: on Waterbirds, adaptive should improve worst-group accuracy over both the class-level contrastive adapter and the fixed-K=2 contrastive prototype baseline by roughly `1.5` absolute points or more without a material drop in average accuracy; on CUB, adaptive should improve at least one primary metric over the best fixed-K baseline; and selected prototype counts should remain active with `K_c > 1` for a nontrivial minority of classes that satisfy the occupancy floor.",
+      "step4": "Apply the pre-registered negative-result criteria exactly: if the class-level contrastive adapter or a fixed-K prototype head matches or beats the adaptive method within normal variation on both datasets, if the non-contrastive prototype head explains the gains, if the PB-inspired comparator closes the gap, or if the Waterbirds conclusion disappears under the simpler fallback sensitivity rules, report the result as evidence that adaptive granularity adds little beyond existing frozen-feature adapters under this budget.",
+      "step5": "For Waterbirds, explicitly compare the primary fallback rule to the two stricter sensitivity variants in one summary table so the reader can see whether the direction and approximate size of the adaptive gain are stable. Treat stability across these three settings as a required robustness check rather than a post hoc analysis.",
+      "step6": "If the main grid, all ablations, and all sensitivity runs finish with at least 45 minutes remaining, run an optional CelebA check on exactly 4 methods for 1 seed each: linear probe, class-level contrastive adapter, fixed-K=2 contrastive prototype adapter, and adaptive method. Report worst-group accuracy and average accuracy only, and state clearly that CelebA is an exploratory external robustness check.",
+      "step7": "Save `results/summary.json` with per-method means, standard deviations, confidence intervals, runtime statistics, parameter counts, selected-`K_c` summaries, fallback-sensitivity outcomes, and boolean pass-fail flags for every pre-registered success criterion."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Create tables and figures for the empirical claim",
+    "description": "Generate compact outputs that support the incremental claim, show where adaptive prototype counts help or fail, and make the fallback sensitivity transparent.",
+    "steps": {
+      "step1": "Create Table 1 with all 7 main methods on Waterbirds and CUB, including primary metrics, macro-F1, runtime in minutes, peak GPU memory, and trainable parameter count. Export both CSV and LaTeX-ready versions.",
+      "step2": "Create Figure 1 as a grouped bar chart of Waterbirds worst-group accuracy and CUB top-1 accuracy for the full main comparison set, showing mean plus or minus standard deviation over the three seeds.",
+      "step3": "Create Figure 2 as an ablation plot comparing Adaptive, Ablation A, Ablation B, and Ablation C on Waterbirds and CUB. Show Waterbirds worst-group accuracy and CUB top-1 accuracy side by side so the effects of adaptivity, penalized selection, and occupancy regularization are directly visible.",
+      "step4": "Create Figure 3 showing the distribution of final `K_c` values per class for the adaptive method on each main dataset, together with prototype-occupancy histograms. This figure is required because the central question is whether adaptive subclass counts are actually used.",
+      "step5": "Create Figure 4 for Waterbirds showing per-group accuracies of the class-level contrastive adapter, fixed-K=2 contrastive prototype adapter, PB-inspired comparator, and adaptive method. Add a small panel with normalized mutual information between adaptive subclass assignments and observed group labels.",
+      "step6": "Create Figure 5 as a Waterbirds fallback-sensitivity plot comparing the primary threshold-free rule with the two stricter mean-improvement margins `0.0025` and `0.005`. Plot worst-group accuracy and the number of classes that split under each setting.",
+      "step7": "If the optional CelebA runs are completed, add a small appendix table with worst-group and average accuracy for the 4 exploratory methods and label it explicitly as exploratory. If CelebA is not run, omit the appendix table rather than stretching the budget.",
+      "step8": "Save all figures as PNG and PDF under `figures/`, and save all underlying numeric plot tables as CSV under `results/plot_data/`."
+    }
+  }
+]

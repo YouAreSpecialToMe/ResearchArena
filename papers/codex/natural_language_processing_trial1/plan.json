@@ -1,0 +1,122 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Pinned single-GPU evaluation environment",
+    "description": "Set up one reproducible environment for frozen-model inference, lightweight evidence scoring, audited-label integration, statistics, and plotting. The plan assumes 1x RTX A6000 48 GB, 60 GB RAM, 4 CPU cores, and a hard total budget of about 8 hours.",
+    "steps": {
+      "step1": "Create a Python 3.11 environment and install pinned packages: torch>=2.3, transformers>=4.46, accelerate>=0.34, datasets>=2.21, pandas, numpy, scipy, scikit-learn, statsmodels, evaluate, rapidfuzz, sentence-transformers, matplotlib, seaborn, and jsonlines.",
+      "step2": "Use Qwen2.5-1.5B-Instruct as the main frozen generator in bfloat16 with greedy decoding, max_input_length=1536, max_new_tokens=16, do_sample=false, temperature=0.0, top_p=1.0, repetition_penalty=1.0, and batch_size=16 to 24 depending on observed memory.",
+      "step3": "Use one lightweight support checker shared by all methods: sentence-transformers/all-MiniLM-L6-v2 for semantic similarity and MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli for entailment-versus-contradiction scores. Run these in batches of 32 to 64 examples after generation caching.",
+      "step4": "Fix random seeds to [13, 21, 42] for any stochastic components: candidate audited-pool sampling before the final pool is frozen, exploratory logistic-router solver initialization, repeated dev-only threshold resampling, and bootstrap confidence intervals. Record all seeds, package versions, CUDA version, GPU name, and decoding settings in exp/shared/env_report.json.",
+      "step5": "Create and version directories: data/raw, data/interim, data/processed, exp/cache, exp/audit, exp/baselines, exp/main, exp/ablations, exp/eval, exp/shared, and figures.",
+      "step6": "Account for available hardware explicitly. Because there is only one GPU, do all generation and MNLI passes sequentially on that GPU, then parallelize CPU-only normalization, bootstrap resampling, table generation, and figure rendering across the 4 CPU cores."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Freeze the audited benchmark subset",
+    "description": "Use the exact audited-set design from the proposal so the main paper evaluates a fixed human-labeled subset rather than a moving sample. This step resolves the proposal-plan inconsistency noted in the feedback.",
+    "steps": {
+      "step1": "Use exactly two source benchmarks in the main paper: CUB and WhoQA or the Who's Who QA split used in the proposal. Do not introduce ConflictBank or ClashEval as data sources; they are related work and evaluation motivation, not part of the audited subset.",
+      "step2": "Construct exactly 320 audited items total, with 160 items from CUB and 160 items from WhoQA. Treat this as the only audited pool used for the paper's quantitative claims.",
+      "step3": "Within the 320 audited items, freeze the proposal's split before any model evaluation: 80 audited dev items total, consisting of 40 CUB and 40 WhoQA, and 240 audited locked-test items total, consisting of 120 CUB and 120 WhoQA.",
+      "step4": "For CUB, stratify sampling so the full 160-item audited pool contains balanced coverage of gold, conflicting, and irrelevant context types, targeting approximately 53 to 54 examples per context type overall and preserving that balance as closely as possible in both dev and test. For WhoQA, stratify by ambiguity-heavy patterns when metadata permits, such as same-name entities, alias collisions, and temporal ambiguity.",
+      "step5": "Generate three candidate stratified audited pools using seeds [13, 21, 42] from source benchmark IDs only, compare only source-level balance statistics such as dataset, context-type, and ambiguity coverage, and then pre-register one final audited pool before any model outputs are inspected. Save the frozen IDs in data/processed/frozen_audit_ids.json.",
+      "step6": "Normalize every audited example into one JSONL schema with fields: dataset, split, example_id, question, context, benchmark_context_type, gold_answers, benchmark_aliases, candidate_entities, ambiguity_flags, source_metadata, audited_label, policy_variant_label, support_note, and adjudication_note. Truncate contexts to at most 512 tokens after sentence segmentation to keep inference stable and cheap."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Audit protocol, alias policy, and label governance",
+    "description": "Make the audited route label the core artifact. This step addresses the feedback about subjectivity at the memory-versus-abstain boundary by fixing a public protocol, reporting agreement, and evaluating explicit sensitivity variants.",
+    "steps": {
+      "step1": "Use the proposal's three route labels exactly. Label 'context' when the supplied context contains enough evidence and following it is the correct action. Label 'memory' when the supplied context is stale, misleading, wrong-entity, or irrelevant but the answer remains sufficiently identifiable from trusted background knowledge. Label 'abstain' when ambiguity, temporal uncertainty, or insufficient evidence makes a committed answer unsafe.",
+      "step2": "Audit all 80 dev items and all 240 locked-test items. Double-annotate every dev item, double-annotate 80 locked-test items for holdout agreement estimation, and single-annotate the remaining 160 locked-test items with mandatory adjudication whenever the annotator flags low confidence, alias ambiguity, or insufficient evidence. This yields 320 final audited items and 480 total annotation passes, matching the proposal.",
+      "step3": "Store for every audited item: final route label, annotator confidence on a 1 to 3 scale, whether alias normalization was needed, brief evidence note, and adjudication note when applicable. Save these records in data/processed/audited_subset.jsonl and the written annotation protocol in exp/audit/guidelines.md.",
+      "step4": "Build alias-aware normalization before model scoring. Apply lowercase normalization, punctuation stripping, whitespace collapse, Unicode normalization, and date canonicalization. Start aliases from benchmark-provided alternatives, then add only audited manual aliases or Wikipedia or Wikidata redirects discovered during adjudication. Save all added aliases together with textual justification in data/processed/alias_tables.json.",
+      "step5": "Create two explicit audited policy variants for the fragile boundary highlighted in the feedback. The strict-abstain variant maps unresolved same-name or temporally underspecified cases to 'abstain'. The permissive-memory variant maps those cases to 'memory' only when the adjudication note identifies one answer as strongly favored. Keep the main paper's primary numbers on the default final audited label and use these two variants only for sensitivity analysis.",
+      "step6": "Report audit quality before any method comparison: Cohen's kappa on doubly labeled items, class balance across context or memory or abstain, proportion of examples requiring adjudication, number of alias additions, and the count of items that flip between strict-abstain and permissive-memory variants. If overall kappa < 0.70 or memory-versus-abstain boundary kappa < 0.60, downgrade the paper's claim from a strong benchmark-correction result to an instability analysis."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Compute shared model outputs and fixed-policy baselines",
+    "description": "Evaluate simple and strong policies using one shared cache of frozen-model outputs. The primary paper compares policies under different scoring regimes, not a large learned routing model.",
+    "steps": {
+      "step1": "For every audited item, cache two deterministic drafts from Qwen2.5-1.5B-Instruct: a memory-view answer generated from the question alone and a context-view answer generated from the question plus supplied context. Save raw answer text, normalized answer text, mean answer-token log probability, mean token entropy, generation latency, and prompt length in exp/cache/qwen_dual_view_outputs.parquet.",
+      "step2": "Compute shared evidence features for each item and each draft: alias-aware support count in the provided context, best-sentence semantic similarity from MiniLM, entailment score from DeBERTa MNLI, contradiction score between the memory-view answer and the provided context, and a binary disagreement flag between memory-view and context-view normalized answers.",
+      "step3": "Baseline 1 simple: Always Context. Always return the context-view answer and never abstain.",
+      "step4": "Baseline 2 simple: Always Memory. Always return the memory-view answer and never abstain.",
+      "step5": "Baseline 3 simple selective predictor: Abstain on low confidence. Choose the higher-confidence draft by mean answer-token log probability, but abstain when the chosen draft's confidence is below threshold tau_conf. Tune tau_conf only on the 80-item audited dev split over the grid {-2.5, -2.0, -1.5, -1.0} in mean log-probability units to maximize expected utility.",
+      "step6": "Baseline 4 strong heuristic router: Context if supported else Abstain. Route to context when the context-view answer has alias-aware support count >= 1 and entailment score >= 0.55; route to memory when the context is contradictory with contradiction score >= 0.55 and the memory-view answer confidence exceeds the context-view confidence by at least 0.4 nats; otherwise abstain. Tune only these thresholds on the 80-item audited dev split.",
+      "step7": "Baseline 5 strong benchmark-proxy router: derive a route purely from benchmark metadata plus the two cached drafts without using audited test labels. On CUB, use gold, conflicting, and irrelevant context tags plus answer agreement or disagreement; on WhoQA, use ambiguity flags plus alias-linked support in context. Tune only thresholded confidence cutoffs on the dev split.",
+      "step8": "Run all fixed-policy baselines identically under all three random seeds [13, 21, 42] for bootstrap and threshold-resampling reproducibility bookkeeping, even though greedy decoding is deterministic. Save per-item decisions and summary metrics to exp/baselines."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Rank policies under original, proxy, and audited scoring",
+    "description": "Test the paper's core claim: benchmark or deployment conclusions can change once the scoring oracle is human-audited and alias-aware. This main experiment uses the locked 240-item audited test split only for final ranking claims.",
+    "steps": {
+      "step1": "Evaluate all fixed policies on the 240-item locked audited test split under Regime A, original benchmark scoring, using each source benchmark's standard answer-correctness protocol as closely as possible.",
+      "step2": "Evaluate the same locked-test outputs under Regime B, proxy route scoring, using automatically derived route labels from benchmark metadata and simple support or contradiction heuristics created without locked-test audited labels.",
+      "step3": "Evaluate the same locked-test outputs under Regime C, audited TRIAD scoring, using the final human-audited route labels and alias-aware normalization. This is the primary evaluation regime for the paper.",
+      "step4": "For each regime, compute route accuracy, macro-F1 over context or memory or abstain, alias-aware exact match, harmful-answer rate, abstention rate, and expected utility under the default matrix {correct committed answer: +1, abstain: 0, wrong committed answer: -2}.",
+      "step5": "Report policy rankings within each regime and compare them directly. The main quantitative claim is supported if the top-ranked policy changes, or if there are at least two pairwise ranking reversals, or if Kendall tau between Regime A and Regime C is <= 0.70 on the locked test, matching the success logic from idea.json.",
+      "step6": "Repeat the audited locked-test evaluation under the two policy-variant labels from the audit protocol, strict-abstain and permissive-memory, to show whether the headline ranking conclusion survives reasonable label-governance changes."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Exploratory small learned router appendix",
+    "description": "Add one tightly constrained learned router only as a secondary appendix analysis. This directly addresses the feedback that a small dataset plus many engineered features would invite instability; the appendix model is intentionally minimal and trained only on audited dev labels.",
+    "steps": {
+      "step1": "Use only three scalar features for the exploratory router: confidence gap between context-view and memory-view drafts, contradiction score from the context against the memory-view answer, and an ambiguity flag derived from same-name or unresolved-entity metadata. Do not add larger engineered feature sets.",
+      "step2": "Train a multinomial logistic regression with solver='lbfgs', class_weight='balanced', max_iter=2000, and regularization C in {0.1, 1.0, 10.0}. Fit only on the 80-item audited dev split.",
+      "step3": "Select C and a single abstention threshold tau_prob in {0.45, 0.50, 0.55, 0.60} by repeated dev-only resampling with seeds [13, 21, 42]. For each seed, create a stratified 60 or 20 internal split inside the audited dev set, tune on the 20-item fold, and average the chosen setting across the three seeds.",
+      "step4": "Refit the logistic model on all 80 audited dev items using the selected hyperparameters, then evaluate exactly once on the 240-item locked audited test split. Do not train on locked-test audited labels, do not train on proxy labels, and do not mix audited and proxy supervision.",
+      "step5": "Treat the learned router as exploratory. The paper's main claim must stand or fail based on the fixed-policy ranking experiment even if the learned router underperforms or produces unstable rankings."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Pre-registered ablations and sensitivity checks",
+    "description": "Ablate each claimed contribution so the paper can separate auditing effects from alias effects, utility effects, and boundary-policy effects.",
+    "steps": {
+      "step1": "Ablation 1 no audited labels: replace Regime C with proxy route labels while keeping outputs fixed. Measure changes in policy ranking, Kendall tau, and pairwise reversals relative to the full audited regime.",
+      "step2": "Ablation 2 no alias-aware normalization: score answers with naive normalized exact match only, without alias tables or redirect expansion. Measure changes in exact match, harmful-answer rate, and ranking order.",
+      "step3": "Ablation 3 no abstention-aware utility: rank policies by plain answer correctness only, ignoring the +1 or 0 or -2 deployment utility. This tests whether conclusions move specifically because abstention is treated as a first-class action.",
+      "step4": "Ablation 4 strict versus permissive boundary: compare rankings under the strict-abstain and permissive-memory audited policy variants. Report the exact number of items whose label changes and whether any policy recommendation flips because of those boundary cases.",
+      "step5": "Ablation 5 remove contradiction or support checks from the strong heuristic router and rerun the locked-test evaluation. This tests whether the strongest non-learned baseline really benefits from conflict-sensitive evidence signals rather than only confidence thresholds.",
+      "step6": "Ablation 6 remove the ambiguity flag from the exploratory logistic router and retrain on the audited dev split. This is the appendix-only test for whether the memory-versus-abstain distinction depends on explicit ambiguity information."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Metrics, statistical tests, and failure conditions",
+    "description": "Evaluate the work as an audited evaluation study. Report ranking stability, annotation reliability, answer quality, and compute cost, and define clear conditions under which the hypothesis fails.",
+    "steps": {
+      "step1": "Primary metrics on the 240-item locked audited test split are expected utility, route accuracy, route macro-F1, alias-aware exact match, naive exact match, abstention rate, harmful-answer rate, and coverage defined as the proportion of non-abstained items.",
+      "step2": "Ranking-stability metrics are Kendall tau, Spearman rank correlation, top-policy identity, and count of pairwise ranking reversals between original, proxy, and audited scoring regimes.",
+      "step3": "Audit-quality metrics are Cohen's kappa on doubly annotated items, class-wise agreement for the memory-versus-abstain boundary, adjudication rate, discard rate, and proxy-versus-audit disagreement rate. Explicitly test the idea.json criterion that proxy labels should disagree with final audited labels on at least 12 percent of locked-test items to count as practically meaningful.",
+      "step4": "Use paired bootstrap with 1000 resamples over locked-test examples for confidence intervals on expected utility, harmful-answer rate, and Kendall tau differences. Use seeds [13, 21, 42] to initialize three independent bootstrap streams and confirm that conclusions do not depend on one RNG stream.",
+      "step5": "Success criteria are the proposal and idea criteria translated into tests: 320 final audited items with the fixed 80 or 240 split, overall kappa >= 0.70 and memory-versus-abstain kappa >= 0.60, at least 95 percent non-discarded audited coverage, and a materially changed ranking under audited scoring defined by top-policy change or at least two pairwise reversals or Kendall tau <= 0.70.",
+      "step6": "Failure criteria are also explicit. The main claim fails if audited scoring leaves rankings effectively unchanged, if proxy-versus-audit disagreement is below 12 percent, or if agreement on the memory-versus-abstain boundary is too weak to support a stable normative oracle. Report such outcomes as negative results rather than softening them."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Paper tables, figures, and runtime schedule",
+    "description": "Produce publication-ready artifacts that foreground audit reliability and ranking sensitivity, and commit to an execution schedule that fits the single-GPU 8-hour budget with buffer.",
+    "steps": {
+      "step1": "Create Table 1 with audited dataset statistics: counts by dataset and split, CUB context-type distribution, WhoQA ambiguity-pattern counts when available, route-label balance, double-annotation counts, adjudication counts, alias-addition counts, and discard counts.",
+      "step2": "Create Table 2 with main policy results on the locked test under original, proxy, and audited scoring, including expected utility, route macro-F1, alias-aware exact match, harmful-answer rate, abstention rate, and latency.",
+      "step3": "Create Table 3 with sensitivity results for strict-abstain, permissive-memory, no-alias, and no-utility ablations, plus an appendix block for the exploratory logistic router.",
+      "step4": "Create Figure 1 as a ranking-shift plot that shows each policy's rank under original, proxy, audited-default, audited-strict, and audited-permissive scoring.",
+      "step5": "Create Figure 2 as a confusion matrix for audited route labels versus proxy route labels, emphasizing where proxy labels over-call memory versus abstain or context.",
+      "step6": "Create Figure 3 as a bar chart of disagreement categories from annotation and adjudication, with a dedicated bar for memory-versus-abstain disagreements.",
+      "step7": "Create Figure 4 as a utility-versus-coverage plot for Always Context, Always Memory, Abstain on Low Confidence, Context if Supported else Abstain, and the exploratory logistic router.",
+      "step8": "Keep the runtime within budget. Allocate approximately 30 minutes for dataset loading and normalization, 20 minutes for alias-table assembly from benchmark metadata and audited notes, 45 minutes for Qwen dual-view generation over 320 items, 35 minutes for MiniLM and MNLI feature extraction, 25 minutes for baseline threshold tuning on the 80-item dev split, 20 minutes for locked-test evaluation, 20 minutes for the exploratory logistic-router appendix, 30 minutes for bootstrap statistics, and 25 minutes for plotting. This totals about 4 hours 10 minutes of machine time, leaving nearly 4 hours of slack for slower inference, reruns, or audit-integration cleanup."
+    }
+  }
+]

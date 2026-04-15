@@ -1,0 +1,306 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated environment and install all required packages for SAE training, robustness evaluation, and model inference.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install transformers: pip install transformers==4.36.0 accelerate",
+      "step4": "Install SAE-related packages: pip install sae-lens transformer-lens",
+      "step5": "Install evaluation packages: pip install scipy scikit-learn matplotlib seaborn pandas numpy",
+      "step6": "Install utility packages: pip install tqdm wandb einops",
+      "step7": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step8": "Create directory structure: mkdir -p data models results figures logs"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Datasets",
+    "description": "Download training and evaluation datasets. Prepare activation extraction pipeline.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Download OpenWebText subset: Use HuggingFace datasets to load 2M tokens (approx 5000 sequences of 512 tokens)",
+      "step2": "Create train/val split: 90% train (4500 sequences), 10% validation (500 sequences)",
+      "step3": "Prepare Art & Science dataset: Load from Li et al. (2025) robustness evaluation benchmark - use their released prompts for feature activation attacks",
+      "step4": "Prepare AG News: Load 1000 samples for domain generalization testing (500 train, 500 test)",
+      "step5": "Cache tokenized datasets: Save as .pt files for fast loading during training",
+      "step6": "Verify dataset statistics: Log sequence lengths, token distributions, and dataset sizes",
+      "step7": "Create semantic perturbation cache: Generate paraphrased variants for 1000 validation samples using a small LLM (e.g., GPT-2) for consistency training"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Extract LLM Activations",
+    "description": "Pre-extract activations from target layers to speed up SAE training.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Load Pythia-70M model: From EleutherAI/pythia-70m-deduped using TransformerLens",
+      "step2": "Extract layer 2 activations (middle layer): Shape [batch, seq_len, d_model=512]",
+      "step3": "Extract activations for all training data: Store as memmap or chunked .pt files",
+      "step4": "Repeat for validation set",
+      "step5": "Verify activation statistics: Mean, std, check for NaNs or outliers",
+      "step6": "Cache activation files to data/activations_pythia70m_layer2.pt (~2GB)"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train Standard TopK SAE Baseline",
+    "description": "Train vanilla TopK SAE as primary baseline for comparison. This is the simplest and most common baseline.",
+    "estimated_time": "45 minutes (3 seeds parallel)",
+    "steps": {
+      "step1": "Set hyperparameters: d_model=512, expansion_factor=4 (d_sae=2048), topk=32, l1_coeff=0",
+      "step2": "Use 3 random seeds: 42, 43, 44 for statistical significance",
+      "step3": "Training config: batch_size=4096 tokens, learning_rate=3e-4, num_epochs=10",
+      "step4": "Optimizer: Adam with betas=(0.9, 0.999), no weight decay",
+      "step5": "Loss: MSE reconstruction loss only (standard TopK uses topk sparsity, no L1)",
+      "step6": "Log metrics every 1000 steps: FVU, L0 sparsity, alive features",
+      "step7": "Save checkpoints: Best by validation FVU, and final model",
+      "step8": "Output: Save models as models/topk_baseline_seed{seed}.pt"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train JumpReLU SAE Baseline",
+    "description": "Train JumpReLU SAE as strong architectural baseline. JumpReLU uses threshold-based activation with learned thresholds.",
+    "estimated_time": "45 minutes (3 seeds parallel)",
+    "steps": {
+      "step1": "Set hyperparameters: d_model=512, expansion_factor=4 (d_sae=2048), bandwidth=0.001",
+      "step2": "Use 3 random seeds: 42, 43, 44",
+      "step3": "Training config: batch_size=4096, lr=3e-4, num_epochs=10",
+      "step4": "JumpReLU architecture: Use ReLU with learned threshold parameters",
+      "step5": "Threshold loss: Add small penalty to encourage reasonable thresholds",
+      "step6": "Log same metrics as TopK baseline for fair comparison",
+      "step7": "Save models as models/jumprelu_baseline_seed{seed}.pt"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Replicate Denoising SAE (Beyond Sparsity)",
+    "description": "Implement and train the denoising SAE from Pan et al. (ICML 2025) for direct comparison. This addresses the feedback to compare directly with concurrent work.",
+    "estimated_time": "60 minutes (3 seeds parallel)",
+    "steps": {
+      "step1": "Implement denoising: Add input dropout (dropout_rate=0.3) to activations during training",
+      "step2": "Architecture: Same as TopK (d_sae=2048, topk=32)",
+      "step3": "Training: Standard reconstruction loss with denoising objective",
+      "step4": "Key difference from RobustSAE: Uses RANDOM noise (dropout) for diversity, not semantic perturbations for robustness",
+      "step5": "Use 3 random seeds: 42, 43, 44",
+      "step6": "Training config: batch_size=4096, lr=3e-4, num_epochs=10",
+      "step7": "Log reconstruction quality and feature diversity metrics",
+      "step8": "Save models as models/denoising_baseline_seed{seed}.pt",
+      "step9": "This baseline tests: Does diversity training (Pan et al.) improve robustness? (Expected: diversity helps coverage, not adversarial robustness)"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train RobustSAE Full Method",
+    "description": "Train RobustSAE with consistency regularization and unsupervised robustness proxy. This is the main proposed method.",
+    "estimated_time": "90 minutes (3 seeds parallel)",
+    "steps": {
+      "step1": "Set hyperparameters: d_model=512, d_sae=2048, topk=32",
+      "step2": "Consistency loss weight: lambda_consist=0.1 (selected from {0.01, 0.1, 1.0} based on preliminary validation)",
+      "step3": "Use 3 random seeds: 42, 43, 44",
+      "step4": "Training config: batch_size=2048 (reduced due to double forward pass), lr=3e-4, num_epochs=10",
+      "step5": "Generate semantic perturbations: For each batch, create perturbed variants using: (a) token synonym substitution, (b) minor punctuation changes",
+      "step6": "Consistency loss: Compute ||z_original - z_perturbed||^2 + 0.5 * ||topk(z_original) - topk(z_perturbed)||^2",
+      "step7": "Total loss: MSE_recon + lambda_sparse * L1_sparse + lambda_consist * L_consistency",
+      "step8": "Compute unsupervised robustness proxy during training: Gradient concentration score R_i for each feature",
+      "step9": "Log: FVU, L0 sparsity, consistency loss value, proxy scores distribution",
+      "step10": "Save models as models/robustsae_full_seed{seed}.pt",
+      "step11": "Save proxy scores as results/proxy_scores_full_seed{seed}.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: RobustSAE without Proxy (Consistency Only)",
+    "description": "Test contribution of unsupervised robustness proxy by training with consistency loss but without proxy-based feature weighting.",
+    "estimated_time": "75 minutes (3 seeds parallel)",
+    "steps": {
+      "step1": "Same architecture and training as Full RobustSAE",
+      "step2": "Ablate: Do NOT compute or use gradient concentration proxy scores",
+      "step3": "Purpose: Isolate the effect of the unsupervised proxy component",
+      "step4": "Use 3 random seeds: 42, 43, 44",
+      "step5": "Training config: Same as Full Method (batch_size=2048, lr=3e-4, num_epochs=10)",
+      "step6": "Save models as models/robustsae_no_proxy_seed{seed}.pt",
+      "step7": "Compare: Full vs No-Proxy to measure proxy contribution to robustness"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Varying Consistency Loss Weight",
+    "description": "Test sensitivity to lambda_consist hyperparameter. Understand reconstruction-robustness tradeoff.",
+    "estimated_time": "90 minutes (parallel)",
+    "steps": {
+      "step1": "Fix seed=42 for controlled comparison",
+      "step2": "Train with lambda_consist in {0.0 (baseline), 0.01, 0.1, 1.0}",
+      "step3": "Keep all other hyperparameters identical",
+      "step4": "Record: FVU, L0 sparsity, training time per epoch",
+      "step5": "Output: Tradeoff curve showing reconstruction vs robustness as function of lambda_consist",
+      "step6": "Save models as models/ablation_lambda_{value}.pt"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Different Perturbation Types",
+    "description": "Compare semantic perturbations vs random dropout for the consistency objective.",
+    "estimated_time": "60 minutes (parallel)",
+    "steps": {
+      "step1": "Condition A: Semantic perturbations (paraphrases, synonyms) - same as main experiment",
+      "step2": "Condition B: Random dropout (noise=0.3) - similar to Pan et al. denoising",
+      "step3": "Condition C: Adversarial perturbations (lightweight PGD on activations)",
+      "step4": "Fix seed=42, lambda_consist=0.1",
+      "step5": "Train 3 models, compare: reconstruction quality, robustness metrics",
+      "step6": "Key question: Do semantic perturbations provide better robustness than random noise?",
+      "step7": "Save results as results/ablation_perturbation_type.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Robustness Evaluation: Population-Level Attacks",
+    "description": "Evaluate all trained models against population-level activation attacks following Li et al. (2025).",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Load Art & Science dataset with 2 semantic categories: art and science",
+      "step2": "For each model, compute baseline feature activations on both categories",
+      "step3": "Implement population attack: Find suffix that, when appended to art prompts, makes SAE activations look like science prompts",
+      "step4": "Attack method: Greedy Coordinate Gradient (GCG) adapted for SAE activations",
+      "step5": "Metric: Overlap change - Jaccard similarity between top-activating features before and after attack",
+      "step6": "Compute for all models and all seeds",
+      "step7": "Statistical test: Paired t-test between RobustSAE and each baseline",
+      "step8": "Save results as results/population_attack_results.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Robustness Evaluation: Individual Feature Attacks",
+    "description": "Test if individual features can be adversarially activated/manipulated.",
+    "estimated_time": "45 minutes",
+    "steps": {
+      "step1": "Select 50 high-activating features per model (most interpretable ones)",
+      "step2": "For each target feature, run activation attack: Find input perturbation that activates target feature",
+      "step3": "Attack method: Gradient-based token optimization (simplified GCG)",
+      "step4": "Metric: Attack Success Rate (ASR) - % of features successfully activated with perturbation budget of 10 tokens",
+      "step5": "Also measure: Average number of iterations to successful attack",
+      "step6": "Compare ASR across all methods",
+      "step7": "Statistical significance: Chi-square test for ASR differences",
+      "step8": "Save results as results/individual_attack_results.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Direct Comparison with Denoising SAE",
+    "description": "Head-to-head comparison addressing the feedback: establish clear differentiation from Pan et al. (ICML 2025).",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "Compare RobustSAE vs Denoising SAE on: (a) Robustness metrics, (b) Diversity metrics",
+      "step2": "Robustness metrics: Population overlap change, individual ASR",
+      "step3": "Diversity metrics: Feature activation frequency entropy, pairwise feature correlation",
+      "step4": "Key claim: RobustSAE improves robustness without harming diversity; Denoising improves diversity without improving robustness",
+      "step5": "Create comparison table showing which method wins on which metric",
+      "step6": "Show that methods are complementary: Propose combined Robust+Diverse SAE",
+      "step7": "Save results as results/denoising_comparison.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Validate Unsupervised Robustness Proxy",
+    "description": "Test if the gradient concentration proxy correlates with actual adversarial vulnerability.",
+    "estimated_time": "30 minutes",
+    "steps": {
+      "step1": "For RobustSAE trained models, extract proxy scores: R_i = ||grad_h z_i||_2 / (|z_i| + epsilon)",
+      "step2": "Get empirical robustness: For each feature i, measure how easily it can be adversarially activated (from individual attack results)",
+      "step3": "Compute Spearman correlation between proxy score R_i and empirical attack success rate",
+      "step4": "Also compute Pearson correlation and Kendall tau",
+      "step5": "Test hypothesis: Correlation > 0.6 indicates proxy is useful for identifying fragile features",
+      "step6": "Visualize: Scatter plot of proxy score vs attack success rate",
+      "step7": "Identify: Top 10% most fragile features by proxy - do they align with top 10% most attacked features?",
+      "step8": "Save results as results/proxy_validation.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Standard SAE Metrics Evaluation",
+    "description": "Compute standard SAE quality metrics for all models.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Fraction of Variance Unexplained (FVU): MSE / Var(h) on validation set",
+      "step2": "L0 Sparsity: Average number of active features per token",
+      "step3": "Loss Recovered: When substituting SAE reconstructions back into LLM forward pass",
+      "step4": "Dead Features: Percentage of features never activated on validation set",
+      "step5": "Feature Density: Distribution of feature activation frequencies",
+      "step6": "Compute for all models, aggregate across seeds",
+      "step7": "Save results as results/standard_metrics.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Feature Steering Stability",
+    "description": "Evaluate if feature steering vectors are more stable with RobustSAE.",
+    "estimated_time": "25 minutes",
+    "steps": {
+      "step1": "Select 10 interpretable features (e.g., number features, punctuation features)",
+      "step2": "For each feature, create steering vector by scaling its decoder weight",
+      "step3": "Apply steering to base prompts and perturbed prompts",
+      "step4": "Metric: Steering effect consistency - correlation between steering effect on original vs perturbed inputs",
+      "step5": "Compare consistency across RobustSAE and baselines",
+      "step6": "Save results as results/steering_stability.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures showing key results.",
+    "estimated_time": "20 minutes",
+    "steps": {
+      "step1": "Figure 1: Method illustration - Diagram of RobustSAE architecture with consistency loss",
+      "step2": "Figure 2: Reconstruction-Robustness tradeoff - Scatter plot: FVU (x) vs Attack Success Rate (y) for all methods",
+      "step3": "Figure 3: Proxy validation - Scatter plot: Proxy score vs empirical attack success with regression line",
+      "step4": "Figure 4: Comparison with Denoising - Grouped bar chart showing RobustSAE wins on robustness, Denoising wins on diversity",
+      "step5": "Figure 5: Feature activation heatmap - Show stability of top features under perturbation",
+      "step6": "Save all figures to figures/ directory in PDF and PNG formats"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Results Tables",
+    "description": "Create LaTeX-formatted tables for paper.",
+    "estimated_time": "15 minutes",
+    "steps": {
+      "step1": "Table 1: Main results - All metrics for all methods (mean ± std over 3 seeds)",
+      "step2": "Table 2: Ablation study results - Component ablations with statistical significance",
+      "step3": "Table 3: Comparison with concurrent work - Direct comparison with Denoising SAE",
+      "step4": "Table 4: Proxy validation - Correlation coefficients and prediction accuracy",
+      "step5": "Save tables as LaTeX files in figures/tables.tex and CSV in results/tables.csv"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Rigorous statistical testing of all claims.",
+    "estimated_time": "10 minutes",
+    "steps": {
+      "step1": "For each metric, perform paired t-test between RobustSAE and each baseline",
+      "step2": "Use Bonferroni correction for multiple comparisons (alpha=0.05/num_comparisons)",
+      "step3": "Report effect sizes (Cohen's d) for significant differences",
+      "step4": "Confidence intervals: 95% CI for all reported metrics",
+      "step5": "Verify success criteria: Attack success reduction >25% with p<0.01, proxy correlation >0.6",
+      "step6": "Save statistical test results as results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Success Criteria Check",
+    "description": "Evaluate whether experiments meet success criteria from proposal.",
+    "estimated_time": "5 minutes",
+    "steps": {
+      "step1": "Check Confirmed: RobustSAE >25% reduction in attack success vs Standard TopK (p<0.01)?",
+      "step2": "Check Confirmed: FVU maintained within 10% of baseline?",
+      "step3": "Check Confirmed: Proxy correlation >0.6 Spearman?",
+      "step4": "Check Confirmed: Improvements generalize across attack types?",
+      "step5": "If criteria met: Document as 'Hypothesis Confirmed'",
+      "step6": "If not met: Document partial success or refutation with analysis",
+      "step7": "Generate final report: results/success_criteria_report.md"
+    }
+  }
+]

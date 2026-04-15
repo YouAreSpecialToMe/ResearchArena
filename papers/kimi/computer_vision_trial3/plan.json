@@ -1,0 +1,386 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create isolated environment and install all required packages for SPT-TTA experiments",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1.0 with CUDA 12.1: pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install timm 0.9.12 for ViT models: pip install timm==0.9.12",
+      "step4": "Install additional dependencies: pip install numpy scipy scikit-learn matplotlib seaborn pandas pillow tqdm tensorboard",
+      "step5": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step6": "Create project structure: mkdir -p src data results logs figures"
+    },
+    "estimated_time": "15 minutes",
+    "resource_requirements": "Internet connection, 5GB disk space"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare ImageNet-C and ImageNet-V2",
+    "description": "Download corruption benchmarks and prepare data loaders with proper preprocessing",
+    "steps": {
+      "step1": "Download ImageNet-C from https://zenodo.org/record/2235448 (6.3GB) - use subset for pilot: gaussian_noise, shot_noise, impulse_noise, defocus_blur, glass_blur",
+      "step2": "Download ImageNet-V2 (matched-frequency) from https://s3-us-west-2.amazonaws.com/imagenetv2public/imagenetv2-matched-frequency.tar.gz (1.2GB)",
+      "step3": "Verify ImageNet validation set is available at /data/imagenet/val or specify alternative path",
+      "step4": "Create data loader with ImageNet preprocessing: Resize(256), CenterCrop(224), Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])",
+      "step5": "Create corruption-specific data loaders for ImageNet-C severity levels 3-5",
+      "step6": "Compute and cache dataset statistics: number of samples per corruption, class distribution",
+      "step7": "Create fast data loader for pilot experiments (batch_size=1 for TTA, batch_size=64 for source evaluation)"
+    },
+    "estimated_time": "30 minutes (download) + 10 minutes (preprocessing)",
+    "resource_requirements": "10GB disk space for datasets"
+  },
+  {
+    "category": "Validation Experiment",
+    "title": "Pilot Experiment: Validate Accuracy Targets",
+    "description": "Quick validation on 3 corruption types to verify achievability of 72% accuracy target before full experiments",
+    "steps": {
+      "step1": "Implement SPT-TTA core: sequential adaptation with attention entropy-based layer selection",
+      "step2": "Use ViT-B/16 pretrained on ImageNet-21k via timm (model_name='vit_base_patch16_224.augreg2_in21k_ft_in1k')",
+      "step3": "Test on ImageNet-C severity 3: gaussian_noise, shot_noise, defocus_blur (3 × 5000 = 15K images)",
+      "step4": "SPT-TTA config: 4 prompt tokens per layer, 1 adaptation step, lr=5e-4, λ_l=[0.3,0.3,0.3,0.3,0.5,0.5,0.5,0.5,0.7,0.7,0.7,0.7]",
+      "step5": "Measure: accuracy per corruption, average accuracy, adaptation time per image, GPU memory",
+      "step6": "Success check: If avg accuracy < 68%, adjust target to observed + 2%; if > 72%, maintain target; record variance",
+      "step7": "Log pilot results to logs/pilot_experiment.json for reference"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "1x A6000 GPU, 8GB VRAM",
+    "critical_decision_point": "If pilot fails to achieve >65%, revise success criteria before proceeding"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Evaluate Source Model (No Adaptation)",
+    "description": "Establish baseline performance of frozen ViT-B/16 without any test-time adaptation",
+    "steps": {
+      "step1": "Load pretrained ViT-B/16 (timm) with frozen parameters",
+      "step2": "Evaluate on ImageNet-C severity 3: all 15 corruption types (gaussian_noise, shot_noise, impulse_noise, defocus_blur, glass_blur, motion_blur, zoom_blur, snow, frost, fog, brightness, contrast, elastic_transform, pixelate, jpeg_compression)",
+      "step3": "Evaluate on ImageNet-C severity 5 (hardest) for robustness analysis",
+      "step4": "Evaluate on ImageNet-V2 (10,000 images) for natural distribution shift",
+      "step5": "Run with 3 random seeds (42, 123, 456) - seeds affect dropout if any",
+      "step6": "Record: Top-1 accuracy per corruption, mean accuracy, std across corruptions, inference time",
+      "step7": "Save results to results/source_vit_b16.json"
+    },
+    "estimated_time": "20 minutes",
+    "resource_requirements": "1x A6000 GPU, 4GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate TENT Baseline",
+    "description": "Reproduce TENT (Wang et al., ICLR 2021) - entropy minimization with BatchNorm adaptation",
+    "steps": {
+      "step1": "Implement TENT: adapt BatchNorm statistics via entropy minimization, no prompts",
+      "step2": "Use official TENT hyperparameters: lr=1e-3 for BN stats, momentum=0.9",
+      "step3": "Evaluate on ImageNet-C severity 3 (15 corruptions), severity 5, and ImageNet-V2",
+      "step4": "Run with 3 random seeds (42, 123, 456)",
+      "step5": "Record: accuracy per corruption, mean, std, adaptation time, memory",
+      "step6": "Compare against published TENT numbers for sanity check (should be ~55-60% on IN-C severity 3)",
+      "step7": "Save results to results/tent_baseline.json"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "1x A6000 GPU, 6GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate MEMO Baseline",
+    "description": "Reproduce MEMO (Zhang et al., NeurIPS 2022) - test-time adaptation via augmentation",
+    "steps": {
+      "step1": "Implement MEMO: marginal entropy minimization with test-time augmentation",
+      "step2": "Use augmentations: horizontal flip, color jitter, grayscale (as per paper)",
+      "step3": "Use MEMO hyperparameters: lr=5e-4, adaptation steps=1",
+      "step4": "Evaluate on ImageNet-C severity 3 (15 corruptions) and ImageNet-V2",
+      "step5": "Run with 3 random seeds (42, 123, 456)",
+      "step6": "Record: accuracy, adaptation time (noting augmentation overhead), memory",
+      "step7": "Save results to results/memo_baseline.json"
+    },
+    "estimated_time": "40 minutes",
+    "resource_requirements": "1x A6000 GPU, 8GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate VPA Baseline",
+    "description": "Reproduce VPA (Sun et al., ACM MM 2023) - simultaneous visual prompt adaptation",
+    "steps": {
+      "step1": "Implement VPA: simultaneous adaptation of all layer prompts via entropy minimization",
+      "step2": "Use VPT-Deep configuration: prompts at all 12 layers, 4 tokens per layer",
+      "step3": "Use VPA hyperparameters: lr=5e-4, adaptation steps=1 (for fairness vs SPT-TTA)",
+      "step4": "Evaluate on ImageNet-C severity 3, severity 5, and ImageNet-V2",
+      "step5": "Run with 3 random seeds (42, 123, 456)",
+      "step6": "Measure gradient conflict: compute cosine similarity between gradients from different layers",
+      "step7": "Record: accuracy, variance across corruption types, adaptation time, memory, gradient conflict metric",
+      "step8": "Save results to results/vpa_baseline.json"
+    },
+    "estimated_time": "35 minutes",
+    "resource_requirements": "1x A6000 GPU, 12GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement and Evaluate DePT Baseline",
+    "description": "Reproduce DePT (Gao et al., ICLR 2023) - data-efficient prompt tuning",
+    "steps": {
+      "step1": "Implement DePT-Deep: prompts at all 12 layers adapted simultaneously",
+      "step2": "Use DePT objective: cross-entropy with consistency regularization",
+      "step3": "Use DePT hyperparameters: lr=5e-4, stage-wise prompting M=12",
+      "step4": "Evaluate on ImageNet-C severity 3, severity 5, and ImageNet-V2",
+      "step5": "Run with 3 random seeds (42, 123, 456)",
+      "step6": "Record: accuracy, adaptation time, memory usage",
+      "step7": "Save results to results/dept_baseline.json"
+    },
+    "estimated_time": "35 minutes",
+    "resource_requirements": "1x A6000 GPU, 12GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SPT-TTA Full: Sequential Adaptation with Layer Selection",
+    "description": "Main proposed method: sequential layer-by-layer adaptation with attention entropy-based selection",
+    "steps": {
+      "step1": "Initialize ViT-B/16 with learnable prompts (4 tokens, 768 dim) at each of 12 layers",
+      "step2": "Implement sequential adaptation: for each layer l, compute attention entropy, adapt if entropy > threshold",
+      "step3": "Entropy threshold τ: adaptive to select ~40% of layers (based on percentile of entropy distribution)",
+      "step4": "Unified objective per selected layer: L = λ_l * L_entropy + (1-λ_l) * L_consistency",
+      "step5": "L_entropy: entropy of model output (softmax logits)",
+      "step6": "L_consistency: MSE between current features and EMA features (decay=0.9)",
+      "step7": "Layer weights: λ_l = [0.3,0.3,0.3,0.3,0.5,0.5,0.5,0.5,0.7,0.7,0.7,0.7] (early/middle/deep)",
+      "step8": "Optimization: 1 gradient step per selected layer, lr=5e-4 (Adam), only prompt parameters",
+      "step9": "Evaluate on ImageNet-C severity 3 (15 corruptions), severity 5, ImageNet-V2",
+      "step10": "Run with 3 random seeds (42, 123, 456)",
+      "step11": "Record: accuracy per corruption, mean, std, adaptation time, memory, layer selection frequency per corruption type",
+      "step12": "Save results to results/spt_tta_full.json"
+    },
+    "estimated_time": "50 minutes",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SPT-TTA without Selection: All Layers Sequential",
+    "description": "Sequential adaptation without layer selection to isolate the benefit of selection mechanism",
+    "steps": {
+      "step1": "Same as SPT-TTA Full but adapt ALL 12 layers sequentially (no entropy threshold)",
+      "step2": "Use same hyperparameters: λ_l weights, lr=5e-4, 1 step per layer",
+      "step3": "Evaluate on ImageNet-C severity 3 only (for efficiency)",
+      "step4": "Run with 3 random seeds (42, 123, 456)",
+      "step5": "Record: accuracy, adaptation time (expect ~2.5x slower than with selection)",
+      "step6": "Save results to results/spt_tta_noselection.json"
+    },
+    "estimated_time": "40 minutes",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Sequential vs Simultaneous Adaptation",
+    "description": "Isolate the effect of sequential (layer-by-layer) vs simultaneous (all together) adaptation",
+    "steps": {
+      "step1": "Sequential SPT-TTA: adapt layers 1→12 sequentially (baseline from main experiment)",
+      "step2": "Simultaneous SPT-TTA: compute loss after full forward, update all prompts at once (like VPA but with our objective)",
+      "step3": "Keep all other settings identical: λ_l weights, 1 adaptation step, same lr",
+      "step4": "Evaluate both on ImageNet-C severity 3 (all 15 corruptions)",
+      "step5": "Run with 3 random seeds (42, 123, 456)",
+      "step6": "Measure gradient conflict: for simultaneous, compute pairwise cosine similarity between layer gradients",
+      "step7": "Compare: accuracy, variance across corruptions, gradient conflict magnitude",
+      "step8": "Save results to results/ablation_sequential_vs_simul.json"
+    },
+    "estimated_time": "45 minutes",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Layer Weight Choices (λ_l)",
+    "description": "Validate the 0.3/0.5/0.7 layer weight progression through systematic ablation",
+    "steps": {
+      "step1": "Proposed weights (0.3/0.5/0.7): λ_l = [0.3,0.3,0.3,0.3,0.5,0.5,0.5,0.5,0.7,0.7,0.7,0.7] - baseline",
+      "step2": "Uniform weights: λ_l = 0.5 for all layers (no hierarchy)",
+      "step3": "Inverted weights: λ_l = [0.7,0.7,0.7,0.7,0.5,0.5,0.5,0.5,0.3,0.3,0.3,0.3] (test hierarchical assumption)",
+      "step4": "Entropy-only: λ_l = 1.0 for all layers (no consistency)",
+      "step5": "Consistency-only: λ_l = 0.0 for all layers (no entropy)",
+      "step6": "Evaluate all 5 variants on ImageNet-C severity 3 (all 15 corruptions)",
+      "step7": "Run with 3 random seeds (42, 123, 456) per variant",
+      "step8": "Compare: mean accuracy, variance, performance on low-level vs semantic corruptions",
+      "step9": "Save results to results/ablation_layer_weights.json"
+    },
+    "estimated_time": "60 minutes (5 variants × 12 min each)",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Selection Rate (Entropy Threshold)",
+    "description": "Vary the layer selection rate to understand accuracy-efficiency tradeoff",
+    "steps": {
+      "step1": "Selection rate 20%: adapt ~2-3 layers with highest entropy",
+      "step2": "Selection rate 40%: adapt ~5 layers (proposed configuration)",
+      "step3": "Selection rate 60%: adapt ~7 layers",
+      "step4": "Selection rate 80%: adapt ~10 layers",
+      "step5": "Selection rate 100%: adapt all 12 layers (same as no-selection ablation)",
+      "step6": "Keep all other hyperparameters identical",
+      "step7": "Evaluate all 5 variants on ImageNet-C severity 3",
+      "step8": "Run with 3 random seeds (42, 123, 456) per variant",
+      "step9": "Plot accuracy vs selection rate, latency vs selection rate",
+      "step10": "Compute accuracy retention: (accuracy - source) / (full - source) for each rate",
+      "step11": "Save results to results/ablation_selection_rate.json"
+    },
+    "estimated_time": "50 minutes (5 variants × 10 min each)",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Random vs Entropy-Guided Layer Selection",
+    "description": "Validate that entropy-based selection is better than random selection",
+    "steps": {
+      "step1": "Entropy-guided: select layers with highest attention entropy (proposed)",
+      "step2": "Random selection: randomly select 40% of layers (5 layers), average over 5 random selections per sample",
+      "step3": "Fixed selection: always adapt layers [4, 6, 8, 10, 12] (middle-to-deep)",
+      "step4": "Evaluate all 3 variants on ImageNet-C severity 3",
+      "step5": "Run with 3 random seeds (42, 123, 456) per variant",
+      "step6": "Compare: accuracy, variance, which layers are selected for different corruption types",
+      "step7": "Save results to results/ablation_selection_strategy.json"
+    },
+    "estimated_time": "35 minutes",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM",
+    "random_seeds": [42, 123, 456]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Validation: Attention Entropy Correlation with Adaptation Need",
+    "description": "Empirically validate that attention entropy correlates with benefit from adaptation (theoretical grounding)",
+    "steps": {
+      "step1": "For each layer l in [1..12], run SPT-TTA adapting ONLY that layer (isolated)",
+      "step2": "Record: accuracy improvement over source for each layer in isolation",
+      "step3": "Record: average attention entropy at each layer across all test samples",
+      "step4": "Compute correlation: Pearson r between entropy and accuracy improvement",
+      "step5": "Hypothesis: positive correlation (high entropy → more benefit from adaptation)",
+      "step6": "Analyze by corruption type: do low-level corruptions show higher entropy in early layers?",
+      "step7": "Create scatter plot: entropy vs accuracy gain per layer",
+      "step8": "Save results to results/entropy_correlation_analysis.json and figures/entropy_correlation.png"
+    },
+    "estimated_time": "30 minutes (12 single-layer experiments)",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Analysis: Cross-Layer Influence of Sequential Adaptation",
+    "description": "Measure how adaptation at layer l affects subsequent layers l+1, l+2, etc.",
+    "steps": {
+      "step1": "Baseline: forward pass without any adaptation, record features at each layer",
+      "step2": "Adapt layer l only (for l in 1, 6, 12), forward through rest of network",
+      "step3": "Measure feature change: L2 distance between features with/without adaptation at layer l+k",
+      "step4": "Compute propagation: how much does adaptation at layer l affect layer l+1, l+2, etc.",
+      "step5": "Hypothesis: early layer adaptation has cascading effects; deep layer adaptation is more localized",
+      "step6": "Visualize as heatmap: rows=adapted layer, columns=affected layer, values=feature change",
+      "step7": "Save results to results/cross_layer_influence.json and figures/cross_layer_heatmap.png"
+    },
+    "estimated_time": "25 minutes",
+    "resource_requirements": "1x A6000 GPU, 16GB VRAM"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Rigorous statistical comparison of SPT-TTA against baselines",
+    "steps": {
+      "step1": "Collect results from 3 seeds for each method: Source, TENT, MEMO, VPA, DePT, SPT-TTA",
+      "step2": "Paired t-test: SPT-TTA vs each baseline on ImageNet-C severity 3 (15 corruption types as samples)",
+      "step3": "Wilcoxon signed-rank test (non-parametric alternative)",
+      "step4": "Compute effect size: Cohen's d for SPT-TTA vs best baseline",
+      "step5": "Report: p-values, confidence intervals, effect sizes",
+      "step6": "Check success criteria: accuracy ≥72% (or pilot-adjusted), improvement ≥5% over source",
+      "step7": "Save statistical results to results/statistical_tests.json"
+    },
+    "estimated_time": "10 minutes (analysis only)",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Efficiency Analysis: Latency and Memory",
+    "description": "Comprehensive efficiency comparison of all methods",
+    "steps": {
+      "step1": "Measure standard inference time (no adaptation) as baseline",
+      "step2": "Measure adaptation time per image for each method: TENT, MEMO, VPA, DePT, SPT-TTA",
+      "step3": "Compute latency overhead: adaptation_time / inference_time",
+      "step4": "Measure peak GPU memory during adaptation for each method",
+      "step5": "Count parameter updates: how many parameters are updated per method",
+      "step6": "Compute throughput: images/second for each method",
+      "step7": "Verify SPT-TTA targets: latency 3-5× standard, memory lower than simultaneous",
+      "step8": "Create table: Method | Accuracy | Latency | Memory | Throughput",
+      "step9": "Save results to results/efficiency_analysis.json"
+    },
+    "estimated_time": "15 minutes",
+    "resource_requirements": "1x A6000 GPU"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Corruption-Type Analysis",
+    "description": "Analyze performance across different corruption categories",
+    "steps": {
+      "step1": "Group corruptions: Noise (gaussian, shot, impulse), Blur (defocus, glass, motion, zoom), Weather (snow, frost, fog), Digital (brightness, contrast, elastic, pixelate, jpeg)",
+      "step2": "Compute average accuracy per group for Source, VPA, DePT, SPT-TTA",
+      "step3": "Analyze: which corruption types benefit most from sequential adaptation?",
+      "step4": "Compare variance: within-group vs between-group performance",
+      "step5": "Hypothesis: sequential helps more on compound corruptions (noise+blur)",
+      "step6": "Save results to results/corruption_type_analysis.json"
+    },
+    "estimated_time": "10 minutes",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Main Paper Figures",
+    "description": "Create publication-quality figures for the research paper",
+    "steps": {
+      "step1": "Figure 1 (Method Overview): Architecture diagram showing sequential adaptation flow with entropy-based selection",
+      "step2": "Figure 2 (Main Results): Bar chart comparing accuracy on ImageNet-C (severity 3) for all methods with error bars (std across seeds)",
+      "step3": "Figure 3 (Accuracy vs Latency): Scatter plot with accuracy on y-axis, latency on x-axis, bubble size = memory usage",
+      "step4": "Figure 4 (Ablation Study): Grouped bar chart for layer weight ablation (uniform, proposed, inverted, entropy-only, consistency-only)",
+      "step5": "Figure 5 (Selection Rate): Line plot showing accuracy and latency vs selection rate (20%-100%)",
+      "step6": "Figure 6 (Layer Selection Heatmap): Heatmap showing which layers are selected for each corruption type",
+      "step7": "Save all figures to figures/ directory in PDF and PNG formats"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "CPU only, matplotlib/seaborn"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Supplementary Figures and Tables",
+    "description": "Create additional visualizations for appendix/supplementary material",
+    "steps": {
+      "step1": "Table S1: Full results on all 15 corruption types with 3 seeds",
+      "step2": "Figure S1: Per-corruption accuracy comparison (grouped bar chart)",
+      "step3": "Figure S2: Attention entropy distribution across layers for different corruptions",
+      "step4": "Figure S3: Gradient conflict visualization for simultaneous vs sequential",
+      "step5": "Figure S4: Cross-layer influence heatmap",
+      "step6": "Figure S5: Convergence analysis - accuracy vs adaptation steps",
+      "step7": "Table S2: Hyperparameter sensitivity (lr, prompt tokens, EMA decay)",
+      "step8": "Save all to figures/supplementary/"
+    },
+    "estimated_time": "25 minutes",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Final Summary and Success Criteria Check",
+    "description": "Compile all results and verify against success criteria",
+    "steps": {
+      "step1": "Load all experimental results from results/ directory",
+      "step2": "Check Confirmatory Criteria:",
+      "step3": "  - Criterion 1: SPT-TTA accuracy ≥72% (or pilot-adjusted target) on IN-C severity 3?",
+      "step4": "  - Criterion 2: Improvement ≥5% over source model?",
+      "step5": "  - Criterion 3: Variance across corruptions ≤ simultaneous adaptation?",
+      "step6": "  - Criterion 4: Latency 3-5× standard inference?",
+      "step7": "  - Criterion 5: Layer selection retains >85% of full sequential accuracy?",
+      "step8": "Check Refutatory Criteria (should NOT be true):",
+      "step9": "  - Simultaneous exceeds sequential by >1%?",
+      "step10": "  - Selection retains <75% of full accuracy?",
+      "step11": "  - Latency >8× standard inference?",
+      "step12": "Generate summary report: results/success_criteria_summary.json",
+      "step13": "If criteria not met, document why and suggest follow-up experiments"
+    },
+    "estimated_time": "10 minutes",
+    "resource_requirements": "CPU only"
+  }
+]

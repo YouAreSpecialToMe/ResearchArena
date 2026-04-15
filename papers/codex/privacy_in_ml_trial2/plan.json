@@ -1,0 +1,130 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze environment and execution budget",
+    "description": "Set a reproducible software stack and a serial GPU schedule for a narrow, matched-budget audit that fits one RTX A6000, 4 CPU cores, 60 GB RAM, and about 8 hours total wall-clock time.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment with `torch==2.2.*`, `torchvision==0.17.*`, `opacus==1.4.*`, `numpy`, `scipy`, `pandas`, `pyarrow`, `scikit-learn==1.4.*`, `lightgbm==4.3.*` or `xgboost==2.0.*` with quantile loss support, `statsmodels`, `matplotlib`, `seaborn`, and `tqdm`.",
+      "step2": "Use fixed seeds `[7, 17, 27, 37]` for all stochastic steps: dataset partitioning, audit-pair construction, proxy-model training, DP training, augmentation sampling, randomized audit-pool orderings, and bootstrap resampling. Reuse the same split files and audit-pair files across every method within each dataset/privacy/seed setting.",
+      "step3": "Create `artifacts/environment`, `artifacts/checkpoints`, `artifacts/cache`, `artifacts/scores`, `artifacts/results`, `artifacts/figures`, and `artifacts/logs`. Save `pip freeze` to `artifacts/environment/pip_freeze.txt` and hardware metadata to `artifacts/environment/system_info.json`.",
+      "step4": "Assume only one usable GPU. Run all target-model training and batched inference serially on the A6000. Use the 4 CPU cores in parallel only for tabular preprocessing, quantile fitting, randomized-ordering aggregation, bootstrap confidence intervals, and plotting.",
+      "step5": "Pre-register one primary base statistic before any private audit is scored: true-label negative cross-entropy. Pre-register one optional sensitivity statistic, true-label margin, to be run only if the main pipeline completes in under 6.5 hours."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Construct leakage-free public and private splits",
+    "description": "Prepare two benchmark datasets with public-only calibration, proxy-audit, and transform-screening splits, plus one fixed finite private audit pool per checkpoint.",
+    "steps": {
+      "step1": "Use Fashion-MNIST and CIFAR-10 from `torchvision`. Keep the official test sets for reporting clean utility only; never use them for calibration, lambda selection, transform screening, or any privacy-audit score tuning.",
+      "step2": "For Fashion-MNIST, partition the 60,000 training examples into 42,000 private-train candidates, 6,000 public calibration, 4,000 public proxy-audit, 4,000 public transform-screening, and 4,000 audit/reserve examples. For CIFAR-10, partition the 50,000 training examples into 32,000 private-train candidates, 6,000 public calibration, 4,000 public proxy-audit, 4,000 public transform-screening, and 4,000 audit/reserve examples.",
+      "step3": "Use standard target-training preprocessing only: Fashion-MNIST normalized to `[0,1]` with random translation up to 2 pixels; CIFAR-10 normalized with dataset constants and trained with random crop padding 4 plus horizontal flip. Keep preprocessing identical across all auditors because auditors reuse the same trained checkpoints.",
+      "step4": "For each dataset and seed, build one fixed audit pool of `N = 240` neighboring candidate pairs from the audit/reserve split: `120` random in-distribution canaries and `120` FGSM canaries. Pair each canary with one same-class reserve example so the one-run neighboring replacement is label matched.",
+      "step5": "Train one non-private public surrogate per dataset using only the union of the public calibration and public proxy-audit splits. Generate FGSM canaries with that surrogate using epsilon `0.10` for Fashion-MNIST and `2/255` for CIFAR-10, clipping inputs back to valid ranges.",
+      "step6": "For each dataset, privacy level, and seed, sample one binary membership mask over the fixed 240 audit pairs. If the mask bit is 1, insert the canary into the private training set; otherwise insert its matched reserve example. Save split indices, pair definitions, and masks to JSON files before training the target model."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Train the shared DP target checkpoints",
+    "description": "Train one audited DP checkpoint per dataset, privacy level, and seed so every attack method is compared on exactly the same models.",
+    "steps": {
+      "step1": "Fashion-MNIST target model: a small CNN with conv channels `[32, 64, 64]`, `3x3` kernels, two `2x2` max-pool layers, one hidden layer of width `128`, ReLU activations, and dropout `0.1`. Train with DP-SGD for `10` epochs, batch size `512`, learning rate `0.55`, cosine decay, momentum `0.9`, weight decay `1e-4`, and max grad norm `1.0`.",
+      "step2": "CIFAR-10 target model: `torchvision` ResNet-18 pretrained on ImageNet, freeze the backbone, and train only the final linear layer with DP-SGD for `8` epochs, batch size `1024`, learning rate `0.35`, cosine decay, momentum `0.9`, weight decay `5e-4`, and max grad norm `1.0`.",
+      "step3": "Train two privacy regimes per dataset: target accountant values `epsilon ≈ 4` and `epsilon ≈ 8` at `delta = 1e-5`. Calibrate one noise multiplier per dataset/privacy setting on seed `7`, then reuse that multiplier for seeds `17`, `27`, and `37` so comparisons remain aligned.",
+      "step4": "Run exactly `16` DP training jobs: `2 datasets x 2 privacy levels x 4 seeds`. Save checkpoints, realized epsilon, utility metrics, and training curves under `artifacts/checkpoints` and `artifacts/results/training_metrics.csv`.",
+      "step5": "Runtime guardrail: if the first Fashion-MNIST run exceeds `9` minutes or the first CIFAR-10 run exceeds `15` minutes, reduce epochs by `20%` for that dataset across all remaining jobs and keep the reduced schedule fixed for every method and seed."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Screen weak transforms using public-only models",
+    "description": "Retain only conservative weak augmentations that are label preserving on public clean data and public FGSM data, without training any screening or reference model on private examples.",
+    "steps": {
+      "step1": "Define a conservative transform pool. Fashion-MNIST candidates: translation up to 2 pixels, crop-resize with crop ratio `0.9`, Gaussian noise std `{0.01, 0.03}`, and brightness jitter `0.05`. CIFAR-10 candidates: crop with padding `2`, horizontal flip, brightness/contrast/saturation jitter `0.1`, and Gaussian noise std `{0.005, 0.01}`.",
+      "step2": "Train one public-only reference model per dataset on the union of the public calibration and public proxy-audit splits. Use the same architecture family as the target model but train non-privately. Do not use any private-train or audit-pool examples for transform screening.",
+      "step3": "On the held-out public transform-screening split, evaluate each transform on `1,000` clean examples and `500` FGSM examples generated from the same public-only surrogate and the same epsilon used for canary creation.",
+      "step4": "Retain a transform only if, on both clean and FGSM public screening sets, reference-model accuracy drops by at most `1.0` percentage point from the clean input and at least `98%` of transformed examples preserve the clean prediction.",
+      "step5": "Freeze one dataset-specific weak-view recipe from the surviving transforms before any private audit scoring. If fewer than two transform families survive for a dataset, keep the surviving recipe, flag the dataset as a weak-view-feasibility stress case, and report any null result directly."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement the simple and strong single-view auditors",
+    "description": "Establish one simple baseline and one strong recent baseline before testing whether repeated weak views add incremental signal under matched total query budgets.",
+    "steps": {
+      "step1": "Baseline 1, simple: query each audit candidate once on the clean input and score it by negative true-label cross-entropy. This is the low-complexity reference baseline.",
+      "step2": "Baseline 2, strong: implement the Liu et al. (2025) single-view quantile auditor. On the public calibration split only, fit conditional quantile models for the clean negative-loss statistic using public difficulty features: public-surrogate loss, public-surrogate entropy, maximum probability, class label, and reference-model feature norm.",
+      "step3": "Fit quantiles `{0.50, 0.90, 0.95}` and define the normalized residual `r_clean = (s_clean - q90(x)) / (q95(x) - q50(x) + 1e-6)`, where `s_clean` is the clean-query negative loss and `qτ(x)` is the predicted conditional quantile.",
+      "step4": "Cache clean-query logits, losses, and `r_clean` values for every checkpoint to Parquet files so all later matched-budget analyses reuse identical outputs and incur no extra target-model queries.",
+      "step5": "For both single-view baselines, report full-pool metrics on the fixed audit pool and randomized-ordering metrics described later: ROC AUC, TPR at FPR `{0.1%, 1%, 5%}`, and empirical epsilon lower bound at `delta = 1e-5`."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Run the weak-view residual audit with public-only lambda selection",
+    "description": "Test the narrow claim that weak-view residuals add some privacy evidence on top of Liu et al. (2025) when every query is counted and score tuning is aligned to the privacy-auditing objective.",
+    "steps": {
+      "step1": "Use `K = 4` weak views in the primary method. For each candidate, issue exactly `1 + K = 5` target-model queries: one clean query and four independently sampled weak views from the frozen dataset-specific transform recipe. Count the clean query in every cost calculation.",
+      "step2": "From those outputs, compute raw statistics per candidate: clean negative loss, mean weak-view negative loss, minimum weak-view negative loss, variance of weak-view negative loss, and agreement rate of predicted labels across the four weak views. Cache these raw features for all checkpoints.",
+      "step3": "Fit separate quantile models on the public calibration split for each statistic family: clean, mean, worst, variance, and agreement. Generate the same `K = 4` weak views on public calibration examples so every derived statistic is calibrated by its own public-only quantile model rather than by the clean-score calibrator.",
+      "step4": "Build public-only proxy audits for lambda selection. For each dataset and seed, train `3` cheap non-private proxy models on disjoint halves of the public proxy-audit split, treat one half as pseudo-members and the other as pseudo-nonmembers, and score them with the same matched-budget pipeline used in the real audit.",
+      "step5": "Select `lambda` from the grid `{0.0, 0.25, 0.5, 0.75, 1.0}` by maximizing the median empirical epsilon lower bound of the proxy audits at query budget `Q_sel = 200`. Also record the AUC-selected lambda on the same public proxy audits and report whether the epsilon-tuned and AUC-tuned values agree.",
+      "step6": "Define the primary structured score as `S_weak(x) = max(r_clean(x), r_worst(x), lambda * r_agree(x))`. Define the mean-only control as `S_mean(x) = r_mean(x)`. Keep `r_var` out of the primary score and reserve it for sensitivity analysis.",
+      "step7": "Primary evaluation protocol: for each checkpoint, sample `R = 20` random permutations of the same fixed 240-pair audit pool. For each ordering and each query budget `Q in {40, 80, 120, ..., 1200}`, evaluate the clean baseline on `m_clean = min(240, Q)` candidates and each weak-view method on `m_weak = min(240, floor(Q / 5))` candidates. Average empirical epsilon, AUC, and TPR metrics over the `20` orderings and report dispersion bands.",
+      "step8": "Secondary evaluation protocol: same-candidate curves over the same `20` randomized orderings, where all methods are compared on the first `m` candidates of each ordering and weak-view methods simply spend more total queries. Mark this as secondary because it does not answer the honest matched-budget question.",
+      "step9": "Save per-example scores, query counts, per-ordering prefix metrics, and aggregated matched-budget curves to `artifacts/scores` and `artifacts/results/main_results.csv`."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablate each novel component",
+    "description": "Measure whether any gain comes from repeated weak views themselves, from the worst-view and agreement structure, or from the residual calibration procedure.",
+    "steps": {
+      "step1": "Ablation A, extra-queries-only control: compare the primary structured score against `S_mean = r_mean` using the exact same cached `1 + K = 5` queries per candidate. This tests whether structure matters beyond averaging extra views.",
+      "step2": "Ablation B, remove agreement: compare `max(r_clean, r_worst)` against the full `max(r_clean, r_worst, lambda * r_agree)` score on identical cached data.",
+      "step3": "Ablation C, remove worst-view term: compare `max(r_clean, lambda * r_agree)` against the full score on identical cached data.",
+      "step4": "Ablation D, remove quantile residualization: replace `r_clean`, `r_worst`, and `r_agree` with z-scored raw statistics standardized on the public calibration split only. This tests whether any multi-view gain survives without Liu-style calibration.",
+      "step5": "Ablation E, vary the number of weak views with `K in {2, 4}` for all settings, and run `K = 8` only if the full primary analysis finishes in under `5.5` hours. Always compare methods under matched total query budgets using the correct `1 + K` cost.",
+      "step6": "Ablation F, canary-family breakdown: report all primary metrics separately for the 120 random canaries and the 120 FGSM canaries to reveal whether any benefit is concentrated in one canary family."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Define success criteria and negative-result conditions",
+    "description": "Evaluate the study as a narrow, directional audit rather than a broad new-method claim, and make the disproof conditions explicit before execution.",
+    "steps": {
+      "step1": "Primary metric: empirical epsilon lower bound at `delta = 1e-5` under the one-run auditing conversion. Secondary metrics: ROC AUC, TPR at FPR `{0.1%, 1%, 5%}`, realized training epsilon, and clean test accuracy.",
+      "step2": "Aggregate results over seeds `[7, 17, 27, 37]` using paired means, standard deviations, and paired `95%` bootstrap confidence intervals with `2,000` resamples for the difference between the structured weak-view score and the Liu clean quantile baseline. Treat each seed as the pairing unit.",
+      "step3": "Headline success criterion: in at least `2` of the `4` dataset/privacy settings, the structured weak-view score shows a positive mean improvement over the Liu clean quantile baseline on the primary matched-total-query epsilon curve in at least one sustained budget region of width `>= 120` queries, and it is not worse than the baseline when evaluated on the full audit pool.",
+      "step4": "Secondary success criterion: the structured score should usually match or exceed the mean-only control on the matched-total-query epsilon curve. If it does not, conclude that extra weak queries may help but the proposed residual combination added no value beyond a simpler multi-view control.",
+      "step5": "Stability criterion: epsilon-tuned and AUC-tuned lambda values should match exactly or lead to materially similar matched-budget conclusions. If they differ and conclusions flip, report the method as tuning-sensitive rather than successful.",
+      "step6": "Negative-result conditions: gains appear only in same-candidate curves but vanish under matched total query accounting; nearly all weak transforms fail the public screening rule; gains change sign across seeds; or benefits are confined to one canary family and disappear in pooled results. Any of these outcomes should be written up as negative or inconclusive evidence."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate figures that emphasize matched-budget auditing",
+    "description": "Produce plots and tables that show both absolute privacy evidence and how that evidence changes once all extra queries are charged fairly.",
+    "steps": {
+      "step1": "Create a main results table with one row per dataset/privacy setting and columns for realized epsilon, clean test accuracy, raw-loss epsilon lower bound, Liu clean-quantile epsilon lower bound, mean-only epsilon lower bound, and structured weak-view epsilon lower bound.",
+      "step2": "Plot Figure 1 as matched-total-query curves of empirical epsilon lower bound versus consumed queries `Q_used`, averaged over the `20` randomized audit-pool orderings, for the Liu clean-quantile baseline, the mean-only control, and the structured weak-view score.",
+      "step3": "Plot Figure 2 as the corresponding ROC AUC versus consumed queries curves over the same randomized orderings so the paper reports both the privacy metric and the standard attack metric.",
+      "step4": "Plot Figure 3 as ablation bars for full score, no-agreement, no-worst-view, no-residualization, and `K in {2, 4}`. Add a second panel splitting random versus FGSM canaries.",
+      "step5": "Plot Figure 4 as a lambda-selection diagnostic showing proxy-audit epsilon lower bound and proxy-audit AUC over the lambda grid, with the selected lambda marked and agreement or disagreement between the two criteria annotated.",
+      "step6": "Export every figure as PNG and PDF and save the exact source CSV files used for plotting under `artifacts/figures/source_data/`."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Check feasibility against the 8-hour budget",
+    "description": "Estimate runtime conservatively before execution and define the fallback simplifications that preserve fairness if the first runs are slower than expected.",
+    "steps": {
+      "step1": "Estimated DP training time: Fashion-MNIST `8` jobs at about `6-8` minutes each for `48-64` minutes total; CIFAR-10 `8` jobs at about `10-14` minutes each for `80-112` minutes total. Shared target-model training should therefore take about `2.1-2.9` GPU hours.",
+      "step2": "Estimated target-model inference time: clean and `K = 4` weak-view scoring over `16` checkpoints and `240` audit pairs requires `16 x 240 x 5 = 19,200` target forward passes, plus public-split passes for calibration and proxy audits. Batched scoring should stay within about `2.0-2.5` GPU hours.",
+      "step3": "Estimated CPU time: quantile fitting for five statistic families, proxy-audit lambda selection, aggregation over `20` random orderings, bootstrap intervals, and plotting should fit within `1.5-2.0` CPU hours and mostly overlap with GPU idle periods. Peak RAM should stay below `30 GB` because checkpoints are small and cached outputs are tabular.",
+      "step4": "Expected total wall-clock time for the main study is about `6.3-7.8` hours. This fits the budget but leaves little slack, so the plan intentionally stays at two datasets and treats the paper as a narrow directional audit rather than a broad benchmark.",
+      "step5": "Fallback rules, in order: if the first four DP jobs exceed `55` minutes total, reduce the audit pool uniformly from `240` to `180` pairs for every setting and regenerate all fixed split files; if total elapsed time after the primary matched-budget analysis exceeds `6.5` hours, skip the optional margin sensitivity and `K = 8` ablation; do not reduce the number of seeds below four and do not add a third dataset."
+    }
+  }
+]

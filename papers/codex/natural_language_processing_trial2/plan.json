@@ -1,0 +1,135 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Freeze the low-cost verification stack",
+    "description": "Create one reproducible environment, pre-cache all pretrained models, and lock settings that fit one RTX A6000, 60 GB RAM, 4 CPU cores, and about 8 hours total runtime.",
+    "steps": {
+      "step1": "Create a Python 3.10 environment and install pinned dependencies: `torch>=2.2`, `transformers>=4.40`, `sentence-transformers>=2.7`, `scikit-learn>=1.4`, `rank-bm25>=0.2`, `spacy>=3.7`, `pandas>=2.2`, `numpy>=1.26`, `scipy>=1.12`, `pyarrow>=15`, `matplotlib>=3.8`, `seaborn>=0.13`, `statsmodels>=0.14`, and `tqdm>=4.66`.",
+      "step2": "Download and cache exactly these pretrained models before any experiment: retriever `intfloat/e5-base-v2`, reranker `cross-encoder/ms-marco-MiniLM-L-6-v2`, and verifier `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`. Use fp16 inference when stable, retriever max length 256, reranker max length 256 with batch size 64, and verifier max length 384 with batch size 24.",
+      "step3": "Install `en_core_web_sm` for sentence segmentation. Fix all trainable randomness to seeds `[13, 21, 42]`. Reuse the same split files, preprocessing, feature standardization, validation procedure, and threshold-selection code across every baseline, ablation, and main model.",
+      "step4": "Create deterministic directories `artifacts/cache`, `artifacts/features`, `artifacts/predictions`, `artifacts/tables`, `artifacts/figures`, `artifacts/annotations`, and `artifacts/logs`. Save package versions, model revisions, CUDA info, CPU info, and git status to `artifacts/run_manifest.json`.",
+      "step5": "Run a 100-sentence validation pilot to profile sentence extraction, retrieval, reranking, verifier calls, greedy support-set search, local removal rescoring, leave-one-out rescoring, swap-local rescoring, and feature assembly. Record runtime per stage and peak GPU memory.",
+      "step6": "Freeze pilot-selected settings before full runs: retrieve top `K_retrieve=12` evidence sentences, rerank top `K_rerank=6`, cap greedy support size at `|S_min|<=3`, evaluate thresholds `tau in {0.55, 0.60, 0.65, 0.70}`, and tune logistic regression only over `C in {0.1, 1.0, 10.0}`.",
+      "step7": "Use the single GPU for all neural inference sequentially and use the 4 CPU cores in parallel for sentence segmentation, JSONL writing, bootstrap resampling, manual-audit bookkeeping, and plotting. Because only 1 GPU is available, speed comes from cache reuse and batching rather than GPU-parallel experiment replication."
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build strict, permissive, and audited sentence datasets",
+    "description": "Project RAGTruth span annotations to sentence-level labels, make ambiguity explicit, and define the strict slice as the primary slice for claims about localized perturbation.",
+    "steps": {
+      "step1": "Use `RAGTruth` as the only required benchmark. Respect its official test split. From the remaining data, create a fixed train/validation split with a 90/10 partition stratified by task type, generator family, and response-level hallucination presence using seed 13. Never tune on the test split.",
+      "step2": "Segment each answer with spaCy sentence boundaries. Keep each sentence as a claim unit unless it exceeds 40 tokens and contains a strong punctuation boundary such as `;` or `:`. Do not split on conjunctions because that increases projection noise.",
+      "step3": "Flatten the benchmark-provided retrieved context into evidence sentences while preserving example id, document id, passage id, original retrieval rank, and sentence position. Remove exact duplicates within an example but keep near-duplicates for redundancy analysis.",
+      "step4": "Create `projected-all` labels by marking a sentence positive if hallucinated spans overlap at least 20 percent of the sentence characters and negative otherwise. Keep these labels for auxiliary analysis and training ablations only, not for the headline conclusion.",
+      "step5": "Create `strict-label` labels by marking a sentence positive only if hallucinated-span overlap is at least 50 percent, there is no adaptive or mixed annotation within the sentence, and the sentence is not dominated by exception tags. Mark a sentence negative only if it has zero overlap with hallucinated spans and zero overlap with adaptive exceptions. Drop every ambiguous case from this slice.",
+      "step6": "Create `audited-subset` sampling metadata on validation before any model comparison. Stratify by strict versus ambiguous projection, support-only confidence quartile, localized removal-score quartile, and disagreement between support-only and localized models so the audit targets likely post-rationalization or projection-noise cases.",
+      "step7": "Write `claims_train.jsonl`, `claims_val.jsonl`, and `claims_test.jsonl` with fields: example id, response id, task type, generator family, question text, answer sentence, sentence index, projected-all label, strict label, overlap ratio, ambiguity flag, and sentence length. Write `evidence_{split}.jsonl` with evidence sentence text and retrieval metadata.",
+      "step8": "Compute and save descriptive statistics for both label slices: number of responses, number of claims, positive rate, ambiguity-drop rate, average claim length, average evidence sentences per example, and counts by task type and generator family. Save the summary to `artifacts/tables/data_stats.csv`."
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Run the simple and strongest in-setting baselines",
+    "description": "Evaluate one simple baseline and the three strongest fair in-setting comparisons requested by the proposal feedback: support-only, support-plus-compactness, and full-context removal.",
+    "steps": {
+      "step1": "Simple baseline: BM25 support heuristic. For each claim, index only the example's evidence sentences and retrieve the top 3 sentences with BM25. Use `top1_bm25`, `mean_top3_bm25`, and `top1_minus_top3mean` as features, then tune a single validation threshold without additional trainable parameters.",
+      "step2": "Strong baseline A: support-only verifier. Retrieve top 12 evidence sentences with `intfloat/e5-base-v2`, rerank the top 6 with `cross-encoder/ms-marco-MiniLM-L-6-v2`, and score claim-evidence support with `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`. Use only support-centric features: best entailment probability, best contradiction probability, best neutral probability, and entailment margin over the second-best evidence sentence.",
+      "step3": "Strong baseline B: support-plus-compactness. Start from the support-only features and add compactness features available without perturbation: greedy support-set size `|S_min|`, support score on `S_min`, support margin between `S_min` and the best single sentence, count of candidate evidence sentences above `tau`, and document-dispersion count across the support set.",
+      "step4": "Strong baseline C: full-context removal. Start from the same support pipeline, then remove the entire provided context and separately remove the greedily selected support bundle from the full context. Use `support_full`, `support_no_context`, `support_remove_support`, `drop_full_to_no_context`, `drop_full_to_remove_support`, and `residual_best_support_after_removal` as features. This is the direct coarse-removal comparator, not a reproduction of any broader prior framework.",
+      "step5": "Train every trainable baseline with the same protocol: z-score features using train statistics only, fit logistic regression with `class_weight='balanced'`, sweep `C in {0.1, 1.0, 10.0}` on validation, and repeat training with seeds `[13, 21, 42]`. Use the same validation-selected thresholding rule for every model.",
+      "step6": "Evaluate all baselines on `strict-label` and `projected-all`. Report the audited subset separately and never tune on it. Treat BM25 as the simple baseline and support-only as the main strong anchor baseline in the paper narrative."
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Implement localized support-set perturbation features",
+    "description": "Test the narrow claim that localized perturbations around a greedily selected support subset provide useful incremental signal beyond support-only, compactness, and coarse full-context removal.",
+    "steps": {
+      "step1": "For each claim, construct a greedy support set `S_min` from the reranked evidence: start from the top-ranked evidence sentence, score support on the current subset, add the next reranked sentence while support is below threshold `tau`, and stop when support crosses `tau` or the subset reaches 3 sentences. Store the chosen indices and support scores at every expansion step.",
+      "step2": "Compute non-perturbation features shared with the baselines: support score on full context, support score on `S_min`, best single-sentence support, `|S_min|`, support margin between `S_min` and best single sentence, count of alternative evidence candidates above `tau`, document dispersion within `S_min`, and leave-one-out redundancy proxy within `S_min`.",
+      "step3": "Compute localized perturbation features centered on `S_min`. `remove-local`: remove all sentences in `S_min` from the context and rescore support. `drop-one`: remove each sentence in `S_min` one at a time and rescore support. `swap-local`: replace each support sentence with the most semantically similar low-support distractor from the same example among the reranked candidates outside `S_min` and rescore support.",
+      "step4": "Derive final localized features: `drop_full_to_remove_local`, `mean_drop_one`, `max_drop_one`, `min_drop_one`, `drop_swap_local`, `best_residual_support_after_local_removal`, `normalized_drop = drop_full_to_remove_local / max(support_full, 1e-6)`, and `support_bundle_changed_after_removal` indicating whether the top supporting bundle changes after `remove-local`.",
+      "step5": "Fit two detectors on the strict training split: `training_free_additive`, defined as a fixed weighted sum of z-scored `support_full`, `support_Smin`, `|S_min|`, and `drop_full_to_remove_local` with equal-magnitude signed weights chosen before test evaluation; and `full_detector`, a logistic regression over all support, compactness, redundancy, and localized perturbation features using the same hyperparameter sweep and 3 seeds as the baselines.",
+      "step6": "Make the primary comparison table include exactly these in-setting models: BM25, support-only, support-plus-compactness, full-context removal, localized-perturbation-only, training-free additive, and full detector. Keep any discussion of outside prior systems in related work, not as headline empirical claims."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Calibrate and stress-test the greedy support set",
+    "description": "Treat `S_min` as a heuristic object whose threshold sensitivity and search instability must be measured before localized perturbation gains can be trusted.",
+    "steps": {
+      "step1": "Select the operating threshold `tau` on validation using only the support-only verifier. For each candidate threshold in `{0.55, 0.60, 0.65, 0.70}`, compute validation AUPRC and Brier score on the strict slice, rank thresholds by strict-slice AUPRC first and Brier score second, and lock one threshold before any test evaluation.",
+      "step2": "Run threshold-stability analysis on validation and test for the locked threshold and its adjacent values. Report how often `S_min` changes membership across adjacent thresholds, mean Jaccard similarity of `S_min` across thresholds, mean absolute change in `|S_min|`, and the fraction of claims for which `drop_full_to_remove_local` changes sign.",
+      "step3": "Split test claims into `stable_Smin` and `unstable_Smin` groups, where `stable_Smin` means identical support-set membership across the locked threshold and both adjacent thresholds. Report support-only, support-plus-compactness, full-context removal, and full-detector performance separately on those two groups.",
+      "step4": "Plot validation calibration curves for the support-only model and the full detector on the strict slice. Report expected calibration error with 10 bins and Brier score to verify that any improvement is not purely due to threshold overfitting.",
+      "step5": "If localized gains appear only on `unstable_Smin` claims or only at a single threshold while disappearing at adjacent thresholds, pre-register the result as unstable and downgrade the central claim to a negative or inconclusive outcome."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Run ablations for every novel component",
+    "description": "Remove each distinct localized component and test whether the observed gain survives without it.",
+    "steps": {
+      "step1": "Ablation A `no_localized_perturbation`: remove all localized perturbation features and keep only support, compactness, and redundancy features. This tests whether the main gain is actually due to localized necessity signals.",
+      "step2": "Ablation B `remove_only`: keep only `remove-local` features and drop `drop-one` and `swap-local`. This tests whether coarse support-bundle deletion alone explains the effect.",
+      "step3": "Ablation C `drop_one_only`: keep only leave-one-out features and drop `remove-local` and `swap-local`. This tests whether local necessity is driven by individual support sentences rather than the whole support set.",
+      "step4": "Ablation D `swap_only`: keep only `swap-local` features and drop removal-based perturbations. This tests whether distractor substitution adds unique signal beyond removal.",
+      "step5": "Ablation E `fixed_topk_support`: replace greedy `S_min` with the top 2 reranked evidence sentences regardless of threshold and recompute all localized features. This tests whether the greedy support-set construction matters.",
+      "step6": "Ablation F `no_redundancy`: remove the redundancy proxy while keeping support, compactness, and localized perturbation features. This tests whether any gain is due to redundancy modeling rather than localized perturbation itself.",
+      "step7": "Train each ablation with the same 3 seeds, validation sweep, and strict-slice thresholding protocol as the full detector. Evaluate on `strict-label` first and on `projected-all` second."
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Audit uncertainty and evidence-dependence claims",
+    "description": "Expand the manual audit enough to estimate uncertainty around post-rationalization claims and avoid over-interpreting noisy sentence labels.",
+    "steps": {
+      "step1": "Sample 200 validation claims for manual audit if time is limited, or 300 if annotation bandwidth is available without delaying the core experiments. Use the precomputed strata from data preparation so the sample over-represents ambiguous projections and support/localization disagreements.",
+      "step2": "Annotate each sampled claim with two independent annotators plus adjudication using these labels: `evidence-dependent`, `post-rationalized`, `redundantly-supported`, `insufficient-context`, and `unclear`. Require a short free-text rationale for every non-`unclear` label.",
+      "step3": "Before adjudication, compute Cohen's kappa on the 5-way labels, raw agreement on the binary split `evidence-dependent` versus `post-rationalized`, and percent `unclear`. If kappa is below 0.60 or `unclear` exceeds 20 percent, mark the audit as exploratory and soften any interpretation about post-rationalization.",
+      "step4": "On adjudicated labels, compare support-only confidence, support-plus-compactness score, full-context-removal score, localized `remove-local` score, localized `drop-one` score, localized `swap-local` score, and full-detector score for distinguishing `evidence-dependent` from `post-rationalized`. Report AUROC with 1000-sample bootstrap confidence intervals.",
+      "step5": "Report descriptive score distributions for `redundantly-supported` and `insufficient-context` claims to verify whether localized removal behaves differently on those categories than on `evidence-dependent` claims."
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Define metrics, tests, and success criteria",
+    "description": "Evaluate the incremental feature claim using standard classification metrics, calibration metrics, uncertainty estimates, and explicit pre-registered decision rules.",
+    "steps": {
+      "step1": "Primary metrics on every slice are macro F1, AUPRC, AUROC, precision, recall, Brier score, and expected calibration error with 10 equal-width bins. Report mean and standard deviation across seeds `[13, 21, 42]` for every trainable model.",
+      "step2": "Secondary metrics are response-level precision, recall, and F1, where a response is labeled hallucinated if any constituent claim is predicted unsupported. Also report average per-claim inference latency, total GPU minutes, and peak GPU memory for each method.",
+      "step3": "Use validation only for hyperparameter selection, threshold locking, and `tau` calibration. Evaluate the test split exactly once per method after the configuration is locked. Compute paired bootstrap confidence intervals with 1000 resamples over test claims for metric differences between the full detector and the three strongest in-setting baselines.",
+      "step4": "Primary success criterion: on the strict-label test slice, the full detector must improve over support-only by at least 1.0 macro-F1 point or 0.01 AUPRC, matching the proposal's stated success threshold.",
+      "step5": "Comparator success criterion: on the strict-label test slice, the full detector must also improve over support-plus-compactness and over full-context removal by at least 0.5 macro-F1 points or 0.005 AUPRC. If not, conclude that localized perturbation does not add enough practical signal over strong in-setting alternatives.",
+      "step6": "Stability success criterion: the gain over support-only must remain directionally positive at the locked threshold and both adjacent thresholds, and must not disappear on the `stable_Smin` subset. Otherwise treat the effect as threshold-fragile.",
+      "step7": "Audit success criterion: on the adjudicated audit, at least one localized perturbation score or the full detector must outperform support-only confidence for `evidence-dependent` versus `post-rationalized` with bootstrap intervals that do not make the effect indistinguishable from zero. If not, avoid causal language about post-rationalization.",
+      "step8": "Explicit failure conditions to report plainly are: no strict-slice gain over support-only, no gain over support-plus-compactness or full-context removal, gains confined to `projected-all`, gains confined to unstable `S_min`, audit disagreement too high for confident interpretation, or end-to-end runtime exceeding the 8-hour budget."
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Produce paper-ready tables and figures",
+    "description": "Generate only the tables and plots needed to support or falsify the narrow incremental-feature claim.",
+    "steps": {
+      "step1": "Create the main results table with rows for BM25, support-only, support-plus-compactness, full-context removal, localized-perturbation-only, training-free additive, full detector, and Ablations A through F. Include strict-label macro F1, strict-label AUPRC, projected-all macro F1, projected-all AUPRC, Brier score, and total GPU minutes.",
+      "step2": "Create a calibration and stability table for the locked `tau` and adjacent thresholds containing validation AUPRC, validation Brier score, test strict-slice macro F1, `S_min` change rate, mean Jaccard similarity, and fraction of sign flips in `drop_full_to_remove_local`.",
+      "step3": "Plot strict-slice precision-recall curves for support-only, support-plus-compactness, full-context removal, and full detector. Save both PNG and PDF versions under `artifacts/figures/strict_pr_curve`.",
+      "step4": "Plot a threshold-stability figure with threshold on the x-axis and three y-axes saved as separate panels: strict-slice AUPRC, `S_min` change rate, and Jaccard similarity. This figure directly tests whether the feature depends on unstable support-set search.",
+      "step5": "Plot an ablation bar chart showing delta macro F1 and delta AUPRC relative to the full detector on the strict slice. Order bars as `no_localized_perturbation`, `remove_only`, `drop_one_only`, `swap_only`, `fixed_topk_support`, and `no_redundancy`.",
+      "step6": "Plot the audit AUROC comparison for `evidence-dependent` versus `post-rationalized` using support-only, support-plus-compactness, full-context removal, localized `remove-local`, localized `drop-one`, localized `swap-local`, and the full detector. Add bootstrap confidence intervals.",
+      "step7": "Plot a runtime breakdown with bars for preprocessing, retrieval, reranking, verifier scoring, greedy support search, localized perturbation rescoring, classifier fitting, bootstrap analysis, and visualization to document compute feasibility."
+    }
+  },
+  {
+    "category": "Environment Configuration",
+    "title": "Map the full workload to the 8-hour budget",
+    "description": "Estimate total runtime, account for the single-GPU constraint, and define the only acceptable scope reductions before execution starts.",
+    "steps": {
+      "step1": "Budget the run after environment setup as follows: 40 minutes for preprocessing and cache initialization, 60 minutes for retrieval plus reranking caches, 90 minutes for full-context verifier scoring, 95 minutes for greedy support search plus support-only and compactness feature extraction, 100 minutes for localized perturbation rescoring, 20 minutes for all logistic-regression training across models and seeds, 35 minutes for ablations using cached features, 40 minutes for audit aggregation and bootstrap analysis, and 20 minutes for tables and plots. Target total wall-clock time is about 7 hours 20 minutes.",
+      "step2": "Execute GPU stages in this order to maximize cache reuse: full-context scoring, `S_min` search, support-only feature extraction, support-plus-compactness feature extraction, full-context-removal scoring, localized `remove-local` scoring, localized `drop-one` scoring, and localized `swap-local` scoring. Use the CPU cores concurrently for metric aggregation and plotting whenever the GPU is idle.",
+      "step3": "If the pilot projects over 8 hours, reduce scope only in this order: lower `K_rerank` from 6 to 5, restrict swap-local to 1 distractor candidate instead of 2 or more, cap the audit at 200 rather than 300 claims, and skip response-level metrics on `projected-all`. Do not reduce below 3 seeds, do not remove the strict-label headline analysis, and do not drop support-plus-compactness or full-context-removal baselines.",
+      "step4": "Do not train new neural models, do not add extra datasets as core evidence, and do not run combinatorial support-subset search. The study remains feasible only because all expensive verifier calls are cached and every comparison shares the same retrieval, reranking, and verifier backbone."
+    }
+  }
+]

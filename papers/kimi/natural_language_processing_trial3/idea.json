@@ -1,0 +1,99 @@
+{
+  "title": "LayerSelect: Attention-Aware Multi-Objective Hub Selection for Cross-Layer KV Cache Sharing",
+  "description": "A training-free framework that selects optimal hub layers for cross-layer KV cache sharing using multi-objective optimization. Unlike existing methods that rely solely on KV cache similarity (xKV, MiniCache) or fixed patterns (CLA), LayerSelect builds a Query-KV Dependency Graph to capture how queries actually use KV caches, then optimizes for coverage, diversity, and attention alignment simultaneously. This addresses the tension between similarity-based and dissimilarity-based sharing discovered by KVSharer.",
+  "motivation": "Cross-layer KV cache sharing is essential for reducing memory in long-context LLM inference. Existing approaches have critical limitations: (1) CLA uses fixed uniform grouping ignoring heterogeneous layer needs; (2) xKV and MiniCache rely on KV-KV similarity (CKA/cosine) for compression, missing how queries actually use the caches; (3) KVSharer discovered that sharing dissimilar caches can work better, but uses simple search without principled optimization; (4) HShare uses greedy selection for token indices rather than KV values. We hypothesize that attention-aware hub selection balancing coverage and diversity will achieve better memory-accuracy tradeoffs.",
+  "proposed_approach": "LayerSelect operates in three phases: (1) Build a Query-KV Dependency Graph by measuring cross-layer attention patterns during calibration; (2) Solve a multi-objective optimization (NSGA-II) to select hub layers that maximize coverage (serving spoke layer needs), maximize diversity (avoiding redundant hubs per KVSharer's finding), and minimize attention misalignment; (3) Deploy with attention-weighted dynamic routing where spoke layers aggregate hub KV caches based on learned dependency scores. This is training-free, requires only ~10 minutes of profiling, and works with existing pretrained models.",
+  "related_work": [
+    {
+      "title": "Reducing Transformer Key-Value Cache Size with Cross-Layer Attention",
+      "authors": "William Brandon, Mayank Mishra, Aniruddha Nrusimha, Rameswar Panda, Jonathan Ragan-Kelley",
+      "venue": "NeurIPS 2024",
+      "year": 2024,
+      "key_contribution": "Introduces architectural cross-layer attention requiring retraining; uses fixed uniform grouping of adjacent layers.",
+      "how_we_differ": "LayerSelect is training-free and uses data-driven multi-objective optimization instead of fixed patterns."
+    },
+    {
+      "title": "xKV: Cross-Layer SVD for KV-Cache Compression",
+      "authors": "Chi-Chih Chang, Chien-Yu Lin, Yash Akhauri, Wei-Cheng Lin, Kai-Chiang Wu, Luis Ceze, Mohamed S. Abdelfattah",
+      "venue": "arXiv:2503.18893",
+      "year": 2025,
+      "key_contribution": "Uses CKA to identify layers with aligned singular vectors, applies cross-layer SVD compression.",
+      "how_we_differ": "xKV focuses on KV-KV representation similarity via CKA/SVD. LayerSelect uses Query-KV attention dependency and multi-objective optimization with attention-weighted routing—fundamentally different approach based on usage patterns."
+    },
+    {
+      "title": "MiniCache: KV Cache Compression in Depth Dimension for Large Language Models",
+      "authors": "Akide Liu, Jing Liu, Zizheng Pan, Yefei He, Gholamreza Haffari, Bohan Zhuang",
+      "venue": "arXiv:2405.14366",
+      "year": 2024,
+      "key_contribution": "Merges adjacent layers using SLERP based on cosine similarity; training-free.",
+      "how_we_differ": "MiniCache is limited to adjacent similar layers. LayerSelect can select any layers as hubs and balances diversity with coverage via multi-objective optimization."
+    },
+    {
+      "title": "KVSharer: Efficient Inference via Layer-Wise Dissimilar KV Cache Sharing",
+      "authors": "Yifei Yang, Zouying Cao, Qiguang Chen, Libo Qin, Dongjie Yang, Hai Zhao, Zhi Chen",
+      "venue": "arXiv:2410.18517",
+      "year": 2024,
+      "key_contribution": "Discovers counterintuitive phenomenon: sharing dissimilar KV caches can better preserve performance; uses simple search strategy.",
+      "how_we_differ": "KVSharer uses search for dissimilar pairs. LayerSelect explicitly encodes diversity as an objective in multi-objective optimization, providing principled tradeoff with coverage."
+    },
+    {
+      "title": "HShare: Fast LLM Decoding by Hierarchical Key-Value Sharing",
+      "authors": "Huaijin Wu, Lianqiang Li, Hantao Huang, Yi Tu, Jihang Zhang, Minghui Yu, Junchi Yan",
+      "venue": "ICLR 2025",
+      "year": 2025,
+      "key_contribution": "Shares critical token indices across layers/heads/queries using greedy algorithm; reduces which tokens are stored.",
+      "how_we_differ": "HShare is complementary—reduces token indices while we reduce layer redundancy. Our multi-objective optimization is more principled than greedy selection."
+    },
+    {
+      "title": "You Only Cache Once: Decoder-Decoder Architectures for Language Models",
+      "authors": "Zhenyu Sun, Hongkuan Zhou, Wenjie Qu, Yan Hu, Xinyang Zhang, Yingxia Shao, Xuequn Shang",
+      "venue": "arXiv:2405.05254",
+      "year": 2024,
+      "key_contribution": "YOCO uses global KV cache for top-half layers; requires architectural changes.",
+      "how_we_differ": "YOCO requires retraining with new architecture. LayerSelect is plug-and-play for existing models."
+    }
+  ],
+  "hypothesis": "Attention-aware multi-objective hub selection that balances coverage (information needs of spoke layers), diversity (informational uniqueness of hubs), and attention alignment will achieve better memory-accuracy tradeoffs than similarity-based methods (xKV, MiniCache), uniform grouping (CLA), or greedy selection (HShare). Specifically, at 2× compression, LayerSelect will achieve <1% accuracy drop on long-context benchmarks compared to 2-3% for baselines.",
+  "success_criteria": {
+    "confirming": [
+      "Achieves ≥2× compression with <2% accuracy drop on RULER long-context benchmark",
+      "Dominates baselines on accuracy-compression Pareto frontier",
+      "Ablation studies show each objective (coverage, diversity, alignment) contributes meaningfully",
+      "Attention distribution divergence is 30-50% lower than direct sharing methods"
+    ],
+    "refuting": [
+      "Query-KV dependency provides no benefit over KV-KV similarity alone",
+      "Multi-objective optimization does not outperform simple greedy selection",
+      "Attention-weighted routing introduces unacceptable latency overhead",
+      "Method fails to generalize across model architectures"
+    ]
+  },
+  "computational_requirements": {
+    "gpu": "1x NVIDIA RTX A6000 (48GB VRAM)",
+    "ram": "60GB",
+    "cpu": "4 cores",
+    "time_budget": "~8 hours for all experiments",
+    "profiling_time": "~10-15 minutes one-time per model",
+    "feasibility": "Training-free approach requires only inference profiling. Models up to 8B-14B parameters fit within constraints. Long-context benchmarks (4K-16K) feasible with reduced batch sizes."
+  },
+  "expected_deliverables": [
+    "Implementation of LayerSelect with Query-KV Dependency Graph construction",
+    "Multi-objective optimization solver (NSGA-II) for hub selection",
+    "Attention-weighted dynamic routing mechanism",
+    "Evaluation on Llama-3.1-8B, Qwen2.5-7B, Mistral-7B",
+    "Comparison against CLA, MiniCache, xKV, KVSharer on RULER and LongBench",
+    "Ablation studies validating each component",
+    "Analysis of Pareto frontier across compression ratios"
+  ],
+  "key_innovations": [
+    "Query-KV Dependency Graph: Captures actual usage patterns via cross-layer attention rather than just representation similarity",
+    "Multi-Objective Hub Selection: Explicitly balances coverage vs diversity (addressing KVSharer's finding) vs attention alignment",
+    "Attention-Weighted Dynamic Routing: Dynamic aggregation based on dependency scores rather than direct copy or SVD compression"
+  ],
+  "novelty_claims": [
+    "First to use Query-KV attention dependency (not just KV-KV similarity) for cross-layer sharing decisions",
+    "First to formulate cross-layer hub selection as multi-objective optimization with explicit diversity objective",
+    "First to use attention-weighted dynamic routing for cross-layer KV cache aggregation",
+    "Training-free and plug-and-play, unlike CLA/YOCO which require retraining"
+  ]
+}

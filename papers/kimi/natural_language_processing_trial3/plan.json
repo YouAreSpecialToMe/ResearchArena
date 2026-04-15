@@ -1,0 +1,304 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Create virtual environment and install required packages for LayerSelect experiments. Includes PyTorch, transformers, datasets, and optimization libraries.",
+    "steps": {
+      "step1": "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.4+ with CUDA: pip install torch==2.4.0 torchvision --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install transformers and related: pip install transformers==4.45.0 accelerate==0.34.0 sentencepiece protobuf",
+      "step4": "Install datasets and evaluation: pip install datasets==2.21.0 evaluate==0.4.3 scikit-learn scipy",
+      "step5": "Install optimization libraries: pip install pymoo==0.6.1  # NSGA-II implementation",
+      "step6": "Install visualization: pip install matplotlib seaborn pandas",
+      "step7": "Verify GPU: python -c 'import torch; print(torch.cuda.get_device_name(0))'"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": false
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Prepare Datasets",
+    "description": "Download RULER benchmark (subset for 4K/8K/16K), calibration data for profiling, and prepare evaluation datasets. Use smaller subsets to fit time budget.",
+    "steps": {
+      "step1": "Download RULER benchmark: git clone https://github.com/hsiehjackson/RULER.git data/ruler",
+      "step2": "Generate RULER subsets with seq lengths 4096, 8192: python scripts/prepare_ruler.py --lengths 4096 8192 --output_dir data/ruler_processed",
+      "step3": "Download calibration data: Use RedPajama-Data-1T-Sample (1000 samples): wget -P data/calibration https://huggingface.co/datasets/togethercomputer/RedPajama-Data-1T-Sample/resolve/main/train.json",
+      "step4": "Preprocess calibration data: python scripts/preprocess_calibration.py --input data/calibration/train.json --output data/calibration/calibration_1k.jsonl --n_samples 256 --seq_len 4096",
+      "step5": "Download LongBench subset: Use THUDM/LongBench with needle-in-haystack and QA tasks: python scripts/download_longbench.py --tasks niah_single_1 niah_multikey_1 qasper --output_dir data/longbench",
+      "step6": "Verify data integrity: python scripts/verify_data.py --data_dir data/",
+      "step7": "Create dataset statistics: python scripts/dataset_stats.py > data/dataset_statistics.json"
+    },
+    "estimated_time_minutes": 30,
+    "gpu_required": false
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download Pretrained Models",
+    "description": "Download and cache pretrained models. Focus on Llama-3.1-8B-Instruct as primary model due to time constraints.",
+    "steps": {
+      "step1": "Download Llama-3.1-8B-Instruct: python -c \"from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct', cache_dir='models/')\"",
+      "step2": "Download Qwen2.5-7B-Instruct (for cross-model validation): python -c \"from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-7B-Instruct', cache_dir='models/')\"",
+      "step3": "Verify models fit in memory: Check 8B models use ~16GB in FP16, leaving room for KV cache",
+      "step4": "Create model configs: python scripts/create_model_configs.py --models meta-llama/Meta-Llama-3.1-8B-Instruct Qwen/Qwen2.5-7B-Instruct --output configs/models.yaml"
+    },
+    "estimated_time_minutes": 20,
+    "gpu_required": false,
+    "notes": "Using 2 models instead of 3 to fit time budget. Mistral-7B deferred to future work."
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1 - Full KV Cache (No Compression)",
+    "description": "Evaluate models with full KV cache to establish upper bound. This is the simple baseline showing uncompressed performance.",
+    "steps": {
+      "step1": "Implement full KV cache inference: Create exp/baseline_full/run.py with standard transformer inference",
+      "step2": "Run Llama-3.1-8B on RULER 4K: CUDA_VISIBLE_DEVICES=0 python exp/baseline_full/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --benchmark ruler --seq_len 4096 --seed 42 --output exp/baseline_full/ruler_4k_seed42.json",
+      "step3": "Run Llama-3.1-8B on RULER 8K: CUDA_VISIBLE_DEVICES=0 python exp/baseline_full/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --benchmark ruler --seq_len 8192 --seed 42 --output exp/baseline_full/ruler_8k_seed42.json",
+      "step4": "Run LongBench evaluation: CUDA_VISIBLE_DEVICES=0 python exp/baseline_full/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --benchmark longbench --seed 42 --output exp/baseline_full/longbench_seed42.json",
+      "step5": "Repeat with seed 43, 44: Run same commands with --seed 43 and --seed 44 for statistical significance",
+      "step6": "Aggregate results: python scripts/aggregate_results.py --input_dir exp/baseline_full/ --output exp/baseline_full/results.json"
+    },
+    "estimated_time_minutes": 60,
+    "gpu_required": true,
+    "seeds": [42, 43, 44]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2 - CLA (Uniform Grouping)",
+    "description": "Implement and evaluate Cross-Layer Attention-style uniform grouping. Groups adjacent layers to share KV caches. Simple baseline showing fixed-pattern performance.",
+    "steps": {
+      "step1": "Implement CLA-style sharing: Create exp/baseline_cla/cla_sharing.py with uniform grouping (layer i shares with layer floor(i/group_size))",
+      "step2": "Run CLA-2 on Llama-3.1-8B (2x compression): CUDA_VISIBLE_DEVICES=0 python exp/baseline_cla/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --group_size 2 --benchmark ruler --seq_len 4096 --seed 42 --output exp/baseline_cla/cla2_ruler_4k_seed42.json",
+      "step3": "Run CLA-4 on Llama-3.1-8B (4x compression): CUDA_VISIBLE_DEVICES=0 python exp/baseline_cla/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --group_size 4 --benchmark ruler --seq_len 4096 --seed 42 --output exp/baseline_cla/cla4_ruler_4k_seed42.json",
+      "step4": "Run CLA variants on RULER 8K: Repeat with --seq_len 8192",
+      "step5": "Run CLA on LongBench: CUDA_VISIBLE_DEVICES=0 python exp/baseline_cla/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --group_size 2 --benchmark longbench --seed 42 --output exp/baseline_cla/cla2_longbench_seed42.json",
+      "step6": "Repeat for seeds 43, 44: Run all configurations with different seeds",
+      "step7": "Aggregate CLA results: python scripts/aggregate_results.py --input_dir exp/baseline_cla/ --output exp/baseline_cla/results.json"
+    },
+    "estimated_time_minutes": 90,
+    "gpu_required": true,
+    "seeds": [42, 43, 44]
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3 - xKV (CKA-Based Similarity, Strong Baseline)",
+    "description": "Implement xKV baseline using CKA for similarity analysis and SVD-based compression. This is the STRONG baseline that addresses feedback - must show how we differ from and improve upon xKV.",
+    "steps": {
+      "step1": "Implement CKA computation: Create exp/baseline_xkv/cka.py with centered kernel alignment for KV cache similarity",
+      "step2": "Implement xKV-style SVD compression: Create exp/baseline_xkv/xkv_compression.py with cross-layer SVD per xKV paper",
+      "step3": "Profile CKA on subset of calibration data (128 samples for speed): CUDA_VISIBLE_DEVICES=0 python exp/baseline_xkv/profile_cka.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --calibration data/calibration/calibration_1k.jsonl --n_samples 128 --output exp/baseline_xkv/cka_profile.json",
+      "step4": "Run xKV 2x compression on RULER 4K, 8K: CUDA_VISIBLE_DEVICES=0 python exp/baseline_xkv/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --compression 2 --benchmark ruler --seq_len 4096 --seed 42 --output exp/baseline_xkv/xkv2x_ruler_4k_seed42.json",
+      "step5": "Run xKV 4x compression on RULER 4K: CUDA_VISIBLE_DEVICES=0 python exp/baseline_xkv/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --compression 4 --benchmark ruler --seq_len 4096 --seed 42 --output exp/baseline_xkv/xkv4x_ruler_4k_seed42.json",
+      "step6": "Run xKV 2x on LongBench: Single config for comparison",
+      "step7": "Repeat key configs for seeds 43, 44 (not all variants)",
+      "step8": "Analyze CKA vs Query-KV patterns: Generate comparison showing CKA captures KV-KV similarity while our method captures Query-KV usage",
+      "step9": "Aggregate xKV results: python scripts/aggregate_results.py --input_dir exp/baseline_xkv/ --output exp/baseline_xkv/results.json"
+    },
+    "estimated_time_minutes": 90,
+    "gpu_required": true,
+    "seeds": [42, 43, 44],
+    "notes": "CRITICAL: This baseline directly addresses xKV overlap feedback. We must show clear improvement over CKA/SVD approach."
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 1 - Build Query-KV Dependency Graph",
+    "description": "Profile model on calibration data to construct Query-KV Dependency Graph. This is our core innovation - capturing how queries actually use KV caches.",
+    "steps": {
+      "step1": "Implement dependency graph construction: Create exp/layerselect/graph_builder.py",
+      "step2": "Implement cross-layer attention measurement: For each query layer i and KV layer j, compute average attention weight when layer i uses KV from layer j",
+      "step3": "Profile Llama-3.1-8B: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/build_graph.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --calibration data/calibration/calibration_1k.jsonl --seq_len 4096 --output exp/layerselect/dependency_graph_llama31_8b.npz",
+      "step4": "Profile Qwen2.5-7B: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/build_graph.py --model Qwen/Qwen2.5-7B-Instruct --calibration data/calibration/calibration_1k.jsonl --seq_len 4096 --output exp/layerselect/dependency_graph_qwen25_7b.npz",
+      "step5": "Visualize dependency matrices: python exp/layerselect/visualize_graph.py --input exp/layerselect/dependency_graph_llama31_8b.npz --output figures/dependency_matrix_llama31.pdf",
+      "step6": "Compute graph statistics: coverage scores, centrality measures, layer importance rankings",
+      "step7": "Compare dependency patterns between models (for generalization analysis)"
+    },
+    "estimated_time_minutes": 30,
+    "gpu_required": true,
+    "notes": "Profiling takes ~10-15 min per model as stated in proposal. Can run models in parallel on same GPU if memory allows."
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 2 - Multi-Objective Hub Selection",
+    "description": "Run NSGA-II optimization to select hub layers. Optimizes for coverage, diversity (addressing KVSharer finding), and attention alignment.",
+    "steps": {
+      "step1": "Implement multi-objective formulation: Create exp/layerselect/optimizer.py with pymoo NSGA-II",
+      "step2": "Define objective functions: coverage(A, s), diversity(s, CKA_matrix), alignment(s, attention_divergence)",
+      "step3": "Run optimization for 2x compression: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/optimize.py --dependency_graph exp/layerselect/dependency_graph_llama31_8b.npz --budget 16 --pop_size 100 --n_generations 200 --output exp/layerselect/hubs_2x_llama31.json",
+      "step4": "Run optimization for 4x compression: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/optimize.py --dependency_graph exp/layerselect/dependency_graph_llama31_8b.npz --budget 8 --pop_size 100 --n_generations 200 --output exp/layerselect/hubs_4x_llama31.json",
+      "step5": "Generate Pareto frontier: Run optimization with varying budget weights to get tradeoff curve",
+      "step6": "Analyze selected hubs: python exp/layerselect/analyze_hubs.py --hubs exp/layerselect/hubs_2x_llama31.json --graph exp/layerselect/dependency_graph_llama31_8b.npz --output exp/layerselect/hub_analysis.json",
+      "step7": "Repeat for Qwen2.5-7B",
+      "step8": "Compare hub selection patterns across models"
+    },
+    "estimated_time_minutes": 45,
+    "gpu_required": false,
+    "notes": "NSGA-II runs on CPU, ~5-10 min per optimization. Pareto frontier requires multiple runs."
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Phase 3 - LayerSelect Full Evaluation",
+    "description": "Evaluate complete LayerSelect with attention-weighted dynamic routing. Main results comparing against baselines.",
+    "steps": {
+      "step1": "Implement attention-weighted routing: Create exp/layerselect/routing.py with dynamic aggregation",
+      "step2": "Implement full LayerSelect inference: Create exp/layerselect/run.py integrating graph, hubs, and routing",
+      "step3": "Run LayerSelect 2x on RULER 4K: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --hubs exp/layerselect/hubs_2x_llama31.json --benchmark ruler --seq_len 4096 --seed 42 --output exp/layerselect/layerselect2x_ruler_4k_seed42.json",
+      "step4": "Run LayerSelect 2x on RULER 8K: Similar command with --seq_len 8192",
+      "step5": "Run LayerSelect 4x on RULER 4K, 8K: Use hubs_4x_llama31.json",
+      "step6": "Run LayerSelect on LongBench: CUDA_VISIBLE_DEVICES=0 python exp/layerselect/run.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --hubs exp/layerselect/hubs_2x_llama31.json --benchmark longbench --seed 42 --output exp/layerselect/layerselect2x_longbench_seed42.json",
+      "step7": "Measure inference throughput: Add --measure_throughput flag to record tokens/sec",
+      "step8": "Repeat for seeds 43, 44",
+      "step9": "Run on Qwen2.5-7B for cross-model validation",
+      "step10": "Aggregate LayerSelect results: python scripts/aggregate_results.py --input_dir exp/layerselect/ --output exp/layerselect/results.json"
+    },
+    "estimated_time_minutes": 90,
+    "gpu_required": true,
+    "seeds": [42, 43, 44]
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 1 - Component Ablation Study",
+    "description": "Test each objective (coverage, diversity, alignment) independently to show contribution. Required for paper.",
+    "steps": {
+      "step1": "Coverage-only variant: Run NSGA-II with only coverage objective (no diversity, no alignment)",
+      "step2": "Diversity-only variant: Run NSGA-II with only diversity objective (no coverage, no alignment)",
+      "step3": "Alignment-only variant: Run NSGA-II with only alignment objective (no coverage, no diversity)",
+      "step4": "Coverage+Diversity (no alignment): Two-objective variant",
+      "step5": "Coverage+Alignment (no diversity): Two-objective variant",
+      "step6": "Evaluate all variants: Run each variant on RULER 4K with seed 42",
+      "step7": "Compare performance: Show that full three-objective outperforms all ablations",
+      "step8": "Generate ablation table: python scripts/generate_ablation_table.py --output figures/ablation_table.pdf"
+    },
+    "estimated_time_minutes": 45,
+    "gpu_required": true,
+    "notes": "Critical ablation showing each component contributes meaningfully (success criterion #3). Running subset of variants."
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 2 - Graph Construction Comparison (xKV Overlap Analysis)",
+    "description": "Directly compare Query-KV dependency (our method) vs KV-KV similarity (xKV-style). Addresses feedback about novelty over xKV.",
+    "steps": {
+      "step1": "Build KV-KV similarity graph: Use CKA to compute layer similarity (like xKV)",
+      "step2": "Run hub selection with KV-KV similarity: Same optimization, different input graph",
+      "step3": "Run hub selection with Query-KV dependency: Our proposed graph",
+      "step4": "Compare hub selections: Analyze overlap/difference in selected hubs",
+      "step5": "Evaluate both on RULER: Show accuracy difference at same compression",
+      "step6": "Generate comparison figure: Side-by-side visualization of CKA matrix vs Dependency matrix",
+      "step7": "Compute correlation: Measure how CKA similarity correlates with dependency scores",
+      "step8": "Key result: Demonstrate that Query-KV dependency provides additional signal beyond KV-KV similarity"
+    },
+    "estimated_time_minutes": 30,
+    "gpu_required": true,
+    "notes": "CRITICAL: This ablation addresses xKV feedback by showing Query-KV dependency outperforms CKA-based selection."
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 3 - Routing Mechanism Comparison",
+    "description": "Compare attention-weighted dynamic routing vs alternatives (direct copy, SVD, averaging).",
+    "steps": {
+      "step1": "Direct copy routing: Spoke layer directly uses hub KV cache (CLA-style)",
+      "step2": "Average routing: Simple average of multiple hub KVs",
+      "step3": "SVD reconstruction: xKV-style compression of hub KVs",
+      "step4": "Attention-weighted (ours): Dynamic aggregation based on dependency scores",
+      "step5": "Evaluate all routing methods: Same hub selection, different routing",
+      "step6": "Measure attention divergence: KL divergence between original and compressed attention patterns",
+      "step7": "Key result: Show attention-weighted routing has 30-50% lower divergence (success criterion #4)"
+    },
+    "estimated_time_minutes": 30,
+    "gpu_required": true,
+    "notes": "Testing key routing variants (direct copy, attention-weighted, SVD)"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation 4 - Budget Sensitivity Analysis",
+    "description": "Test performance across different compression ratios (number of hubs).",
+    "steps": {
+      "step1": "Run with budget=24 (1.33x compression): CUDA_VISIBLE_DEVICES=0 python exp/layerselect/optimize.py --budget 24",
+      "step2": "Run with budget=16 (2x compression): Already done in main experiment",
+      "step3": "Run with budget=12 (2.67x compression): CUDA_VISIBLE_DEVICES=0 python exp/layerselect/optimize.py --budget 12",
+      "step4": "Run with budget=8 (4x compression): Already done in main experiment",
+      "step5": "Run with budget=6 (5.33x compression): CUDA_VISIBLE_DEVICES=0 python exp/layerselect/optimize.py --budget 6",
+      "step6": "Evaluate all budgets on RULER 4K",
+      "step7": "Generate compression-accuracy curve: Plot accuracy vs compression ratio",
+      "step8": "Identify optimal operating point: Where accuracy drop < 1% with maximum compression"
+    },
+    "estimated_time_minutes": 35,
+    "gpu_required": true,
+    "notes": "Testing 4 key budget points (1.33x, 2x, 4x, 5.33x) for Pareto curve"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform statistical tests to confirm improvements are significant.",
+    "steps": {
+      "step1": "Load results from all experiments: baseline_full, baseline_cla, baseline_xkv, layerselect",
+      "step2": "Compute mean and std across seeds: For each method and metric",
+      "step3": "Perform paired t-tests: LayerSelect vs xKV, LayerSelect vs CLA",
+      "step4": "Compute effect sizes: Cohen's d for practical significance",
+      "step5": "Generate significance table: With p-values and confidence intervals",
+      "step6": "Verify success criterion 1: LayerSelect achieves >=2x compression with <2% accuracy drop",
+      "step7": "Verify success criterion 2: LayerSelect dominates on Pareto frontier",
+      "step8": "Document all results: Save to exp/statistical_tests/results.json"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": false
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Cross-Model Generalization Validation",
+    "description": "Verify method generalizes across different model architectures.",
+    "steps": {
+      "step1": "Compare Llama-3.1-8B and Qwen2.5-7B results",
+      "step2": "Analyze if optimal hub patterns are consistent across models",
+      "step3": "Check if relative improvements over baselines hold",
+      "step4": "Document generalization: Verify method doesn't fail on different architectures (contradicting refuting evidence #4)"
+    },
+    "estimated_time_minutes": 10,
+    "gpu_required": false
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-ready figures for the research paper.",
+    "steps": {
+      "step1": "Figure 1 - Method Overview: Visualize Query-KV Dependency Graph, hub selection, and routing",
+      "step2": "Figure 2 - Pareto Frontier: Accuracy vs Compression ratio for all methods",
+      "step3": "Figure 3 - Dependency Matrices: Comparison of Query-KV vs KV-KV (CKA) matrices",
+      "step4": "Figure 4 - Hub Selection Visualization: Which layers selected as hubs at different budgets",
+      "step5": "Figure 5 - Ablation Results: Component contribution bar chart",
+      "step6": "Figure 6 - Attention Divergence: KL divergence comparison across routing methods",
+      "step7": "Table 1 - Main Results: Comparison with baselines on RULER and LongBench",
+      "step8": "Table 2 - Ablation Table: Component-wise breakdown",
+      "step9": "Save all figures: Output to figures/ directory in PDF and PNG formats"
+    },
+    "estimated_time_minutes": 20,
+    "gpu_required": false
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Latency Overhead Analysis",
+    "description": "Verify that attention-weighted routing doesn't introduce unacceptable latency (refuting criterion #3).",
+    "steps": {
+      "step1": "Measure baseline inference time: Full KV cache, no routing overhead",
+      "step2": "Measure CLA inference time: Direct copy has minimal overhead",
+      "step3": "Measure xKV inference time: SVD reconstruction overhead",
+      "step4": "Measure LayerSelect inference time: Attention-weighted routing overhead",
+      "step5": "Compute overhead percentage: (LayerSelect_time - Baseline_time) / Baseline_time * 100",
+      "step6": "Target: Overhead < 10% to be acceptable",
+      "step7": "Generate latency comparison figure"
+    },
+    "estimated_time_minutes": 20,
+    "gpu_required": true
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Memory Usage Profiling",
+    "description": "Verify actual memory savings match theoretical compression ratios.",
+    "steps": {
+      "step1": "Profile peak memory: Use torch.cuda.max_memory_allocated()",
+      "step2": "Compare across methods: Full, CLA, xKV, LayerSelect",
+      "step3": "Verify compression ratios: Actual memory vs theoretical",
+      "step4": "Generate memory breakdown: KV cache vs model weights vs activation"
+    },
+    "estimated_time_minutes": 15,
+    "gpu_required": true
+  }
+]

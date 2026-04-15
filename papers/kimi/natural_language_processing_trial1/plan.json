@@ -1,0 +1,301 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Configure virtual environment and install all required packages for SAE-GUIDE experiments. Ensure compatibility with CUDA for A6000 GPU.",
+    "steps": {
+      "step1": "Create/activate virtual environment: python -m venv .venv && source .venv/bin/activate",
+      "step2": "Install PyTorch 2.1+ with CUDA 12.1: pip install torch==2.1.2 torchvision --index-url https://download.pytorch.org/whl/cu121",
+      "step3": "Install transformers: pip install transformers==4.36.0",
+      "step4": "Install sae-lens for SAE training: pip install sae-lens==1.0.0",
+      "step5": "Install datasets and evaluation: pip install datasets==2.14.0 evaluate==0.4.1",
+      "step6": "Install retrieval libraries: pip install rank-bm25==0.2.2 faiss-gpu==1.7.4 sentence-transformers==2.2.2",
+      "step7": "Install utilities: pip install numpy==1.24.0 scikit-learn==1.3.0 scipy==1.11.0 matplotlib==3.7.0 seaborn==0.12.0 pandas==2.0.0 tqdm",
+      "step8": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step9": "Set random seeds for reproducibility: RANDOM_SEEDS=[42, 123, 456] to be used across all experiments"
+    }
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Multi-Hop QA Datasets",
+    "description": "Download HotpotQA and 2WikiMultiHopQA dev sets. Extract reasoning chains and create train/val/test splits. Build BM25 retrieval index.",
+    "steps": {
+      "step1": "Download HotpotQA dev set (distractor setting): wget http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+      "step2": "Sample 500 questions from HotpotQA dev for experiments (stratified by question type: bridge/comparison)",
+      "step3": "Download 2WikiMultiHopQA dev set: use HuggingFace datasets - datasets.load_dataset('2WikiMultiHopQA', 'dev')",
+      "step4": "Sample 300 questions from 2WikiMultiHopQA dev (stratified sampling)",
+      "step5": "Split each dataset: 60% train (480), 20% val (160), 20% test (160) - total 800 questions",
+      "step6": "Extract reasoning chains using Qwen2.5-7B with CoT prompt: 'Answer step by step'",
+      "step7": "Identify bridge entities and intermediate answers for each question using string matching heuristics",
+      "step8": "Build BM25 index over Wikipedia passages: use rank_bm25 with default k1=1.5, b=0.75",
+      "step9": "Create ground-truth retrieval labels: mark passage as relevant if contains answer or bridge entity",
+      "step10": "Save preprocessed data to data/processed/ with pickle format for fast loading"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Standard RAG Baseline",
+    "description": "Implement simple single-retrieval RAG baseline. Retrieves once using the original question, then generates answer.",
+    "steps": {
+      "step1": "Load Qwen2.5-7B-Instruct model with bfloat16 precision: model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-7B-Instruct', torch_dtype=torch.bfloat16, device_map='auto')",
+      "step2": "Implement retrieval function: retrieve(query, k=3) returns top-k BM25 passages",
+      "step3": "Build prompt template: 'Context: {docs}\nQuestion: {question}\nAnswer:'",
+      "step4": "For each test question: retrieve with original question, generate answer with greedy decoding (temperature=0)",
+      "step5": "Compute metrics: Exact Match (EM), F1 score, Retrieval Precision@3",
+      "step6": "Run with 3 random seeds [42, 123, 456] - same model, different question ordering for confidence intervals",
+      "step7": "Expected: ~35-40% EM on HotpotQA (standard RAG struggles with multi-hop)",
+      "step8": "Save predictions to results/standard_rag_predictions.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement IRCOT Periodic Retrieval Baseline",
+    "description": "Implement IRCOT-style periodic retrieval. Retrieves every N=50 tokens during generation. This is a strong baseline for multi-hop reasoning.",
+    "steps": {
+      "step1": "Implement streaming generation with token counting: generate up to 50 tokens, then trigger retrieval",
+      "step2": "Construct retrieval query from generated text: use last 30 tokens as query",
+      "step3": "Append retrieved documents to context and continue generation",
+      "step4": "Set max retrieval rounds = 5 to prevent infinite loops",
+      "step5": "Compute metrics: EM, F1, Retrieval Precision@3, Average retrieval calls per question",
+      "step6": "Run with 3 random seeds [42, 123, 456]",
+      "step7": "Expected: ~45-50% EM, ~3-4 retrieval calls per question",
+      "step8": "Save predictions to results/ircot_predictions.json"
+    }
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Implement Probing-RAG Binary Probe Baseline",
+    "description": "Implement Probing-RAG style binary classifier on hidden states to decide whether to retrieve. This is our strongest baseline and main comparison point.",
+    "steps": {
+      "step1": "Extract hidden states from layer 16 of Qwen2.5-7B during reasoning on training set (480 questions)",
+      "step2": "Label training examples: positive if next reasoning step needs retrieval (ground-truth bridge entity not in context)",
+      "step3": "Train binary MLP probe: input=3584-dim hidden state, hidden=512, output=1 (sigmoid)",
+      "step4": "Training config: lr=1e-4, batch_size=32, epochs=10, optimizer=AdamW with weight_decay=0.01",
+      "step5": "At inference: generate reasoning step-by-step, extract hidden state, probe predicts retrieval necessity",
+      "step6": "If probe score > 0.5, retrieve using original question + generated text",
+      "step7": "Compute metrics: EM, F1, Retrieval Precision@3, Detection Accuracy (% correct retrieval decisions)",
+      "step8": "Run with 3 random seeds for probe initialization [42, 123, 456]",
+      "step9": "Expected: ~48-52% EM, ~2-3 retrieval calls per question",
+      "step10": "Save predictions to results/probing_rag_predictions.json and probe weights to checkpoints/probing_rag/"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SAE Training on Multi-Hop Reasoning Hidden States",
+    "description": "Train Sparse Autoencoder on hidden states from intermediate layers during multi-hop reasoning. This is the foundation of SAE-GUIDE.",
+    "steps": {
+      "step1": "Generate hidden state dataset: Run Qwen2.5-7B on 480 training questions, extract hidden states from layers 12-20 at each reasoning step",
+      "step2": "Aggregate hidden states: pool across layers 12-20 using mean pooling, resulting in ~2K-5K state vectors (3584-dim each)",
+      "step3": "Initialize SAE: expansion_factor=8, input_dim=3584, hidden_dim=28672, top_k=32 (TopK SAE)",
+      "step4": "SAE architecture: encoder (3584 -> 28672 with ReLU), decoder (28672 -> 3584)",
+      "step5": "Training config: lr=1e-3, batch_size=256, epochs=100, loss = MSE_reconstruction + 0.1 * L1_sparsity",
+      "step6": "Early stopping: stop if validation reconstruction loss doesn't improve for 10 epochs",
+      "step7": "Expected training time: ~45-60 minutes on A6000 for ~3K hidden states",
+      "step8": "Save SAE checkpoint: checkpoints/sae/sae_qwen_hotpotqa.pt",
+      "step9": "Evaluate reconstruction: target MSE < 0.01, average active features per input ~30-35",
+      "step10": "Run with 3 random seeds for SAE initialization [42, 123, 456]"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Feature Annotation and Information-Need Mapping",
+    "description": "Analyze SAE features to identify those correlated with information gaps. Create feature-to-query mapping for targeted retrieval. Addresses feedback on concrete mapping examples.",
+    "steps": {
+      "step1": "Extract SAE features for all training hidden states: z = SAE.encode(h), shape (N, 28672)",
+      "step2": "For each feature j (0 to 28671), collect top-50 activating examples",
+      "step3": "Analyze feature patterns: for each feature, examine context of activating examples",
+      "step4": "Classify features into types: entity_features (activate when entity info needed), temporal_features (dates/times), relation_features (relationships needed), other",
+      "step5": "Identify information-gap features: features with high activation when ground-truth intermediate answer is NOT in context",
+      "step6": "Build feature-to-query mapping dictionary: feature_type -> query_template",
+      "step7": "Entity feature template: extract entities from context, append 'information about {entity}'",
+      "step8": "Temporal feature template: append 'date timeline when' to query",
+      "step9": "Relation feature template: extract entity pair, append '{entity1} {entity2} relationship'",
+      "step10": "Save feature mapping: checkpoints/sae/feature_to_query_map.json",
+      "step11": "Count interpretable features: target >50% of top-100 active features have clear semantic meaning"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train Information-Need Probe on SAE Features",
+    "description": "Train lightweight probe on cumulative SAE feature activations to predict when information is needed. Uses cumulative activation tracking.",
+    "steps": {
+      "step1": "Create training data: for each reasoning step, compute cumulative SAE feature activation with decay α=0.9",
+      "step2": "Cumulative formula: cumsum[t] = α * cumsum[t-1] + z_t, where z_t = SAE.encode(h_t)",
+      "step3": "Label training examples: positive if retrieval needed at this step (ground-truth label)",
+      "step4": "Train probe: 2-layer MLP, input=28672 (cumulative features), hidden=1024, output=1",
+      "step5": "Training config: lr=1e-4, batch_size=64, epochs=20, optimizer=AdamW, weight_decay=0.01",
+      "step6": "Loss: binary cross-entropy with class weighting (handle class imbalance)",
+      "step7": "Validation: tune threshold θ_retrieval on validation set to maximize F1",
+      "step8": "Save probe: checkpoints/sae_guide/probe.pt",
+      "step9": "Training time: ~15 minutes on A6000",
+      "step10": "Run with 3 random seeds [42, 123, 456]"
+    }
+  },
+  {
+    "category": "Main Experiment",
+    "title": "SAE-GUIDE Full System Evaluation",
+    "description": "Evaluate complete SAE-GUIDE system with SAE-based information-need detection and feature-guided retrieval. Main results for paper.",
+    "steps": {
+      "step1": "Load trained SAE and probe from checkpoints",
+      "step2": "For each test question, initialize: context=empty, cumulative_features=zeros",
+      "step3": "While answer not generated: generate next reasoning step (max 30 tokens)",
+      "step4": "Extract hidden state h_t from layer 16, compute z_t = SAE.encode(h_t)",
+      "step5": "Update cumulative: cumulative = 0.9 * cumulative + z_t",
+      "step6": "Compute uncertainty = probe(cumulative)",
+      "step7": "If uncertainty > θ_retrieval (tuned threshold): identify top-5 activated features",
+      "step8": "Generate augmented query: original_question + ' ' + feature_to_query(top_features, context)",
+      "step9": "Retrieve k=3 documents using augmented query, append to context",
+      "step10": "Continue generation with updated context",
+      "step11": "Compute metrics: EM, F1, Retrieval Precision@3, Average retrieval calls per question",
+      "step12": "Record feature activation statistics: which features activate, at what steps",
+      "step13": "Run with 3 random seeds [42, 123, 456]",
+      "step14": "Save predictions: results/sae_guide_predictions.json"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Binary Probe vs SAE-Based Probe",
+    "description": "Ablation study comparing SAE-based probe against equivalent binary probe without SAE decomposition. Tests if SAE adds value.",
+    "steps": {
+      "step1": "Train binary probe directly on hidden states (same architecture as Probing-RAG, but same training data as SAE-GUIDE)",
+      "step2": "Compare: (a) Binary probe on raw hidden states vs (b) Probe on SAE features",
+      "step3": "Both use cumulative activation (for fairness)",
+      "step4": "Evaluate both on same test set with 3 seeds",
+      "step5": "Metrics: EM, F1, Detection Accuracy (% correct retrieval decisions)",
+      "step6": "Success criterion: SAE-based probe outperforms binary probe by >2% F1",
+      "step7": "If SAE doesn't help, this refutes core claim (R1 in proposal)"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Cumulative vs Per-Step Activation",
+    "description": "Test whether cumulative feature activation provides benefit over per-step activation alone.",
+    "steps": {
+      "step1": "Train variant probe using only current step z_t (no cumulative sum)",
+      "step2": "Compare against cumulative version: cumulative = 0.9 * prev + z_t",
+      "step3": "Both use same SAE and feature-to-query mapping",
+      "step4": "Evaluate on test set with 3 seeds",
+      "step5": "Metrics: EM, F1, Detection Accuracy",
+      "step6": "Success criterion: Cumulative activation outperforms per-step by >1% F1",
+      "step7": "If no benefit, this is failure mode F3 - simplify to per-step"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: With vs Without Feature-to-Query Mapping",
+    "description": "Test whether feature-guided query augmentation improves retrieval quality over using original query alone.",
+    "steps": {
+      "step1": "Run SAE-GUIDE with feature-to-query mapping (full system)",
+      "step2": "Run SAE-GUIDE without mapping: always use original question for retrieval",
+      "step3": "Both use same SAE and probe for triggering",
+      "step4": "Compare Retrieval Precision@3: does feature-guided retrieval get better documents?",
+      "step5": "Compare EM/F1: does better retrieval lead to better answers?",
+      "step6": "Success criterion: Feature-to-query mapping improves Precision@3 by >5%",
+      "step7": "If no improvement, this is failure mode F4"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Layer Selection Analysis",
+    "description": "Compare SAEs trained on different layer ranges to find optimal hidden state location for information-need detection.",
+    "steps": {
+      "step1": "Extract hidden states from early layers (4-8), mid layers (12-20), late layers (24-30)",
+      "step2": "Train 3 separate SAEs (one per layer range) with same hyperparameters",
+      "step3": "Train corresponding probes for each SAE",
+      "step4": "Evaluate all 3 variants on validation set",
+      "step5": "Metrics: EM, F1, reconstruction loss",
+      "step6": "Report which layer range works best for information-need detection",
+      "step7": "Time budget: this adds ~30 minutes for 2 additional SAEs (parallel training possible)"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation: Feature Type Analysis",
+    "description": "Test contribution of different feature types (entity, temporal, relation) to retrieval performance.",
+    "steps": {
+      "step1": "Run SAE-GUIDE using only entity-type features for query augmentation",
+      "step2": "Run SAE-GUIDE using only temporal-type features",
+      "step3": "Run SAE-GUIDE using only relation-type features",
+      "step4": "Run SAE-GUIDE using all feature types (full system)",
+      "step5": "Compare EM, F1, and Retrieval Precision across variants",
+      "step6": "Identify which feature types are most important for each dataset"
+    }
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Failure Mode Analysis",
+    "description": "Systematically analyze failure modes F1-F5 as described in proposal. Categorize errors and analyze their prevalence.",
+    "steps": {
+      "step1": "F1 Analysis (Non-interpretable features): Sample top-100 most active features, use GPT-4 to generate descriptions, manual rating of meaningfulness",
+      "step2": "F2 Analysis (Features don't correlate with needs): Compute correlation between feature activation and ground-truth information needs, target r > 0.3",
+      "step3": "F3 Analysis (Cumulative no benefit): Compare per-step vs cumulative (from ablation), if no difference, F3 confirmed",
+      "step4": "F4 Analysis (Mapping fails): Compare retrieval precision with/without feature-to-query mapping, if no difference, F4 confirmed",
+      "step5": "F5 Analysis (Overfitting): Compare HotpotQA vs 2WikiMultiHopQA performance gap, gap >10% suggests overfitting",
+      "step6": "Categorize each error example into: wrong retrieval trigger, wrong retrieval query, correct retrieval but wrong answer, other",
+      "step7": "Report failure mode distribution across all test examples",
+      "step8": "Save failure analysis: results/failure_mode_analysis.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Conduct statistical tests to validate that SAE-GUIDE improvements are significant. Required for confirmation criteria.",
+    "steps": {
+      "step1": "Collect results from 3 random seeds for SAE-GUIDE and each baseline",
+      "step2": "Compute mean and standard deviation for EM and F1 per method",
+      "step3": "Perform paired t-test between SAE-GUIDE and Probing-RAG: target p < 0.05",
+      "step4": "Perform paired t-test between SAE-GUIDE and IRCOT: target p < 0.05",
+      "step5": "Compute effect size (Cohen's d) for significant differences",
+      "step6": "Report 95% confidence intervals for all metrics",
+      "step7": "Save statistics: results/statistical_tests.json"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Feature Interpretability Evaluation",
+    "description": "Evaluate whether SAE features capture meaningful semantic concepts. Address confirmation criterion C3.",
+    "steps": {
+      "step1": "For top-100 most frequently activated features, collect 50 top-activating examples each",
+      "step2": "Use GPT-4 to generate feature description from examples: 'Based on these contexts, what concept does this feature detect?'",
+      "step3": "Manual rating (automated with GPT-4 as proxy): Rate each description as 'clearly meaningful', 'somewhat meaningful', or 'unclear'",
+      "step4": "Compare against baseline: generate random descriptions for same features, rate them",
+      "step5": "Success criterion: >50% of features rated as 'clearly meaningful' or 'somewhat meaningful'",
+      "step6": "Report examples of best and worst feature interpretations",
+      "step7": "Save results: results/feature_interpretability.json"
+    }
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures and Tables",
+    "description": "Create all visualizations and tables for the research paper.",
+    "steps": {
+      "step1": "Figure 1: Architecture diagram showing SAE-GUIDE pipeline (4 phases)",
+      "step2": "Figure 2: Example feature activation patterns during multi-hop reasoning (show cumulative activation over steps)",
+      "step3": "Figure 3: Comparison bar chart: EM and F1 across all methods (Standard RAG, IRCOT, Probing-RAG, SAE-GUIDE) with error bars",
+      "step4": "Figure 4: Retrieval efficiency plot: Accuracy vs Average retrieval calls per question",
+      "step5": "Figure 5: Ablation results: contribution of each component (binary vs SAE, cumulative vs per-step, with/without mapping)",
+      "step6": "Figure 6: Failure mode distribution pie chart",
+      "step7": "Table 1: Main results table - EM, F1, Precision@3, Retrieval calls for all methods across datasets",
+      "step8": "Table 2: Ablation study results",
+      "step9": "Table 3: Feature interpretability scores",
+      "step10": "Save all figures to figures/ directory in PDF and PNG formats"
+    }
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Validation",
+    "description": "Final validation against confirmation and refutation criteria from proposal.",
+    "steps": {
+      "step1": "Check C1: SAE-GUIDE significantly better than Probing-RAG (p < 0.05)?",
+      "step2": "Check C2: SAE-GUIDE reduces retrieval calls by 15%+ vs IRCOT with comparable accuracy?",
+      "step3": "Check C3: >50% of top features rated as interpretable?",
+      "step4": "Check C4: SAE features outperform binary probe in ablation?",
+      "step5": "Check R1 (refutation): If SAE-GUIDE not better than binary probe, claim is refuted",
+      "step6": "Check R2 (refutation): If interpretability <30%, features don't capture semantic needs",
+      "step7": "Check R3 (refutation): If cumulative no better than per-step",
+      "step8": "Check R4 (refutation): If feature-to-query mapping doesn't improve precision",
+      "step9": "Generate final verdict: CONFIRMED / PARTIALLY CONFIRMED / REFUTED with evidence",
+      "step10": "Save verdict: results/success_criteria_verdict.json"
+    }
+  }
+]

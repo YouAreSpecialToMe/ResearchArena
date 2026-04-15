@@ -1,0 +1,618 @@
+{
+  "metadata": {
+    "project": "Structure-Aware Conditional VAE for Multi-Objective Therapeutic Peptide Design",
+    "version": "2.0",
+    "feedback_addressed": [
+      "Corrected SaProt citation to ICLR 2024",
+      "Added detailed discussion of PepMorph (CVAE with masking) and PLUM (disentangled VAE with Zseq/Zfunc/Zlength)",
+      "Updated baseline R² to 0.65 from Liu et al. 2025 DMPNN benchmark",
+      "Revised novelty claims to focus on cross-attention fusion vs late fusion in MMCD/Multi-Peptide",
+      "Added comprehensive training stabilization experiments for disentangled VAEs",
+      "Included cross-attention vs late fusion ablation study",
+      "Cited MMCD (contrastive diffusion) and Multi-Peptide (multimodal prediction) as related work"
+    ],
+    "compute_budget": {
+      "gpu": "1x NVIDIA RTX A6000 (48GB VRAM)",
+      "ram": "60GB",
+      "cpu": "4 cores",
+      "time_limit_hours": 8
+    },
+    "estimated_total_runtime_hours": 7.5,
+    "random_seeds": [42, 123, 456],
+    "success_criteria": {
+      "primary": [
+        "Permeability prediction R² > 0.70 on held-out test (vs. R² ≈ 0.65 for DMPNN baseline per Liu et al. 2025)",
+        "Property-conditioned generation achieves MAE < 0.5 log Papp units from target",
+        ">30% of generated peptides pass all three PK filters (permeable, stable, soluble) vs <15% for baselines"
+      ],
+      "secondary": [
+        ">80% of generated sequences achieve pLDDT > 70 in structure validation",
+        "Cross-attention fusion shows >5% improvement over late fusion ablation (replicating MMCD/Multi-Peptide approach)",
+        "Posterior collapse rate <20% using stabilization techniques vs >50% for vanilla disentangled VAE",
+        "Structure vs. sequence ablation shows >5% improvement in property prediction (R² improvement of at least 0.035)"
+      ],
+      "failure_criteria": [
+        "Structure vs. sequence ablation shows <3% improvement (challenges core hypothesis)",
+        "Disentangled latents collapse (>50% inactive dimensions) or fail independent control",
+        "Cross-attention provides no benefit over late fusion (<2% difference)",
+        "Generated sequences fail structural validation (<50% designable)"
+      ]
+    }
+  },
+  "experiments": [
+    {
+      "category": "Environment Configuration",
+      "title": "Setup Python Environment and Dependencies",
+      "description": "Create isolated virtual environment and install all required packages for peptide modeling, structure prediction, and deep learning.",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "step1": "Create Python 3.10 virtual environment: python -m venv .venv && source .venv/bin/activate",
+        "step2": "Install PyTorch 2.1+ with CUDA: pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu118",
+        "step3": "Install ESM-2 for sequence encoding: pip install fair-esm==2.0.0",
+        "step4": "Install RDKit for molecular processing: pip install rdkit==2023.9.1",
+        "step5": "Install PyTorch Geometric for GNN: pip install torch_geometric==2.4.0 torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu118.html",
+        "step6": "Install structure prediction and biology tools: pip install biopython==1.81 biotite==0.37.0",
+        "step7": "Install evaluation utilities: pip install scikit-learn==1.3.2 scipy==1.11.4 pandas==2.1.4 numpy==1.24.3 matplotlib==3.8.2 seaborn==0.13.0",
+        "step8": "Verify GPU availability: python -c 'import torch; print(f\"CUDA: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0)}\")'"
+      },
+      "output_artifacts": [
+        ".venv/ directory with all dependencies",
+        "logs/environment_setup.log"
+      ]
+    },
+    {
+      "category": "Data Preparation",
+      "title": "Download and Preprocess CycPeptMPDB Dataset",
+      "description": "Download the primary cyclic peptide permeability dataset from Li et al. 2023 (JCIM) and prepare train/validation/test splits with structure generation.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "step1": "Download CycPeptMPDB from http://cycpeptmpdb.com/download/ - get CycPeptMPDB_Peptide.csv containing 7,334 cyclic peptides",
+        "step2": "Filter dataset: remove sequences with >50 amino acids, remove sequences with non-standard amino acids (keep: standard 20 + D-amino acids + N-methylated)",
+        "step3": "Create stratified split: 70% train (~5133 peptides), 15% validation (~1100), 15% test (~1100) stratified by permeability bins (5 quantiles)",
+        "step4": "Generate 3D conformations using RDKit ETKDGv3 with MMFF94 optimization for all peptides; save as .sdf files in data/structures/",
+        "step5": "Compute molecular graphs: nodes=atoms (with features=[atomic_num, degree, formal_charge, hybridization]), edges=bonds (bond_type, conjugated, ring_status); save as PyG Data objects",
+        "step6": "Extract ESM-2 embeddings: use esm2_t33_650M_UR50D model (frozen), extract residue-level representations (last hidden layer, 1280-dim per residue)",
+        "step7": "Normalize permeability values (log Papp): compute mean/std on training set ONLY, apply normalization to all splits",
+        "step8": "Generate data statistics: sequence length distribution, permeability histogram, amino acid frequency, cyclic topology distribution",
+        "step9": "Save processed datasets: data/processed/{train,val,test}.pt with keys=['sequences', 'graphs', 'embeddings', 'labels', 'structures']"
+      },
+      "output_artifacts": [
+        "data/raw/CycPeptMPDB_Peptide.csv",
+        "data/processed/{train,val,test}.pt",
+        "data/structures/*.sdf",
+        "logs/data_statistics.json"
+      ]
+    },
+    {
+      "category": "Data Preparation",
+      "title": "Prepare Auxiliary Datasets for Multi-Task Learning",
+      "description": "Download and process solubility (PROSO-II) and stability datasets to enable multi-task property prediction following PLUM multi-objective approach.",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "step1": "Download PROSO-II solubility dataset (~4,000 peptide sequences with binary solubility labels)",
+        "step2": "Filter PROSO-II for peptides <50 amino acids, prioritize cyclic peptides where applicable",
+        "step3": "Curate stability dataset from literature: collect protease resistance data for ~1,000 cyclic peptides from PubMed abstracts",
+        "step4": "Unify data format: ensure all datasets have (sequence, graph, property_dict) structure with consistent keys",
+        "step5": "Create multi-task training indices: identify peptides with multiple property labels",
+        "step6": "Save auxiliary datasets: data/processed/prosoii.pt, data/processed/stability.pt with same structure as main dataset"
+      },
+      "output_artifacts": [
+        "data/processed/prosoii.pt",
+        "data/processed/stability.pt",
+        "logs/auxiliary_data_stats.json"
+      ]
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Train Simple Baseline: Sequence-Only VAE",
+      "description": "Simple baseline using LSTM-based VAE with only sequence information. Tests whether multimodal structure information is actually necessary.",
+      "estimated_time_minutes": 45,
+      "steps": {
+        "step1": "Implement SeqVAE: Encoder=LSTM(hidden=256, layers=2, bidirectional=True), Latent dim=256, Decoder=LSTM with attention mechanism",
+        "step2": "VAE loss: L_recon (cross-entropy) + β*L_KL with β=1.0, property prediction head=MLP(256→128→1 for permeability)",
+        "step3": "Train for 100 epochs with Adam (lr=1e-3), batch_size=128, early stopping (patience=10) on validation ELBO",
+        "step4": "Run 3 random seeds (42, 123, 456): save best model checkpoint for each seed",
+        "step5": "Evaluate on test set: report R², RMSE, MAE, Pearson r for permeability prediction",
+        "step6": "Generate 1000 peptides from prior distribution: compute validity (correct peptide syntax), novelty (not in training set), diversity (average pairwise edit distance)"
+      },
+      "hyperparameters": {
+        "encoder_hidden": 256,
+        "encoder_layers": 2,
+        "encoder_bidirectional": true,
+        "latent_dim": 256,
+        "decoder_hidden": 256,
+        "beta_kl": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 128,
+        "epochs": 100,
+        "early_stopping_patience": 10
+      },
+      "output_artifacts": [
+        "models/baseline_seqvae_seed{42,123,456}.pt",
+        "results/baseline_seqvae_metrics.json"
+      ]
+    },
+    {
+      "category": "Baseline Experiment",
+      "title": "Train Strong Baseline: DMPNN Property Predictor",
+      "description": "Reimplement DMPNN (Directed Message Passing Neural Network) from Liu et al. 2025 benchmark which achieves R² ≈ 0.65. This is the strongest published baseline for cyclic peptide permeability prediction.",
+      "estimated_time_minutes": 40,
+      "steps": {
+        "step1": "Implement DMPNN architecture following Liu et al. 2025: 5 message passing layers, hidden_dim=300, edge features=bond types (single, double, aromatic, etc.)",
+        "step2": "Global pooling: concatenate mean and max pooling (600-dim) followed by MLP(600→300→1) for permeability regression",
+        "step3": "Train for 100 epochs with Adam (lr=1e-3), batch_size=64, MSE loss on permeability",
+        "step4": "Run 3 random seeds (42, 123, 456)",
+        "step5": "Evaluate on test set: report R², RMSE, MAE, Pearson r. Target: reproduce ~R²=0.65 from Liu et al. 2025"
+      },
+      "hyperparameters": {
+        "num_mp_layers": 5,
+        "hidden_dim": 300,
+        "dropout": 0.2,
+        "learning_rate": 0.001,
+        "batch_size": 64,
+        "epochs": 100
+      },
+      "output_artifacts": [
+        "models/baseline_dmpnn_seed{42,123,456}.pt",
+        "results/baseline_dmpnn_metrics.json"
+      ],
+      "comparison_paper": "Liu et al. 2025, Journal of Cheminformatics"
+    },
+    {
+      "category": "Main Experiment",
+      "title": "Train StruCVAE-Pep Full Model",
+      "description": "Train complete StruCVAE-Pep with multimodal encoder, cross-attention fusion, disentangled latent space, and training stabilization techniques. Differs from PepMorph (sequence-only CVAE) and PLUM (sequence-only disentangled VAE) by adding explicit 3D structure via DMPNN and cross-attention fusion.",
+      "estimated_time_minutes": 90,
+      "steps": {
+        "step1": "Initialize multimodal encoder: ESM-2_t33_650M_UR50D (frozen, extract 1280-dim per residue) + DMPNN structure encoder (5 layers, 256 hidden)",
+        "step2": "Implement cross-attention fusion (8 heads): structure features attend to sequence features AND vice versa, enabling early multimodal interaction",
+        "step3": "Define disentangled latents: z_structure (128-dim, captures conformation), z_property (64-dim, captures permeability/stability), z_sequence (64-dim, captures residue patterns)",
+        "step4": "Build conditional decoder: LSTM (256 hidden) with property conditioning via FiLM (Feature-wise Linear Modulation) layers",
+        "step5": "Set up stabilized training: composite loss L_total = L_recon + β(t)*L_KL + 0.5*L_property + 0.1*L_structure_contrastive with cyclical KL annealing",
+        "step6": "Apply training stabilization: (a) Cyclical annealing: β cycles from 0→1 over 5 cycles, (b) Free bits: min KL=0.5 per dimension, (c) Aggressive encoder: 2 encoder updates per decoder when KL < threshold",
+        "step7": "Train for 150 epochs with AdamW (lr=5e-4, weight_decay=1e-5), batch_size=64, gradient clipping (max_norm=1.0)",
+        "step8": "Use learning rate scheduler: CosineAnnealing with warmup (10 epochs)",
+        "step9": "Run 3 random seeds (42, 123, 456), save best model based on validation ELBO + property MSE",
+        "step10": "Log training metrics every epoch: losses, R² on validation, latent statistics (active dimensions, KL per factor)"
+      },
+      "hyperparameters": {
+        "esm_model": "esm2_t33_650M_UR50D",
+        "esm_frozen": true,
+        "dmpnn_layers": 5,
+        "dmpnn_hidden": 256,
+        "fusion_heads": 8,
+        "fusion_type": "cross_attention",
+        "z_structure_dim": 128,
+        "z_property_dim": 64,
+        "z_sequence_dim": 64,
+        "decoder_hidden": 256,
+        "decoder_film": true,
+        "beta_kl_start": 0.0,
+        "beta_kl_end": 1.0,
+        "beta_cycles": 5,
+        "free_bits_threshold": 0.5,
+        "aggressive_encoder": true,
+        "lambda_property": 0.5,
+        "lambda_structure": 0.1,
+        "learning_rate": 0.0005,
+        "weight_decay": 0.00001,
+        "batch_size": 64,
+        "epochs": 150,
+        "warmup_epochs": 10,
+        "grad_clip": 1.0
+      },
+      "output_artifacts": [
+        "models/strucvae_full_seed{42,123,456}.pt",
+        "logs/strucvae_training_curves.json",
+        "logs/strucvae_latent_stats.json",
+        "results/strucvae_full_metrics.json"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Without Structure Encoder (vs PepMorph/PLUM baseline)",
+      "description": "Remove DMPNN structure encoder to isolate contribution of 3D structure information. Tests whether our multimodal approach outperforms sequence-only methods like PepMorph (CVAE) and PLUM (disentangled VAE).",
+      "estimated_time_minutes": 60,
+      "steps": {
+        "step1": "Modify architecture: Remove structure encoder and cross-attention fusion, use only ESM-2 sequence embeddings",
+        "step2": "Keep all other components identical: same disentangled latent dimensions, decoder architecture, loss weights",
+        "step3": "Train for 150 epochs with same hyperparameters as full model",
+        "step4": "Run 3 random seeds (42, 123, 456)",
+        "step5": "Compare test R² against full model: expect >5% drop if structure information is beneficial",
+        "step6": "Compare against published PepMorph/PLUM results to contextualize performance"
+      },
+      "output_artifacts": [
+        "models/ablation_no_structure_seed{42,123,456}.pt",
+        "results/ablation_no_structure_metrics.json"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Cross-Attention vs Late Fusion",
+      "description": "Compare cross-attention fusion (our approach) against late fusion used in MMCD (contrastive alignment) and Multi-Peptide (concatenation). Tests whether early interaction between modalities improves over late fusion.",
+      "estimated_time_minutes": 60,
+      "steps": {
+        "step1": "Implement late fusion variant: Process sequence and structure through separate encoders (no cross-attention), concatenate final representations",
+        "step2": "Keep latent dimensions and total parameter count comparable to full model",
+        "step3": "Train for 150 epochs with same hyperparameters as full model",
+        "step4": "Run 3 random seeds (42, 123, 456)",
+        "step5": "Compare R², generation quality against cross-attention model",
+        "step6": "Test hypothesis: cross-attention shows >5% improvement over late fusion by enabling dynamic modality interaction"
+      },
+      "comparison_papers": ["MMCD (late fusion via contrastive)", "Multi-Peptide (late fusion via concatenation)"],
+      "output_artifacts": [
+        "models/ablation_late_fusion_seed{42,123,456}.pt",
+        "results/ablation_late_fusion_metrics.json"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Without Disentanglement",
+      "description": "Use single latent space instead of factorized structure/property/sequence latents. Tests whether explicit disentanglement (following PLUM's approach but with structure) improves controllability.",
+      "estimated_time_minutes": 60,
+      "steps": {
+        "step1": "Modify architecture: Replace 3 separate latents (128+64+64=256 total) with single 256-dim latent",
+        "step2": "Keep encoder/decoder architecture otherwise identical",
+        "step3": "Train for 150 epochs with same hyperparameters",
+        "step4": "Run 3 random seeds (42, 123, 456)",
+        "step5": "Evaluate property control: measure if conditioning on target permeability values still works effectively",
+        "step6": "Compare reconstruction quality vs disentangled version"
+      },
+      "output_artifacts": [
+        "models/ablation_no_disentangle_seed{42,123,456}.pt",
+        "results/ablation_no_disentangle_metrics.json"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Training Stabilization: Posterior Collapse Analysis",
+      "description": "Systematically study posterior collapse in disentangled VAEs and validate that stabilization techniques prevent it. Compare against vanilla disentangled VAE without stabilization.",
+      "estimated_time_minutes": 75,
+      "steps": {
+        "step1": "Train vanilla disentangled VAE: No cyclical annealing (β=1.0 fixed), no free bits, no aggressive encoder",
+        "step2": "Train with cyclical annealing only: β cycles 0→1 over 5 cycles",
+        "step3": "Train with free bits only: min KL=0.5 per dimension",
+        "step4": "Train with aggressive encoder only: 2 encoder updates per decoder update",
+        "step5": "Train full stabilization: All techniques combined (as in main model)",
+        "step6": "For each variant, run single seed (42) for 100 epochs",
+        "step7": "Measure posterior collapse: % of latent dimensions with KL < 0.1 (inactive)",
+        "step8": "Compare: reconstruction loss, KL divergence per factor, property prediction R²",
+        "step9": "Target: Full stabilization achieves <20% collapsed dimensions vs >50% for vanilla"
+      },
+      "stabilization_techniques": {
+        "cyclical_annealing": "Fu et al. 2019 - gradually increase β from 0 to 1 over multiple cycles",
+        "free_bits": "Kingma et al. 2016 - minimum KL threshold per dimension prevents collapse",
+        "aggressive_encoder": "He et al. 2019 - multiple encoder updates per decoder when encoder lags"
+      },
+      "output_artifacts": [
+        "models/ablation_stabilization_{vanilla,annealing,freebits,aggressive,full}_seed42.pt",
+        "results/ablation_stabilization_analysis.json",
+        "figures/stabilization_comparison.png"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Ablation: Beta (KL Weight) Sensitivity",
+      "description": "Study trade-off between reconstruction quality and latent space regularization by varying β parameter.",
+      "estimated_time_minutes": 60,
+      "steps": {
+        "step1": "Train full model with β=0.01 (very weak regularization, AE-like behavior)",
+        "step2": "Train full model with β=0.1 (weak regularization)",
+        "step3": "Train full model with β=1.0 (standard VAE)",
+        "step4": "Train full model with β=5.0 (strong regularization, β-VAE regime)",
+        "step5": "For each β, run single seed (42) for 100 epochs",
+        "step6": "Compare: reconstruction accuracy (perplexity), latent space smoothness (interpolation quality), property prediction performance",
+        "step7": "Measure disentanglement metrics: mutual information between latent factors"
+      },
+      "output_artifacts": [
+        "models/ablation_beta_{0.01,0.1,1.0,5.0}_seed42.pt",
+        "results/ablation_beta_sweep.json"
+      ]
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Property Prediction Benchmarking",
+      "description": "Comprehensive evaluation of all models on permeability prediction with statistical significance testing against DMPNN baseline.",
+      "estimated_time_minutes": 20,
+      "steps": {
+        "step1": "Load all trained models: SeqVAE, DMPNN, StruCVAE-Pep, ablations (3 seeds each)",
+        "step2": "Compute predictions on test set for all models",
+        "step3": "Calculate metrics for each model/seed: R², Pearson r, Spearman ρ, RMSE, MAE",
+        "step4": "Report mean ± std across 3 seeds for each model",
+        "step5": "Perform statistical testing: paired t-test between StruCVAE-Pep and each baseline",
+        "step6": "Compute 95% confidence intervals using bootstrap resampling (n=1000)",
+        "step7": "Create comparison table: Model | R² (mean±std) | RMSE | MAE | Pearson r | p-value vs DMPNN"
+      },
+      "output_artifacts": [
+        "results/property_prediction_benchmark.json",
+        "results/property_prediction_table.csv"
+      ]
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Conditional Generation Evaluation",
+      "description": "Test whether disentangled property latent enables controllable generation with specific permeability targets.",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "step1": "Define target permeability values: [-6.5, -6.0, -5.5, -5.0, -4.5, -4.0] log Papp (covering range from impermeable to highly permeable)",
+        "step2": "For each target value, generate 500 peptides using property-conditioned sampling: z_p = μ_p(y_target) + σ_p(y_target) · ε",
+        "step3": "Compute metrics per target:",
+        "step3a": "  - Validity: % chemically valid (correct peptide bonds, proper cyclization)",
+        "step3b": "  - Property MAE: mean absolute error between target and predicted permeability",
+        "step3c": "  - Property variance: std of predicted permeabilities (lower = better control)",
+        "step4": "Compute aggregate: average MAE across targets, % within 0.5 log units of target, linear correlation between target and achieved",
+        "step5": "Compare against unconditional generation: sample from prior without property conditioning",
+        "step6": "Success criterion: MAE < 0.5 log units, strong correlation (r > 0.8) between target and achieved"
+      },
+      "output_artifacts": [
+        "results/conditional_generation_metrics.json",
+        "results/generated_peptides_conditioned.pt",
+        "figures/conditional_generation_scatter.png"
+      ]
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Multi-Objective Generation Quality",
+      "description": "Generate peptides and evaluate on multiple PK properties simultaneously. Test if joint optimization produces more 'drug-like' peptides than sequential filtering.",
+      "estimated_time_minutes": 25,
+      "steps": {
+        "step1": "Generate 2000 peptides from full model using diverse sampling (vary z_structure and z_sequence while targeting high z_property)",
+        "step2": "Evaluate each generated peptide on 3 PK properties:",
+        "step2a": "  - Permeability: predicted log Papp using trained model",
+        "step2b": "  - Solubility: binary classifier trained on PROSO-II dataset",
+        "step2c": "  - Stability: binary classifier trained on curated stability dataset",
+        "step3": "Define 'drug-like' criteria (based on literature): permeable (log Papp > -5.5), soluble (probability > 0.7), stable (probability > 0.7)",
+        "step4": "Compute % of generated peptides passing all three filters (target: >30%)",
+        "step5": "Compare against baseline SeqVAE: generate 2000 peptides and apply same filters",
+        "step6": "Compare against sequential pipeline: generate from SeqVAE, then filter with DMPNN predictor",
+        "step7": "Compute diversity metrics: pairwise sequence edit distance (Levenshtein), physicochemical property variance (hydrophobicity, charge, size)",
+        "step8": "Compute novelty: % of generated peptides not in training set (similarity < 0.8)"
+      },
+      "output_artifacts": [
+        "results/multi_objective_generation.json",
+        "results/generated_peptides_2000.json"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Latent Space Analysis and Disentanglement Verification",
+      "description": "Analyze learned latent spaces to verify disentanglement following PLUM's methodology but extended to 3D structure.",
+      "estimated_time_minutes": 20,
+      "steps": {
+        "step1": "Encode all test peptides into latent space using trained StruCVAE-Pep",
+        "step2": "Compute correlation between z_structure dimensions and structural properties:",
+        "step2a": "  - Radius of gyration (computed from 3D coordinates)",
+        "step2b": "  - Solvent Accessible Surface Area (SASA)",
+        "step2c": "  - Number of hydrogen bond donors/acceptors",
+        "step3": "Compute correlation between z_property dimensions and PK properties: permeability, solubility, stability",
+        "step4": "Measure disentanglement via mutual information:",
+        "step4a": "  - I(z_structure; z_property) should be low (structure independent of property)",
+        "step4b": "  - I(z_structure; z_sequence) should be low (structure independent of sequence patterns)",
+        "step4c": "  - I(z_property; z_sequence) should be low (property independent of sequence patterns)",
+        "step5": "Perform linear interpolation in latent space: traverse z_property dimension while keeping z_structure, z_sequence fixed; verify smooth permeability transition",
+        "step6": "Visualize latent space: t-SNE/UMAP projection colored by permeability bins, structure clusters, and sequence motifs"
+      },
+      "output_artifacts": [
+        "results/latent_space_analysis.json",
+        "figures/latent_space_tsne.png",
+        "figures/latent_interpolation.png"
+      ]
+    },
+    {
+      "category": "Analysis Experiment",
+      "title": "Structure Validation with ESMFold",
+      "description": "Validate that generated sequences adopt designable 3D structures. Use ESMFold as lightweight alternative to AlphaFold2.",
+      "estimated_time_minutes": 45,
+      "steps": {
+        "step1": "Select top 100 generated peptides by predicted permeability (high, medium, low bins)",
+        "step2": "Run ESMFold structure prediction for each selected peptide (install via pip install esm fold if needed, or use API)",
+        "step3": "Compute pLDDT (predicted Local Distance Difference Test) scores for each prediction",
+        "step4": "Compute TM-scores between predicted structures and reference cyclic peptide structures from PDB",
+        "step5": "Report statistics: % with pLDDT > 70 (designable threshold), % with pLDDT > 90 (high confidence)",
+        "step6": "Analyze relationship between predicted permeability and structural confidence",
+        "step7": "Visualize example structures: show high-confidence (pLDDT > 90) and low-confidence (pLDDT < 50) examples"
+      },
+      "output_artifacts": [
+        "results/structure_validation.json",
+        "structures/generated/{peptide_id}.pdb",
+        "figures/structure_examples.png"
+      ]
+    },
+    {
+      "category": "Visualization",
+      "title": "Generate Paper Figures",
+      "description": "Create publication-quality figures comparing against baselines and related work (PepMorph, PLUM, MMCD approaches).",
+      "estimated_time_minutes": 30,
+      "steps": {
+        "step1": "Figure 1: Model architecture diagram showing cross-attention fusion between ESM-2 and DMPNN, disentangled latents (z_structure, z_property, z_sequence)",
+        "step2": "Figure 2: Property prediction comparison - bar chart of R² for all models with error bars (3 seeds), highlight DMPNN baseline (R²≈0.65) from Liu et al. 2025",
+        "step3": "Figure 3: Conditional generation results - scatter plot of target vs achieved permeability, with R² and MAE annotated",
+        "figure3_caption": "Demonstrates disentangled property latent enables controllable generation unlike PepMorph (descriptor-only conditioning)",
+        "step4": "Figure 4: Ablation study results - performance drop when removing each component (structure, disentanglement, cross-attention)",
+        "figure4_caption": "Cross-attention vs Late Fusion comparison highlighting advantage over MMCD/Multi-Peptide approaches",
+        "step5": "Figure 5: Training stabilization comparison - KL divergence per factor over training for vanilla vs stabilized VAE",
+        "figure5_caption": "Shows <20% posterior collapse rate with stabilization vs >50% without",
+        "step6": "Figure 6: Latent space visualization - t-SNE with permeability coloring and interpolation trajectory",
+        "step7": "Figure 7: Generated peptide examples - 2D structures of high-scoring drug-like designs",
+        "step8": "Table 1: Main results with mean±std across 3 seeds, 95% CI, and p-values vs baselines",
+        "step9": "Table 2: Comparison with published methods (DMPNN from Liu et al. 2025, PepMorph, PLUM concepts)"
+      },
+      "output_artifacts": [
+        "figures/figure1_architecture.pdf",
+        "figures/figure2_property_prediction.pdf",
+        "figures/figure3_conditional_generation.pdf",
+        "figures/figure4_ablation.pdf",
+        "figures/figure5_stabilization.pdf",
+        "figures/figure6_latent_space.pdf",
+        "figures/figure7_examples.pdf",
+        "figures/table1_main_results.csv",
+        "figures/table2_comparison.csv"
+      ]
+    },
+    {
+      "category": "Effectiveness Evaluation",
+      "title": "Statistical Significance and Error Analysis",
+      "description": "Rigorous statistical testing and comprehensive error analysis to support claims.",
+      "estimated_time_minutes": 15,
+      "steps": {
+        "step1": "Compute 95% confidence intervals for all metrics using bootstrap resampling (n=1000 samples)",
+        "step2": "Perform paired t-tests between StruCVAE-Pep and each baseline (DMPNN, SeqVAE)",
+        "step3": "Apply Bonferroni correction for multiple comparisons if testing against >2 baselines",
+        "step4": "Analyze failure cases: identify peptide subgroups where model performs poorly (e.g., by length, by amino acid composition)",
+        "step5": "Correlation analysis: relationship between sequence length and prediction error, between structural complexity and error",
+        "step6": "Generate final summary report: mean ± std ± 95% CI for all key metrics with significance markers"
+      },
+      "output_artifacts": [
+        "results/statistical_tests.json",
+        "results/error_analysis.json",
+        "results/final_summary_report.json"
+      ]
+    }
+  ],
+  "execution_plan": {
+    "parallel_groups": [
+      {
+        "group_id": 1,
+        "description": "Environment and data setup (sequential, must complete first)",
+        "experiments": [
+          "Setup Python Environment and Dependencies",
+          "Download and Preprocess CycPeptMPDB Dataset",
+          "Prepare Auxiliary Datasets for Multi-Task Learning"
+        ],
+        "estimated_time_minutes": 60
+      },
+      {
+        "group_id": 2,
+        "description": "Baseline training (parallel on single GPU, sequential execution)",
+        "experiments": [
+          "Train Simple Baseline: Sequence-Only VAE",
+          "Train Strong Baseline: DMPNN Property Predictor"
+        ],
+        "estimated_time_minutes": 90
+      },
+      {
+        "group_id": 3,
+        "description": "Main model and key ablations (primary experiments)",
+        "experiments": [
+          "Train StruCVAE-Pep Full Model",
+          "Ablation: Without Structure Encoder (vs PepMorph/PLUM baseline)",
+          "Ablation: Cross-Attention vs Late Fusion"
+        ],
+        "estimated_time_minutes": 210
+      },
+      {
+        "group_id": 4,
+        "description": "Secondary ablations (can run after group 3 completes)",
+        "experiments": [
+          "Ablation: Without Disentanglement",
+          "Ablation: Beta (KL Weight) Sensitivity"
+        ],
+        "estimated_time_minutes": 120
+      },
+      {
+        "group_id": 5,
+        "description": "Training stabilization analysis (detailed study)",
+        "experiments": [
+          "Training Stabilization: Posterior Collapse Analysis"
+        ],
+        "estimated_time_minutes": 75
+      },
+      {
+        "group_id": 6,
+        "description": "Evaluation and analysis (after all training completes)",
+        "experiments": [
+          "Property Prediction Benchmarking",
+          "Conditional Generation Evaluation",
+          "Multi-Objective Generation Quality",
+          "Latent Space Analysis and Disentanglement Verification",
+          "Structure Validation with ESMFold"
+        ],
+        "estimated_time_minutes": 140
+      },
+      {
+        "group_id": 7,
+        "description": "Visualization and final reporting",
+        "experiments": [
+          "Generate Paper Figures",
+          "Statistical Significance and Error Analysis"
+        ],
+        "estimated_time_minutes": 45
+      }
+    ],
+    "total_estimated_time": "~7.5 hours with careful sequential execution on 1 GPU",
+    "critical_path": "Group 1 → Group 2/3 (partially parallel) → Group 4/5 → Group 6 → Group 7"
+  },
+  "related_work_discussion": {
+    "PepMorph": {
+      "paper": "Costa & Zavadlav 2025, arXiv:2509.02060",
+      "approach": "Transformer-based CVAE with masking mechanism for morphology-aware peptide generation",
+      "key_features": "ESM-2 alphabet, masking for partial conditioning, aggregation propensity prediction",
+      "our_difference": "PepMorph is sequence-only with descriptor conditioning; StruCVAE-Pep adds explicit 3D structure encoder (DMPNN) with cross-attention fusion and targets PK properties (permeability, stability) rather than aggregation morphology"
+    },
+    "PLUM": {
+      "paper": "Banerjee et al. 2026, bioRxiv",
+      "approach": "Disentangled VAE with Zseq (sequence), Zfunc (function), Zlength latents for antimicrobial peptides",
+      "key_features": "Adversarial predictors with gradient reversal, LSTM encoder/decoder, 88.5% AMP yield",
+      "our_difference": "PLUM uses sequence-only inputs (LSTM-based); StruCVAE-Pep adds explicit 3D structure encoding via DMPNN and cross-attention fusion; targets therapeutic PK properties vs antimicrobial activity"
+    },
+    "MMCD": {
+      "paper": "Wang et al. 2023/2024, arXiv:2312.15665",
+      "approach": "Multi-modal contrastive diffusion for peptide sequence-structure co-generation",
+      "key_features": "Late fusion via inter-contrastive (sequence-structure alignment) and intra-contrastive (therapeutic vs non-therapeutic) learning",
+      "our_difference": "MMCD uses diffusion with late fusion; StruCVAE-Pep uses VAE with early cross-attention fusion and explicit disentanglement of structure vs property factors; enables direct conditioning on continuous values"
+    },
+    "Multi_Peptide": {
+      "paper": "JCIM 2024",
+      "approach": "PeptideBERT + GNN with contrastive learning for peptide property prediction",
+      "key_features": "AlphaFold structures, late fusion via embedding concatenation, prediction-only task",
+      "our_difference": "Multi-Peptide is a prediction model with late fusion; StruCVAE-Pep is a generative model with early cross-attention fusion and end-to-end trainable architecture"
+    },
+    "SaProt": {
+      "paper": "Su et al. 2024, ICLR",
+      "correction": "Published in ICLR 2024 (not Nature Communications)",
+      "contribution": "Structure-aware protein language model using Foldseek 3Di tokens",
+      "our_extension": "Apply structure-aware representations to conditional peptide generation with cross-modal fusion"
+    },
+    "Liu_et_al_2025": {
+      "paper": "Liu et al. 2025, Journal of Cheminformatics",
+      "finding": "DMPNN achieves R² ≈ 0.65 on random split of CycPeptMPDB, outperforming other methods in comprehensive benchmark of 13 ML models",
+      "our_target": "Exceed DMPNN with R² > 0.70 using multimodal cross-attention approach"
+    }
+  },
+  "training_stabilization_details": {
+    "problem": "Disentangled VAEs suffer from posterior collapse where latent dimensions become inactive (KL approaches 0)",
+    "why_it_matters": "Collapse prevents disentangled representation learning, making property control impossible",
+    "techniques": [
+      {
+        "name": "Cyclical KL Annealing",
+        "reference": "Fu et al. 2019, NAACL",
+        "description": "Gradually increase β from 0 to 1 over multiple cycles (5 cycles, each with 30 epochs warmup)",
+        "purpose": "Allow model to learn good reconstructions before full KL regularization kicks in"
+      },
+      {
+        "name": "Free Bits",
+        "reference": "Kingma et al. 2016, NeurIPS",
+        "description": "Set minimum KL threshold of 0.5 nats per latent dimension",
+        "purpose": "Prevent any single dimension from collapsing entirely"
+      },
+      {
+        "name": "Aggressive Encoder Training",
+        "reference": "He et al. 2019, ICLR",
+        "description": "Perform 2 encoder updates per decoder update when KL < 1.0 (encoder is 'lagging')",
+        "purpose": "Ensure encoder keeps up with decoder to prevent posterior mismatch"
+      },
+      {
+        "name": "Decoder Weakening",
+        "description": "Randomly drop 20% of conditioning tokens during decoding",
+        "purpose": "Force decoder to rely on latent variables rather than autoregressive dependencies"
+      },
+      {
+        "name": "Factor-specific β",
+        "description": "Use β=2.0 for z_property (encourage disentanglement), β=0.5 for z_structure/z_sequence (preserve reconstruction)",
+        "purpose": "Balance disentanglement vs reconstruction quality per factor"
+      }
+    ],
+    "measurement": "Track % of latent dimensions with KL < 0.1 (inactive) per factor over training",
+    "target": "<20% collapsed dimensions with full stabilization vs >50% for vanilla VAE"
+  }
+}

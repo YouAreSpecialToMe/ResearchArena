@@ -1,0 +1,326 @@
+[
+  {
+    "category": "Environment Configuration",
+    "title": "Setup Python Environment and Dependencies",
+    "description": "Install required packages for ContextStab: PyTorch Geometric for GNNs, fair-esm for protein language models, scanpy for scRNA-seq processing, and additional dependencies. Ensure all packages are compatible with CUDA for A6000 GPU.",
+    "steps": {
+      "step1": "Activate virtual environment: source .venv/bin/activate",
+      "step2": "Install PyTorch Geometric and dependencies: pip install torch-geometric torch-scatter torch-sparse pyg-lib -f https://data.pyg.org/whl/torch-2.10.0+cu121.html",
+      "step3": "Install ESM-2: pip install fair-esm",
+      "step4": "Install additional bioinformatics tools: pip install biopython seaborn scikit-learn matplotlib",
+      "step5": "Verify GPU availability: python -c 'import torch; print(torch.cuda.get_device_name(0))'",
+      "step6": "Create directory structure: mkdir -p data/{proteingym,megascale,hca,processed} models outputs figures"
+    },
+    "estimated_time": "15 minutes",
+    "resource_requirements": "Internet connection, 5GB disk space"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Preprocess Protein Stability Datasets",
+    "description": "Download ProteinGym benchmark datasets and Megascale stability data. These provide the ground truth ΔΔG values for training and evaluation. Use the official ProteinGym repository for consistent evaluation.",
+    "steps": {
+      "step1": "Clone ProteinGym repository: git clone https://github.com/OATML-Markslab/ProteinGym.git",
+      "step2": "Download ProteinGym substitutions benchmark: wget -P data/proteingym/ https://marks.hms.harvard.edu/proteingym/ProteinGym_substitutions.zip",
+      "step3": "Unzip and organize: unzip data/proteingym/ProteinGym_substitutions.zip -d data/proteingym/",
+      "step4": "Download Megascale dataset: Use wget to download from https://doi.org/10.1101/2022.12.06.519132 (or use ProteinGym's included Megascale variants)",
+      "step5": "Preprocess data: python scripts/preprocess_stability_data.py --input data/proteingym/ --output data/processed/stability_benchmarks.pkl",
+      "step6": "Create train/val/test splits: Use ProteinGym's predefined splits to ensure comparability with baselines",
+      "step7": "Verify data integrity: Check that we have ~2.5M variants across 283 proteins for training, S669 (669 variants) and Ssym (~600 variants) for testing"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "20GB disk space, Internet connection"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Download and Process REAL Human Cell Atlas scRNA-seq Data",
+    "description": "Download real single-cell RNA-seq data from Human Cell Atlas (HCA) for 5 biologically distinct cell types. Use the Census API for programmatic access to harmonized scRNA-seq data. This addresses the critical feedback about using REAL data instead of synthetic contexts.",
+    "steps": {
+      "step1": "Install cellxgene-census: pip install cellxgene-census",
+      "step2": "Download real scRNA-seq for Plasma cells (bone marrow): python scripts/download_hca_data.py --cell_type 'plasma_cell' --tissue 'bone_marrow' --output data/hca/plasma_cells.h5ad",
+      "step3": "Download real scRNA-seq for Neurons (brain cortex): python scripts/download_hca_data.py --cell_type 'neuron' --tissue 'brain' --output data/hca/neurons.h5ad",
+      "step4": "Download real scRNA-seq for Hepatocytes (liver): python scripts/download_hca_data.py --cell_type 'hepatocyte' --tissue 'liver' --output data/hca/hepatocytes.h5ad",
+      "step5": "Download real scRNA-seq for Fibroblasts (lung): python scripts/download_hca_data.py --cell_type 'fibroblast' --tissue 'lung' --output data/hca/fibroblasts.h5ad",
+      "step6": "Download real scRNA-seq for Macrophages (multiple tissues): python scripts/download_hca_data.py --cell_type 'macrophage' --tissue 'lung,bone_marrow' --output data/hca/macrophages.h5ad",
+      "step7": "Extract proteostasis gene expression: python scripts/extract_proteostasis_genes.py --input_dir data/hca/ --output data/processed/cell_contexts.pkl --gene_list data/proteostasis_genes.txt",
+      "step8": "Validate cell type separation: Compute UMAP and verify distinct clustering by cell type"
+    },
+    "estimated_time": "45 minutes",
+    "resource_requirements": "15GB disk space, Internet connection"
+  },
+  {
+    "category": "Data Preparation",
+    "title": "Build STRING Protein-Protein Interaction Network",
+    "description": "Download and preprocess the STRING database to create the graph structure for the context encoder. Filter to high-confidence interactions and proteostasis-related genes.",
+    "steps": {
+      "step1": "Download STRING protein links (full network): wget -P data/string/ https://stringdb-static.org/download/protein.links.v12.0/9606.protein.links.v12.0.txt.gz",
+      "step2": "Download STRING protein info: wget -P data/string/ https://stringdb-static.org/download/protein.info.v12.0/9606.protein.info.v12.0.txt.gz",
+      "step3": "Gunzip files: gunzip data/string/*.gz",
+      "step4": "Filter for high-confidence interactions (combined_score > 700): python scripts/preprocess_string.py --input data/string/ --output data/processed/string_network.pkl --min_score 700",
+      "step5": "Extract proteostasis subgraph: python scripts/extract_proteostasis_subgraph.py --network data/processed/string_network.pkl --genes data/proteostasis_genes.txt --output data/processed/proteostasis_graph.pkl",
+      "step6": "Map genes to proteins: Create mapping from gene symbols to UniProt IDs using data/processed/gene_mapping.pkl"
+    },
+    "estimated_time": "20 minutes",
+    "resource_requirements": "5GB disk space"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 1: ESM-2 Zero-Shot Stability Prediction",
+    "description": "Implement and evaluate ESM-2 zero-shot predictions as the simplest baseline. This uses the pre-trained ESM-2 model without any task-specific training on stability data. Uses ESM-2 650M model.",
+    "steps": {
+      "step1": "Create baseline script: python baselines/esm2_zeroshot.py --model esm2_t33_650M_UR50D",
+      "step2": "Generate ESM-2 embeddings for all proteins in test sets",
+      "step3": "Compute mutation effect scores using ESM-2 log likelihood ratios: log P(mutant) - log P(wildtype)",
+      "step4": "Evaluate on ProteinGym test sets (S669, Ssym)",
+      "step5": "Compute metrics: Pearson correlation, Spearman correlation, RMSE between predicted and experimental ΔΔG",
+      "step6": "Save predictions to outputs/baselines/esm2_zeroshot_predictions.pkl",
+      "step7": "Expected performance: Pearson r ~0.40-0.50 based on literature (ESM-2 alone, no stability training)"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "1x A6000 (20GB VRAM), seeds: 42"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 2: Fine-tuned ESM-2 on Stability Data",
+    "description": "Fine-tune ESM-2 on Megascale/ProteinGym stability data. This represents a strong baseline that learns from the same training data as ContextStab but without context awareness.",
+    "steps": {
+      "step1": "Create fine-tuning script: python baselines/esm2_finetuned.py --model esm2_t33_650M_UR50D --train_data data/processed/stability_benchmarks.pkl",
+      "step2": "Freeze bottom 30 layers, fine-tune top 3 layers + prediction head",
+      "step3": "Training config: batch_size=8, learning_rate=1e-5, epochs=5, warmup_steps=1000",
+      "step4": "Train on Megascale (~260K variants) with 5-fold cross-validation",
+      "step5": "Run for 3 random seeds: 42, 123, 456",
+      "step6": "Evaluate on S669, Ssym test sets",
+      "step7": "Save best model to models/baselines/esm2_finetuned_seed{N}.pt",
+      "step8": "Expected performance: Pearson r ~0.60-0.65 (competitive with Pro-PRIME on some benchmarks)"
+    },
+    "estimated_time": "90 minutes (3 seeds x 30 min)",
+    "resource_requirements": "1x A6000 (40GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 3: PINNACLE + MLP for Stability Prediction",
+    "description": "Use PINNACLE's context-aware protein embeddings as input to an MLP predictor for ΔΔG. This directly tests whether existing context-aware representations (without explicit stability training) can predict stability changes.",
+    "steps": {
+      "step1": "Download pre-trained PINNACLE embeddings from https://github.com/pnnl/pinnacle (or use API if available)",
+      "step2": "Create PINNACLE baseline script: python baselines/pinnacle_baseline.py",
+      "step3": "For each protein, extract PINNACLE embeddings for the cell types being evaluated",
+      "step4": "Train MLP head on top of PINNACLE embeddings: 2-layer MLP with hidden_dim=512",
+      "step5": "Training data: Megascale variants paired with cell-type-specific PINNACLE embeddings",
+      "step6": "Run for 3 random seeds: 42, 123, 456",
+      "step7": "Evaluate on test sets and save to outputs/baselines/pinnacle_mlp_seed{N}.pkl",
+      "step8": "Expected performance: Pearson r ~0.55-0.62 (PINNACLE provides context but lacks stability-specific training)"
+    },
+    "estimated_time": "45 minutes",
+    "resource_requirements": "1x A6000 (16GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Baseline Experiment",
+    "title": "Baseline 4: Context-Agnostic GNN (Sequence + Graph Only)",
+    "description": "Ablation baseline: ContextStab architecture without cellular context input. Tests whether the GNN architecture itself (without context information) provides any benefit over simple ESM-2 fine-tuning.",
+    "steps": {
+      "step1": "Create context-agnostic variant: python baselines/context_agnostic_gnn.py",
+      "step2": "Use same architecture as ContextStab but with zero/constant cell context vectors",
+      "step3": "This isolates the contribution of the real cellular context information",
+      "step4": "Train on Megascale with same hyperparameters as ContextStab",
+      "step5": "Run for 3 random seeds: 42, 123, 456",
+      "step6": "Evaluate and save to outputs/baselines/context_agnostic_seed{N}.pkl"
+    },
+    "estimated_time": "60 minutes",
+    "resource_requirements": "1x A6000 (35GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Train ContextStab with REAL Human Cell Atlas Data",
+    "description": "Train the full ContextStab model using real scRNA-seq data from Human Cell Atlas. This is the main proposed method integrating ESM-2 protein embeddings with real cellular contexts via Graph Attention Network.",
+    "steps": {
+      "step1": "Implement ContextStab architecture in models/contextstab.py",
+      "step2": "Architecture details: ESM-2 (650M, frozen) → 1280-dim embeddings",
+      "step3": "Context encoder: 3-layer GAT with hidden_dim=256, heads=4, dropout=0.1",
+      "step4": "Graph: Proteostasis gene network from STRING (high-confidence interactions)",
+      "step5": "Fusion: Cross-attention between protein embedding (query) and context graph (keys/values)",
+      "step6": "Prediction head: 2-layer MLP (512 → 256 → 1) predicting ΔΔG",
+      "step7": "Training: AdamW optimizer, lr=1e-4 with cosine decay, batch_size=16, epochs=10",
+      "step8": "Data pairing: Each protein mutation paired with all 5 real cell type contexts from HCA",
+      "step9": "Loss: MSE on ΔΔG + 0.01*contrastive_loss(encourage similar predictions for similar contexts)",
+      "step10": "Train for 3 random seeds: 42, 123, 456",
+      "step11": "Save checkpoints: models/contextstab_seed{N}_epoch{E}.pt"
+    },
+    "estimated_time": "150 minutes (3 seeds x 50 min)",
+    "resource_requirements": "1x A6000 (45GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Main Experiment",
+    "title": "Evaluate Context-Dependent Predictions Across Real Cell Types",
+    "description": "Test the core hypothesis: Does ContextStab predict meaningful variation in stability across different real cell types from Human Cell Atlas? Evaluate predictions for the same mutations across plasma cells, neurons, hepatocytes, fibroblasts, and macrophages.",
+    "steps": {
+      "step1": "Load trained ContextStab model for each seed",
+      "step2": "For each mutation in test sets, predict ΔΔG for all 5 cell types",
+      "step3": "Compute prediction variance across cell types for each mutation",
+      "step4": "Identify mutations with cell-type-specific effects (>1 kcal/mol difference between max and min)",
+      "step5": "Test biological hypothesis: Plasma cells (high ER stress) show different predictions for secreted proteins vs. fibroblasts",
+      "step6": "Test biological hypothesis: Neurons show different predictions for proteins associated with neurodegeneration",
+      "step7": "Compute context sensitivity metric: Percentage of predictions varying by >1 kcal/mol across cell types",
+      "step8": "Success criterion: >20% of predictions show >1 kcal/mol variation across cell types",
+      "step9": "Save results to outputs/main/context_dependent_predictions.pkl"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "1x A6000 (20GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 1: Effect of Real vs Synthetic Contexts",
+    "description": "Critical ablation to validate the importance of using REAL scRNA-seq data from Human Cell Atlas versus synthetic/artificial cellular contexts. This directly addresses the feedback about using real data.",
+    "steps": {
+      "step1": "Create synthetic context baseline: Generate 5 synthetic context vectors (random gene expression profiles)",
+      "step2": "Train ContextStab with synthetic contexts (same architecture, same training data)",
+      "step3": "Compare performance: Real HCA contexts vs Synthetic contexts",
+      "step4": "Metrics: Overall accuracy on S669/Ssym + context-sensitivity score",
+      "step5": "Expected: Real contexts should show higher context-sensitivity and potentially better overall accuracy if context information is useful",
+      "step6": "Run for 3 random seeds: 42, 123, 456",
+      "step7": "Save results to outputs/ablations/real_vs_synthetic_contexts.pkl"
+    },
+    "estimated_time": "60 minutes",
+    "resource_requirements": "1x A6000 (45GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 2: Component Ablation - Context Encoder",
+    "description": "Remove the Graph Attention Network context encoder and replace with simple MLP on gene expression. Tests whether the graph structure of protein interactions provides value.",
+    "steps": {
+      "step1": "Create ablation: Replace GAT with 2-layer MLP on flattened gene expression",
+      "step2": "Keep all other components identical (ESM-2, fusion, prediction head)",
+      "step3": "Train on same data with same hyperparameters",
+      "step4": "Run for 3 random seeds: 42, 123, 456",
+      "step5": "Compare: Full GAT vs MLP-only context encoding",
+      "step6": "Save results to outputs/ablations/no_graph_structure.pkl"
+    },
+    "estimated_time": "45 minutes",
+    "resource_requirements": "1x A6000 (35GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 3: Component Ablation - Cross-Attention Fusion",
+    "description": "Replace the cross-attention fusion mechanism with simple concatenation. Tests whether the learned attention-based fusion is necessary.",
+    "steps": {
+      "step1": "Create ablation: Replace cross-attention with concatenation + linear projection",
+      "step2": "Concatenate protein embedding and pooled context vector, project to 512-dim",
+      "step3": "Train on same data with same hyperparameters",
+      "step4": "Run for 3 random seeds: 42, 123, 456",
+      "step5": "Compare: Cross-attention fusion vs simple concatenation",
+      "step6": "Save results to outputs/ablations/no_cross_attention.pkl"
+    },
+    "estimated_time": "45 minutes",
+    "resource_requirements": "1x A6000 (35GB VRAM), 3 random seeds"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Ablation Study 4: Gene Set Analysis",
+    "description": "Test which gene sets contribute most to context-aware predictions. Compare full proteostasis gene set (~500 genes) vs chaperones only (~60 core chaperones) vs random gene sets.",
+    "steps": {
+      "step1": "Chaperone-only context: Use only 60 core chaperones from Brehme et al. (2014)",
+      "step2": "Full proteostasis: Chaperones + proteasome + autophagy + ER stress markers (~500 genes)",
+      "step3": "Random genes: Randomly select 500 genes as negative control",
+      "step4": "Train 3 variants with same architecture and hyperparameters",
+      "step5": "Run for 3 random seeds each: 42, 123, 456",
+      "step6": "Compare context-sensitivity across gene sets",
+      "step7": "Expected: Full proteostasis > Chaperones only > Random genes",
+      "step8": "Save results to outputs/ablations/gene_set_comparison.pkl"
+    },
+    "estimated_time": "90 minutes",
+    "resource_requirements": "1x A6000 (35GB VRAM), 3 random seeds x 3 variants"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Zero-Shot Cell Type Transfer",
+    "description": "Test whether ContextStab generalizes to unseen cell types from Human Cell Atlas. Train on 4 cell types, test on 1 held-out cell type, rotating through all combinations.",
+    "steps": {
+      "step1": "Create 5 train/test splits: Each leaving out one cell type",
+      "step2": "For each split: Train on 4 cell types, evaluate on held-out cell type",
+      "step3": "Metric: Prediction consistency (Spearman correlation between predictions on held-out vs training cell types)",
+      "step4": "Test if similar cell types (e.g., fibroblasts vs macrophages) transfer better than dissimilar ones",
+      "step5": "Run for 3 random seeds: 42, 123, 456",
+      "step6": "Save results to outputs/analysis/zero_shot_transfer.pkl"
+    },
+    "estimated_time": "120 minutes",
+    "resource_requirements": "1x A6000 (45GB VRAM), 3 random seeds x 5 folds"
+  },
+  {
+    "category": "Analysis Experiment",
+    "title": "Interpretability Analysis: Attention Patterns",
+    "description": "Analyze the cross-attention weights to understand which cellular factors most influence predictions. Validate against known chaperone-client relationships from literature.",
+    "steps": {
+      "step1": "Extract attention weights from trained ContextStab model for all test predictions",
+      "step2": "Aggregate attention scores per gene across all predictions",
+      "step3": "Identify top-attended genes: Are they enriched for chaperones (HSP90, HSP70)?",
+      "step4": "Analyze by protein family: Do different proteins attend to different cellular factors?",
+      "step5": "Validate known relationships: Does HSP90 attention correlate with known HSP90 client proteins?",
+      "step6": "Compare attention patterns across cell types: Which genes distinguish plasma cells from neurons?",
+      "step7": "Create visualization: Heatmap of attention weights (proteins x genes)",
+      "step8": "Save results to outputs/analysis/attention_analysis.pkl"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "1x A6000 (20GB VRAM)"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Statistical Significance Testing",
+    "description": "Perform rigorous statistical tests to validate that improvements are significant and not due to random chance. Use paired tests where appropriate.",
+    "steps": {
+      "step1": "For each metric (Pearson r, Spearman r, RMSE), compute mean and std across 3 seeds",
+      "step2": "Paired t-test between ContextStab and each baseline on matched predictions",
+      "step3": "Wilcoxon signed-rank test for non-parametric comparison",
+      "step4": "Effect size calculation: Cohen's d for magnitude of improvement",
+      "step5": "Multiple comparison correction: Bonferroni correction for testing against multiple baselines",
+      "step6": "Report 95% confidence intervals for all metrics",
+      "step7": "Save statistical test results to outputs/evaluation/statistical_tests.json"
+    },
+    "estimated_time": "15 minutes",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Effectiveness Evaluation",
+    "title": "Success Criteria Verification",
+    "description": "Verify that the results meet all predefined success criteria from the proposal. Document which criteria are met, which are not, and why.",
+    "steps": {
+      "step1": "Criterion 1: Standard benchmark performance - Check if Pearson r > 0.65 on ProteinGym",
+      "step2": "Criterion 2: Context sensitivity - Check if >20% predictions vary by >1 kcal/mol across cell types",
+      "step3": "Criterion 3: Real data validation - Verify real HCA data outperforms synthetic contexts",
+      "step4": "Criterion 4: Interpretability - Check if attention correlates with known chaperone relationships",
+      "step5": "Document all results in outputs/evaluation/success_criteria.md",
+      "step6": "For any unmet criteria, analyze why and discuss limitations"
+    },
+    "estimated_time": "15 minutes",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Paper Figures",
+    "description": "Create publication-quality figures for the research paper. Include comparison plots, context-dependent prediction visualizations, and interpretability analysis.",
+    "steps": {
+      "step1": "Figure 1: Method overview diagram - ContextStab architecture with real HCA data flow",
+      "step2": "Figure 2: Benchmark comparison bar chart - ContextStab vs all baselines (ESM-2, Fine-tuned, PINNACLE) with error bars from 3 seeds",
+      "step3": "Figure 3: Context-dependent predictions heatmap - ΔΔG predictions for mutations (rows) across 5 cell types (columns)",
+      "step4": "Figure 4: Cell type variance distribution - Histogram of prediction variance across cell types",
+      "step5": "Figure 5: Ablation study results - Performance drop when removing each component",
+      "step6": "Figure 6: Attention interpretability - Top attended genes and their biological functions",
+      "step7": "Figure 7: Real vs Synthetic comparison - Side-by-side performance comparison",
+      "step8": "Save all figures to figures/ in PDF and PNG formats"
+    },
+    "estimated_time": "30 minutes",
+    "resource_requirements": "CPU only"
+  },
+  {
+    "category": "Visualization",
+    "title": "Generate Results Tables",
+    "description": "Create comprehensive results tables for the paper with all metrics, standard deviations, and statistical significance indicators.",
+    "steps": {
+      "step1": "Table 1: Main benchmark results - All methods on S669 and Ssym with Pearson/Spearman/RMSE",
+      "step2": "Table 2: Context sensitivity analysis - Variance statistics across cell types",
+      "step3": "Table 3: Ablation study results - Component contribution analysis",
+      "step4": "Table 4: Gene set comparison - Performance with different gene subsets",
+      "step5": "Table 5: Zero-shot transfer results - Generalization to held-out cell types",
+      "step6": "Save tables as LaTeX and CSV formats in figures/tables/"
+    },
+    "estimated_time": "20 minutes",
+    "resource_requirements": "CPU only"
+  }
+]
