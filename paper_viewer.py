@@ -11,7 +11,68 @@ import os
 import streamlit as st
 import pandas as pd
 
+from datetime import datetime
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
+COMMENTS_FILE = os.path.join(ROOT, "papers", "human_comments.json")
+
+
+def load_comments():
+    if os.path.exists(COMMENTS_FILE):
+        with open(COMMENTS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_comments(comments):
+    with open(COMMENTS_FILE, "w") as f:
+        json.dump(comments, f, indent=2)
+
+
+def render_comments(paper_key):
+    """Render human comments section for a paper."""
+    if "comments" not in st.session_state:
+        st.session_state.comments = load_comments()
+
+    comments = st.session_state.comments
+    paper_comments = comments.get(paper_key, [])
+
+    # Display existing comments
+    if paper_comments:
+        for i, c in enumerate(paper_comments):
+            st.markdown(
+                f'<div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:0.8rem;margin-bottom:0.5rem">'
+                f'<div style="font-size:0.75rem;color:#8b949e;margin-bottom:0.3rem">{c["timestamp"]}</div>'
+                f'<div style="color:#c9d1d9">{c["text"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        if st.button("Clear all comments", key=f"clear_{paper_key}"):
+            comments.pop(paper_key, None)
+            save_comments(comments)
+            st.session_state.comments = comments
+            st.rerun()
+    else:
+        st.caption("No comments yet.")
+
+    # Add new comment
+    new_comment = st.text_area(
+        "Add a comment",
+        key=f"comment_input_{paper_key}",
+        height=100,
+        placeholder="Write your notes about this paper, its reviews, or experiments...",
+    )
+    if st.button("Save Comment", key=f"save_{paper_key}"):
+        if new_comment.strip():
+            if paper_key not in comments:
+                comments[paper_key] = []
+            comments[paper_key].append({
+                "text": new_comment.strip(),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+            save_comments(comments)
+            st.session_state.comments = comments
+            st.rerun()
 
 # ── Seed display names ──────────────────────────────────────────────
 DOMAIN_NAMES = {
@@ -400,7 +461,11 @@ def main():
                     )
 
             # Review tabs
-            tab_pr, tab_sar, tab_idea = st.tabs(["Peer Reviews", "Stanford AI Review", "Paper Info"])
+            paper_key = f"{p['agent']}/{p['seed']}_trial{p['trial']}"
+            comments = st.session_state.get("comments", load_comments())
+            n_comments = len(comments.get(paper_key, []))
+            comment_label = f"My Notes ({n_comments})" if n_comments else "My Notes"
+            tab_pr, tab_sar, tab_idea, tab_comments = st.tabs(["Peer Reviews", "Stanford AI Review", "Paper Info", comment_label])
 
             with tab_pr:
                 render_pr_reviews(p["pr_data"])
@@ -442,6 +507,9 @@ def main():
                     if py_files:
                         st.markdown(f"**Experiment Code ({len(py_files)} files)**")
                         st.code("\n".join(sorted(py_files)), language="text")
+
+            with tab_comments:
+                render_comments(paper_key)
 
 
 if __name__ == "__main__":
