@@ -23,15 +23,15 @@
 
 | Integrity issues | Claude | Codex | Kimi |
 |---|---|---|---|
-| Results mismatch | 3 (8%) | 1 (3%) | 1 (3%) |
-| Implementation mismatch | 3 (8%) | 0 (0%) | 4 (10%) |
-| Both | 8 (21%) | 2 (5%) | 20 (51%) |
-| Fake reference | 11 (28%) | 3 (8%) | 18 (46%) |
+| Results mismatch | 6 (15%) | 2 (5%) | 4 (10%) |
+| Setting mismatch | 10 (26%) | 1 (3%) | 5 (13%) |
+| Both | 12 (31%) | 2 (5%) | 30 (77%) |
+| Fake reference | 14 (36%) | 3 (8%) | 28 (72%) |
 
 **Takeaways:**
 - Current CLI agents trail human-authored papers substantially on SAR acceptance
 - **Claude Code** is the strongest agent overall (41% SAR accept); **Codex** is the most *trustworthy* (lowest integrity issues)
-- **Kimi Code** shows the most paper–artifact divergence — 51% of papers have both results and implementation mismatches, 46% have fake references
+- **Kimi Code** shows the most paper–artifact divergence — 77% of papers have both results and setting mismatches, 72% have fake references
 - Computational resources are *not* the main bottleneck; upgrading A6000 → H100 shows no consistent pattern
 - SAR misses code-level failures that only a code-aware peer review can catch
 
