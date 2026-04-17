@@ -1,10 +1,45 @@
-# ResearchArena
+# Research Arena
 
-Benchmark harness for testing whether CLI agents (Claude Code, Codex, Kimi Code, Mini-Agent) can autonomously conduct end-to-end research — from idea to accepted paper.
+**How far are we from true auto-research?** A comprehensive benchmark of off-the-shelf CLI agents (Claude Code, Codex, Kimi Code) conducting end-to-end research across 13 CS domains.
+
+**Blog & results:** [youarespecialtome.github.io](https://youarespecialtome.github.io/ResearchArena/)
+
+- **117 agent-generated papers** (39 per agent, 3 trials × 13 seeds) across both GPU and CPU domains
+- **351 peer reviews** (code-aware, 3 reviewers per paper) + **117 Stanford Agentic Reviewer scores**
+- **302 human-authored ICLR 2025 papers** (100 accepted, 100 rejected, 102 FARS) evaluated as baseline
+- **Manual annotation of 117 papers** for results mismatches, implementation mismatches, and fabricated references
+
+## Key findings
+
+| SAR (manually annotated) | Accept | Reject | Accept % |
+|---|---|---|---|
+| ICLR Accepted | 76 | 24 | 76.0% |
+| ICLR Weighted (32%/68%) | 59.7 | 40.3 | 59.7% |
+| ICLR Rejected | 52 | 48 | 52.0% |
+| **Claude Code** | 16 | 23 | 41.0% |
+| FARS (Analemma) | 22 | 80 | 21.6% |
+| **Codex** | 5 | 34 | 12.8% |
+| **Kimi Code** | 2 | 37 | 5.1% |
+
+| Integrity issues | Claude | Codex | Kimi |
+|---|---|---|---|
+| Results mismatch | 3 (8%) | 1 (3%) | 1 (3%) |
+| Implementation mismatch | 3 (8%) | 0 (0%) | 4 (10%) |
+| Both | 8 (21%) | 2 (5%) | 20 (51%) |
+| Fake reference | 11 (28%) | 3 (8%) | 18 (46%) |
+
+**Takeaways:**
+- Current CLI agents trail human-authored papers substantially on SAR acceptance
+- **Claude Code** is the strongest agent overall (41% SAR accept); **Codex** is the most *trustworthy* (lowest integrity issues)
+- **Kimi Code** shows the most paper–artifact divergence — 51% of papers have both results and implementation mismatches, 46% have fake references
+- Computational resources are *not* the main bottleneck; upgrading A6000 → H100 shows no consistent pattern
+- SAR misses code-level failures that only a code-aware peer review can catch
+
+See [Case Studies: Paper–Artifact Divergence](https://youarespecialtome.github.io/ResearchArena/#case-studies) for five illustrative failure modes with embedded PDFs.
 
 ## What this does
 
-Given a seed field (e.g., "computer vision", "query optimization", "program analysis"), the pipeline:
+Given a seed field (e.g., "computer vision", "compiler optimization"), the pipeline:
 
 1. **Launches a CLI agent** with appropriate compute access (GPU or CPU), network, and packages
 2. **The agent produces a structured research proposal** — `proposal.md`, `plan.json`, and `idea.json`
@@ -14,139 +49,110 @@ Given a seed field (e.g., "computer vision", "query optimization", "program anal
 6. **Other CLI agents review it** — with read-only workspace access, searching online to verify novelty
 7. If rejected, the pipeline iterates — refine the idea, retry experiments, or try a new idea entirely
 
-Each stage has a dedicated guideline file that the agent reads before starting. The agent receives computational resource constraints upfront so it scopes ideas to fit.
-
 ## Conferences & Areas
 
 Seeds span multiple CS conferences and two platforms:
 
 | Platform | Areas | Conferences |
 |---|---|---|
-| **GPU** | NLP, CV, graphics, generative models, RL, robotics, AI4Science | ICLR, NeurIPS, ICML, CVPR, ACL, EMNLP, SIGGRAPH, CoRL |
-| **CPU** | Systems, databases, PL, theory, architecture, security | OSDI, SOSP, SIGMOD, VLDB, PLDI, POPL, STOC, FOCS, ISCA, CCS |
+| **GPU** | NLP, CV, generative models, interpretability, supervised representation learning, privacy, AI for biology, datasets & benchmarks | ICLR, NeurIPS, ICML, CVPR, ACL, EMNLP |
+| **CPU** | Causal learning, compiler optimization, data integration, operating systems, probabilistic methods | OSDI, SOSP, SIGMOD, VLDB, PLDI, POPL |
 
-GPU seeds get CUDA-enabled containers with GPU access. CPU seeds get lightweight containers optimized for analytical, algorithmic, and systems-level experiments.
-
-## Architecture
+## Repo structure
 
 ```
-                    ┌──────────────────────────────────────────────────────────────────┐
-                    │                  researcharena (harness)                          │
-                    │                                                                    │
-Seed field ───────→ │  IDEATION ──→ SELF-REVIEW ──→ EXPERIMENTS ──→ SELF-REVIEW        │
-  + platform        │  (proposal.md    (idea)        (follow           (experiment)      │
-  (gpu/cpu)         │   plan.json                     plan.json)                         │
-                    │   idea.json)                        │                              │
-                    │       ↑                             ↓                              │
-                    │       │ score<6              PAPER ──→ SELF-REVIEW ──→ PEER REVIEW │
-                    │       │ (revise)             (paper.tex)  (paper)        │         │
-                    │       │                                      ↑           │         │
-                    │       │                         score<6 ─────┘           │         │
-                    │       │                                                  │         │
-                    │       │                                        ├─ score ≥ 8        │
-                    │       │                                        │   → ACCEPTED      │
-                    │       │                                        │                   │
-                    │       │                                        ├─ score 5-7        │
-                    │       │                                        │   → REFINE IDEA   │
-                    │       │                                        │   → re-experiment  │
-                    │       │                                        │   → rewrite paper  │
-                    │       │                                        │                   │
-                    │       │                                        └─ score < 5        │
-                    │       │                                            → reject         │
-                    │       └────────────────────────── try new idea ────────────────────│
-                    │                                                                    │
-                    │  Self-review: score >= 6 pass, < 6 revise (up to 2 retries)       │
-                    │  Peer review: 3 independent reviewers in parallel                  │
-                    │  Each stage = one CLI agent invocation                              │
-                    └──────────────────────────────────────────────────────────────────┘
+ResearchArena/
+├── papers/                     # 117 agent-generated papers
+│   ├── claude/{seed}_trial{N}/
+│   │   ├── paper.pdf, paper.tex, references.bib
+│   │   ├── idea.json, plan.json, proposal.md
+│   │   ├── reviews.json              # 3 peer reviews
+│   │   ├── stanford_review.json      # SAR review
+│   │   └── exp/                      # experiment code (.py/.sh)
+│   ├── codex/…
+│   └── kimi/…
+├── blog/                       # website (gh-pages branch mirrors this)
+│   ├── index.html, index_zh.html, papers.html
+│   └── assets/plots/           # all figures used in the blog
+├── analysis/                   # baseline assessment data + annotations
+│   ├── iclr2025_baseline/      # 300 ICLR papers, SAR assessments
+│   ├── stanford_reviews/       # FARS + ICLR SAR fetches
+│   └── sar_annotations_*.json  # manual annotations
+├── researcharena/              # the benchmark harness
+│   ├── stages/                 # ideation / experiment / paper / review
+│   ├── templates/              # domain guidelines (ml/systems/databases/pl/theory/security)
+│   └── utils/                  # agent_runner, tracker, checkpoint, …
+├── paper_viewer.py             # Streamlit app to browse papers + reviews
+├── sar_annotator.py            # Streamlit app for manual SAR annotation
+├── configs/                    # YAML configs
+├── scripts/                    # SLURM / launcher scripts
+└── Dockerfile[.cpu]            # agent containers
 ```
 
-### Stages & guidelines
+## Setup
 
-| Stage | Agent reads | Agent produces | Guideline |
-|---|---|---|---|
-| 1. IDEATION | seed field + resources + feedback (if revising) | `proposal.md` + `plan.json` + `idea.json` + `references/` | `idea_guidelines.md` |
-| 1b. REVIEW (idea) | proposal + plan + idea + references | score + feedback | `reviewer_guidelines.md` |
-| 2. EXPERIMENTS | `plan.json` + `idea.json` + resources | `results.json` + `exp/` + `figures/` | `experiment_guidelines.md` |
-| 2b. REVIEW (experiment) | results + code + logs vs plan | score + feedback | `reviewer_guidelines.md` |
-| 3. PAPER | proposal + plan + results + revision budget | `paper.tex` | `paper_writing_guidelines.md` |
-| 3b. REVIEW (paper) | paper + results + code | score + feedback | `reviewer_guidelines.md` |
-| 4. PEER REVIEW | paper + workspace (read-only) | review scores | `reviewer_guidelines.md` |
+```bash
+pip install -e .
 
-### Review gates
+# Containers (Docker mode)
+docker pull pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+docker tag pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel researcharena/agent:latest
+docker build -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
 
-Three quality checkpoints between stages, using the researcher agent as a reviewer (with the same `reviewer_guidelines.md` used by peer reviewers):
-
-| Gate | Focus dimensions | Pass threshold |
-|---|---|---|
-| After ideation | Novelty, soundness, significance, plan quality, references | score >= 6 |
-| After experiments | Plan compliance, rigor, integrity, reproducibility | score >= 6 |
-| After paper | All 9 dimensions (full review) | score >= 6 |
-
-Each gate retries up to 2 times before proceeding anyway. Gates can be disabled per-stage or entirely via config.
-
-### Experiment self-review: abandon on low score
-
-| Score | Action |
-|---|---|
-| >= 6 | Proceed to paper writing |
-| 4-5 | Back to experiments with feedback (up to 2 retries) |
-| < 4 | Abandon idea, start fresh ideation |
-
-### Runtime modes
-
-The harness supports two runtime modes:
-
-**Docker/Podman mode** (`runtime: "docker"`, default) — each agent runs in an isolated container:
-
-```
-GPU platform: researcharena/agent:latest (pytorch/pytorch base, CUDA)
-CPU platform: researcharena/agent-cpu:latest (python:3.11-slim base)
-
-├── CLI agent binaries mounted from host
-│
-├── Researcher (e.g., Claude Code)
-│   └── docker run -v workspace:/workspace        (read-write)
-│   └── ~/.claude/ mounted rw (persistent memory across stages)
-│
-├── Reviewer 1 (e.g., Codex)
-│   └── docker run -v workspace:/workspace:ro     (read-only)
-│
-└── Reviewer 2 (e.g., Kimi Code)
-    └── docker run -v workspace:/workspace:ro     (read-only)
+# API keys
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+export MOONSHOT_API_KEY=sk-...
 ```
 
-**Local mode** (`runtime: "local"`) — agents run directly on the host:
+## Usage
 
-```
-workspace/idea_01/
-├── .venv/                    # per-workspace virtualenv (system-site-packages)
-├── proposal.md               # research proposal
-├── plan.json                 # experiment plan
-├── idea.json                 # idea summary
-├── results.json              # experiment results
-├── paper.tex / paper.pdf     # the paper
-├── figures/                  # generated figures
-├── references/               # parsed reference papers
-├── logs/                     # stdout, stderr, events.jsonl
-└── CLAUDE.md                 # agent context file
+### Run a single seed
+
+```bash
+researcharena run --seed "computer vision" --agent claude --platform gpu
+researcharena run --seed "compiler optimization" --agent codex --platform cpu
 ```
 
-### Review sources
+### Run with checkpoint/resume (recommended for SLURM)
 
-Each paper is evaluated by independent peer reviewers running in parallel:
+```bash
+python -m researcharena.run_resumable \
+  --config configs/claude_cpu.yaml \
+  --seed "compiler optimization" \
+  --platform cpu \
+  --workspace outputs/claude_t1_compiler_optimization
+```
 
-| Reviewer | Model |
-|---|---|
-| Claude Code | claude-opus-4-6 |
-| Codex | gpt-5.4 |
-| Kimi Code | kimi-k2.5 |
+A `checkpoint.json` is saved after every step; interrupted jobs resume from the last completed step.
 
-Reviewers get read-only workspace access, check code/logs, and search online to verify novelty claims.
+### Run 8 parallel experiments on SLURM
 
-### Auto-reviewer selection
+```bash
+sbatch scripts/slurm_claude_gpu.sh
+sbatch scripts/slurm_codex_gpu.sh
+sbatch scripts/slurm_kimi_gpu.sh
+```
 
-The agent under test is excluded from the reviewer pool (unless `allow_self_review: true`):
+### Browse all 117 papers + reviews (Streamlit)
+
+```bash
+streamlit run paper_viewer.py
+```
+
+Filter by agent, domain, platform, decision; expand any paper to see its 3 peer reviews (with 9-dimension scores), Stanford AI Review, idea description, and experiment code listing. Includes a "My Notes" tab per paper that persists to `papers/human_comments.json`.
+
+### Manually annotate ambiguous SAR reviews
+
+```bash
+streamlit run sar_annotator.py
+```
+
+Classify each SAR assessment as Accept / Reject / Unclear; progress auto-saves to `analysis/sar_annotations.json`.
+
+## Review pipeline
+
+Each paper is evaluated by 3 independent CLI agents (excluding the researcher agent) with read-only workspace access. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations.
 
 | Researcher | Reviewers |
 |---|---|
@@ -154,307 +160,31 @@ The agent under test is excluded from the reviewer pool (unless `allow_self_revi
 | Codex | Claude Code, Kimi Code |
 | Kimi Code | Claude Code, Codex |
 
-For smoke tests with only one agent, set `allow_self_review: true` to let the agent review its own work.
-
-## Setup
-
-### 1. Install the harness
-
-```bash
-pip install -e .
-```
-
-### 2. (Docker mode) Build or pull images
-
-```bash
-# GPU image
-docker pull pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
-docker tag pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel researcharena/agent:latest
-
-# CPU image
-docker build -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
-```
-
-CLI agent binaries (claude, codex, etc.) are automatically mounted from the host into the container at runtime.
-
-### 3. (Local mode) Just install agent CLIs
-
-```bash
-claude login        # Claude Code
-codex login         # Codex (optional)
-pip install kimi-cli  # Kimi Code (optional)
-```
-
-No container needed. Set `runtime: "local"` in your config.
-
-### 4. Set API keys
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
-export HF_TOKEN=hf_...
-export MOONSHOT_API_KEY=sk-...      # for Kimi Code
-```
-
-For subscription agents (Claude Code, Codex), just run `claude login` / `codex login`.
-
-## Usage
-
-### Run a single seed
-
-```bash
-# GPU seed (default)
-researcharena run --seed "computer vision" --agent claude
-
-# CPU seed
-researcharena run --seed "query optimization" --agent claude --platform cpu
-
-# Custom workspace
-researcharena run --seed "computer vision" --workspace outputs/claude/cv_run1
-```
-
-### Run with checkpoint/resume (recommended for SLURM)
-
-Use `run_resumable` instead of `run` to automatically checkpoint after each
-pipeline step. If the job is preempted or crashes, resubmitting it resumes
-from the last completed step instead of starting over.
-
-```bash
-# Same arguments as `researcharena run`
-python -m researcharena.run_resumable \
-  --config configs/claude_cpu.yaml \
-  --seed "compiler optimization" \
-  --platform cpu \
-  --workspace outputs/claude_t1_compiler_optimization
-
-# In SLURM scripts, replace:
-#   researcharena run --config ... --seed ... --workspace ...
-# with:
-#   python -m researcharena.run_resumable --config ... --seed ... --workspace ...
-```
-
-A `checkpoint.json` is saved in the workspace after every step. On completion
-it is automatically removed. If the job is interrupted, the checkpoint tells
-the pipeline exactly where to resume (stage, step number, idea attempt,
-self-review counters, tracker history).
-
-### Run 8 parallel experiments on SLURM
-
-```bash
-# Submit 8 Claude researchers, one per A6000 GPU
-sbatch scripts/slurm_claude_gpu.sh
-
-# Submit 8 Codex researchers
-sbatch scripts/slurm_codex_gpu.sh
-```
-
-### Run 8 parallel experiments locally
-
-```bash
-# Claude researchers
-bash scripts/launch_parallel.sh
-
-# Codex researchers
-bash scripts/launch_parallel_codex.sh
-```
-
-### Run the full benchmark
-
-```bash
-researcharena bench --agent claude                      # all seeds
-researcharena bench --agent claude --platform gpu       # GPU seeds only
-researcharena bench --agent claude --conference sigmod  # SIGMOD seeds
-researcharena bench --agent claude --field "query optimization"
-```
-
-### Other commands
-
-```bash
-researcharena list-seeds                          # show all seeds
-researcharena list-seeds --platform gpu           # GPU seeds only
-researcharena review-only outputs/runs/idea_01/   # review existing paper
-```
+Scores use a 0-10 scale. Acceptance threshold: 8. Score 5-7 triggers revision. Score < 5 is rejected.
 
 ## Configuration
 
-See [`configs/8xa6000.yaml`](configs/8xa6000.yaml) for a full example:
+See [`configs/8xa6000.yaml`](configs/8xa6000.yaml) for the full example. Key knobs:
 
-```yaml
-seed_topic: "computer vision"
-seed_platform: "gpu"
-seed_domain: "ml"
+- `platforms.gpu.resources` / `platforms.cpu.resources` — compute budget
+- `agent.max_turns`, `ideation_timeout`, `paper_timeout`
+- `self_review.threshold` (default 6) and `max_retries_per_gate` (default 2)
+- `review.agents` — list of reviewer CLI agents + models
+- `pipeline.max_ideas_per_seed` — how many fresh ideas to try before giving up
 
-platforms:
-  gpu:
-    resources:
-      total_gpus: 1
-      gpu_type: "NVIDIA RTX A6000"
-      gpu_memory_gb: 48
-      total_cpus: 4
-      total_memory_gb: 60
+## Citation
 
-agent:
-  type: "claude"
-  model: "claude-opus-4-6"
-  runtime: "local"
-  max_turns: 200
-  ideation_timeout: 3600      # 1 hour
-  paper_timeout: 3600         # 1 hour
-
-experiment:
-  max_gpu_hours: 8
-  max_experiment_retries_per_idea: 3
-
-paper:
-  template: "neurips"
-  max_revisions: 2
-
-self_review:
-  enabled: true
-  threshold: 6                # score >= 6 to pass
-  max_retries_per_gate: 2
-  timeout: 900                # 15 min per self-review
-  gates:
-    idea: true
-    experiment: true
-    paper: true
-
-review:
-  accept_threshold: 8
-  agents:
-    - type: "claude"
-      name: "Claude Code"
-      model: "claude-opus-4-6"
-      review_timeout: 3600
-    - type: "codex"
-      name: "Codex"
-      model: "gpt-5.4"
-      review_timeout: 3600
-    - type: "kimi"
-      name: "Kimi Code"
-      review_timeout: 3600
-
-pipeline:
-  max_ideas_per_seed: 3
-  max_global_steps: 50
-```
-
-## Scoring
-
-Reviews use a 0-10 scale (even numbers only):
-
-| Score | Meaning | Decision |
-|---|---|---|
-| 10 | Seminal paper, top 5% | accept |
-| 8 | Clear accept, strong contribution | accept |
-| 6 | Marginal | revision |
-| 4 | Below threshold | reject |
-| 2 | Strong rejection | reject |
-| 0 | Fabricated or trivial | reject |
-
-Acceptance threshold: **8**. Score 5-7 triggers a revision loop. Score < 5 is rejected.
-
-### Scoring dimensions (per-dimension 1-10)
-
-1. **Novelty** — reviewer searches online (arXiv, Semantic Scholar) to verify
-2. **Soundness** — methodology and evidence
-3. **Significance** — does it matter to the community
-4. **Clarity** — writing quality and organization
-5. **Reproducibility** — enough detail to reimplement
-6. **Experimental rigor** — baselines, ablations, error bars
-7. **References** — key related works cited and discussed
-8. **Reference integrity** — reviewer verifies citations exist online
-9. **Results integrity** — sanity check: code/logs match reported numbers
-
-## Iteration & backtracking
-
-| Outcome | Action |
-|---|---|
-| Review gate fails (score < 6) | Revise and retry (up to 2 retries per gate) |
-| Review gate budget exhausted | Proceed to next stage anyway |
-| Experiment review score < 4 | Abandon idea, start fresh |
-| Experiments fail (no results.json) | Retry with error context (up to 3 attempts) |
-| Experiment retries exhausted | Abandon idea, try new one |
-| Peer review score >= 8 | Accept |
-| Peer review score 5-7 (marginal) | Back to ideation with feedback → re-experiment → rewrite (up to 2 revisions) |
-| Peer review score < 5 (rejected) | Abandon idea, try new one |
-| Revisions exhausted | Abandon idea, try new one |
-
-The agent sees its retry budget at every stage. Best paper across all attempts is tracked.
-
-## Output
+If you use Research Arena or its data, please cite:
 
 ```
-outputs/claude/computer_vision_20260319_143052/
-├── summary.json                         # final result
-├── tracker.json                         # time, tokens, cost per action
-│
-├── idea_01/
-│   ├── .venv/                           # per-workspace virtualenv (local mode)
-│   ├── CLAUDE.md                        # agent context
-│   ├── idea_guidelines.md               # stage guidelines
-│   ├── experiment_guidelines.md
-│   ├── paper_writing_guidelines.md
-│   ├── proposal.md                      # research proposal
-│   ├── plan.json                        # experiment plan
-│   ├── idea.json                        # idea summary
-│   ├── results.json                     # experiment results
-│   ├── paper.tex / paper.pdf            # the paper
-│   ├── figures/                         # generated figures
-│   ├── references/                      # parsed reference papers
-│   ├── logs/                            # agent stdout/stderr/events
-│   └── reviews.json                     # aggregated reviews
-│
-└── idea_02/                             # if idea_01 was rejected
+@misc{researcharena2026,
+  title   = {How Far Are We From True Auto Research?},
+  author  = {Zhang, Zhengxin and Wang, Ning and Galhotra, Sainyam and Cardie, Claire},
+  year    = {2026},
+  note    = {Cornell University. \url{https://youarespecialtome.github.io/ResearchArena/}}
+}
 ```
 
-## Project structure
+## License
 
-```
-researcharena/
-├── cli.py                       # CLI entry point (run, bench, review-only, list-seeds)
-├── pipeline.py                  # State machine orchestrator
-├── pipeline_resumable.py        # Resumable pipeline with auto-checkpoint
-├── run_resumable.py             # CLI entry point for resumable runs
-├── stages/
-│   ├── ideation.py              # Stage 1: structured proposal + plan + idea
-│   ├── self_review.py           # Self-review gates (idea, experiment, paper)
-│   ├── experiment_design.py     # Stage 2: plan-driven experiments
-│   ├── paper_writing.py         # Stage 3: LaTeX paper writing
-│   └── review.py                # Stage 4: parallel CLI agent peer reviewers
-├── utils/
-│   ├── agent_runner.py          # Local + Docker/Podman execution
-│   ├── tracker.py               # Time, tokens, cost tracking
-│   ├── checkpoint.py            # Pipeline state checkpoint/resume
-│   ├── config.py                # YAML config loading
-│   ├── paperreview.py           # paperreview.ai automation
-│   └── reference_checker.py     # Citation verification (disabled, high false-positive rate)
-├── templates/                   # Domain-specific guideline templates
-│   ├── ml/                      # ML/AI (ICLR, NeurIPS, ICML, CVPR, ACL)
-│   │   ├── idea_guidelines.md
-│   │   ├── experiment_guidelines.md
-│   │   ├── paper_writing_guidelines.md
-│   │   ├── reviewer_guidelines.md
-│   │   ├── self_review_idea.md
-│   │   ├── self_review_experiment.md
-│   │   └── self_review_paper.md
-│   ├── systems/                 # Systems (OSDI, SOSP, EuroSys)
-│   ├── databases/               # Databases (SIGMOD, VLDB, ICDE)
-│   ├── pl/                      # Programming Languages (PLDI, POPL, OOPSLA)
-│   ├── theory/                  # Theory (STOC, FOCS, SODA)
-│   └── security/                # Security (CCS, S&P, USENIX Security)
-├── configs/
-│   ├── 8xa6000.yaml             # 8x A6000 GPU parallel config (Claude)
-│   ├── 8xa6000_codex.yaml       # 8x A6000 GPU parallel config (Codex)
-│   ├── smoke_test.yaml          # Quick single-idea smoke test
-│   ├── seed_gpu_exp.yaml        # GPU experiment seeds (8 topics)
-│   └── seeds.yaml               # Full seed list
-├── scripts/
-│   ├── slurm_claude_gpu.sh      # SLURM array job: 8 Claude researchers
-│   ├── slurm_codex_gpu.sh       # SLURM array job: 8 Codex researchers
-│   ├── launch_parallel.sh       # Local parallel launch (Claude)
-│   └── launch_parallel_codex.sh # Local parallel launch (Codex)
-├── Dockerfile                   # GPU image
-├── Dockerfile.cpu               # CPU image
-└── pyproject.toml
-```
+Released under a permissive license — see [`LICENSE`](LICENSE) once added. Contact the authors for questions.
