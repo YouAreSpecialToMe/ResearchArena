@@ -195,4 +195,4 @@ If you use Research Arena or its data, please cite:
 
 ## License
 
-Released under a permissive license — see [`LICENSE`](LICENSE) once added. Contact the authors for questions.
+Released under the MIT License — see [`LICENSE`](LICENSE).
