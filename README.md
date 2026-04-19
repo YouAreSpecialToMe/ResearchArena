@@ -1,5 +1,13 @@
 # Research Arena
 
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/Website-ResearchArena-5eead4.svg)](https://youarespecialtome.github.io/ResearchArena/)
+[![GitHub stars](https://img.shields.io/github/stars/YouAreSpecialToMe/ResearchArena?style=social)](https://github.com/YouAreSpecialToMe/ResearchArena/stargazers)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.6+-ee4c2c.svg)](https://pytorch.org/)
+[![Docker](https://img.shields.io/badge/Docker-supported-2496ed.svg)](https://www.docker.com/)
+
 **How far are we from true auto-research?** A comprehensive benchmark of off-the-shelf CLI agents (Claude Code, Codex, Kimi Code) conducting end-to-end research across 13 CS domains.
 
 **Blog & results:** [youarespecialtome.github.io](https://youarespecialtome.github.io/ResearchArena/)
