@@ -1,4 +1,4 @@
-# Research Arena
+# How Far Are We From True Auto Research?
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,42 +8,69 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.6+-ee4c2c.svg)](https://pytorch.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-2496ed.svg)](https://www.docker.com/)
 
-**How far are we from true auto-research?** A comprehensive benchmark of off-the-shelf CLI agents (Claude Code, Codex, Kimi Code) conducting end-to-end research across 13 CS domains.
+An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Codex (GPT-5.4)**, **Kimi Code (K2.5)** — conducting end-to-end research across diverse fields and compute resources.
 
-**Blog & results:** [youarespecialtome.github.io](https://youarespecialtome.github.io/ResearchArena/)
+**Blog & results:** [youarespecialtome.github.io/ResearchArena](https://youarespecialtome.github.io/ResearchArena/)
 
-- **117 agent-generated papers** (39 per agent, 3 trials × 13 seeds) across both GPU and CPU domains
-- **351 peer reviews** (code-aware, 3 reviewers per paper) + **117 Stanford Agentic Reviewer scores**
-- **302 human-authored ICLR 2025 papers** (100 accepted, 100 rejected, 102 FARS) evaluated as baseline
-- **Manual annotation of 117 papers** for results mismatches, implementation mismatches, and fabricated references
+**Authors:** Zhengxin Zhang\*, Ning Wang\*, Sainyam Galhotra, Claire Cardie — Cornell University. (\*Order determined by coin flip.)
 
-## Key findings
+---
 
-| SAR (manually annotated) | Accept | Reject | Accept % |
+## At a glance
+
+- **117 agent-generated papers** (39 per agent, 3 trials × 13 seeds) spanning both GPU and CPU domains
+- **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer (SAR) scores**
+- **302 human-authored papers** (100 ICLR 2025 accepted, 100 ICLR 2025 rejected, 102 FARS) evaluated as baselines
+- **Manual annotation of every paper** for results mismatches, implementation mismatches, and fabricated references
+
+## Headline results
+
+**Stanford Agentic Review (0–10, ICLR scale):**
+
+Claude Code **5.45** > FARS **5.06** > Codex **4.93** > Kimi Code **4.24**. Claude Code beats Analemma's $186K FARS system with $200 in API spend, but still trails the average ICLR-accepted paper (5.59).
+
+**Peer Review (0–10, ICLR scale, code-aware):**
+
+Claude Code **4.59** > Codex **4.51** > Kimi Code **3.38**. PR is stricter than SAR — all agents drop because reviewers have read-only access to the code, logs, and `results.json`.
+
+### Human-annotated SAR accept decisions
+
+| | Accept | Reject | Accept % |
 |---|---|---|---|
-| ICLR Accepted | 76 | 24 | 76.0% |
-| ICLR Weighted (32%/68%) | 59.7 | 40.3 | 59.7% |
-| ICLR Rejected | 52 | 48 | 52.0% |
-| **Claude Code** | 16 | 23 | 41.0% |
+| ICLR Accepted (baseline) | 76 | 24 | 76.0% |
+| ICLR Weighted (32% acc / 68% rej) | 59.7 | 40.3 | 59.7% |
+| ICLR Rejected (baseline) | 52 | 48 | 52.0% |
+| **Claude Code** | 16 | 23 | **41.0%** |
 | FARS (Analemma) | 22 | 80 | 21.6% |
-| **Codex** | 5 | 34 | 12.8% |
-| **Kimi Code** | 2 | 37 | 5.1% |
+| **Codex** | 5 | 34 | **12.8%** |
+| **Kimi Code** | 2 | 37 | **5.1%** |
 
-| Integrity issues | Claude | Codex | Kimi |
+### Paper–artifact integrity (manual, n=39 per agent)
+
+| | Claude | Codex | Kimi |
 |---|---|---|---|
-| Results mismatch | 6 (15%) | 2 (5%) | 4 (10%) |
-| Setting mismatch | 10 (26%) | 1 (3%) | 5 (13%) |
-| Both | 12 (31%) | 2 (5%) | 30 (77%) |
+| Results mismatch only | 6 (15%) | 2 (5%) | 4 (10%) |
+| Setting mismatch only | 10 (26%) | 1 (3%) | 5 (13%) |
+| Both (results + setting) | 12 (31%) | 2 (5%) | 30 (77%) |
 | Fake reference | 14 (36%) | 3 (8%) | 28 (72%) |
 
 **Takeaways:**
-- Current CLI agents trail human-authored papers substantially on SAR acceptance
-- **Claude Code** is the strongest agent overall (41% SAR accept); **Codex** is the most *trustworthy* (lowest integrity issues)
-- **Kimi Code** shows the most paper–artifact divergence — 77% of papers have both results and setting mismatches, 72% have fake references
-- Computational resources are *not* the main bottleneck; upgrading A6000 → H100 shows no consistent pattern
-- SAR misses code-level failures that only a code-aware peer review can catch
+- Current CLI agents trail human-authored papers on SAR acceptance by a wide margin.
+- **Claude Code** is the strongest agent overall (41% SAR accept, highest PR score, full-stack profile).
+- **Codex** is the most *trustworthy* — lowest integrity issues, 87% empirical studies, strongest on 7/9 reliability dimensions.
+- **Kimi Code** shows the most paper–artifact divergence — 77% of papers have *both* results and setting mismatches, 72% cite fake references.
+- Compute is **not** the bottleneck — upgrading A6000 → H100 yields no consistent improvement (Codex 4.51 → 4.26).
+- SAR misses code-level failures that only a code-aware peer review can catch.
 
-See [Case Studies: Paper–Artifact Divergence](https://youarespecialtome.github.io/ResearchArena/#case-studies) for five illustrative failure modes with embedded PDFs.
+See [Case Studies: Paper–Artifact Divergence](https://youarespecialtome.github.io/ResearchArena/#case-studies) for six illustrative failure modes with embedded PDFs.
+
+## Three distinct research personas
+
+| Agent | Persona | Signature pattern |
+|---|---|---|
+| **Claude Code** | Full-stack researcher | 46% empirical studies + 33% novel methods; longest papers; strongest on creative dimensions (novelty 5.42, significance 5.23). |
+| **Codex** | Empirical scientist | 87% empirical studies; lowest integrity issues; explicitly scopes work as *pilot / feasibility / negative* with matched-budget comparisons. |
+| **Kimi Code** | System builder | 79% "novel methods" with acronym names ("Name: Subtitle"); confident, marketing-leaning; but low actual novelty — often repackages existing work. |
 
 ## What this does
 
@@ -54,17 +81,17 @@ Given a seed field (e.g., "computer vision", "compiler optimization"), the pipel
 3. **Self-review gates** check quality at each stage before proceeding
 4. **The agent follows its experiment plan** step-by-step, producing `results.json`
 5. **The agent writes a LaTeX paper** from the proposal, plan, and results
-6. **Other CLI agents review it** — with read-only workspace access, searching online to verify novelty
+6. **Other CLI agents review it** — with read-only workspace access, and online search to verify novelty and citations
 7. If rejected, the pipeline iterates — refine the idea, retry experiments, or try a new idea entirely
 
-## Conferences & Areas
+## Conferences & areas
 
-Seeds span multiple CS conferences and two platforms:
+Seeds span multiple CS conferences and two compute platforms. Hardware: **1× RTX A6000 (48GB), 4 CPUs, 60GB RAM** (main experiments); **H100 (80GB)** re-run for GPU seeds.
 
-| Platform | Areas | Conferences |
+| Platform | Seeds | Target conferences |
 |---|---|---|
-| **GPU** | NLP, CV, generative models, interpretability, supervised representation learning, privacy, AI for biology, datasets & benchmarks | ICLR, NeurIPS, ICML, CVPR, ACL, EMNLP |
-| **CPU** | Causal learning, compiler optimization, data integration, operating systems, probabilistic methods | OSDI, SOSP, SIGMOD, VLDB, PLDI, POPL |
+| **GPU (8)** | AI for Biology, Computer Vision, Datasets & Benchmarks, Generative Models, Interpretability, NLP, Privacy in ML, Supervised Representation Learning | ICLR, NeurIPS, ICML, CVPR, ACL, EMNLP |
+| **CPU (5)** | Causal Learning, Compiler Optimization, Data Integration & Cleaning, Operating System Design, Probabilistic Methods | OSDI, SOSP, SIGMOD, VLDB, PLDI, POPL |
 
 ## Repo structure
 
@@ -160,7 +187,7 @@ Classify each SAR assessment as Accept / Reject / Unclear; progress auto-saves t
 
 ## Review pipeline
 
-Each paper is evaluated by 3 independent CLI agents (excluding the researcher agent) with read-only workspace access. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations.
+Each paper is evaluated by 3 independent CLI agents (excluding the researcher agent) with read-only workspace access. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations against arXiv, Semantic Scholar, and CrossRef.
 
 | Researcher | Reviewers |
 |---|---|
@@ -168,7 +195,7 @@ Each paper is evaluated by 3 independent CLI agents (excluding the researcher ag
 | Codex | Claude Code, Kimi Code |
 | Kimi Code | Claude Code, Codex |
 
-Scores use a 0-10 scale. Acceptance threshold: 8. Score 5-7 triggers revision. Score < 5 is rejected.
+Scores use a 0–10 scale. Acceptance threshold: 8. Score 5–7 triggers revision. Score < 5 is rejected.
 
 ## Configuration
 
