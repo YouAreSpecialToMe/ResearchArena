@@ -22,7 +22,7 @@ An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Co
 - **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer (SAR) scores**
 - **Manual annotation of every paper** for results mismatches, implementation mismatches, and fabricated references
 
-## Headline results
+## Key findings
 
 **Stanford Agentic Review (0–10, ICLR scale):**
 
