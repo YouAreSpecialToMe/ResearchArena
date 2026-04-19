@@ -10,7 +10,7 @@
 
 An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Codex (GPT-5.4)**, **Kimi Code (K2.5)** — conducting end-to-end research across diverse fields and compute resources.
 
-**Blog & results:** [youarespecialtome.github.io/ResearchArena](https://youarespecialtome.github.io/ResearchArena/)
+**Full write-up:** [blog post](https://youarespecialtome.github.io/ResearchArena/)
 
 **Authors:** Zhengxin Zhang\*, Ning Wang\*, Sainyam Galhotra, Claire Cardie — Cornell University. (\*Order determined by coin flip.)
 
