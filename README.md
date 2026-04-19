@@ -20,7 +20,6 @@ An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Co
 
 - **117 agent-generated papers** (39 per agent, 3 trials × 13 seeds) spanning both GPU and CPU domains
 - **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer (SAR) scores**
-- **302 human-authored papers** (100 ICLR 2025 accepted, 100 ICLR 2025 rejected, 102 FARS) evaluated as baselines
 - **Manual annotation of every paper** for results mismatches, implementation mismatches, and fabricated references
 
 ## Headline results
