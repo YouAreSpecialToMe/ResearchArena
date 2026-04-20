@@ -4,9 +4,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-ResearchArena-5eead4.svg)](https://youarespecialtome.github.io/ResearchArena/)
 [![GitHub stars](https://img.shields.io/github/stars/YouAreSpecialToMe/ResearchArena?style=social)](https://github.com/YouAreSpecialToMe/ResearchArena/stargazers)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.6+-ee4c2c.svg)](https://pytorch.org/)
-[![Docker](https://img.shields.io/badge/Docker-supported-2496ed.svg)](https://www.docker.com/)
 
 An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Codex (GPT-5.4)**, **Kimi Code (K2.5)** — conducting end-to-end research across diverse fields and compute resources.
 
