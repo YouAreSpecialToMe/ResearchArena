@@ -22,6 +22,21 @@ Given a seed field (e.g., "computer vision", "compiler optimization"), each CLI 
 3. **Paper Writing** — Produce a paper; self-review for up to 3 iterations.
 4. **Review** — Evaluate via Stanford Agentic Reviewer and triple peer review (all three agents review each paper alongside its code).
 
+Everything above is configurable — swap agents, change self-review intensity, give the agent more ideas to try, or raise the acceptance bar. The main knobs in `configs/*.yaml`:
+
+| Knob | What it does |
+|---|---|
+| `agent.type` / `agent.model` | Which CLI agent runs the research (claude / codex / kimi / minimax) and which model it uses. |
+| `agent.max_turns`, `ideation_timeout`, `paper_timeout` | Per-stage turn and wall-clock budgets for the researcher. |
+| `self_review.max_retries_per_gate` | How many times each gate (idea / experiment / paper) can send itself back for revision. |
+| `self_review.thresholds.{idea,experiment,paper}` | The score each self-review must clear to pass (default: idea 8, experiment 6, paper 8). |
+| `experiment.max_experiment_retries_per_idea` | How many times the agent can retry failed experiments before abandoning an idea. |
+| `pipeline.max_ideas_per_seed` | How many fresh research ideas to try on one seed before giving up. |
+| `review.agents` | Which CLI agents act as peer reviewers, with optional per-reviewer model/timeout. |
+| `review.accept_threshold` | Cutoff for accept vs. revise vs. reject after peer review. |
+
+See [`configs/8xa6000.yaml`](configs/8xa6000.yaml) for a full annotated example.
+
 ## Conferences & areas
 
 Seeds span multiple CS conferences and two compute platforms. Hardware: **1× RTX A6000 (48GB), 4 CPUs, 60GB RAM** (main experiments); **H100 (80GB)** re-run for GPU seeds.
@@ -93,16 +108,6 @@ Each paper is evaluated by 3 independent CLI agents (excluding the researcher ag
 | Kimi Code | Claude Code, Codex |
 
 Scores use a 0–10 scale. Acceptance threshold: 8. Score 5–7 triggers revision. Score < 5 is rejected.
-
-## Configuration
-
-See [`configs/8xa6000.yaml`](configs/8xa6000.yaml) for the full example. Key knobs:
-
-- `platforms.gpu.resources` / `platforms.cpu.resources` — compute budget
-- `agent.max_turns`, `ideation_timeout`, `paper_timeout`
-- `self_review.threshold` (default 6) and `max_retries_per_gate` (default 2)
-- `review.agents` — list of reviewer CLI agents + models
-- `pipeline.max_ideas_per_seed` — how many fresh ideas to try before giving up
 
 ## Citation
 
