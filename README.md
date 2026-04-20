@@ -105,7 +105,7 @@ See [`configs/8xa6000.yaml`](configs/8xa6000.yaml) for a full annotated example.
 
 Each paper is evaluated by two complementary reviewers:
 
-**1. Peer Review (PR) — code-aware.** Three independent CLI agents (excluding the researcher agent) review the paper with read-only access to the entire workspace (code, logs, `results.json`). This lets them verify whether reported numbers match the actual artifacts, flag incomplete experiments, and catch fabricated claims. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations against arXiv, Semantic Scholar, and CrossRef.
+**1. Peer Review (PR) — code-aware.** All three CLI agents (Claude Code, Codex, Kimi Code) review every paper with read-only access to the entire workspace (code, logs, `results.json`). This lets them verify whether reported numbers match the actual artifacts, flag incomplete experiments, and catch fabricated claims. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations against arXiv, Semantic Scholar, and CrossRef.
 
 **2. Stanford Agentic Reviewer (SAR) — external, PDF-only.** We additionally submit each paper to [paperreview.ai](https://paperreview.ai) (Stanford ML Group) for an independent, ICLR-calibrated score. SAR sees only the PDF, not the code — so comparing SAR against our code-aware PR isolates how much reviewers miss when they can't inspect artifacts.
 
