@@ -107,12 +107,6 @@ Each paper is evaluated by two complementary reviewers:
 
 **1. Peer Review (PR) — code-aware.** Three independent CLI agents (excluding the researcher agent) review the paper with read-only access to the entire workspace (code, logs, `results.json`). This lets them verify whether reported numbers match the actual artifacts, flag incomplete experiments, and catch fabricated claims. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations against arXiv, Semantic Scholar, and CrossRef.
 
-| Researcher | PR reviewers |
-|---|---|
-| Claude Code | Codex, Kimi Code |
-| Codex | Claude Code, Kimi Code |
-| Kimi Code | Claude Code, Codex |
-
 **2. Stanford Agentic Reviewer (SAR) — external, PDF-only.** We additionally submit each paper to [paperreview.ai](https://paperreview.ai) (Stanford ML Group) for an independent, ICLR-calibrated score. SAR sees only the PDF, not the code — so comparing SAR against our code-aware PR isolates how much reviewers miss when they can't inspect artifacts.
 
 Scores use a 0–10 scale. Acceptance threshold: 8. Score 5–7 triggers revision. Score < 5 is rejected.
