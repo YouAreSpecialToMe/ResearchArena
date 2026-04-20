@@ -7,10 +7,6 @@
 
 An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Codex (GPT-5.4)**, **Kimi Code (K2.5)** — conducting end-to-end research across diverse fields and compute resources.
 
----
-
-## At a glance
-
 - **117 agent-generated papers** — 39 per agent (Claude Code, Codex, Kimi Code), 3 trials × 13 seeds, spanning both GPU and CPU domains
 - **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer scores**
 - **Manual annotation of every paper** for results mismatches, implementation mismatches, and fabricated references
