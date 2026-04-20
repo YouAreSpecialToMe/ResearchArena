@@ -112,30 +112,6 @@ python -m researcharena.run_resumable \
 
 A `checkpoint.json` is saved after every step; interrupted jobs resume from the last completed step.
 
-### Run 8 parallel experiments on SLURM
-
-```bash
-sbatch scripts/slurm_claude_gpu.sh
-sbatch scripts/slurm_codex_gpu.sh
-sbatch scripts/slurm_kimi_gpu.sh
-```
-
-### Browse all 117 papers + reviews (Streamlit)
-
-```bash
-streamlit run paper_viewer.py
-```
-
-Filter by agent, domain, platform, decision; expand any paper to see its 3 peer reviews (with 9-dimension scores), Stanford AI Review, idea description, and experiment code listing. Includes a "My Notes" tab per paper that persists to `papers/human_comments.json`.
-
-### Manually annotate ambiguous SAR reviews
-
-```bash
-streamlit run sar_annotator.py
-```
-
-Classify each SAR assessment as Accept / Reject / Unclear; progress auto-saves to `analysis/sar_annotations.json`.
-
 ## Review pipeline
 
 Each paper is evaluated by 3 independent CLI agents (excluding the researcher agent) with read-only workspace access. Reviewers score 9 dimensions (novelty, soundness, significance, clarity, reproducibility, experimental rigor, references, reference integrity, results integrity), decide accept/revision/reject, and run online verification of citations against arXiv, Semantic Scholar, and CrossRef.
