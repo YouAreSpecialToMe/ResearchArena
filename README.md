@@ -22,15 +22,12 @@ An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Co
 
 ## What this does
 
-Given a seed field (e.g., "computer vision", "compiler optimization"), the pipeline:
+Given a seed field (e.g., "computer vision", "compiler optimization"), each CLI agent follows a standardized pipeline:
 
-1. **Launches a CLI agent** with appropriate compute access (GPU or CPU), network, and packages
-2. **The agent produces a structured research proposal** — `proposal.md`, `plan.json`, and `idea.json`
-3. **Self-review gates** check quality at each stage before proceeding
-4. **The agent follows its experiment plan** step-by-step, producing `results.json`
-5. **The agent writes a LaTeX paper** from the proposal, plan, and results
-6. **Other CLI agents review it** — with read-only workspace access, and online search to verify novelty and citations
-7. If rejected, the pipeline iterates — refine the idea, retry experiments, or try a new idea entirely
+1. **Ideation** — Generate a research idea and experiment plan; self-review for up to 3 iterations.
+2. **Experiments** — Write and execute code, collect results; self-review for up to 3 iterations.
+3. **Paper Writing** — Produce a paper; self-review for up to 3 iterations.
+4. **Review** — Evaluate via Stanford Agentic Reviewer and triple peer review (all three agents review each paper alongside its code).
 
 ## Conferences & areas
 
