@@ -128,10 +128,19 @@ ResearchArena/
 ```bash
 pip install -e .
 
-# Containers (Docker mode)
-docker pull pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
-docker tag pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel researcharena/agent:latest
+# Containers (Docker or Podman)
+# GPU image: PyTorch 2.6 + CUDA 12.4 + transformers/datasets/accelerate/…
+docker build -t researcharena/agent:latest .
+# CPU image: Python 3.11 + scipy/sklearn/networkx/sympy/z3-solver/…
 docker build -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
+
+# For rootless podman, add --userns=host:
+#   podman build --userns=host -t researcharena/agent:latest .
+#   podman build --userns=host -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
+
+# CLI agent binaries (claude, codex, kimi) are not installed in the image —
+# agent_runner.py mounts them from the host at runtime, so install them
+# locally first (e.g. `npm install -g @anthropic-ai/claude-code`).
 
 # API keys
 export ANTHROPIC_API_KEY=sk-ant-...
