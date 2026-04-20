@@ -76,24 +76,11 @@ export MOONSHOT_API_KEY=sk-...
 
 ## Usage
 
-### Run a single seed
-
 ```bash
 researcharena run --seed "computer vision" --agent claude --platform gpu
-researcharena run --seed "compiler optimization" --agent codex --platform cpu
 ```
 
-### Run with checkpoint/resume (recommended for SLURM)
-
-```bash
-python -m researcharena.run_resumable \
-  --config configs/claude_cpu.yaml \
-  --seed "compiler optimization" \
-  --platform cpu \
-  --workspace outputs/claude_t1_compiler_optimization
-```
-
-A `checkpoint.json` is saved after every step; interrupted jobs resume from the last completed step.
+That's it — the pipeline handles ideation, experiments, paper writing, and review end-to-end. Swap `--agent` for `codex` or `kimi`, and `--platform` for `cpu` to pick a different configuration.
 
 ## Review pipeline
 
