@@ -14,58 +14,11 @@ An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Co
 
 ## At a glance
 
-- **117 agent-generated papers** (39 per agent, 3 trials × 13 seeds) spanning both GPU and CPU domains
-- **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer (SAR) scores**
+- **117 agent-generated papers** — 39 per agent (Claude Code, Codex, Kimi Code), 3 trials × 13 seeds, spanning both GPU and CPU domains
+- **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer scores**
 - **Manual annotation of every paper** for results mismatches, implementation mismatches, and fabricated references
 
-## Key findings
-
-**Stanford Agentic Review (0–10, ICLR scale):**
-
-Claude Code **5.45** > FARS **5.06** > Codex **4.93** > Kimi Code **4.24**. Claude Code beats Analemma's $186K FARS system with $200 in API spend, but still trails the average ICLR-accepted paper (5.59).
-
-**Peer Review (0–10, ICLR scale, code-aware):**
-
-Claude Code **4.59** > Codex **4.51** > Kimi Code **3.38**. PR is stricter than SAR — all agents drop because reviewers have read-only access to the code, logs, and `results.json`.
-
-### Human-annotated SAR accept decisions
-
-| | Accept | Reject | Accept % |
-|---|---|---|---|
-| ICLR Accepted (baseline) | 76 | 24 | 76.0% |
-| ICLR Weighted (32% acc / 68% rej) | 59.7 | 40.3 | 59.7% |
-| ICLR Rejected (baseline) | 52 | 48 | 52.0% |
-| **Claude Code** | 16 | 23 | **41.0%** |
-| FARS (Analemma) | 22 | 80 | 21.6% |
-| **Codex** | 5 | 34 | **12.8%** |
-| **Kimi Code** | 2 | 37 | **5.1%** |
-
-### Paper–artifact integrity (manual, n=39 per agent)
-
-| | Claude | Codex | Kimi |
-|---|---|---|---|
-| Results mismatch only | 6 (15%) | 2 (5%) | 4 (10%) |
-| Setting mismatch only | 10 (26%) | 1 (3%) | 5 (13%) |
-| Both (results + setting) | 12 (31%) | 2 (5%) | 30 (77%) |
-| Fake reference | 14 (36%) | 3 (8%) | 28 (72%) |
-
-**Takeaways:**
-- Current CLI agents trail human-authored papers on SAR acceptance by a wide margin.
-- **Claude Code** is the strongest agent overall (41% SAR accept, highest PR score, full-stack profile).
-- **Codex** is the most *trustworthy* — lowest integrity issues, 87% empirical studies, strongest on 7/9 reliability dimensions.
-- **Kimi Code** shows the most paper–artifact divergence — 77% of papers have *both* results and setting mismatches, 72% cite fake references.
-- Compute is **not** the bottleneck — upgrading A6000 → H100 yields no consistent improvement (Codex 4.51 → 4.26).
-- SAR misses code-level failures that only a code-aware peer review can catch.
-
-See [Case Studies: Paper–Artifact Divergence](https://youarespecialtome.github.io/ResearchArena/#case-studies) for six illustrative failure modes with embedded PDFs.
-
-## Three distinct research personas
-
-| Agent | Persona | Signature pattern |
-|---|---|---|
-| **Claude Code** | Full-stack researcher | 46% empirical studies + 33% novel methods; longest papers; strongest on creative dimensions (novelty 5.42, significance 5.23). |
-| **Codex** | Empirical scientist | 87% empirical studies; lowest integrity issues; explicitly scopes work as *pilot / feasibility / negative* with matched-budget comparisons. |
-| **Kimi Code** | System builder | 79% "novel methods" with acronym names ("Name: Subtitle"); confident, marketing-leaning; but low actual novelty — often repackages existing work. |
+➡️ Read the [full write-up](https://youarespecialtome.github.io/ResearchArena/) for scores, per-domain breakdowns, case studies, and the human-inspection findings.
 
 ## What this does
 
