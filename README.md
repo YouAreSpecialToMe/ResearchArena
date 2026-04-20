@@ -36,29 +36,16 @@ Seeds span multiple CS conferences and two compute platforms. Hardware: **1× RT
 ```
 ResearchArena/
 ├── papers/                     # 117 agent-generated papers
-│   ├── claude/{seed}_trial{N}/
-│   │   ├── paper.pdf, paper.tex, references.bib
-│   │   ├── idea.json, plan.json, proposal.md
-│   │   ├── reviews.json              # 3 peer reviews
-│   │   ├── stanford_review.json      # SAR review
-│   │   └── exp/                      # experiment code (.py/.sh)
-│   ├── codex/…
-│   └── kimi/…
-├── blog/                       # website (gh-pages branch mirrors this)
-│   ├── index.html, index_zh.html, papers.html
-│   └── assets/plots/           # all figures used in the blog
-├── analysis/                   # baseline assessment data + annotations
-│   ├── iclr2025_baseline/      # 300 ICLR papers, SAR assessments
-│   ├── stanford_reviews/       # FARS + ICLR SAR fetches
-│   └── sar_annotations_*.json  # manual annotations
+│   └── {claude,codex,kimi}/{seed}_trial{N}/
+│       ├── paper.pdf, paper.tex, references.bib
+│       ├── idea.json, plan.json, proposal.md
+│       ├── reviews.json              # 3 peer reviews
+│       ├── stanford_review.json      # SAR review
+│       └── exp/                      # experiment code (.py/.sh)
 ├── researcharena/              # the benchmark harness
 │   ├── stages/                 # ideation / experiment / paper / review
 │   ├── templates/              # domain guidelines (ml/systems/databases/pl/theory/security)
 │   └── utils/                  # agent_runner, tracker, checkpoint, …
-├── paper_viewer.py             # Streamlit app to browse papers + reviews
-├── sar_annotator.py            # Streamlit app for manual SAR annotation
-├── configs/                    # YAML configs
-├── scripts/                    # SLURM / launcher scripts
 └── Dockerfile[.cpu]            # agent containers
 ```
 
