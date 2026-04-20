@@ -107,7 +107,7 @@ We employ a **peer-review protocol (PR)** where all three CLI agents review ever
 
 ## Citation
 
-If you use Research Arena or its data, please cite:
+If you find our project useful, please cite:
 
 ```
 @misc{researcharena2026,
