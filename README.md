@@ -64,14 +64,18 @@ docker build -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
 #   podman build --userns=host -t researcharena/agent:latest .
 #   podman build --userns=host -f Dockerfile.cpu -t researcharena/agent-cpu:latest .
 
-# CLI agent binaries (claude, codex, kimi) are not installed in the image —
-# agent_runner.py mounts them from the host at runtime, so install them
-# locally first (e.g. `npm install -g @anthropic-ai/claude-code`).
+# Install the CLI agents (claude, codex, kimi) on the host — they are NOT
+# baked into the image. agent_runner.py mounts each binary + its auth
+# (~/.claude, ~/.codex, ~/.kimi) into the container at runtime, so log in
+# once on the host with `claude login` / `codex login` / `kimi login` and
+# you're done.
 
-# API keys
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
-export MOONSHOT_API_KEY=sk-...
+# Optional: API keys / tokens (forwarded into the container if set)
+export ANTHROPIC_API_KEY=sk-ant-...      # if not using `claude login`
+export OPENAI_API_KEY=sk-...             # if not using `codex login`
+export MOONSHOT_API_KEY=sk-...           # if not using `kimi login`
+export HF_TOKEN=hf_...                   # needed for gated HuggingFace models
+export WANDB_API_KEY=...                 # optional, for experiment logging
 ```
 
 ## Usage
