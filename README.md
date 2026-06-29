@@ -1,5 +1,6 @@
 # How Far Are We From True Auto Research?
 
+[![arXiv](https://img.shields.io/badge/arXiv-2605.19156-b31b1b.svg)](https://arxiv.org/abs/2605.19156)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-ResearchArena-5eead4.svg)](https://youarespecialtome.github.io/ResearchArena/)
@@ -10,6 +11,8 @@ An in-depth analysis of frontier CLI agents — **Claude Code (Opus 4.6)**, **Co
 - **117 agent-generated papers** — 39 per agent (Claude Code, Codex, Kimi Code), 3 trials × 13 seeds, spanning both GPU and CPU domains
 - **351 code-aware peer reviews** (3 CLI-agent reviewers per paper) + **117 Stanford Agentic Reviewer scores**
 - **Human analysis of every paper**, its artifacts, and agentic reviews
+
+📄 Paper: [arXiv:2605.19156](https://arxiv.org/abs/2605.19156)
 
 ➡️ Read the [full write-up](https://youarespecialtome.github.io/ResearchArena/) for scores, per-domain breakdowns, case studies, and the human-inspection findings.
 
