@@ -112,12 +112,16 @@ We employ a **peer-review protocol (PR)** where all three CLI agents review ever
 
 If you find our project useful, please cite:
 
-```
+```bibtex
 @misc{researcharena2026,
-  title   = {How Far Are We From True Auto Research?},
-  author  = {Zhang, Zhengxin and Wang, Ning and Galhotra, Sainyam and Cardie, Claire},
-  year    = {2026},
-  note    = {Cornell University. \url{https://youarespecialtome.github.io/ResearchArena/}}
+  title         = {How Far Are We From True Auto Research?},
+  author        = {Zhang, Zhengxin and Wang, Ning and Galhotra, Sainyam and Cardie, Claire},
+  year          = {2026},
+  eprint        = {2605.19156},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  doi           = {10.48550/arXiv.2605.19156},
+  url           = {https://arxiv.org/abs/2605.19156}
 }
 ```
 
