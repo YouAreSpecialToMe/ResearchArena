@@ -1,4 +1,4 @@
-# How Far Are We From True Auto Research?
+# How Far Are We From True Auto-Research?
 
 [![arXiv](https://img.shields.io/badge/arXiv-2605.19156-b31b1b.svg)](https://arxiv.org/abs/2605.19156)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -114,7 +114,7 @@ If you find our project useful, please cite:
 
 ```bibtex
 @misc{researcharena2026,
-  title         = {How Far Are We From True Auto Research?},
+  title         = {How Far Are We From True Auto-Research?},
   author        = {Zhang, Zhengxin and Wang, Ning and Galhotra, Sainyam and Cardie, Claire},
   year          = {2026},
   eprint        = {2605.19156},
